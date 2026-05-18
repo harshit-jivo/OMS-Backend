@@ -22,4 +22,6 @@ urlpatterns = [
     path('api/auth/', include('users.urls')),
     path('api/orders/', include('orders.urls')),
     path('api/sap/', include('sap_sync.urls')),
+    path('api/hana/', include('hana.urls'))
+    
 ]

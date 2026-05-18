@@ -66,7 +66,8 @@ INSTALLED_APPS = [
     # Local apps
     'users',
     'orders',
-    'sap_sync'
+    'sap_sync',
+    'hana'
 ]
 
 MIDDLEWARE = [
@@ -111,7 +112,17 @@ DATABASES = {
         'PASSWORD': config('DB_PASSWORD'),
         'HOST': config('DB_HOST'),
         'PORT': config('DB_PORT'),
+    },
+    'hana': {
+        'ENGINE': 'django.db.backends.dummy', 
+        'HOST': '103.89.45.192',       
+        'PORT': 30015,              
+        'SCHEMA': 'JIVO_OIL_HANADB',
+        'USER': 'DATA1',
+        'PASSWORD': 'Jivo@1989',
     }
+    
+    
 }
 
 #HAND credentials
