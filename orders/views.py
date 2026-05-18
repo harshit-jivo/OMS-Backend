@@ -1055,7 +1055,14 @@ class UpdateOrderView(APIView):
 
         log_action = 'Auditor Approval' if is_billing_editor else 'Rate Approval' if needs_approval else 'Billing'
         log_remarks = 'Sent to auditor' if is_billing_editor else '; '.join(flagged_items) if needs_approval else ''
-        log_user = None if (not is_billing_editor and not needs_approval and log_action == 'Billing') else user
+        if is_billing_editor:
+            _close_or_create_status_log(
+                order=order,
+                action_status=previous_status,
+                user=user,
+                remarks="Accepted by billing"
+            )
+        log_user = None if (is_billing_editor or (not needs_approval and log_action == 'Billing')) else user
         log_order_action(order, log_action, user=log_user, remarks=log_remarks)
 
         return Response({
@@ -1147,7 +1154,14 @@ class CreateOrderView(APIView):
 
             log_action = 'Auditor Approval' if is_billing_editor else 'Rate Approval' if needs_approval else 'Billing'
             log_remarks = 'Sent to auditor' if is_billing_editor else '; '.join(flagged_items) if needs_approval else ''
-            log_user = None if (not is_billing_editor and not needs_approval and log_action == 'Billing') else user
+            if is_billing_editor:
+                _close_or_create_status_log(
+                    order=order,
+                    action_status=previous_status,
+                    user=user,
+                    remarks="Accepted by billing"
+                )
+            log_user = None if (is_billing_editor or (not needs_approval and log_action == 'Billing')) else user
             log_order_action(order, log_action, user=log_user, remarks=log_remarks)
 
             # Save every unique order as a template, but skip true duplicates.
@@ -1399,6 +1413,14 @@ class UpdateOrderStatusView(APIView):
             )
         )
 
+        is_auditor_rejected = (
+            "auditor" in prev_name
+            and (
+                getattr(status_obj, "code", "") == "REJECTED"
+                or "reject" in new_name
+            )
+        )
+
         is_rate_approved = (
             prev_name == "rate approval"
             and status_obj.id == 6
@@ -1476,19 +1498,12 @@ class UpdateOrderStatusView(APIView):
                 remarks=reason or "Accepted by billing"
             )
 
-            auditor_pending_log = (
-                OrdersLog.objects
-                .filter(order=order, action=status_obj, performed_by__isnull=True)
-                .order_by("-created_at")
-                .first()
+            log_order_action(
+                order=order,
+                action_name=status_obj.name,
+                user=None,
+                remarks=""
             )
-            if not auditor_pending_log:
-                log_order_action(
-                    order=order,
-                    action_name=status_obj.name,
-                    user=None,
-                    remarks=""
-                )
 
             send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
 
@@ -1504,6 +1519,29 @@ class UpdateOrderStatusView(APIView):
                 action_status=previous_status,
                 user=user,
                 remarks=reason or "Accepted by billing"
+            )
+
+            log_order_action(
+                order=order,
+                action_name=status_obj.name,
+                user=user,
+                remarks=reason
+            )
+
+            send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
+
+            return Response({
+                "message": "Order status updated successfully",
+                "order_id": order.id,
+                "status": status_obj.name
+            })
+
+        if is_auditor_rejected:
+            _close_or_create_status_log(
+                order=order,
+                action_status=previous_status,
+                user=user,
+                remarks=reason
             )
 
             log_order_action(
