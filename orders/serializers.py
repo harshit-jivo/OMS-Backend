@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,Notification,OrderItemScheme, Order
+from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order
 from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
@@ -309,9 +309,3 @@ class CreateSchemeSerializer(serializers.ModelSerializer):
         fields = ["scheme_name", "item_code", "state_code"]
         extra_kwargs = {"state_code": {"required": False, "allow_blank": True, "allow_null": True}}
 
-class NotificationSerializer(serializers.ModelSerializer):
-    order_id = serializers.IntegerField(source='order.id', read_only=True)
-    
-    class Meta:
-        model = Notification
-        fields = ['id', 'message', 'is_read', 'created_at', 'order_id']
