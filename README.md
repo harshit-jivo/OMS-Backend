@@ -12,6 +12,7 @@ Django REST backend for the Order Management System. The project handles user au
 - SAP/HANA integration through SQL Server and SAP Service Layer
 - APScheduler for scheduled sync jobs
 - Optional local AI order summary support
+- Upcoming Invoice Module
 
 ## Project Structure
 
