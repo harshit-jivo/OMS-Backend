@@ -115,11 +115,11 @@ DATABASES = {
     },
     'hana': {
         'ENGINE': 'django.db.backends.dummy', 
-        'HOST': '103.89.45.192',       
-        'PORT': 30015,              
-        'SCHEMA': 'JIVO_OIL_HANADB',
-        'USER': 'DATA1',
-        'PASSWORD': 'Jivo@1989',
+        'HOST': config('HANA_DB_HOST'),
+        'PORT': config('HANA_DB_PORT'),
+        'SCHEMA': config('HANA_DB_NAME'),
+        'USER': config('HANA_DB_USER'),
+        'PASSWORD': config('HANA_DB_PASSWORD'),
     }
     
     
