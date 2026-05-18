@@ -3,7 +3,7 @@
 Django REST backend for the Order Management System. The project handles user authentication, order creation and approval workflows, SAP master-data sync, sales quotation pushes, dashboards, notifications, and party/product assignment management.
 
 ## Tech Stack
-
+- React is being used for the frontend
 - Python
 - Django
 - Django REST Framework
