@@ -607,3 +607,20 @@ class TestSalesQuotation(APIView):
                 {"error": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
+            
+class GetPartyByCategoryView(APIView):
+    def get(self , request):
+        category = request.query_params.get('category')
+        if not category:
+            return Response({
+                'success': False,
+                'message': 'category query parameter is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        parties = Party.objects.filter(category__iexact=category)
+        serializer = PartySerializer(parties, many=True)
+        
+        return Response({
+            'success': True,
+            'data': serializer.data
+        })

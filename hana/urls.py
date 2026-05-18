@@ -1,6 +1,6 @@
 from django.urls import path
-from .views import getSalesOrderView
+from .views import GetSalesOrderView
 
 urlpatterns = [
-    path('so/' , getSalesOrderView.as_view()),
+    path('so/' , GetSalesOrderView.as_view()),
 ]

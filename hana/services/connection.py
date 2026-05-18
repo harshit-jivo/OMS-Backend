@@ -55,18 +55,53 @@ class HANAConnection:
 
 class Queries():
     SCHEMA = settings.DATABASES['hana']['SCHEMA']
-
+    
     @staticmethod
-    def get_sales_orders():
+    def get_sales_orders_for_party(party_code):
         s = Queries.SCHEMA
         return f"""
-            SELECT
-                T0."DocNum",
-                T0."DocDate",
-                T0."CardCode",
-                T0."CardName",
-                T0."DocTotal",
-                T0."DocStatus"
-            FROM "{s}"."ORDR" T0
-            ORDER BY T0."DocDate" DESC
-        """
+        SELECT
+            T0."DocEntry",
+            T0."DocNum",
+            T0."DocDate",
+            T0."DocDueDate",
+            T0."CardCode",
+            T0."CardName",
+            T0."NumAtCard",
+            T0."DocStatus",
+            T0."DocTotal",
+            T0."VatSum",
+            T0."DiscSum",
+            T0."Comments",
+            T0."SlpCode",
+
+            T1."LineNum",
+            T1."ItemCode",
+            T1."Dscription",
+            T1."Quantity",
+            T1."OpenQty",
+            T1."Price",
+            T1."PriceBefDi",
+            T1."DiscPrcnt",
+            T1."LineTotal",
+            T1."VatPrcnt",
+            T1."VatGroup",
+            T1."WhsCode",
+            T1."TaxCode",
+            T1."ShipDate",
+            T1."AcctCode",
+            T1."Project",
+            T1."OcrCode",
+            T1."LineStatus"
+
+        FROM "{s}"."ORDR" AS T0
+        INNER JOIN "{s}"."RDR1" AS T1
+            ON T0."DocEntry" = T1."DocEntry"
+
+        WHERE T0."CardCode" = '{party_code}'
+          AND T0."DocStatus" = 'O'
+          AND T1."LineStatus" = 'O'
+          AND T1."OpenQty" > 0
+
+        ORDER BY T0."DocDate" DESC, T0."DocNum", T1."LineNum"
+        """ 

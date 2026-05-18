@@ -27,12 +27,13 @@ class PartySerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Party
-        fields = [
-            'id', 'card_code', 'card_name', 'address', 'state',
-            'main_group', 'chain', 'country', 'card_type', 'category',
-            'synced_at', 'created_at', 'addresses'
-        ]
+        # fields = [
+        #     'id', 'card_code', 'card_name', 'address', 'state',
+        #     'main_group', 'chain', 'country', 'card_type', 'category',
+        #     'synced_at', 'created_at', 'addresses'
+        # ]
 
+        fields = '__all__'
 
 class PartyListSerializer(serializers.ModelSerializer):
     class Meta:
