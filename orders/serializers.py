@@ -1,0 +1,317 @@
+from rest_framework import serializers
+from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,Notification,OrderItemScheme, Order
+from users.models import SchemeProduct, State
+from sap_sync.models import PartyAddress as SapPartyAddress
+from sap_sync.models import Product as SapProduct
+from sap_sync.models import Party as SapParty
+
+
+def get_scheme_item_code_raw(scheme_id):
+    if not scheme_id:
+        return None
+
+    return (
+        SchemeProduct.objects
+        .filter(scheme_id=scheme_id)
+        .values_list('item_code', flat=True)
+        .first()
+    )
+
+class SchemeProductSerializer(serializers.ModelSerializer):
+    state_name = serializers.CharField(source='state.name', read_only=True)
+    product_id = serializers.SerializerMethodField()
+    item_name = serializers.SerializerMethodField()
+    sal_factor2 = serializers.SerializerMethodField()
+    sal_pack_unit = serializers.SerializerMethodField()
+
+    def _get_product(self, obj):
+        item_code = getattr(obj, 'item_code', None)
+        if not item_code:
+            return None
+        return SapProduct.objects.filter(item_code=item_code).order_by('id').first()
+
+    def get_product_id(self, obj):
+        product = self._get_product(obj)
+        return product.id if product else None
+
+    def get_item_name(self, obj):
+        product = self._get_product(obj)
+        return product.item_name if product else None
+
+    def get_sal_factor2(self, obj):
+        product = self._get_product(obj)
+        return product.sal_factor2 if product else None
+
+    def get_sal_pack_unit(self, obj):
+        product = self._get_product(obj)
+        return product.sal_pack_unit if product else None
+   
+    class Meta:
+        model = SchemeProduct
+        fields = [
+            'scheme_id',
+            'scheme_name',
+            'is_active',
+            'state',
+            'state_code',
+            'product_id',
+            'item_code',
+            'item_name',
+            'sal_factor2',
+            'sal_pack_unit',
+        ]
+   
+
+class PartiesSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Parties
+        fields = ['card_code','card_name']
+
+class DispatchLocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DispatchLocation
+        fields = ['id','name', 'code']
+
+class PartyAddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SapPartyAddress
+        fields = ['id','full_address', 'gst_number','address_type','address_name','category']
+       
+class ProductSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductDetails
+        fields = ['id', 'item_code', 'item_name', 'category', 'brand', 'variety', 'sal_factor2', 'tax_rate', 'sal_pack_unit']
+
+class CreateOrderSerializer(serializers.Serializer):
+    card_code = serializers.CharField(max_length=100)
+    card_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    bill_to_id = serializers.IntegerField(required=False, default=0)
+    bill_to_address = serializers.CharField(required=False, allow_blank=True, default='')
+    ship_to_id = serializers.IntegerField(required=False, default=0)
+    ship_to_address = serializers.CharField(required=False, allow_blank=True, default='')
+    dispatch_from_id = serializers.IntegerField(required=False, default=0)
+    dispatch_from_name = serializers.CharField(required=False, allow_blank=True, default='')
+    company = serializers.CharField(required=False, allow_blank=True, default='')
+    po_number = serializers.CharField(required=False, allow_blank=True, default='')
+    is_foc = serializers.BooleanField(required=False, default=False)
+    remarks = serializers.CharField(required=False, allow_blank=True, default='')
+    items = serializers.ListField(child=serializers.DictField())
+    basic_price = serializers.DecimalField(max_digits=12, decimal_places=4, default=0)
+    delivery_date = serializers.DateField(required=False, allow_null=True)
+   
+
+class BranchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Branches
+        fields = ['bpl_id', 'bpl_name', 'category']
+
+class OrderStatusUpdateSerializer(serializers.Serializer):
+    status = serializers.IntegerField()
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+class OrderListByUserIdSerializer(serializers.ModelSerializer):
+    status_name = serializers.CharField(source="status.name")
+    items_count = serializers.IntegerField(source="items.count", read_only=True)
+    categories = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source="status.name", read_only=True)
+
+    def get_categories(self, obj):
+        return list(
+            obj.items.exclude(category__isnull=True)
+            .exclude(category__exact="")
+            .values_list("category", flat=True)
+            .distinct()
+        )
+   
+    class Meta:
+        model = Order
+        fields = [
+            "id",
+            "order_number",
+            "card_code",
+            "card_name",
+            "total_amount",
+            "status",
+            "status_name",
+            "status_display",
+            "created_at",
+            "delivery_date",
+            "po_number",
+            "is_foc",
+            "items_count",
+            "categories",
+        ]    
+   
+class OrdersLogSerializer(serializers.ModelSerializer):
+    status_id = serializers.IntegerField(source="action.id", read_only=True)
+    status_name = serializers.SerializerMethodField()
+    remarks = serializers.SerializerMethodField()
+    performed_by_name = serializers.CharField(
+        source="performed_by.username", read_only=True
+    )
+
+    def _performed_by_role(self, obj):
+        role = getattr(getattr(obj, "performed_by", None), "role", None)
+        return (getattr(role, "name", "") or "").strip().lower()
+
+    def _action_name(self, obj):
+        return (getattr(getattr(obj, "action", None), "name", "") or "").strip()
+
+    def _raw_remarks(self, obj):
+        return (getattr(obj, "remarks", "") or "").strip()
+
+    def _is_billing_acceptance(self, obj):
+        action_name = self._action_name(obj).lower()
+        remarks = self._raw_remarks(obj).lower()
+        performer_role = self._performed_by_role(obj)
+
+        if "reject" in action_name or "reject" in remarks:
+            return False
+
+        return (
+            performer_role == "billing"
+            and (
+                action_name in ["billing", "approved", "accepted"]
+                or "billing" in action_name
+                or remarks in ["approved", "accepted", "accepted by billing", "approved by billing", "sent to auditor"]
+            )
+        )
+
+    def get_status_name(self, obj):
+        if self._is_billing_acceptance(obj):
+            return "Accepted by Billing"
+        return self._action_name(obj)
+
+    def get_remarks(self, obj):
+        if self._is_billing_acceptance(obj):
+            return "Accepted by billing"
+        if (
+            self._action_name(obj).lower() == "completed"
+            and self._performed_by_role(obj) == "auditor"
+            and not self._raw_remarks(obj)
+        ):
+            return "Sales quotation created by auditor"
+        return self._raw_remarks(obj)
+   
+    class Meta:
+        model = OrdersLog
+        fields = [
+            "id",
+            "status_id",
+            "status_name",
+            "remarks",
+            "performed_by_name",
+            "created_at",
+        ]
+
+class OrderItemSchemeSerializer(serializers.ModelSerializer):
+    scheme_id = serializers.IntegerField(read_only=True, allow_null=True)
+    scheme_name = serializers.SerializerMethodField()
+    scheme_item_code = serializers.SerializerMethodField()
+    scheme_qty = serializers.DecimalField(source='qty_scheme', max_digits=10, decimal_places=2, read_only=True)
+
+    def get_scheme_name(self, obj):
+        raw_scheme_id = getattr(obj, 'scheme_id', None)
+        if not raw_scheme_id:
+            return None
+        return (
+            SchemeProduct.objects
+            .filter(scheme_id=raw_scheme_id)
+            .values_list('scheme_name', flat=True)
+            .first()
+        )
+
+    def get_scheme_item_code(self, obj):
+        raw_scheme_id = getattr(obj, 'scheme_id', None)
+        if not raw_scheme_id:
+            return None
+        return get_scheme_item_code_raw(raw_scheme_id)
+
+    class Meta:
+        model = OrderItemScheme
+        fields = ['id', 'scheme_id', 'scheme_name', 'scheme_item_code', 'scheme_qty', 'qty_scheme']
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    scheme_id = serializers.IntegerField(read_only=True, allow_null=True)
+    scheme_name = serializers.SerializerMethodField()
+    scheme_item_code = serializers.SerializerMethodField()
+    is_scheme_visible = serializers.SerializerMethodField()
+    schemes = OrderItemSchemeSerializer(many=True, read_only=True)
+
+    def get_scheme_name(self, obj):
+        raw_scheme_id = getattr(obj, 'scheme_id', None)
+        if not raw_scheme_id:
+            return None
+        return (
+            SchemeProduct.objects
+            .filter(scheme_id=raw_scheme_id)
+            .values_list('scheme_name', flat=True)
+            .first()
+        )
+
+    def get_scheme_item_code(self, obj):
+        raw_scheme_id = getattr(obj, 'scheme_id', None)
+        if not raw_scheme_id:
+            return None
+        return get_scheme_item_code_raw(raw_scheme_id)
+
+    def get_is_scheme_visible(self, obj):
+        raw_scheme_id = getattr(obj, 'scheme_id', None)
+        scheme_qty = getattr(obj, 'qty_scheme', 0) or 0
+        has_multiple_schemes = obj.schemes.exists() if getattr(obj, 'pk', None) else False
+        return bool(
+            getattr(obj, 'is_scheme_visible', False)
+            or (raw_scheme_id and scheme_qty > 0)
+            or has_multiple_schemes
+        )
+
+    class Meta:
+        model = OrderItem
+        fields = "__all__"
+
+class OrderDetailSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True)
+    items_count = serializers.IntegerField(source="items.count", read_only=True)
+    status = serializers.CharField(source="status.code")
+    status_display = serializers.CharField(source="status.name")
+    party_state = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+
+    def get_party_state(self, obj):
+        party = SapParty.objects.filter(card_code=obj.card_code).first()
+        if not party or not party.state:
+            return None
+        state = State.objects.filter(code=party.state).first()
+        return state.name if state else party.state
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.username
+        return None
+
+    class Meta:
+        model = Order
+        fields = [
+            "id", "order_number", "card_code", "card_name",
+            "bill_to_id", "bill_to_address", "ship_to_id", "ship_to_address",
+            "dispatch_from_id", "dispatch_from_name", "company", "po_number","is_foc",
+            "remarks", "total_amount", "status", "status_display",
+            "created_by", "created_by_name", "created_at", "delivery_date",
+            "sap_created", "sap_doc_number",
+            "approved_by", "approved_at", "rejected_by", "rejected_at",
+            "rejection_reason", "reject_reason", "updated_at",
+            "items", "items_count", "party_state",
+        ]
+
+class CreateSchemeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchemeProduct
+        fields = ["scheme_name", "item_code", "state_code"]
+        extra_kwargs = {"state_code": {"required": False, "allow_blank": True, "allow_null": True}}
+
+class NotificationSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    
+    class Meta:
+        model = Notification
+        fields = ['id', 'message', 'is_read', 'created_at', 'order_id']
