@@ -19,3 +19,9 @@ class GetSalesOrderView(APIView):
         rows = SalesOrderService().syncSalesOrder(party_code)
         grouped = group_sales_orders(rows)
         return Response(grouped)
+    
+    
+class GetOpenPartiesView(APIView):
+    def get (self , request):
+        openParties = SalesOrderService().syncOpenParties()
+        return Response(openParties)
