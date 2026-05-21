@@ -216,21 +216,25 @@ def _get_base_orders(user):
             Q(logs__action__name__icontains='auditor')
         ).distinct()
     if role_name == 'approver':
-        handled_order_ids = (
-            OrdersLog.objects
-            .filter(performed_by=user)
-            .filter(
-                Q(action__code__in=['APPROVED', 'REJECTED']) |
-                Q(action__name__icontains='approve') |
-                Q(action__name__icontains='reject')
+
+            handled_order_ids = (
+                OrdersLog.objects
+                .filter(performed_by=user)
+                .values_list('order_id', flat=True)
+                .distinct()
             )
-            .values_list('order_id', flat=True)
-            .distinct()
-        )
-        return Order.objects.filter(
-            Q(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']) |
-            Q(id__in=handled_order_ids)
-        ).distinct()
+
+            queryset = Order.objects.filter(
+                Q(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']) |
+                Q(id__in=handled_order_ids)
+            ).distinct()
+
+            if user.category:
+                queryset = queryset.filter(
+                    created_by__category=user.category
+                )
+
+            return queryset
     if role_name == 'billing':
         handled_order_ids = (
             OrdersLog.objects
