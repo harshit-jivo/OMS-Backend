@@ -12,7 +12,7 @@ from datetime import datetime
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
-from django.db.models import Sum, Count,F,Q
+from django.db.models import Sum, Count,F,Q, OuterRef, Subquery
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from collections import defaultdict
@@ -34,6 +34,12 @@ from .ai_service import get_order_summary
 
 BILLING_ACTIVE_CODES = ['BILLING', 'BILLING_PENDING']
 BILLING_RESOLVED_CODES = ['BILLING_REJECTED', 'COMPLETED']
+BILLING_ACCEPTED_ACTION_ID = 3
+BILLING_REJECTED_ACTION_ID = 8
+BILLING_DECISION_ACTION_IDS = [BILLING_ACCEPTED_ACTION_ID, BILLING_REJECTED_ACTION_ID]
+AUDITOR_ACCEPTED_ACTION_ID = 9
+AUDITOR_REJECTED_ACTION_ID = 7
+AUDITOR_DECISION_ACTION_IDS = [AUDITOR_ACCEPTED_ACTION_ID, AUDITOR_REJECTED_ACTION_ID]
 
 @csrf_exempt
 def ai_order_summary(request):
@@ -228,23 +234,20 @@ def _get_base_orders(user):
     if role_name == 'billing':
         handled_order_ids = (
             OrdersLog.objects
-            .filter(performed_by=user)
             .filter(
-                Q(action__code__in=BILLING_ACTIVE_CODES) |
-                Q(action__code__in=BILLING_RESOLVED_CODES) |
-                Q(action__code='AUDITOR_APPROVAL') |
-                Q(action__name__icontains='auditor') |
-                Q(action__name__icontains='billing reject') |
-                Q(action__name__icontains='complete')
+                performed_by=user,
+                action_id__in=BILLING_DECISION_ACTION_IDS
             )
             .values_list('order_id', flat=True)
             .distinct()
         )
+
         return Order.objects.filter(
             Q(status__code__in=BILLING_ACTIVE_CODES) |
             Q(id__in=handled_order_ids)
         ).distinct()
     return Order.objects.none()
+    
 
 class WDashboardKPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -288,42 +291,76 @@ class WDashboardKPIView(APIView):
                 'billing': User.objects.filter(role__name__iexact='billing', is_active=True).count(),
             }
         if role_name == 'auditor':
-            auditor_handled_orders = year_orders.filter(
-                logs__performed_by=request.user,
-            ).distinct()
+            latest_auditor_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=AUDITOR_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            auditor_orders_with_decision = year_orders.annotate(
+                latest_auditor_action_id=Subquery(latest_auditor_action)
+            )
+            auditor_decided_orders = (
+                auditor_orders_with_decision
+                .filter(latest_auditor_action_id__in=AUDITOR_DECISION_ACTION_IDS)
+                .exclude(status__code='AUDITOR_APPROVAL')
+                .distinct()
+            )
 
-            accepted_orders = auditor_handled_orders.filter(
-                Q(logs__action__code='COMPLETED') |
-                Q(logs__action__name__icontains='complete') |
-                Q(logs__remarks__icontains='quotation')
-            ).distinct().count()
-            rejected_orders = auditor_handled_orders.filter(
-                Q(status__code='REJECTED') |
-                Q(logs__action__code='REJECTED') |
-                Q(logs__action__name__icontains='reject')
-            ).distinct().count()
-            pending_review_orders = year_orders.filter(status__code='AUDITOR_APPROVAL').distinct().count()
+            pending_review_orders = (
+                auditor_orders_with_decision
+                .filter(status__code='AUDITOR_APPROVAL')
+                .distinct()
+                .count()
+            )
+
+            accepted_orders = auditor_decided_orders.filter(
+                latest_auditor_action_id=AUDITOR_ACCEPTED_ACTION_ID
+            ).count()
+
+            rejected_orders = auditor_decided_orders.filter(
+                latest_auditor_action_id=AUDITOR_REJECTED_ACTION_ID
+            ).count()
         if role_name == 'billing':
-            billing_handled_orders = year_orders.filter(
-                logs__performed_by=request.user,
-            ).distinct()
+            latest_billing_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=BILLING_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            billing_orders_with_decision = year_orders.annotate(
+                latest_billing_action_id=Subquery(latest_billing_action)
+            )
+            billing_decided_orders = (
+                billing_orders_with_decision
+                .filter(latest_billing_action_id__in=BILLING_DECISION_ACTION_IDS)
+                .exclude(status__code__in=BILLING_ACTIVE_CODES)
+                .distinct()
+            )
 
-            accepted_orders = billing_handled_orders.filter(
-                Q(logs__action__code__in=BILLING_ACTIVE_CODES) |
-                Q(logs__action__code='AUDITOR_APPROVAL') |
-                Q(logs__action__name__icontains='auditor') |
-                Q(logs__remarks__icontains='sent to auditor')
-            ).exclude(
-                Q(logs__action__code='BILLING_REJECTED') |
-                Q(logs__action__name__icontains='billing reject')
-            ).distinct().count()
+            pending_review_orders = (
+                billing_orders_with_decision
+                .filter(status__code__in=BILLING_ACTIVE_CODES)
+                .distinct()
+                .count()
+            )
 
-            rejected_orders = billing_handled_orders.filter(
-                Q(logs__action__code='BILLING_REJECTED') |
-                Q(logs__action__name__icontains='billing reject')
-            ).distinct().count()
+            accepted_orders = billing_decided_orders.filter(
+                latest_billing_action_id=BILLING_ACCEPTED_ACTION_ID
+            ).count()
 
-            pending_review_orders = year_orders.filter(status__code__in=BILLING_ACTIVE_CODES).distinct().count()
+            rejected_orders = billing_decided_orders.filter(
+                latest_billing_action_id=BILLING_REJECTED_ACTION_ID
+            ).count()
+
         if role_name == 'approver':
             approver_handled_orders = year_orders.filter(
                 logs__performed_by=request.user,
@@ -452,6 +489,96 @@ class WDashboardChartsView(APIView):
             for os in OrderStatus.objects.all()
         ]
 
+        role = getattr(request.user, 'role', None)
+        role_name = getattr(role, 'name', '').lower() if role else ''
+        decision_data = []
+        if role_name == 'billing':
+            latest_billing_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=BILLING_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            billing_orders_with_decision = filtered_orders.annotate(
+                latest_billing_action_id=Subquery(latest_billing_action)
+            )
+            billing_decided_orders = (
+                billing_orders_with_decision
+                .filter(latest_billing_action_id__in=BILLING_DECISION_ACTION_IDS)
+                .exclude(status__code__in=BILLING_ACTIVE_CODES)
+                .distinct()
+            )
+            decision_data = [
+                {
+                    'status': 'accepted',
+                    'label': 'Accepted',
+                    'count': billing_decided_orders.filter(
+                        latest_billing_action_id=BILLING_ACCEPTED_ACTION_ID
+                    ).count(),
+                },
+                {
+                    'status': 'rejected',
+                    'label': 'Rejected',
+                    'count': billing_decided_orders.filter(
+                        latest_billing_action_id=BILLING_REJECTED_ACTION_ID
+                    ).count(),
+                },
+                {
+                    'status': 'queue',
+                    'label': 'Pending',
+                    'count': billing_orders_with_decision.filter(
+                        status__code__in=BILLING_ACTIVE_CODES
+                    ).distinct().count(),
+                },
+            ]
+        elif role_name == 'auditor':
+            latest_auditor_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=AUDITOR_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            auditor_orders_with_decision = filtered_orders.annotate(
+                latest_auditor_action_id=Subquery(latest_auditor_action)
+            )
+            auditor_decided_orders = (
+                auditor_orders_with_decision
+                .filter(latest_auditor_action_id__in=AUDITOR_DECISION_ACTION_IDS)
+                .exclude(status__code='AUDITOR_APPROVAL')
+                .distinct()
+            )
+            decision_data = [
+                {
+                    'status': 'accepted',
+                    'label': 'Accepted',
+                    'count': auditor_decided_orders.filter(
+                        latest_auditor_action_id=AUDITOR_ACCEPTED_ACTION_ID
+                    ).count(),
+                },
+                {
+                    'status': 'rejected',
+                    'label': 'Rejected',
+                    'count': auditor_decided_orders.filter(
+                        latest_auditor_action_id=AUDITOR_REJECTED_ACTION_ID
+                    ).count(),
+                },
+                {
+                    'status': 'pending',
+                    'label': 'Pending Review',
+                    'count': auditor_orders_with_decision.filter(
+                        status__code='AUDITOR_APPROVAL'
+                    ).distinct().count(),
+                },
+            ]
+
         # CHART 4: Top Parties by Revenue (selected period)
         top_parties = (
             filtered_orders
@@ -491,9 +618,74 @@ class WDashboardChartsView(APIView):
             'monthly_sales': monthly_sales_data,
             'statewise_orders': statewise_data,
             'status_distribution': status_data,
+            'decision_distribution': decision_data,
             'top_parties': top_parties_data,
             'category_sales': category_data,
         })
+
+class OrderStatusTrackingView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        mode = (request.query_params.get('mode') or '').strip().lower()
+        base_orders = _get_base_orders(request.user).select_related('status', 'created_by')
+
+        if mode == 'auditor':
+            latest_auditor_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=AUDITOR_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            orders = base_orders.annotate(
+                latest_decision_action_id=Subquery(latest_auditor_action)
+            )
+            accepted_orders = orders.filter(
+                latest_decision_action_id=AUDITOR_ACCEPTED_ACTION_ID
+            ).exclude(status__code='AUDITOR_APPROVAL')
+            rejected_orders = orders.filter(
+                latest_decision_action_id=AUDITOR_REJECTED_ACTION_ID
+            ).exclude(status__code='AUDITOR_APPROVAL')
+        elif mode == 'billing':
+            latest_billing_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=BILLING_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            orders = base_orders.annotate(
+                latest_decision_action_id=Subquery(latest_billing_action)
+            )
+            accepted_orders = orders.filter(
+                latest_decision_action_id=BILLING_ACCEPTED_ACTION_ID
+            ).exclude(status__code__in=BILLING_ACTIVE_CODES)
+            rejected_orders = orders.filter(
+                latest_decision_action_id=BILLING_REJECTED_ACTION_ID
+            ).exclude(status__code__in=BILLING_ACTIVE_CODES)
+        else:
+            return Response({'error': 'mode must be auditor or billing'}, status=status.HTTP_400_BAD_REQUEST)
+
+        accepted_data = OrderListByUserIdSerializer(accepted_orders.distinct(), many=True).data
+        rejected_data = OrderListByUserIdSerializer(rejected_orders.distinct(), many=True).data
+
+        for item in accepted_data:
+            item['decision_type'] = 'accepted'
+        for item in rejected_data:
+            item['decision_type'] = 'rejected'
+
+        return Response(sorted(
+            [*accepted_data, *rejected_data],
+            key=lambda item: item.get('created_at') or '',
+            reverse=True,
+        ))
 
 class DashboardKPIView(APIView):
     permission_classes = [AllowAny]
