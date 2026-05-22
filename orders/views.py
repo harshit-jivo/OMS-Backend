@@ -40,6 +40,10 @@ BILLING_DECISION_ACTION_IDS = [BILLING_ACCEPTED_ACTION_ID, BILLING_REJECTED_ACTI
 AUDITOR_ACCEPTED_ACTION_ID = 9
 AUDITOR_REJECTED_ACTION_ID = 7
 AUDITOR_DECISION_ACTION_IDS = [AUDITOR_ACCEPTED_ACTION_ID, AUDITOR_REJECTED_ACTION_ID]
+APPROVER_ACCEPTED_ACTION_ID = 6
+APPROVER_REJECTED_ACTION_ID = 7
+APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
+APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
 
 @csrf_exempt
 def ai_order_summary(request):
@@ -259,6 +263,22 @@ def _get_base_orders(user):
             Q(id__in=handled_order_ids)
         ).distinct()
     return Order.objects.none()
+
+
+def _with_latest_approver_decision(orders, user):
+    latest_approver_action = (
+        OrdersLog.objects
+        .filter(
+            order=OuterRef('pk'),
+            performed_by=user,
+            action_id__in=APPROVER_DECISION_ACTION_IDS,
+        )
+        .order_by('-created_at', '-id')
+        .values('action_id')[:1]
+    )
+    return orders.annotate(
+        latest_approver_action_id=Subquery(latest_approver_action)
+    )
     
 
 class WDashboardKPIView(APIView):
@@ -404,22 +424,24 @@ class WDashboardKPIView(APIView):
             ).count()
 
         if role_name == 'approver':
-            approver_handled_orders = period_orders.filter(
-                logs__performed_by=request.user,
-            ).distinct()
+            approver_orders_with_decision = _with_latest_approver_decision(
+                period_orders,
+                request.user,
+            )
 
-            accepted_orders = approver_handled_orders.filter(
-                Q(logs__action__name__icontains='approve') |
-                Q(logs__action__code='APPROVED')
+            accepted_orders = approver_orders_with_decision.filter(
+                latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
             ).distinct().count()
 
-            rejected_orders = approver_handled_orders.filter(
-                Q(status__code__in=['REJECTED', 'BILLING_REJECTED']) |
-                Q(logs__action__code__in=['REJECTED', 'BILLING_REJECTED']) |
-                Q(logs__action__name__icontains='reject')
+            rejected_orders = approver_orders_with_decision.filter(
+                latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
             ).distinct().count()
 
-            pending_review_orders = period_orders.filter(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']).distinct().count()
+            pending_review_orders = period_orders.filter(
+                status__code__in=APPROVER_ACTIVE_CODES
+            ).distinct().count()
+
+            total_orders = accepted_orders + rejected_orders + pending_review_orders
 
         status_counts = {}
         for os in OrderStatus.objects.all():
@@ -618,6 +640,34 @@ class WDashboardChartsView(APIView):
                     'label': 'Pending Review',
                     'count': auditor_orders_with_decision.filter(
                         status__code='AUDITOR_APPROVAL'
+                    ).distinct().count(),
+                },
+            ]
+        elif role_name == 'approver':
+            approver_orders_with_decision = _with_latest_approver_decision(
+                filtered_orders,
+                request.user,
+            )
+            decision_data = [
+                {
+                    'status': 'accepted',
+                    'label': 'Approved',
+                    'count': approver_orders_with_decision.filter(
+                        latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
+                    ).distinct().count(),
+                },
+                {
+                    'status': 'rejected',
+                    'label': 'Rejected',
+                    'count': approver_orders_with_decision.filter(
+                        latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
+                    ).distinct().count(),
+                },
+                {
+                    'status': 'pending',
+                    'label': 'Pending Approval',
+                    'count': approver_orders_with_decision.filter(
+                        status__code__in=APPROVER_ACTIVE_CODES
                     ).distinct().count(),
                 },
             ]
