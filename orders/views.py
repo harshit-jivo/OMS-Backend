@@ -195,6 +195,13 @@ def _save_template_if_unique(user, order):
 
     Template.objects.get_or_create(user=user, order=order)
 
+
+def _get_user_category_name(user):
+    category_obj = getattr(user, 'category', None)
+    category_name = getattr(category_obj, 'category', category_obj)
+    normalized_category = str(category_name or '').strip().upper()
+    return normalized_category or None
+
 def _get_base_orders(user):
     """Scope orders by user role:
     - admin: all orders
@@ -216,25 +223,26 @@ def _get_base_orders(user):
             Q(logs__action__name__icontains='auditor')
         ).distinct()
     if role_name == 'approver':
+        handled_order_ids = (
+            OrdersLog.objects
+            .filter(performed_by=user)
+            .values_list('order_id', flat=True)
+            .distinct()
+        )
 
-            handled_order_ids = (
-                OrdersLog.objects
-                .filter(performed_by=user)
-                .values_list('order_id', flat=True)
-                .distinct()
-            )
+        queryset = Order.objects.filter(
+            Q(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']) |
+            Q(id__in=handled_order_ids)
+        ).distinct()
 
-            queryset = Order.objects.filter(
-                Q(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']) |
-                Q(id__in=handled_order_ids)
+        user_category = _get_user_category_name(user)
+        if user_category:
+            queryset = queryset.filter(
+                Q(items__category__iexact=user_category) |
+                Q(created_by__category__category__iexact=user_category)
             ).distinct()
 
-            if user.category:
-                queryset = queryset.filter(
-                    created_by__category=user.category
-                )
-
-            return queryset
+        return queryset
     if role_name == 'billing':
         handled_order_ids = (
             OrdersLog.objects
@@ -2010,28 +2018,33 @@ class OrderListView(APIView):
     permission_classes = [AllowAny]
     
     def get(self, request):
-
         status_filter = request.query_params.get('status', None)
         user_id = request.query_params.get('user_id', None)
         billing_view = request.query_params.get('billing', 'false').lower() == 'true'
 
+        if request.user.is_authenticated:
+            orders = _get_base_orders(request.user)
+        else:
+            orders = Order.objects.all()
+
         if billing_view:
-            # Billing view: show all billing-related orders regardless of sap_created
-            orders = Order.objects.filter(status_id__in=[3, 5, 6, 8]).order_by('-created_at')
+            # Billing view: show billing-related orders from the caller's allowed scope.
+            orders = orders.filter(status_id__in=[3, 5, 6, 8])
         else:
             if status_filter:
-                orders = Order.objects.filter(status__code=status_filter).order_by('-created_at')
+                orders = orders.filter(status__code=status_filter)
             else:
-                orders = Order.objects.filter(sap_created=False).order_by('-created_at')
+                orders = orders.filter(sap_created=False)
 
-        # Filter by user_id
         if user_id:
             orders = orders.filter(created_by=user_id)
 
+        orders = orders.select_related('status', 'created_by').prefetch_related('items').order_by('-created_at').distinct()
+
         data = []
         for order in orders:
-            items_qs = OrderItem.objects.filter(order=order)
-            items_count = OrderItem.objects.filter(order=order).count()
+            items_qs = order.items.all()
+            items_count = items_qs.count()
             data.append({
                 'id': order.id,
                 'order_number': order.order_number,
