@@ -206,6 +206,93 @@ def _get_user_category_name(user):
     normalized_category = str(category_name or '').strip().upper()
     return normalized_category or None
 
+
+def _normalize_scope_name(value):
+    normalized = str(value or '').strip()
+    return normalized or None
+
+
+def _get_user_main_group_names(user):
+    names = []
+    main_group = getattr(user, 'main_group', None)
+    if main_group:
+        names.append(_normalize_scope_name(getattr(main_group, 'name', main_group)))
+
+    main_groups = getattr(user, 'main_groups', None)
+    if main_groups is not None:
+        for group in main_groups.all():
+            names.append(_normalize_scope_name(getattr(group, 'name', group)))
+
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _build_iexact_filter(field_name, values):
+    query = Q()
+    for value in values:
+        query |= Q(**{f'{field_name}__iexact': value})
+    return query
+
+
+def _apply_billing_order_scope(queryset, user):
+    user_category = _get_user_category_name(user)
+    user_main_groups = _get_user_main_group_names(user)
+
+    if not user_category and not user_main_groups:
+        return queryset
+
+    party_queryset = SapParty.objects.all()
+    if user_category:
+        party_queryset = party_queryset.filter(category__iexact=user_category)
+    if user_main_groups:
+        party_queryset = party_queryset.filter(
+            _build_iexact_filter('main_group', user_main_groups)
+        )
+
+    queryset = queryset.filter(
+        card_code__in=party_queryset.values_list('card_code', flat=True)
+    )
+
+    if user_category:
+        queryset = queryset.filter(items__category__iexact=user_category)
+
+    return queryset.distinct()
+
+
+def _billing_users_for_order(order, exclude_user=None):
+    users = User.objects.filter(role__name__iexact='billing', is_active=True)
+    if exclude_user:
+        users = users.exclude(id=exclude_user.id)
+
+    order_categories = {
+        str(category or '').strip().upper()
+        for category in order.items.exclude(category__isnull=True)
+        .exclude(category='')
+        .values_list('category', flat=True)
+    }
+
+    matching_users = []
+    for user in users:
+        user_category = _get_user_category_name(user)
+        if user_category and user_category not in order_categories:
+            continue
+
+        user_main_groups = _get_user_main_group_names(user)
+        if user_main_groups:
+            party_match = SapParty.objects.filter(
+                card_code=order.card_code,
+            )
+            if user_category:
+                party_match = party_match.filter(category__iexact=user_category)
+            party_match = party_match.filter(
+                _build_iexact_filter('main_group', user_main_groups)
+            )
+            if not party_match.exists():
+                continue
+
+        matching_users.append(user)
+
+    return matching_users
+
 def _get_base_orders(user):
     """Scope orders by user role:
     - admin: all orders
@@ -258,10 +345,12 @@ def _get_base_orders(user):
             .distinct()
         )
 
-        return Order.objects.filter(
+        queryset = Order.objects.filter(
             Q(status__code__in=BILLING_ACTIVE_CODES) |
             Q(id__in=handled_order_ids)
         ).distinct()
+
+        return _apply_billing_order_scope(queryset, user)
     return Order.objects.none()
 
 
@@ -431,11 +520,11 @@ class WDashboardKPIView(APIView):
 
             accepted_orders = approver_orders_with_decision.filter(
                 latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
-            ).distinct().count()
+            ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count()
 
             rejected_orders = approver_orders_with_decision.filter(
                 latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
-            ).distinct().count()
+            ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count()
 
             pending_review_orders = period_orders.filter(
                 status__code__in=APPROVER_ACTIVE_CODES
@@ -654,14 +743,14 @@ class WDashboardChartsView(APIView):
                     'label': 'Approved',
                     'count': approver_orders_with_decision.filter(
                         latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
-                    ).distinct().count(),
+                    ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count(),
                 },
                 {
                     'status': 'rejected',
                     'label': 'Rejected',
                     'count': approver_orders_with_decision.filter(
                         latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
-                    ).distinct().count(),
+                    ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count(),
                 },
                 {
                     'status': 'pending',
@@ -1534,8 +1623,18 @@ class CreateOrderView(APIView):
         # Log: Order created
         log_order_action(order, 'Order Created', user=user)
 
-        # Route based on price check
-        if needs_approval:
+        creator_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
+        is_billing_creator = creator_role == "billing"
+
+        # Billing-created orders skip rate approval and billing queue; they go straight to auditor.
+        if is_billing_creator:
+            next_status = get_status('Auditor Approval')
+            if next_status:
+                order.status = next_status
+                order.save()
+                send_order_notifications(order, next_status.name, actor=user)
+            log_order_action(order, 'Auditor Approval', user=None, remarks='Sent to auditor')
+        elif needs_approval:
             next_status = get_status('Rate Approval')
             if next_status:
                 order.status = next_status
@@ -1556,10 +1655,10 @@ class CreateOrderView(APIView):
             'order_number': order.order_number,
             'total_amount': str(order.total_amount),
             'status': order.status.name if order.status else '',
-            'needs_approval': needs_approval,
-            'flagged_items': flagged_items if needs_approval else [],
+            'needs_approval': False if is_billing_creator else needs_approval,
+            'flagged_items': [] if is_billing_creator else flagged_items if needs_approval else [],
             'remarks': order.remarks or '',
-            'message': 'Order sent to rate approver' if needs_approval else 'Order sent to billing',
+            'message': 'Order sent to auditor' if is_billing_creator else 'Order sent to rate approver' if needs_approval else 'Order sent to billing',
         }, status=status.HTTP_201_CREATED)
     
 
@@ -2262,12 +2361,12 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
         return
 
     if normalized_status in {"billing", "billing pending", "billing approval"}:
-        _notify_role(
-            "billing",
-            order,
-            f"Order {order.order_number} from {creator_name} is ready for billing.",
-            exclude_user=actor,
-        )
+        for billing_user in _billing_users_for_order(order, exclude_user=actor):
+            _create_notification(
+                billing_user,
+                order,
+                f"Order {order.order_number} from {creator_name} is ready for billing.",
+            )
         return
 
     if normalized_status == "auditor approval":
