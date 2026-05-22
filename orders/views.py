@@ -268,27 +268,57 @@ class WDashboardKPIView(APIView):
         today = timezone.now().date()
         now = timezone.now()
         year = int(request.query_params.get('year', now.year))
+        month = int(request.query_params.get('month', 0))
 
-        year_start = timezone.make_aware(datetime(year, 1, 1))
-        year_end = timezone.make_aware(datetime(year, 12, 31, 23, 59, 59))
+        if month == 0:
+            range_start = timezone.make_aware(datetime(year, 1, 1))
+            if year == now.year:
+                range_end = timezone.make_aware(
+                    datetime(now.year, now.month, now.day, 23, 59, 59)
+                )
+            else:
+                range_end = timezone.make_aware(
+                    datetime(year, 12, 31, 23, 59, 59)
+                )
+        else:
+            range_start = timezone.make_aware(datetime(year, month, 1))
+            last_day = calendar.monthrange(year, month)[1]
+            range_end = timezone.make_aware(
+                datetime(year, month, last_day, 23, 59, 59)
+            )
 
         base_order_ids = _get_base_orders(request.user).values_list('id', flat=True).distinct()
         all_orders = Order.objects.filter(id__in=base_order_ids)
-        year_orders = all_orders.filter(created_at__gte=year_start, created_at__lte=year_end)
+        period_orders = all_orders.filter(
+            created_at__gte=range_start,
+            created_at__lte=range_end,
+        )
 
-        if year == now.year:
-            today_orders = year_orders.filter(created_at__date=today).count()
+        if month != 0:
+            today_orders = (
+                period_orders.filter(created_at__date=today).count()
+                if year == now.year and month == now.month
+                else 0
+            )
+            this_month_orders = period_orders.count()
+        elif year == now.year:
+            today_orders = period_orders.filter(created_at__date=today).count()
             current_month_start = today.replace(day=1)
-            this_month_orders = year_orders.filter(created_at__date__gte=current_month_start).count()
+            this_month_orders = period_orders.filter(
+                created_at__date__gte=current_month_start
+            ).count()
         else:
             month_start = timezone.make_aware(datetime(year, now.month, 1))
             last_day = calendar.monthrange(year, now.month)[1]
             month_end = timezone.make_aware(datetime(year, now.month, last_day, 23, 59, 59))
             today_orders = 0
-            this_month_orders = year_orders.filter(created_at__gte=month_start, created_at__lte=month_end).count()
+            this_month_orders = period_orders.filter(
+                created_at__gte=month_start,
+                created_at__lte=month_end,
+            ).count()
 
-        total_orders = year_orders.count()
-        total_revenue = year_orders.aggregate(total=Sum('total_amount'))['total'] or 0
+        total_orders = period_orders.count()
+        total_revenue = period_orders.aggregate(total=Sum('total_amount'))['total'] or 0
         accepted_orders = 0
         rejected_orders = 0
         pending_review_orders = 0
@@ -313,7 +343,7 @@ class WDashboardKPIView(APIView):
                 .order_by('-created_at', '-id')
                 .values('action_id')[:1]
             )
-            auditor_orders_with_decision = year_orders.annotate(
+            auditor_orders_with_decision = period_orders.annotate(
                 latest_auditor_action_id=Subquery(latest_auditor_action)
             )
             auditor_decided_orders = (
@@ -348,7 +378,7 @@ class WDashboardKPIView(APIView):
                 .order_by('-created_at', '-id')
                 .values('action_id')[:1]
             )
-            billing_orders_with_decision = year_orders.annotate(
+            billing_orders_with_decision = period_orders.annotate(
                 latest_billing_action_id=Subquery(latest_billing_action)
             )
             billing_decided_orders = (
@@ -374,7 +404,7 @@ class WDashboardKPIView(APIView):
             ).count()
 
         if role_name == 'approver':
-            approver_handled_orders = year_orders.filter(
+            approver_handled_orders = period_orders.filter(
                 logs__performed_by=request.user,
             ).distinct()
 
@@ -389,13 +419,14 @@ class WDashboardKPIView(APIView):
                 Q(logs__action__name__icontains='reject')
             ).distinct().count()
 
-            pending_review_orders = year_orders.filter(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']).distinct().count()
+            pending_review_orders = period_orders.filter(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']).distinct().count()
 
         status_counts = {}
         for os in OrderStatus.objects.all():
-            status_counts[os.name] = year_orders.filter(status=os).count()
+            status_counts[os.name] = period_orders.filter(status=os).count()
 
         return Response({
+            'filter': {'year': year, 'month': month},
             'total_orders': total_orders,
             'total_revenue': str(total_revenue),
             'today_orders': today_orders,
