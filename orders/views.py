@@ -852,8 +852,28 @@ class OrderStatusTrackingView(APIView):
             rejected_orders = orders.filter(
                 latest_decision_action_id=BILLING_REJECTED_ACTION_ID
             ).exclude(status__code__in=BILLING_ACTIVE_CODES)
+        elif mode in ['rate_approver', 'rate approver', 'approver']:
+            latest_approver_action = (
+                OrdersLog.objects
+                .filter(
+                    order=OuterRef('pk'),
+                    performed_by=request.user,
+                    action_id__in=APPROVER_DECISION_ACTION_IDS,
+                )
+                .order_by('-created_at', '-id')
+                .values('action_id')[:1]
+            )
+            orders = base_orders.annotate(
+                latest_decision_action_id=Subquery(latest_approver_action)
+            )
+            accepted_orders = orders.filter(
+                latest_decision_action_id=APPROVER_ACCEPTED_ACTION_ID
+            ).exclude(status__code__in=APPROVER_ACTIVE_CODES)
+            rejected_orders = orders.filter(
+                latest_decision_action_id=APPROVER_REJECTED_ACTION_ID
+            ).exclude(status__code__in=APPROVER_ACTIVE_CODES)
         else:
-            return Response({'error': 'mode must be auditor or billing'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'mode must be auditor, billing, or rate_approver'}, status=status.HTTP_400_BAD_REQUEST)
 
         accepted_data = OrderListByUserIdSerializer(accepted_orders.distinct(), many=True).data
         rejected_data = OrderListByUserIdSerializer(rejected_orders.distinct(), many=True).data
