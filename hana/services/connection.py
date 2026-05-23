@@ -60,20 +60,18 @@ class Queries():
     def get_party_with_open_so():
         s = Queries.SCHEMA
         return f"""
-            SELECT	
-		    		DISTINCT T0."CardCode",
-		    		T0."CardName",
-		    		COUNT(T0."DocEntry") AS "Num_of_Open_SalesOrder"
-		    FROM "{s}"."ORDR" AS T0
-		    WHERE T0."DocStatus" = 'O' AND T0."CANCELED" = 'N'
-		    GROUP BY T0."CardCode" , T0."CardName"
-		    ORDER BY "Num_of_Open_SalesOrder" DESC
+            SELECT
+                T0."CardCode",
+                T0."CardName",
+                COUNT(T0."DocEntry") AS "Num_of_Open_SalesOrder"
+            FROM "{s}"."ORDR" T0
+            WHERE T0."DocStatus" = 'O'
+              AND T0."CANCELED" = 'N'
+            GROUP BY T0."CardCode", T0."CardName"
+            ORDER BY "Num_of_Open_SalesOrder" DESC
         """
     
-    @staticmethod
-    
-
-        
+       
     @staticmethod
     def get_sales_orders_for_party(party_code):
         s = Queries.SCHEMA
