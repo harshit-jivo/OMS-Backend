@@ -1,7 +1,7 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -128,6 +128,11 @@ def _create_order_item(order, item, to_float, to_bool):
     ])
 
     return order_item
+
+
+def _normalize_order_type(value):
+    order_type = str(value or 'PARTY').strip().upper()
+    return 'STAFF' if order_type == 'STAFF' else 'PARTY'
 
 
 def _normalize_template_number(value):
@@ -1384,15 +1389,23 @@ class UpdateOrderView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         data = serializer.validated_data
+        order_type = _normalize_order_type(request.data.get('order_type', order.order_type))
+        employee_id = str(data.get('employee_id') or order.employee_id or '').strip()
         items = data.pop('items', [])
         order_remarks = request.data.get('remarks', data.get('remarks', ''))
 
         if not items:
             return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if order_type == 'STAFF' and not employee_id:
+            return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
+        if order_type == 'PARTY' and not data.get('card_code'):
+            return Response({'error': 'card_code is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Update order header fields
-        order.card_code = data.get('card_code', order.card_code)
-        order.card_name = data.get('card_name', order.card_name)
+        order.order_type = order_type
+        order.employee_id = employee_id if order_type == 'STAFF' else data.get('employee_id', order.employee_id)
+        order.card_code = data.get('card_code') or ('STAFF' if order_type == 'STAFF' else order.card_code)
+        order.card_name = data.get('card_name') or (employee_id if order_type == 'STAFF' else order.card_name)
         order.bill_to_id = data.get('bill_to_id') or order.bill_to_id
         order.bill_to_address = data.get('bill_to_address', order.bill_to_address)
         order.ship_to_id = data.get('ship_to_id') or order.ship_to_id
@@ -1424,6 +1437,22 @@ class UpdateOrderView(APIView):
         order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
 
         user = request.user if request.user.is_authenticated else None
+        if order_type == 'STAFF':
+            order.status = previous_status or get_status('Order Created')
+            order.save()
+            _mark_order_notifications_read(order, user)
+            log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
+            return Response({
+                'id': order.id,
+                'order_number': order.order_number,
+                'total_amount': str(order.total_amount),
+                'status': order.status.name if order.status else '',
+                'order_type': order.order_type,
+                'employee_id': order.employee_id,
+                'needs_approval': False,
+                'message': 'Staff order updated successfully',
+            }, status=status.HTTP_200_OK)
+
         editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
         is_billing_editor = editor_role == "billing"
 
@@ -1500,13 +1529,21 @@ class CreateOrderView(APIView):
             if not serializer.is_valid():
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             data = serializer.validated_data
+            order_type = _normalize_order_type(request.data.get('order_type', order.order_type))
+            employee_id = str(data.get('employee_id') or order.employee_id or '').strip()
             items = data.pop('items', [])
             order_remarks = request.data.get('remarks', data.get('remarks', ''))
             if not items:
                 return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+            if order_type == 'STAFF' and not employee_id:
+                return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
+            if order_type == 'PARTY' and not data.get('card_code'):
+                return Response({'error': 'card_code is required'}, status=status.HTTP_400_BAD_REQUEST)
         
-            order.card_code = data.get('card_code', order.card_code)
-            order.card_name = data.get('card_name', order.card_name)
+            order.order_type = order_type
+            order.employee_id = employee_id if order_type == 'STAFF' else data.get('employee_id', order.employee_id)
+            order.card_code = data.get('card_code') or ('STAFF' if order_type == 'STAFF' else order.card_code)
+            order.card_name = data.get('card_name') or (employee_id if order_type == 'STAFF' else order.card_name)
             order.bill_to_id = data.get('bill_to_id') or order.bill_to_id
             order.bill_to_address = data.get('bill_to_address', order.bill_to_address)
             order.ship_to_id = data.get('ship_to_id') or order.ship_to_id
@@ -1534,6 +1571,22 @@ class CreateOrderView(APIView):
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
             user = request.user if request.user.is_authenticated else None
+            if order_type == 'STAFF':
+                order.status = previous_status or get_status('Order Created')
+                order.save()
+                _mark_order_notifications_read(order, user)
+                log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
+                return Response({
+                    'id': order.id,
+                    'order_number': order.order_number,
+                    'total_amount': str(order.total_amount),
+                    'status': order.status.name if order.status else '',
+                    'order_type': order.order_type,
+                    'employee_id': order.employee_id,
+                    'needs_approval': False,
+                    'message': 'Staff order updated successfully',
+                }, status=status.HTTP_200_OK)
+
             editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
             is_billing_editor = editor_role == "billing"
 
@@ -1580,12 +1633,18 @@ class CreateOrderView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         data = serializer.validated_data
+        order_type = _normalize_order_type(data.get('order_type'))
+        employee_id = str(data.get('employee_id') or '').strip()
         items = data.pop('items', [])
         # Keep remarks resilient even if serializer/view code drifts across deployments.
         order_remarks = request.data.get('remarks', data.get('remarks', ''))
 
         if not items:
             return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if order_type == 'STAFF' and not employee_id:
+            return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
+        if order_type == 'PARTY' and not data.get('card_code'):
+            return Response({'error': 'card_code is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Generate order number: ORD-YYYYMMDD-XXXX
         today = datetime.now().strftime('%Y%m%d')
@@ -1607,8 +1666,10 @@ class CreateOrderView(APIView):
 
         order = Order.objects.create(
             order_number=order_number,
-            card_code=data.get('card_code', ''),
-            card_name=data.get('card_name', ''),
+            order_type=order_type,
+            employee_id=employee_id,
+            card_code=data.get('card_code') or ('STAFF' if order_type == 'STAFF' else ''),
+            card_name=data.get('card_name') or (employee_id if order_type == 'STAFF' else ''),
             bill_to_id=data.get('bill_to_id'),
             bill_to_address=data.get('bill_to_address', ''),
             ship_to_id=data.get('ship_to_id'),
@@ -1623,6 +1684,7 @@ class CreateOrderView(APIView):
             created_by=user,
             delivery_date=data.get('delivery_date'),
             remarks=order_remarks
+            
         )
 
         needs_approval = False
@@ -1637,11 +1699,26 @@ class CreateOrderView(APIView):
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
 
-        # Save every unique order as a template, but skip true duplicates.
-        _save_template_if_unique(user, order)
+        # Save party orders as reusable templates, but keep staff orders separate.
+        if order_type != 'STAFF':
+            _save_template_if_unique(user, order)
 
         # Log: Order created
         log_order_action(order, 'Order Created', user=user)
+
+        if order_type == 'STAFF':
+            return Response({
+                'id': order.id,
+                'order_number': order.order_number,
+                'total_amount': str(order.total_amount),
+                'status': order.status.name if order.status else '',
+                'order_type': order.order_type,
+                'employee_id': order.employee_id,
+                'needs_approval': False,
+                'flagged_items': [],
+                'remarks': order.remarks or '',
+                'message': 'Staff order created successfully',
+            }, status=status.HTTP_201_CREATED)
 
         creator_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
         is_billing_creator = creator_role == "billing"
@@ -2454,4 +2531,12 @@ class NotificationListView(APIView):
             except Notification.DoesNotExist:
                 return Response({"error": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response({"error": "No ID provided"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
+class StaffProductsAPIView(APIView):
+
+    def get(self, request):
+        products = SapProduct.objects.filter(staff_prices__isnull=False).distinct()
+
+        serializer = StaffProductSerializer(products, many=True)
+
+        return Response(serializer.data)

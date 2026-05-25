@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification
+from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice
 from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
@@ -83,7 +83,7 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = ['id', 'item_code', 'item_name', 'category', 'brand', 'variety', 'sal_factor2', 'tax_rate', 'sal_pack_unit']
 
 class CreateOrderSerializer(serializers.Serializer):
-    card_code = serializers.CharField(max_length=100)
+    card_code = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     card_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
     bill_to_id = serializers.IntegerField(required=False, default=0)
     bill_to_address = serializers.CharField(required=False, allow_blank=True, default='')
@@ -98,6 +98,8 @@ class CreateOrderSerializer(serializers.Serializer):
     items = serializers.ListField(child=serializers.DictField())
     basic_price = serializers.DecimalField(max_digits=12, decimal_places=4, default=0)
     delivery_date = serializers.DateField(required=False, allow_null=True)
+    order_type = serializers.CharField(required=False, allow_blank=True, default='PARTY')
+    employee_id = serializers.CharField(required=False, allow_blank=True, default='')
    
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -316,3 +318,26 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = ['id', 'message', 'is_read', 'created_at', 'order_id']
 
+
+class StaffProductSerializer(serializers.ModelSerializer):
+    staff_rate = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SapProduct
+        fields = [
+            "id",
+            "item_code",
+            "item_name",
+            "category",
+            "tax_rate",
+            "sal_factor2",
+            "sal_pack_unit",
+            "staff_rate"
+        ]
+
+    def get_staff_rate(self, obj):
+        staff_price = StaffProductPrice.objects.filter(
+            product=obj
+        ).first()
+
+        return staff_price.rate if staff_price else 0

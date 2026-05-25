@@ -1,6 +1,7 @@
 from django.db import models
 from users.models import User, PartyProductAssignment, UserPartyAssignment
 from django.utils import timezone
+from sap_sync.models import Product
 
 class OrderStatus(models.Model):
     """
@@ -116,6 +117,23 @@ class Order(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     delivery_date = models.DateField(null=True, blank=True)
     
+    ORDER_TYPES = (
+    ("PARTY", "Party"),
+    ("STAFF", "Staff"),
+    )
+
+    order_type = models.CharField(
+    max_length=20,
+    choices=ORDER_TYPES,
+    default="PARTY"
+    )
+
+    employee_id = models.CharField(
+    max_length=255,
+    null=True,
+    blank=True
+    )
+
     sap_created = models.BooleanField(default=False)
     sap_doc_number = models.CharField(blank=True, max_length=100, null=True)   
     # Approval/Rejection
@@ -230,3 +248,23 @@ class Notification(models.Model):
     def __str__(self):
          return f"Notification for {self.user.username}: {self.message}"
 
+class StaffProductPrice(models.Model):
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="staff_prices"
+    )
+
+    rate = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'staff_product_prices'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.product.item_name} - {self.rate}"
