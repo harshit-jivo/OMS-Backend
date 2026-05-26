@@ -2,7 +2,7 @@ from urllib import request
 from django.shortcuts import render
 import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -2601,3 +2601,135 @@ class StaffProductsAPIView(APIView):
         serializer = StaffProductSerializer(products, many=True)
 
         return Response(serializer.data)
+
+    def post(self, request):
+        products = request.data.get("products", [])
+        removed_products = request.data.get("removed_products", [])
+        if not isinstance(products, list):
+            return Response(
+                {"error": "products must be a list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(removed_products, list):
+            return Response(
+                {"error": "removed_products must be a list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not products and not removed_products:
+            return Response(
+                {"error": "products or removed_products must be a non-empty list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        saved = []
+        removed = []
+        errors = []
+
+        for index, item in enumerate(removed_products):
+            product_id = item.get("product_id") or item.get("id")
+            item_code = item.get("item_code")
+            category = str(item.get("category") or "").strip()
+
+            if not category:
+                errors.append({"index": index, "error": "category is required"})
+                continue
+
+            product = None
+            if product_id:
+                product = SapProduct.objects.filter(
+                    id=product_id,
+                    category__iexact=category,
+                ).first()
+            if not product and item_code:
+                product = SapProduct.objects.filter(
+                    item_code=item_code,
+                    category__iexact=category,
+                ).first()
+
+            if not product:
+                errors.append({"index": index, "error": "product not found"})
+                continue
+
+            deleted_count, _ = StaffProductPrice.objects.filter(product=product).delete()
+            if deleted_count:
+                removed.append({
+                    "product_id": product.id,
+                    "item_code": product.item_code,
+                    "item_name": product.item_name,
+                    "category": product.category,
+                })
+
+        for index, item in enumerate(products):
+            product_id = item.get("product_id") or item.get("id")
+            item_code = item.get("item_code")
+            category = str(item.get("category") or "").strip()
+            rate = item.get("rate")
+
+            if not category:
+                errors.append({"index": index, "error": "category is required"})
+                continue
+
+            if rate in (None, ""):
+                errors.append({"index": index, "error": "rate is required"})
+                continue
+
+            try:
+                rate_value = float(rate)
+            except (TypeError, ValueError):
+                errors.append({"index": index, "error": "rate must be a number"})
+                continue
+
+            if rate_value < 0:
+                errors.append({"index": index, "error": "rate cannot be negative"})
+                continue
+
+            product = None
+            if product_id:
+                product = SapProduct.objects.filter(
+                    id=product_id,
+                    category__iexact=category,
+                ).first()
+            if not product and item_code:
+                product = SapProduct.objects.filter(
+                    item_code=item_code,
+                    category__iexact=category,
+                ).first()
+
+            if not product:
+                errors.append({"index": index, "error": "product not found"})
+                continue
+
+            staff_price = StaffProductPrice.objects.filter(product=product).first()
+            if staff_price:
+                staff_price.rate = rate_value
+                staff_price.save(update_fields=["rate"])
+            else:
+                staff_price = StaffProductPrice.objects.create(
+                    product=product,
+                    rate=rate_value,
+                )
+
+            saved.append({
+                "id": staff_price.id,
+                "product_id": product.id,
+                "item_code": product.item_code,
+                "item_name": product.item_name,
+                "category": product.category,
+                "rate": str(staff_price.rate),
+            })
+
+        if errors:
+            return Response(
+                {"saved": saved, "removed": removed, "errors": errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "message": "Staff rates saved successfully",
+                "saved": saved,
+                "removed": removed,
+            },
+            status=status.HTTP_200_OK,
+        )
+
