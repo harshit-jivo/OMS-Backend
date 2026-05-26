@@ -248,6 +248,22 @@ class Notification(models.Model):
     def __str__(self):
          return f"Notification for {self.user.username}: {self.message}"
 
+class PushToken(models.Model):
+    id = models.AutoField(primary_key=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='push_tokens')
+    token = models.CharField(max_length=255, unique=True)
+    platform = models.CharField(max_length=20, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'push_tokens'
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"{self.user.username}: {self.platform}"
+
 class StaffProductPrice(models.Model):
     product = models.ForeignKey(
         Product,

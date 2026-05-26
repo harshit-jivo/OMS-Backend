@@ -2,7 +2,7 @@ from urllib import request
 from django.shortcuts import render
 import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -29,6 +29,7 @@ from users.models import SchemeProduct, User, State
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
+import requests
 from .ai_service import get_order_summary
 
 
@@ -2429,7 +2430,47 @@ def _mark_order_notifications_read(order, user):
 def _create_notification(user, order, message):
     if not user or not order or not message:
         return
-    Notification.objects.create(user=user, order=order, message=message)
+    notification = Notification.objects.create(user=user, order=order, message=message)
+    _send_push_notification(user, notification)
+
+
+def _send_push_notification(user, notification):
+    tokens = list(
+        PushToken.objects.filter(user=user, is_active=True)
+        .values_list('token', flat=True)
+        .distinct()
+    )
+    if not tokens:
+        return
+
+    payload = [
+        {
+            'to': token,
+            'title': 'OMS Notification',
+            'body': notification.message,
+            'sound': 'default',
+            'data': {
+                'notification_id': notification.id,
+                'order_id': notification.order_id,
+                'screen': 'notifications',
+            },
+        }
+        for token in tokens
+        if token
+    ]
+    if not payload:
+        return
+
+    try:
+        response = requests.post(
+            'https://exp.host/--/api/v2/push/send',
+            json=payload,
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            print('Expo push notification failed:', response.status_code, response.text)
+    except requests.RequestException as error:
+        print('Expo push notification error:', error)
 
 
 
@@ -2531,6 +2572,26 @@ class NotificationListView(APIView):
             except Notification.DoesNotExist:
                 return Response({"error": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response({"error": "No ID provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+class PushTokenView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        token = (request.data.get('token') or request.data.get('push_token') or '').strip()
+        platform = (request.data.get('platform') or '').strip()
+
+        if not token:
+            return Response({'error': 'Push token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        PushToken.objects.update_or_create(
+            token=token,
+            defaults={
+                'user': request.user,
+                'platform': platform,
+                'is_active': True,
+            },
+        )
+        return Response({'success': True, 'message': 'Push token registered'})
 
 class StaffProductsAPIView(APIView):
 
