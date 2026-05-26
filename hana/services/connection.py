@@ -121,3 +121,40 @@ class Queries():
 
         ORDER BY T0."DocDate" DESC, T0."DocNum", T1."LineNum"
         """ 
+    
+    @staticmethod
+    def get_customer_details(party_code):
+        s = Queries.SCHEMA
+        return f"""
+        SELECT
+            T0."CardCode" , 
+            T0."CardName" , 
+            T0."State1" ,  
+            T0."U_Chain" ,  
+            T0."BillToDef" , 
+            T0."ShipToDef" 	 
+        FROM "{s}"."OCRD" AS T0
+        WHERE T0."CardCode" = '{party_code}'
+        """
+        
+    @staticmethod
+    def get_warehouse_details(whs_code):
+        s = Queries.SCHEMA
+        return f"""
+        SELECT
+            T0."WhsCode",
+            T0."WhsName"
+        FROM "{s}"."OWHS" AS T0
+        WHERE T0."WhsCode" = '{whs_code}'
+        """ 
+        
+    @staticmethod
+    def  get_salesperson_details(slp_code):
+        s = Queries.SCHEMA
+        return f"""
+        SELECT
+            T0."SlpCode",
+            T0."SlpName"
+        FROM "{s}"."OSLP" AS T0
+        WHERE T0."SlpCode" = '{slp_code}'
+        """

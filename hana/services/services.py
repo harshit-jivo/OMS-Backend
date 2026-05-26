@@ -17,3 +17,24 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def getCustomerDetails(self, party_code):
+        with HANAConnection() as conn:
+            query = Queries.get_customer_details(party_code)
+            result = conn.execute(query)
+
+        return result
+    
+    def getWarehouseDetails(self, warehouse_code):
+        with HANAConnection() as conn:
+            query = Queries.get_warehouse_details(warehouse_code)
+            result = conn.execute(query)
+
+        return result
+    
+    def getSalespersonDetails(self, salesperson_code):
+        with HANAConnection() as conn:
+            query = Queries.get_salesperson_details(salesperson_code)
+            result = conn.execute(query)
+
+        return result
