@@ -158,3 +158,14 @@ class Queries():
         FROM "{s}"."OSLP" AS T0
         WHERE T0."SlpCode" = '{slp_code}'
         """
+        
+    @staticmethod
+    def get_freight_masters():
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+            	T0."ExpnsCode",
+            	T0."ExpnsName"
+            FROM "{s}"."OEXD" AS T0
+            WHERE T0."IsActive" = 'Y'
+        """

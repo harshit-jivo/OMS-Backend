@@ -38,3 +38,10 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def FreightMasters(self):
+        with HANAConnection() as conn:
+            query = Queries.get_freight_masters()
+            result = conn.execute(query)
+
+        return result

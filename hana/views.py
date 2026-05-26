@@ -64,3 +64,8 @@ class GetSalespersonDetailsView(APIView):
 
         details = SalesOrderService().getSalespersonDetails(salesperson_code)
         return Response(details)
+
+class GetFreightMastersView(APIView):
+    def get (self , request):
+        freight_masters = SalesOrderService().FreightMasters()
+        return Response(freight_masters)
