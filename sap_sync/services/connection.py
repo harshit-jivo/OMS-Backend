@@ -76,20 +76,50 @@ class SAPConnection:
     @staticmethod
     def get_products_query():
         return """
-            SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand
-            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''OIL'' AS "Category", "SalFactor2", "U_Rev_tax_Rate","Deleted", "U_Variety", "SalPackUn", "U_Brand" 
+            SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand, OnHand
+            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''OIL'' AS "Category", "SalFactor2", "U_Rev_tax_Rate","Deleted", "U_Variety", "SalPackUn", "U_Brand", "OnHand"
             FROM "JIVO_OIL_HANADB"."OITM" 
             WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' ')
             UNION ALL 
-            SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand
-            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''BEVERAGES'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "SalPackUn", "U_Brand" 
+            SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand, OnHand
+            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''BEVERAGES'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "SalPackUn", "U_Brand", "OnHand"
             FROM "JIVO_BEVERAGES_HANADB"."OITM" 
             WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' ')
             UNION ALL
-            SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand
-            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''MART'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "SalPackUn", "U_Brand" 
+            SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand, OnHand
+            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''MART'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "SalPackUn", "U_Brand", "OnHand" 
             FROM "JIVO_MART_HANADB"."OITM" 
             WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' ')
+        """
+
+    @staticmethod
+    def get_live_stock_query(category, item_codes):
+        db_by_category = {
+            "OIL": "JIVO_OIL_HANADB",
+            "BEVERAGES": "JIVO_BEVERAGES_HANADB",
+            "MART": "JIVO_MART_HANADB",
+        }
+        normalized_category = str(category or "").strip().upper()
+        database = db_by_category.get(normalized_category)
+        cleaned_item_codes = [
+            str(item_code or "").strip()
+            for item_code in item_codes
+            if str(item_code or "").strip()
+        ]
+
+        if not database or not cleaned_item_codes:
+            return None
+
+        quoted_item_codes = ", ".join(
+            "''{}''".format(item_code.replace("'", "''"))
+            for item_code in sorted(set(cleaned_item_codes))
+        )
+
+        return f"""
+            SELECT ItemCode, Category, OnHand
+            FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", ''{normalized_category}'' AS "Category", "OnHand"
+            FROM "{database}"."OITM"
+            WHERE "ItemCode" IN ({quoted_item_codes})')
         """
     
     @staticmethod

@@ -19,6 +19,7 @@ from collections import defaultdict
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions
 from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct
+from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
 from .scheme_rules import (
@@ -232,6 +233,69 @@ def _get_user_main_group_names(user):
     return list(dict.fromkeys(name for name in names if name))
 
 
+def _clean_party_state(value):
+    state = str(value or '').strip()
+    if not state or state.lower() in {'unknown', 'none', 'null', '-'}:
+        return None
+    return state
+
+
+@lru_cache(maxsize=1)
+def _get_state_display_map():
+    state_map = {}
+    for state in State.objects.filter(is_active=True).values('code', 'name'):
+        name = _clean_party_state(state.get('name'))
+        if not name:
+            continue
+
+        for value in (state.get('code'), state.get('name')):
+            clean_value = _clean_party_state(value)
+            if clean_value:
+                state_map[clean_value.lower()] = name
+
+    return state_map
+
+
+def _format_party_state(value):
+    state = _clean_party_state(value)
+    if not state:
+        return None
+
+    return _get_state_display_map().get(state.lower(), state)
+
+
+def _build_party_state_map(card_codes):
+    normalized_codes = list(dict.fromkeys(
+        str(card_code or '').strip()
+        for card_code in card_codes
+        if str(card_code or '').strip()
+    ))
+    state_map = {}
+    if not normalized_codes:
+        return state_map
+
+    for card_code, state in Parties.objects.filter(card_code__in=normalized_codes).values_list('card_code', 'state'):
+        clean_state = _format_party_state(state)
+        if clean_state:
+            state_map[str(card_code).strip()] = clean_state
+
+    missing_codes = [card_code for card_code in normalized_codes if card_code not in state_map]
+    if missing_codes:
+        for card_code, state in SapParty.objects.filter(card_code__in=missing_codes).values_list('card_code', 'state'):
+            clean_state = _format_party_state(state)
+            if clean_state:
+                state_map.setdefault(str(card_code).strip(), clean_state)
+
+    missing_codes = [card_code for card_code in normalized_codes if card_code not in state_map]
+    if missing_codes:
+        for card_code, state in SapPartyAddress.objects.filter(card_code__in=missing_codes).values_list('card_code', 'state'):
+            clean_state = _format_party_state(state)
+            if clean_state:
+                state_map.setdefault(str(card_code).strip(), clean_state)
+
+    return state_map
+
+
 def _build_iexact_filter(field_name, values):
     query = Q()
     for value in values:
@@ -434,6 +498,20 @@ class WDashboardKPIView(APIView):
 
         total_orders = period_orders.count()
         total_revenue = period_orders.aggregate(total=Sum('total_amount'))['total'] or 0
+        completed_revenue = period_orders.filter(
+            Q(status__code__icontains='COMPLETED') |
+            Q(status__name__icontains='Completed')
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+        rejected_revenue = period_orders.filter(
+            Q(status__code__icontains='REJECTED') |
+            Q(status__name__icontains='Rejected')
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+        pending_revenue = period_orders.exclude(
+            Q(status__code__icontains='COMPLETED') |
+            Q(status__name__icontains='Completed') |
+            Q(status__code__icontains='REJECTED') |
+            Q(status__name__icontains='Rejected')
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
         accepted_orders = 0
         rejected_orders = 0
         pending_review_orders = 0
@@ -546,6 +624,9 @@ class WDashboardKPIView(APIView):
             'filter': {'year': year, 'month': month},
             'total_orders': total_orders,
             'total_revenue': str(total_revenue),
+            'completed_revenue': str(completed_revenue),
+            'rejected_revenue': str(rejected_revenue),
+            'pending_revenue': str(pending_revenue),
             'today_orders': today_orders,
             'this_month_orders': this_month_orders,
             'status_counts': status_counts,
@@ -619,21 +700,85 @@ class WDashboardChartsView(APIView):
         card_codes_in_month = list(
             filtered_orders.values_list('card_code', flat=True).distinct()
         )
-        state_map = {}
-        if card_codes_in_month:
-            parties = Parties.objects.filter(
-                card_code__in=card_codes_in_month
-            ).values_list('card_code', 'state')
-            state_map = {cc: (st or 'Unknown') for cc, st in parties}
+        state_map = _build_party_state_map(card_codes_in_month)
 
-        state_counts = defaultdict(int)
-        for order in filtered_orders.values('card_code'):
-            state = state_map.get(order['card_code'], 'Unknown')
-            state_counts[state] += 1
+        state_counts = defaultdict(lambda: {'orders': 0, 'sales': 0})
+        for order in filtered_orders.values('card_code', 'total_amount'):
+            state = state_map.get(str(order['card_code'] or '').strip(), 'Unknown')
+            state_counts[state]['orders'] += 1
+            state_counts[state]['sales'] += float(order['total_amount'] or 0)
 
         statewise_data = sorted(
-            [{'state': k, 'orders': v} for k, v in state_counts.items()],
-            key=lambda x: x['orders'],
+            [
+                {
+                    'state': state,
+                    'orders': values['orders'],
+                    'sales': values['sales'],
+                }
+                for state, values in state_counts.items()
+            ],
+            key=lambda x: x['sales'],
+            reverse=True
+        )
+
+        manager_performance = (
+            filtered_orders
+            .filter(created_by__role__name__iexact='manager')
+            .values('created_by_id', 'created_by__name', 'created_by__username')
+            .annotate(sales=Sum('total_amount'), orders=Count('id', distinct=True))
+            .order_by('-sales', '-orders')
+        )
+        manager_sales_map = {
+            entry['created_by_id']: {
+                'orders': entry['orders'],
+                'sales': float(entry['sales'] or 0),
+            }
+            for entry in manager_performance
+        }
+        active_managers = User.objects.filter(
+            role__name__iexact='manager',
+            is_active=True,
+        ).values('id', 'name', 'username')
+        manager_performance_data = sorted(
+            [
+                {
+                    'manager_id': manager['id'],
+                    'manager_name': manager['name'] or manager['username'] or 'Unknown',
+                    'orders': manager_sales_map.get(manager['id'], {}).get('orders', 0),
+                    'sales': manager_sales_map.get(manager['id'], {}).get('sales', 0),
+                }
+                for manager in active_managers
+            ],
+            key=lambda x: (x['sales'], x['orders']),
+            reverse=True
+        )
+
+        manager_state_counts = defaultdict(lambda: {'orders': 0, 'sales': 0})
+        for order in filtered_orders.filter(created_by__role__name__iexact='manager').values(
+            'created_by_id',
+            'created_by__name',
+            'created_by__username',
+            'card_code',
+            'total_amount',
+        ):
+            state = state_map.get(str(order['card_code'] or '').strip(), 'Unknown')
+            manager_name = order['created_by__name'] or order['created_by__username'] or 'Unknown'
+            key = (order['created_by_id'], manager_name, state)
+            manager_state_counts[key]['orders'] += 1
+            manager_state_counts[key]['sales'] += float(order['total_amount'] or 0)
+
+        manager_state_performance_data = sorted(
+            [
+                {
+                    'manager_id': manager_id,
+                    'manager_name': manager_name,
+                    'state': state,
+                    'orders': values['orders'],
+                    'sales': values['sales'],
+                }
+                for (manager_id, manager_name, state), values in manager_state_counts.items()
+            ],
+            key=lambda x: x['sales'],
             reverse=True
         )
 
@@ -800,15 +945,27 @@ class WDashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
+        highest_sales_order = (
+            filtered_orders
+            .order_by('-total_amount')
+            .values('order_number', 'total_amount')
+            .first()
+        )
 
         return Response({
             'filter': {'year': year, 'month': month, 'line_year': line_year},
             'monthly_sales': monthly_sales_data,
             'statewise_orders': statewise_data,
+            'manager_performance': manager_performance_data,
+            'manager_state_performance': manager_state_performance_data,
             'status_distribution': status_data,
             'decision_distribution': decision_data,
             'top_parties': top_parties_data,
             'category_sales': category_data,
+            'highest_sales_order': {
+                'order_number': highest_sales_order['order_number'] if highest_sales_order else None,
+                'amount': float(highest_sales_order['total_amount'] or 0) if highest_sales_order else 0,
+            },
         })
 
 class OrderStatusTrackingView(APIView):
@@ -991,16 +1148,11 @@ class DashboardChartsView(APIView):
         card_codes_in_month = list(
             filtered_orders.values_list('card_code', flat=True).distinct()
         )
-        state_map = {}
-        if card_codes_in_month:
-            parties = Parties.objects.filter(
-                card_code__in=card_codes_in_month
-            ).values_list('card_code', 'state')
-            state_map = {cc: (st or 'Unknown') for cc, st in parties}
+        state_map = _build_party_state_map(card_codes_in_month)
 
         state_counts = defaultdict(int)
         for order in filtered_orders.values('card_code'):
-            state = state_map.get(order['card_code'], 'Unknown')
+            state = state_map.get(str(order['card_code'] or '').strip(), 'Unknown')
             state_counts[state] += 1
 
         statewise_data = sorted(
@@ -2326,6 +2478,8 @@ class OrderListView(APIView):
             data.append({
                 'id': order.id,
                 'order_number': order.order_number,
+                'order_type': order.order_type,
+                'employee_id': order.employee_id,
                 'card_code': order.card_code,
                 'card_name': order.card_name,
                 'total_amount': str(order.total_amount),
@@ -2592,6 +2746,116 @@ class PushTokenView(APIView):
             },
         )
         return Response({'success': True, 'message': 'Push token registered'})
+
+
+def _stock_check_number(value):
+    try:
+        if value in (None, ''):
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _stock_check_required_qty(item):
+    qty = _stock_check_number(getattr(item, 'qty', 0))
+    if qty > 0:
+        return qty
+
+    boxes = _stock_check_number(getattr(item, 'boxes', 0))
+    pcs = _stock_check_number(getattr(item, 'pcs', 0))
+    return boxes * pcs if boxes > 0 and pcs > 0 else boxes or pcs
+
+
+def _stock_check_key(item_code, category):
+    return (
+        str(item_code or '').strip(),
+        str(category or '').strip().upper(),
+    )
+
+
+def _get_live_stock_by_product(item_codes_by_category):
+    stock_by_product = {}
+
+    with SAPConnection() as connection:
+        for category, item_codes in item_codes_by_category.items():
+            query = SAPConnection.get_live_stock_query(category, item_codes)
+            if not query:
+                continue
+
+            for row in connection.execute_query(query):
+                key = _stock_check_key(row.get('ItemCode'), row.get('Category') or category)
+                stock_by_product[key] = _stock_check_number(row.get('OnHand'))
+
+    return stock_by_product
+
+
+class OrderStockCheckView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        if request.user.is_authenticated:
+            orders = _get_base_orders(request.user)
+        else:
+            orders = Order.objects.all()
+
+        orders = (
+            orders
+            .filter(sap_created=True)
+            .select_related('status')
+            .prefetch_related('items')
+            .order_by('-created_at')
+            .distinct()
+        )
+
+        item_codes_by_category = defaultdict(set)
+        for order in orders:
+            for item in order.items.all():
+                item_code = str(getattr(item, 'item_code', '') or '').strip()
+                category = str(getattr(item, 'category', '') or '').strip().upper()
+                if item_code and category:
+                    item_codes_by_category[category].add(item_code)
+
+        try:
+            stock_by_product = _get_live_stock_by_product(item_codes_by_category)
+        except Exception as error:
+            return Response(
+                {
+                    'error': 'Unable to fetch live stock from SAP.',
+                    'detail': str(error),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        data = []
+        for order in orders:
+            items = []
+            for item in order.items.all():
+                key = _stock_check_key(item.item_code, item.category)
+                items.append({
+                    'item_code': item.item_code or '-',
+                    'item_name': item.item_name or item.item_code or '-',
+                    'category': item.category or '-',
+                    'required_qty': _stock_check_required_qty(item),
+                    'available_stock': stock_by_product.get(key, 0),
+                })
+
+            data.append({
+                'id': order.id,
+                'order_number': order.order_number,
+                'date': order.created_at,
+                'customer': (
+                    order.employee_id or order.card_name or 'Staff'
+                    if order.order_type == 'STAFF'
+                    else order.card_name or order.card_code or '-'
+                ),
+                'order_type': 'Staff' if order.order_type == 'STAFF' else 'Party',
+                'dispatch_from': order.dispatch_from_name or str(order.dispatch_from_id or '-'),
+                'status': getattr(order.status, 'name', '-') or '-',
+                'items': items,
+            })
+
+        return Response(data)
 
 class StaffProductsAPIView(APIView):
 

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, PushTokenView,StaffProductsAPIView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, PushTokenView,StaffProductsAPIView, OrderStockCheckView
 
 urlpatterns=[
     
@@ -33,6 +33,7 @@ urlpatterns=[
     path("api/ai-order-summary/", ai_order_summary),
     path('templates/parties/', TemplatePartyListView.as_view(), name='template_parties'),
     path('templates/orders/', TemplateOrderListView.as_view(), name='template_orders'),
+    path("stock-check/",OrderStockCheckView.as_view(), name="stock-check"),
     path("notifications/",NotificationListView.as_view(), name="notifications"),
     path("notifications/<int:pk>/",NotificationListView.as_view(), name="notification-detail"),
     path("push-token/",PushTokenView.as_view(), name="push-token"),

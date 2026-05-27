@@ -443,6 +443,7 @@ class SyncService:
                         'variety': row.get('U_Variety'),
                         'sal_pack_unit': row.get('SalPackUn'),
                         'brand': row.get('U_Brand'),
+                        'on_hand': row.get('OnHand'),
                     }
                    
                     # Lookup by BOTH item_code AND category
