@@ -90,6 +90,8 @@ class Queries():
             T0."DiscSum",
             T0."Comments",
             T0."SlpCode",
+            T0."ShipToCode",
+            T0."PayToCode",
 
             T1."LineNum",
             T1."ItemCode",
@@ -158,6 +160,22 @@ class Queries():
         FROM "{s}"."OSLP" AS T0
         WHERE T0."SlpCode" = '{slp_code}'
         """
+    @staticmethod
+    def get_addresse(card_code):
+        s = Queries.SCHEMA
+        return f"""
+        SELECT
+            T0."Address",
+            T0."AdresType",
+            T0."CardCode",
+            T0."City",
+            T0."State",
+            T0."Country",
+            T0."GSTRegnNo",
+            T0."GSTType"
+        FROM "{s}"."CRD1" AS T0
+        WHERE T0."CardCode" = '{card_code}'
+        """
         
     @staticmethod
     def get_freight_masters():
@@ -168,4 +186,55 @@ class Queries():
             	T0."ExpnsName"
             FROM "{s}"."OEXD" AS T0
             WHERE T0."IsActive" = 'Y'
+        """  
+    
+    @staticmethod  
+    def get_customer_state():
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+            	DISTINCT T0."State1"
+            FROM "{s}"."OCRD" AS T0
+        """
+        
+    @staticmethod
+    def get_state_chain(stateCode=None):
+        s = Queries.SCHEMA
+        
+        if stateCode:
+            return f"""
+                SELECT 
+                	DISTINCT T0."U_Chain"
+                FROM "{s}"."OCRD" AS T0
+                    WHERE T0."State1" = '{stateCode}'
+                """
+                
+        return f"""
+            SELECT 
+            	DISTINCT T0."U_Chain"
+             FROM "{s}"."OCRD" AS T0
+        """
+            
+    @staticmethod
+    def get_all_customer():
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+            	T0."CardCode",
+            	T0."CardName",
+                T0."State1",
+	            T0."U_Chain"
+            FROM "{s}"."OCRD" AS T0
+        """
+    
+    @staticmethod    
+    def get_next_doc_no(object_code):
+        s = Queries.SCHEMA
+        return f"""
+            SELECT TOP 1 T0."NextNumber"
+            FROM "{s}"."NNM1" AS T0
+            WHERE T0."ObjectCode" = '{object_code}'
+              AND T0."Locked" = 'N'
+              AND T0."IsManual" = 'N'
+            ORDER BY T0."Series" ASC
         """

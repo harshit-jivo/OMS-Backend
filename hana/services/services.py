@@ -45,3 +45,38 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def getAddress(self, card_code):
+        with HANAConnection() as conn:
+            query = Queries.get_addresse(card_code)
+            result = conn.execute(query)
+
+        return result
+    
+    def getVendorStates(self):
+        with HANAConnection() as conn:
+            query = Queries().get_customer_state()
+            result = conn.execute(query)
+
+        return result
+    
+    def getStateChain(self, state_code=None):
+        with HANAConnection() as conn:
+            query = Queries.get_state_chain(state_code)
+            result = conn.execute(query)
+
+        return result
+
+    def getAllCustomers(self):
+        with HANAConnection() as conn:
+            query = Queries.get_all_customer()
+            result = conn.execute(query)
+
+        return result
+    
+    def getNextDocNum(self, doc_type):
+        with HANAConnection() as conn:
+            query = Queries.get_next_doc_no(doc_type)
+            result = conn.execute(query)
+
+        return result

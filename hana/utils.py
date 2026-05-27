@@ -19,6 +19,8 @@ def group_sales_orders(rows):
                 "DiscSum":    float(row['DiscSum'] or 0),
                 "Comments":   row['Comments'],
                 "SlpCode":    row['SlpCode'],
+                "ShipToCode" : row['ShipToCode'],
+                "PayToCode" : row['PayToCode'],
                 "lines": []
             }
 

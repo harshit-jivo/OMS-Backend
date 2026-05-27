@@ -69,3 +69,49 @@ class GetFreightMastersView(APIView):
     def get (self , request):
         freight_masters = SalesOrderService().FreightMasters()
         return Response(freight_masters)
+    
+class GetAddressView(APIView):
+    def get (self , request):
+        card_code = request.query_params.get('card_code')
+
+        if not card_code:
+            return Response(
+                {"error": "card_code is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        address = SalesOrderService().getAddress(card_code)
+        return Response(address)
+    
+    
+class GetVendorStatesView(APIView):
+    def get (self , request):
+        states = SalesOrderService().getVendorStates()
+        return Response(states)
+    
+
+class GetStateChainView(APIView):
+    def get (self , request):
+        state_code = request.query_params.get('state_code')
+
+
+        chain = SalesOrderService().getStateChain(state_code)
+        return Response(chain)
+    
+class GetAllCustomersView(APIView):
+    def get (self , request):
+        customers = SalesOrderService().getAllCustomers()
+        return Response(customers)
+    
+class GetNextDocNumberView(APIView):
+    def get (self , request):
+        doc_type = request.query_params.get('doc_type')
+    
+        if not doc_type:
+            return Response(
+                {"error": "doc_type is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        next_doc_number = SalesOrderService().getNextDocNum(doc_type)
+        return Response(next_doc_number)
