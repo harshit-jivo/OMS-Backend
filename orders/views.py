@@ -2673,7 +2673,6 @@ def _send_push_notification(user, notification):
     payload = [
         {
             'to': token,
-            'title': 'OMS Notification',
             'body': notification.message,
             'sound': 'default',
             'channelId': 'default',
