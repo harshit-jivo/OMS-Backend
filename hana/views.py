@@ -115,3 +115,9 @@ class GetNextDocNumberView(APIView):
             
         next_doc_number = SalesOrderService().getNextDocNum(doc_type)
         return Response(next_doc_number)
+    
+class GetFGItemsView(APIView):
+    def get (self , request):
+        fg_items = SalesOrderService().getFGItems()
+        return Response(fg_items)
+    

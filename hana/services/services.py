@@ -80,3 +80,10 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def getFGItems(self):
+        with HANAConnection() as conn:
+            query = Queries.get_fg_items()
+            result = conn.execute(query)
+
+        return result

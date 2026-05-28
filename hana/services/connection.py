@@ -225,8 +225,9 @@ class Queries():
                 T0."State1",
 	            T0."U_Chain"
             FROM "{s}"."OCRD" AS T0
+            WHERE T0."CardType" = 'C'
         """
-    
+
     @staticmethod    
     def get_next_doc_no(object_code):
         s = Queries.SCHEMA
@@ -237,4 +238,21 @@ class Queries():
               AND T0."Locked" = 'N'
               AND T0."IsManual" = 'N'
             ORDER BY T0."Series" ASC
+        """
+        
+    @staticmethod
+    def get_fg_items():
+        s = Queries.SCHEMA 
+        return f"""
+        SELECT 
+            T0."ItemCode",  
+            T0."ItemName",
+            T0."U_Brand",
+            T0."U_Variety",
+	        T0."U_Sub_Group",
+	        T0."U_SKU"
+         
+        FROM "{s}"."OITM" AS T0
+        WHERE T0."ItemCode" LIKE 'FG%'
+     
         """
