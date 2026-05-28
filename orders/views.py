@@ -2642,6 +2642,15 @@ def _create_notification(user, order, message):
     if not user or not order or not message:
         return
     notification = Notification.objects.create(user=user, order=order, message=message)
+    print(
+        'Notification created:',
+        {
+            'notification_id': notification.id,
+            'user_id': user.id,
+            'order_id': order.id,
+            'message': message,
+        },
+    )
     _send_push_notification(user, notification)
 
 
@@ -2652,6 +2661,13 @@ def _send_push_notification(user, notification):
         .distinct()
     )
     if not tokens:
+        print(
+            'Expo push skipped: no active tokens',
+            {
+                'user_id': user.id,
+                'notification_id': notification.id,
+            },
+        )
         return
 
     payload = [
@@ -2660,6 +2676,8 @@ def _send_push_notification(user, notification):
             'title': 'OMS Notification',
             'body': notification.message,
             'sound': 'default',
+            'channelId': 'default',
+            'priority': 'high',
             'data': {
                 'notification_id': notification.id,
                 'order_id': notification.order_id,
@@ -2676,10 +2694,49 @@ def _send_push_notification(user, notification):
         response = requests.post(
             'https://exp.host/--/api/v2/push/send',
             json=payload,
+            headers={
+                'Accept': 'application/json',
+                'Accept-encoding': 'gzip, deflate',
+                'Content-Type': 'application/json',
+            },
             timeout=10,
         )
+        response_data = {}
+        try:
+            response_data = response.json()
+        except ValueError:
+            response_data = {'raw': response.text}
+
         if response.status_code >= 400:
-            print('Expo push notification failed:', response.status_code, response.text)
+            print('Expo push notification failed:', response.status_code, response_data)
+            return
+
+        ticket_errors = [
+            ticket
+            for ticket in response_data.get('data', [])
+            if ticket.get('status') != 'ok'
+        ]
+        if response_data.get('errors') or ticket_errors:
+            print(
+                'Expo push notification ticket errors:',
+                {
+                    'errors': response_data.get('errors', []),
+                    'ticket_errors': ticket_errors,
+                    'user_id': user.id,
+                    'notification_id': notification.id,
+                },
+            )
+            return
+
+        print(
+            'Expo push notification accepted:',
+            {
+                'user_id': user.id,
+                'notification_id': notification.id,
+                'token_count': len(tokens),
+                'tickets': response_data.get('data', []),
+            },
+        )
     except requests.RequestException as error:
         print('Expo push notification error:', error)
 
@@ -3053,4 +3110,3 @@ class StaffProductsAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
-
