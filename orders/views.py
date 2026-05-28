@@ -296,6 +296,59 @@ def _build_party_state_map(card_codes):
     return state_map
 
 
+def _build_state_item_sales(filtered_orders, state_map):
+    state_item_counts = defaultdict(lambda: {'total_sales': 0, 'quantity': 0, 'count': 0})
+
+    for item in OrderItem.objects.filter(order__in=filtered_orders).values(
+        'item_code',
+        'item_name',
+        'category',
+        'variety',
+        'qty',
+        'total',
+        'order__card_code',
+    ):
+        state = state_map.get(str(item['order__card_code'] or '').strip(), 'Unknown')
+        item_code = item['item_code'] or '-'
+        item_name = item['item_name'] or item_code
+        category = item['category'] or 'Unknown'
+        variety = item['variety'] or 'Unknown'
+        key = (state, variety, item_code, item_name, category)
+        state_item_counts[key]['total_sales'] += float(item['total'] or 0)
+        state_item_counts[key]['quantity'] += float(item['qty'] or 0)
+        state_item_counts[key]['count'] += 1
+
+    products_by_state = defaultdict(list)
+    for (state, variety, item_code, item_name, category), values in state_item_counts.items():
+        products_by_state[state].append({
+            'variety': variety,
+            'item_code': item_code,
+            'item_name': item_name,
+            'category': category,
+            'total_sales': values['total_sales'],
+            'quantity': values['quantity'],
+            'count': values['count'],
+        })
+
+    state_rows = []
+    for state, products in products_by_state.items():
+        sorted_products = sorted(
+            products,
+            key=lambda x: (x['total_sales'], x['quantity'], x['count']),
+            reverse=True
+        )
+        state_rows.append({
+            'state': state,
+            'products': sorted_products,
+        })
+
+    return sorted(
+        state_rows,
+        key=lambda x: sum(product['total_sales'] for product in x['products']),
+        reverse=True
+    )
+
+
 def _build_iexact_filter(field_name, values):
     query = Q()
     for value in values:
@@ -945,6 +998,7 @@ class WDashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
+        state_item_sales = _build_state_item_sales(filtered_orders, state_map)
         highest_sales_order = (
             filtered_orders
             .order_by('-total_amount')
@@ -962,6 +1016,7 @@ class WDashboardChartsView(APIView):
             'decision_distribution': decision_data,
             'top_parties': top_parties_data,
             'category_sales': category_data,
+            'state_item_sales': state_item_sales,
             'highest_sales_order': {
                 'order_number': highest_sales_order['order_number'] if highest_sales_order else None,
                 'amount': float(highest_sales_order['total_amount'] or 0) if highest_sales_order else 0,
@@ -1206,6 +1261,7 @@ class DashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
+        state_item_sales = _build_state_item_sales(filtered_orders, state_map)
 
         return Response({
             'filter': {'year': year, 'month': month, 'line_year': line_year},
@@ -1214,6 +1270,7 @@ class DashboardChartsView(APIView):
             'status_distribution': status_data,
             'top_parties': top_parties_data,
             'category_sales': category_data,
+            'state_item_sales': state_item_sales,
         })
 
 def extract_type_from_name(item_name):
