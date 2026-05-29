@@ -297,25 +297,71 @@ def _build_party_state_map(card_codes):
 
 
 def _build_state_item_sales(filtered_orders, state_map):
-    state_item_counts = defaultdict(lambda: {'total_sales': 0, 'quantity': 0, 'count': 0})
+    state_item_counts = defaultdict(lambda: {'total_sales': 0, 'quantity': 0, 'boxes': 0, 'ltrs': 0, 'count': 0})
 
-    for item in OrderItem.objects.filter(order__in=filtered_orders).values(
+    item_rows = list(OrderItem.objects.filter(order__in=filtered_orders).values(
         'item_code',
         'item_name',
         'category',
         'variety',
         'qty',
+        'boxes',
+        'ltrs',
         'total',
         'order__card_code',
-    ):
+    ))
+    product_keys = {
+        (
+            str(item['item_code'] or '').strip(),
+            str(item['category'] or '').strip().upper(),
+        )
+        for item in item_rows
+        if str(item['item_code'] or '').strip()
+    }
+    products = SapProduct.objects.filter(
+        item_code__in=[item_code for item_code, _category in product_keys]
+    ).values('item_code', 'category', 'sal_factor2', 'sal_pack_unit')
+    product_meta = {}
+    for product in products:
+        key = (
+            str(product.get('item_code') or '').strip(),
+            str(product.get('category') or '').strip().upper(),
+        )
+        product_meta.setdefault(key, product)
+
+    def to_float(value):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    for item in item_rows:
         state = state_map.get(str(item['order__card_code'] or '').strip(), 'Unknown')
         item_code = item['item_code'] or '-'
         item_name = item['item_name'] or item_code
         category = item['category'] or 'Unknown'
         variety = item['variety'] or 'Unknown'
+        qty = to_float(item['qty'])
+        boxes = to_float(item['boxes'])
+        ltrs = to_float(item['ltrs'])
+        product = product_meta.get((
+            str(item_code or '').strip(),
+            str(category or '').strip().upper(),
+        ))
+
+        if product:
+            sal_factor = to_float(product.get('sal_factor2'))
+            sal_pack_unit = to_float(product.get('sal_pack_unit'))
+            if boxes <= 0 and qty > 0 and sal_factor > 0:
+                boxes = qty / sal_factor
+            if ltrs <= 0 and qty > 0 and sal_pack_unit > 0:
+                ltrs = qty * sal_pack_unit
+
         key = (state, variety, item_code, item_name, category)
         state_item_counts[key]['total_sales'] += float(item['total'] or 0)
-        state_item_counts[key]['quantity'] += float(item['qty'] or 0)
+        state_item_counts[key]['quantity'] += qty
+        state_item_counts[key]['boxes'] += boxes
+        state_item_counts[key]['ltrs'] += ltrs
         state_item_counts[key]['count'] += 1
 
     products_by_state = defaultdict(list)
@@ -327,6 +373,8 @@ def _build_state_item_sales(filtered_orders, state_map):
             'category': category,
             'total_sales': values['total_sales'],
             'quantity': values['quantity'],
+            'boxes': values['boxes'],
+            'ltrs': values['ltrs'],
             'count': values['count'],
         })
 
