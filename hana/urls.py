@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView
+from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView
 
 urlpatterns = [
     path('so/' , GetSalesOrderView.as_view()),
@@ -13,5 +13,7 @@ urlpatterns = [
     path('vendor-states/' , GetVendorStatesView.as_view()),
     path('all-customers/' , GetAllCustomersView.as_view()),
     path('next-doc-number/' , GetNextDocNumberView.as_view()),
-    path('fg-items/' , GetFGItemsView.as_view())
+    path('fg-items/' , GetFGItemsView.as_view()),
+    path('batch-details/' , GetBatchDetailsView.as_view()),
+    path('inventory-details/' , GetInventoryDetailsView.as_view()),
 ]

@@ -121,3 +121,30 @@ class GetFGItemsView(APIView):
         fg_items = SalesOrderService().getFGItems()
         return Response(fg_items)
     
+    
+class GetBatchDetailsView(APIView):
+    def get (self , request):
+        item_code = request.query_params.get('item_code')
+        whs_code = request.query_params.get('whs_code')
+
+        if not item_code or not whs_code:
+            return Response(
+                {"error": "item_code and whs_code are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        batch_details = SalesOrderService().get_batch_details(item_code , whs_code)
+        return Response(batch_details)
+    
+class GetInventoryDetailsView(APIView):
+    def get (self , request):
+        item_code = request.query_params.get('item_code')
+
+        if not item_code:
+            return Response(
+                {"error": "item_code is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        inventory_details = SalesOrderService().get_inventory_details(item_code)
+        return Response(inventory_details)

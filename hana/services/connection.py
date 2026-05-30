@@ -92,6 +92,7 @@ class Queries():
             T0."SlpCode",
             T0."ShipToCode",
             T0."PayToCode",
+            T0."BPLId",
 
             T1."LineNum",
             T1."ItemCode",
@@ -256,3 +257,39 @@ class Queries():
         WHERE T0."ItemCode" LIKE 'FG%'
      
         """
+    @staticmethod
+    def get_batch_details(item_code, whs_code):
+        s = Queries.SCHEMA
+        return f"""
+        SELECT 
+            T0."SysNumber",
+            T0."BatchNum",
+            T0."ItemCode",
+            T0."ItemName",
+            T0."WhsCode",
+            T0."PrdDate",
+            T0."ExpDate",
+            T0."InDate",
+            T0."Quantity",
+            T0."BaseType",
+            T0."BaseNum",
+            T0."BaseEntry"
+            
+        FROM "{s}"."OIBT" AS T0
+        WHERE T0."ItemCode" = '{item_code}'
+          AND T0."WhsCode" = '{whs_code}'
+          AND T0."Quantity" > 0
+        """
+        
+    @staticmethod
+    def get_inventory_details(item_code):
+        s = Queries.SCHEMA
+        return f"""
+           SELECT 
+                DISTINCT T0."WhsCode",
+                SUM(T0."Quantity")
+            FROM "JIVO_OIL_HANADB"."OIBT" AS T0
+            WHERE T0."Quantity" > 0 AND T0."ItemCode" = '{item_code}'
+            GROUP  BY T0."WhsCode"
+        """
+        

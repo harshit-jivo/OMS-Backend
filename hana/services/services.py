@@ -87,3 +87,17 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def get_batch_details(self , itemCode , WhsCode):
+        with HANAConnection() as conn:
+            query = Queries.get_batch_details(itemCode , WhsCode)
+            result = conn.execute(query)
+
+        return result
+    
+    def get_inventory_details(self , itemCode):
+        with HANAConnection() as conn:
+            query = Queries.get_inventory_details(itemCode)
+            result = conn.execute(query)
+
+        return result

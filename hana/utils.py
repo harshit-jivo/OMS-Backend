@@ -21,6 +21,7 @@ def group_sales_orders(rows):
                 "SlpCode":    row['SlpCode'],
                 "ShipToCode" : row['ShipToCode'],
                 "PayToCode" : row['PayToCode'],
+                "BPL_Id" : row['BPLId'],
                 "lines": []
             }
 
