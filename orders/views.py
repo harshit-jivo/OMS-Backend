@@ -767,6 +767,12 @@ class WDashboardChartsView(APIView):
             created_at__gte=range_start,
             created_at__lte=range_end
         )
+        completed_orders = filtered_orders.filter(
+            Q(status__code__icontains='COMPLETED') |
+            Q(status__name__icontains='Completed')
+        )
+        role = getattr(request.user, 'role', None)
+        role_name = getattr(role, 'name', '').lower() if role else ''
 
         # CHART 1: Monthly Sales Timeline (full line_year Jan-Dec)
         year_start = timezone.make_aware(datetime(line_year, 1, 1))
@@ -895,8 +901,6 @@ class WDashboardChartsView(APIView):
             for os in OrderStatus.objects.all()
         ]
 
-        role = getattr(request.user, 'role', None)
-        role_name = getattr(role, 'name', '').lower() if role else ''
         decision_data = []
         if role_name == 'billing':
             latest_billing_action = (
@@ -1031,9 +1035,10 @@ class WDashboardChartsView(APIView):
         ]
 
         # CHART 5: Category-wise Sales (selected month)
+        category_order_scope = completed_orders if role_name == 'admin' else filtered_orders
         category_sales = (
             OrderItem.objects
-            .filter(order__in=filtered_orders)
+            .filter(order__in=category_order_scope)
             .values('category')
             .annotate(total_sales=Sum('total'), count=Count('id', distinct=True))
             .order_by('-total_sales')
@@ -2418,8 +2423,8 @@ class OrdersByUserView(APIView):
     def get(self,request, user_id):
         orders = (
             Order.objects.filter(created_by=user_id)
-            .select_related("status")
-            .prefetch_related("items")
+            .select_related("status", "created_by")
+            .prefetch_related("items", "items__schemes")
             .order_by("-created_at")
         )
 

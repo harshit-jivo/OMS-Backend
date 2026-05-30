@@ -111,39 +111,6 @@ class OrderStatusUpdateSerializer(serializers.Serializer):
     status = serializers.IntegerField()
     reason = serializers.CharField(required=False, allow_blank=True)
 
-class OrderListByUserIdSerializer(serializers.ModelSerializer):
-    status_name = serializers.CharField(source="status.name")
-    items_count = serializers.IntegerField(source="items.count", read_only=True)
-    categories = serializers.SerializerMethodField()
-    status_display = serializers.CharField(source="status.name", read_only=True)
-
-    def get_categories(self, obj):
-        return list(
-            obj.items.exclude(category__isnull=True)
-            .exclude(category__exact="")
-            .values_list("category", flat=True)
-            .distinct()
-        )
-   
-    class Meta:
-        model = Order
-        fields = [
-            "id",
-            "order_number",
-            "card_code",
-            "card_name",
-            "total_amount",
-            "status",
-            "status_name",
-            "status_display",
-            "created_at",
-            "delivery_date",
-            "po_number",
-            "is_foc",
-            "items_count",
-            "categories",
-        ]    
-   
 class OrdersLogSerializer(serializers.ModelSerializer):
     status_id = serializers.IntegerField(source="action.id", read_only=True)
     status_name = serializers.SerializerMethodField()
@@ -270,6 +237,61 @@ class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = "__all__"
+
+class OrderListByUserIdSerializer(serializers.ModelSerializer):
+    status_name = serializers.CharField(source="status.name")
+    items = OrderItemSerializer(many=True, read_only=True)
+    items_count = serializers.IntegerField(source="items.count", read_only=True)
+    categories = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source="status.name", read_only=True)
+    created_by = serializers.IntegerField(source="created_by_id", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+
+    def get_categories(self, obj):
+        return list(
+            obj.items.exclude(category__isnull=True)
+            .exclude(category__exact="")
+            .values_list("category", flat=True)
+            .distinct()
+        )
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.username
+        return None
+   
+    class Meta:
+        model = Order
+        fields = [
+            "id",
+            "order_number",
+            "order_type",
+            "employee_id",
+            "card_code",
+            "card_name",
+            "bill_to_id",
+            "bill_to_address",
+            "ship_to_id",
+            "ship_to_address",
+            "dispatch_from_id",
+            "dispatch_from_name",
+            "company",
+            "po_number",
+            "is_foc",
+            "remarks",
+            "total_amount",
+            "status",
+            "status_name",
+            "status_display",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "delivery_date",
+            "sap_doc_number",
+            "items",
+            "items_count",
+            "categories",
+        ]
 
 class OrderDetailSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
