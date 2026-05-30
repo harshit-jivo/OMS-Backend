@@ -6,7 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import LoginSerializer, UpdateUserSerializer, UserSerializer,StateSerializer, CompanySerializer,MainGroupSerializer,CreateUserSerializer, CategorySerializer
 from rest_framework.generics import ListAPIView
 from .models import State, Company, MainGroup,UserRole,User, UserPartyAssignment,PartyProductAssignment
-from sap_sync.models import Party, Product
+from sap_sync.models import Party, Product, active_product_q
 from orders.models import Categories
 from decimal import Decimal
 from django.db.models import Q
@@ -42,6 +42,14 @@ def _normalize_party_selections(raw_selections=None, raw_card_codes=None):
             normalized.add((normalized_card_code, None))
 
     return normalized
+
+
+def _active_product_exists(item_code, category):
+    return Product.objects.filter(
+        active_product_q(),
+        item_code=item_code,
+        category=category,
+    ).exists()
 
 
 def _get_party_for_assignment(card_code, category):
@@ -246,13 +254,18 @@ class PartyProductsView(APIView):
 
         category_filter = request.query_params.get('category', None)
 
-        assignments = PartyProductAssignment.objects.filter(card_code=card_code, is_active=True)
+        active_products = Product.objects.filter(active_product_q()).values_list('item_code', flat=True)
+        assignments = PartyProductAssignment.objects.filter(
+            card_code=card_code,
+            is_active=True,
+            item_code__in=active_products,
+        )
         if category_filter:
             assignments = assignments.filter(category=category_filter)
 
         products_list = []
         for a in assignments:
-            product = Product.objects.filter(item_code=a.item_code, category=a.category).first()
+            product = Product.objects.filter(active_product_q(), item_code=a.item_code, category=a.category).first()
             if product:
                 products_list.append({
                     'id': product.id,
@@ -302,8 +315,8 @@ class AssignProductToPartyView(APIView):
         if not Party.objects.filter(card_code=card_code).exists():
             return Response({'success': False, 'message': 'Party not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if not Product.objects.filter(item_code=item_code, category=category).exists():
-            return Response({'success': False, 'message': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+        if not _active_product_exists(item_code, category):
+            return Response({'success': False, 'message': 'Product not found or inactive'}, status=status.HTTP_404_NOT_FOUND)
 
         obj, created = PartyProductAssignment.objects.update_or_create(
             card_code=card_code,
@@ -362,8 +375,8 @@ class BulkAssignPartyToProductView(APIView):
                     continue
 
                 # Validate product exists
-                if not Product.objects.filter(item_code=item_code, category=category).exists():
-                    errors.append(f"{card_code}: {item_code}|{category} not found")
+                if not _active_product_exists(item_code, category):
+                    errors.append(f"{card_code}: {item_code}|{category} not found or inactive")
                     continue
 
                 obj, created = PartyProductAssignment.objects.update_or_create(
@@ -428,8 +441,8 @@ class BulkAssignProductsToPartyView(APIView):
                 errors.append(f"Missing item_code or category")
                 continue
 
-            if not Product.objects.filter(item_code=item_code, category=category).exists():
-                errors.append(f"Product {item_code}|{category} not found")
+            if not _active_product_exists(item_code, category):
+                errors.append(f"Product {item_code}|{category} not found or inactive")
                 continue
 
             obj, created = PartyProductAssignment.objects.update_or_create(

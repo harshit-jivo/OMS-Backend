@@ -1,5 +1,11 @@
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
+
+
+def active_product_q(prefix=""):
+    field = f"{prefix}is_active"
+    return Q(**{f"{field}__iexact": "Y"})
 
 class Product(models.Model):
     """Product/Item synced from SAP"""
@@ -20,7 +26,7 @@ class Product(models.Model):
     sal_pack_unit = models.CharField(max_length=50, blank=True, null=True)
     brand = models.CharField(max_length=100, blank=True, null=True)
     on_hand = models.DecimalField(max_digits=18, decimal_places=6, blank=True, null=True)
-        
+    is_active = models.CharField(max_length=50, blank=True, null=True)
     synced_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
         

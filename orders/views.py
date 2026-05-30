@@ -18,7 +18,7 @@ from django.utils import timezone
 from collections import defaultdict
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct
+from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
@@ -32,6 +32,10 @@ from django.views.decorators.csrf import csrf_exempt
 import json
 import requests
 from .ai_service import get_order_summary
+
+
+def _active_sap_item_codes():
+    return SapProduct.objects.filter(active_product_q()).values_list('item_code', flat=True)
 
 
 BILLING_ACTIVE_CODES = ['BILLING', 'BILLING_PENDING']
@@ -1350,14 +1354,17 @@ class PartyProductsView(APIView):
 
     def get(self, request, card_code):
         normalized_card_code = (card_code or '').strip()
+        active_item_codes = _active_sap_item_codes()
         assignments = PartyProductAssignment.objects.filter(
             card_code=normalized_card_code,
             is_active=True,
+            item_code__in=active_item_codes,
         ).order_by('category', 'item_code')
 
         rows = []
         for assignment in assignments:
             product = SapProduct.objects.filter(
+                active_product_q(),
                 item_code=assignment.item_code,
                 category=assignment.category,
             ).first()
@@ -1365,7 +1372,10 @@ class PartyProductsView(APIView):
             # Some older assignment rows can carry a valid item_code with a
             # category that no longer matches SAP metadata exactly.
             if not product:
-                product = SapProduct.objects.filter(item_code=assignment.item_code).first()
+                product = SapProduct.objects.filter(active_product_q(), item_code=assignment.item_code).first()
+
+            if not product:
+                continue
 
             rows.append({
                 'item_code': assignment.item_code,
@@ -1537,9 +1547,12 @@ class ProductFiltersView(APIView):
         category = request.query_params.get('category')
         brand = request.query_params.get('brand')
         variety = request.query_params.get('variety')
+        active_item_codes = _active_sap_item_codes()
 
         # Always get all categories
-        categories = ProductDetails.objects.exclude(
+        categories = ProductDetails.objects.filter(
+            item_code__in=active_item_codes
+        ).exclude(
             category__isnull=True
         ).exclude(
             category=''
@@ -1549,6 +1562,7 @@ class ProductFiltersView(APIView):
         brands = []
         if category:
             brands = ProductDetails.objects.filter(
+                item_code__in=active_item_codes,
                 category=category
             ).exclude(
                 brand__isnull=True
@@ -1560,6 +1574,7 @@ class ProductFiltersView(APIView):
         varieties = []
         if category and brand:
             varieties = ProductDetails.objects.filter(
+                item_code__in=active_item_codes,
                 category=category,
                 brand=brand
             ).exclude(
@@ -1572,6 +1587,7 @@ class ProductFiltersView(APIView):
         types = []
         if category and brand and variety:
             types_query = ProductDetails.objects.filter(
+                item_code__in=active_item_codes,
                 category=category,
                 brand=brand,
                 variety=variety
@@ -1609,7 +1625,7 @@ class ProductListView(APIView):
         variety = request.query_params.get('variety')
         item_type = request.query_params.get('type')
 
-        products = ProductDetails.objects.all()
+        products = ProductDetails.objects.filter(item_code__in=_active_sap_item_codes())
 
         if category:
             products = products.filter(category=category)
@@ -3026,7 +3042,7 @@ class OrderStockCheckView(APIView):
 class StaffProductsAPIView(APIView):
 
     def get(self, request):
-        products = SapProduct.objects.filter(staff_prices__isnull=False).distinct()
+        products = SapProduct.objects.filter(active_product_q(), staff_prices__isnull=False).distinct()
 
         serializer = StaffProductSerializer(products, many=True)
 
@@ -3116,17 +3132,19 @@ class StaffProductsAPIView(APIView):
             product = None
             if product_id:
                 product = SapProduct.objects.filter(
+                    active_product_q(),
                     id=product_id,
                     category__iexact=category,
                 ).first()
             if not product and item_code:
                 product = SapProduct.objects.filter(
+                    active_product_q(),
                     item_code=item_code,
                     category__iexact=category,
                 ).first()
 
             if not product:
-                errors.append({"index": index, "error": "product not found"})
+                errors.append({"index": index, "error": "product not found or inactive"})
                 continue
 
             staff_price = StaffProductPrice.objects.filter(product=product).first()

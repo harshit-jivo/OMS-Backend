@@ -7,7 +7,7 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'item_code', 'item_name', 'category', 'sal_factor2',
             'tax_rate', 'is_deleted', 'variety', 'sal_pack_unit', 'brand',
-            'on_hand', 'synced_at', 'created_at'
+            'on_hand', 'synced_at', 'created_at', 'is_active'
         ]
 
 

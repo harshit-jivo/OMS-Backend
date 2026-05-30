@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from django.db.models import Q
-from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog
+from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q
 from .serializers import (ProductSerializer, PartySerializer, PartyListSerializer,
     PartyAddressSerializer, SyncLogSerializer, SyncScheduleSerializer,BranchSerializer)
 from .services import SyncService
@@ -136,7 +136,7 @@ class ProductListView(ListAPIView):
     serializer_class = ProductSerializer
 
     def get_queryset(self):
-        queryset = Product.objects.all()
+        queryset = Product.objects.filter(active_product_q())
 
         category = self.request.query_params.get('category', None)
         if category:
@@ -164,7 +164,7 @@ class ProductDetailView(RetrieveAPIView):
     """Get single product by ID or item_code"""
     permission_classes = [AllowAny]
     serializer_class = ProductSerializer
-    queryset = Product.objects.all()
+    queryset = Product.objects.filter(active_product_q())
     lookup_field = 'pk'
 
 
@@ -172,7 +172,7 @@ class ProductByCodeView(RetrieveAPIView):
     """Get product by item_code"""
     permission_classes = [AllowAny]
     serializer_class = ProductSerializer
-    queryset = Product.objects.all()
+    queryset = Product.objects.filter(active_product_q())
     lookup_field = 'item_code'
 
 

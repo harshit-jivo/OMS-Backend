@@ -444,6 +444,7 @@ class SyncService:
                         'sal_pack_unit': row.get('SalPackUn'),
                         'brand': row.get('U_Brand'),
                         'on_hand': row.get('OnHand'),
+                        'is_active': row.get('validFor'),
                     }
                    
                     # Lookup by BOTH item_code AND category
