@@ -3180,3 +3180,19 @@ class StaffProductsAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+class UserPartyView(APIView):
+    
+    def get(self , request):
+        user = request.query_params.get("user")
+        if not user:
+            return Response({"error": "user parameter is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        parties = (
+            Order.objects.filter(created_by__id=user)
+            .exclude(card_code__isnull=True)
+            .exclude(card_code__exact="")
+            .values("card_code", "card_name")
+            .distinct()
+        )
+        

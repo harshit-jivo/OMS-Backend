@@ -220,13 +220,20 @@ class Queries():
     def get_all_customer():
         s = Queries.SCHEMA
         return f"""
-            SELECT 
+           SELECT 
+                T0."U_Main_Group",
             	T0."CardCode",
             	T0."CardName",
                 T0."State1",
-	            T0."U_Chain"
+	            T0."U_Chain",
+                COUNT(T1."DocEntry") AS "OpenOrders"
             FROM "{s}"."OCRD" AS T0
-            WHERE T0."CardType" = 'C'
+            LEFT JOIN "{s}"."ORDR" AS T1
+            ON T1."CardCode" = T0."CardCode"
+            WHERE T0."CardType" = 'C' AND T1."DocStatus" =   'O'
+            GROUP BY T0."U_Main_Group",T0."CardCode",T0."CardName",T0."State1",T0."U_Chain"
+            ORDER BY "OpenOrders" DESC
+            
         """
 
     @staticmethod    
@@ -273,7 +280,7 @@ class Queries():
             T0."Quantity",
             T0."BaseType",
             T0."BaseNum",
-            T0."BaseEntry"
+            T0."BaseEntry" 
             
         FROM "{s}"."OIBT" AS T0
         WHERE T0."ItemCode" = '{item_code}'
