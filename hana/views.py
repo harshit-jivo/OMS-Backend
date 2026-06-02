@@ -148,3 +148,17 @@ class GetInventoryDetailsView(APIView):
             
         inventory_details = SalesOrderService().get_inventory_details(item_code)
         return Response(inventory_details)
+    
+class GetItemPriceView(APIView):
+    def get (self , request):
+        item_code = request.query_params.get('item_code')
+        price_list = request.query_params.get('price_list')
+
+        if not item_code or not price_list:
+            return Response(
+                {"error": "item_code and price_list are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        item_price = SalesOrderService().get_item_price(item_code , price_list)
+        return Response(item_price)

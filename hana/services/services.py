@@ -101,3 +101,10 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def get_item_price(self , itemCode , priceList):
+        with HANAConnection() as conn:
+            query = Queries.get_item_price(itemCode , priceList)
+            result = conn.execute(query)
+
+        return result

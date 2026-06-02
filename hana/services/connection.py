@@ -226,12 +226,13 @@ class Queries():
             	T0."CardName",
                 T0."State1",
 	            T0."U_Chain",
-                COUNT(T1."DocEntry") AS "OpenOrders"
+                T0."ListNum",
+                (SELECT COUNT(T1."DocEntry") FROM "{s}"."ORDR" AS T1 WHERE T1."CardCode" = T0."CardCode" AND T1."DocStatus" = 'O') AS "OpenOrders"
             FROM "{s}"."OCRD" AS T0
             LEFT JOIN "{s}"."ORDR" AS T1
             ON T1."CardCode" = T0."CardCode"
-            WHERE T0."CardType" = 'C' AND T1."DocStatus" =   'O'
-            GROUP BY T0."U_Main_Group",T0."CardCode",T0."CardName",T0."State1",T0."U_Chain"
+            WHERE T0."CardType" = 'C' 
+            GROUP BY T0."U_Main_Group",T0."CardCode",T0."CardName",T0."State1",T0."U_Chain" , T0."ListNum"
             ORDER BY "OpenOrders" DESC
             
         """
@@ -253,16 +254,19 @@ class Queries():
         s = Queries.SCHEMA 
         return f"""
         SELECT 
-            T0."ItemCode",  
-            T0."ItemName",
-            T0."U_Brand",
-            T0."U_Variety",
-	        T0."U_Sub_Group",
-	        T0."U_SKU"
-         
-        FROM "{s}"."OITM" AS T0
+        	T0."ItemCode",
+        	T0."ItemName",
+        	T0."U_Brand",
+        	T0."U_Variety",
+        	T0."U_Sub_Group",
+        	T0."U_SKU",
+        	SUM(T1."Quantity") AS "TotalQty"
+        FROM "{s}"."OITM" AS T0 
+        LEFT JOIN "{s}"."OIBT" AS T1
+        ON	T0."ItemCode" = T1."ItemCode"
         WHERE T0."ItemCode" LIKE 'FG%'
-     
+        GROUP BY T0."ItemCode", T0."ItemName" ,T0."U_Brand",T0."U_Variety",T0."U_Sub_Group",T0."U_SKU"
+        ORDER BY "TotalQty" DESC
         """
     @staticmethod
     def get_batch_details(item_code, whs_code):
@@ -295,8 +299,20 @@ class Queries():
            SELECT 
                 DISTINCT T0."WhsCode",
                 SUM(T0."Quantity")
-            FROM "JIVO_OIL_HANADB"."OIBT" AS T0
+            FROM "{s}"."OIBT" AS T0
             WHERE T0."Quantity" > 0 AND T0."ItemCode" = '{item_code}'
             GROUP  BY T0."WhsCode"
         """
         
+    @staticmethod
+    def get_item_price(item_code ,  price_list):
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+                T0."ItemCode",
+                T0."PriceList",
+                T0."Price"
+
+            FROM "{s}"."ITM1" AS T0
+            WHERE T0."ItemCode" = '{item_code}' AND T0."PriceList" = {price_list}
+        """

@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView
+from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView
 
 urlpatterns = [
     path('so/' , GetSalesOrderView.as_view()),
@@ -16,4 +16,5 @@ urlpatterns = [
     path('fg-items/' , GetFGItemsView.as_view()),
     path('batch-details/' , GetBatchDetailsView.as_view()),
     path('inventory-details/' , GetInventoryDetailsView.as_view()),
+    path('item-price/' , GetItemPriceView.as_view()),
 ]
