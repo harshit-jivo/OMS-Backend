@@ -6,6 +6,20 @@ from rest_framework import status
 from .services.services import SalesOrderService
 from .utils import group_sales_orders
 
+class GetProductStockView(APIView):
+    def get(self, request):
+        try:
+            products = SalesOrderService().getProductStock()
+            return Response(products)
+        except Exception as error:
+            return Response(
+                {
+                    "error": "Unable to fetch product stock from HANA.",
+                    "detail": str(error),
+                },
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
 class GetSalesOrderView(APIView):
     def get(self, request):
         party_code = request.query_params.get('card_code')

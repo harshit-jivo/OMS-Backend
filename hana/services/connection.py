@@ -55,6 +55,84 @@ class HANAConnection:
 
 class Queries():
     SCHEMA = settings.DATABASES['hana']['SCHEMA']
+
+    @staticmethod
+    def get_product_stock():
+        configured_schemas = [
+            (getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA, 'OIL'),
+            (getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''), 'BEVERAGES'),
+            (getattr(settings, 'HANA_COMPANY_DB_MART', ''), 'MART'),
+        ]
+        unique_schemas = []
+        seen = set()
+
+        for schema, category in configured_schemas:
+            schema = str(schema or '').strip()
+            if not schema or schema in seen:
+                continue
+            seen.add(schema)
+            unique_schemas.append((schema, category))
+
+        item_filter = """
+            (
+                T0."ItemCode" LIKE 'FG%' OR
+                T0."ItemCode" LIKE 'SCH%' OR
+                T0."ItemCode" LIKE 'RM%' OR
+                T0."ItemCode" LIKE 'PM%' OR
+                T0."ItemCode" LIKE 'SC%'
+            )
+        """
+
+        queries = [
+            f"""
+            SELECT
+                T0."ItemCode" AS "item_code",
+                T0."ItemName" AS "item_name",
+                '{category}' AS "category",
+                T0."SalFactor2" AS "sal_factor2",
+                T0."U_Rev_tax_Rate" AS "tax_rate",
+                T0."Deleted" AS "is_deleted",
+                T0."U_Variety" AS "variety",
+                T0."SalPackUn" AS "sal_pack_unit",
+                T0."U_Brand" AS "brand",
+                T1."WhsCode" AS "warehouse_code",
+                T2."WhsName" AS "warehouse_name",
+                T1."OnHand" AS "warehouse_stock",
+                IFNULL(T3."RequiredQty", 0) AS "pending_required_qty",
+                T1."OnHand" - IFNULL(T3."RequiredQty", 0) AS "left_over_stock",
+                T1."OnHand" AS "on_hand",
+                T0."OnHand" AS "total_on_hand",
+                T0."validFor" AS "is_active"
+            FROM "{schema}"."OITM" AS T0
+            INNER JOIN "{schema}"."OITW" AS T1
+                ON T0."ItemCode" = T1."ItemCode"
+            INNER JOIN "{schema}"."OWHS" AS T2
+                ON T1."WhsCode" = T2."WhsCode"
+            LEFT JOIN (
+                SELECT
+                    R1."ItemCode",
+                    R1."WhsCode",
+                    SUM(R1."OpenQty") AS "RequiredQty"
+                FROM "{schema}"."RDR1" AS R1
+                INNER JOIN "{schema}"."ORDR" AS R0
+                    ON R1."DocEntry" = R0."DocEntry"
+                WHERE
+                    R0."CANCELED" = 'N'
+                    AND R0."DocStatus" = 'O'
+                    AND R1."LineStatus" = 'O'
+                    AND R1."OpenQty" > 0
+                GROUP BY
+                    R1."ItemCode",
+                    R1."WhsCode"
+            ) AS T3
+                ON T1."ItemCode" = T3."ItemCode"
+                AND T1."WhsCode" = T3."WhsCode"
+            WHERE {item_filter}
+            """
+            for schema, category in unique_schemas
+        ]
+
+        return "\nUNION ALL\n".join(queries)
     
     @staticmethod
     def get_party_with_open_so():
