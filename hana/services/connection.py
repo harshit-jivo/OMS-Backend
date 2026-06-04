@@ -16,9 +16,11 @@ class HANAConnection:
                 password=cfg['PASSWORD'],
             )
             self.cursor =  self.connection.cursor()
+            print("Connected to HANA successfully")
             return True
               
         except Exception as e:
+            print(e)
             raise ConnectionError(f"SAP connection failed: {str(e)}")
         
     def disconnect(self):
@@ -49,6 +51,7 @@ class HANAConnection:
 
         except Exception as e:
             self.connection.rollback()
+            
             raise RuntimeError(f"HANA query failed: {str(e)}")
 
 
