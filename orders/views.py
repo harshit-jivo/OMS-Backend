@@ -2,7 +2,7 @@ from urllib import request
 from django.shortcuts import render
 import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -50,6 +50,20 @@ APPROVER_ACCEPTED_ACTION_ID = 6
 APPROVER_REJECTED_ACTION_ID = 7
 APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
 APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
+RATE_CONDITION_CHOICES = {
+    'BASIC_GT_MARKET': 'Basic Price > Market Price',
+    'BASIC_LT_MARKET': 'Basic Price < Market Price',
+    'BASIC_EQ_MARKET': 'Basic Price = Market Price',
+    'BASIC_MARKET_ZERO': 'Basic Price and Market Price = 0',
+    'BASIC_ZERO_MARKET_GT_ZERO': 'Basic Price = 0 and Market Price > 0',
+}
+DEFAULT_RATE_CONDITIONS = ['BASIC_GT_MARKET']
+ORDER_FLOW_TYPE_ASM = 'ASM'
+ORDER_FLOW_TYPE_BILLING = 'BILLING'
+ORDER_FLOW_TYPE_CHOICES = {
+    ORDER_FLOW_TYPE_ASM: 'ASM Order Flow',
+    ORDER_FLOW_TYPE_BILLING: 'Billing Orders Flow',
+}
 
 @csrf_exempt
 def ai_order_summary(request):
@@ -58,6 +72,202 @@ def ai_order_summary(request):
     result = get_order_summary(data)
 
     return JsonResponse({"summary": result})
+
+def _normalize_order_flow_type(flow_type):
+    flow_type = str(flow_type or ORDER_FLOW_TYPE_ASM).strip().upper()
+    return flow_type if flow_type in ORDER_FLOW_TYPE_CHOICES else ORDER_FLOW_TYPE_ASM
+
+def _default_order_flow_values(flow_type):
+    if flow_type == ORDER_FLOW_TYPE_BILLING:
+        return {
+            'rate_approval_enabled': False,
+            'billing_enabled': False,
+            'auditor_enabled': True,
+            'rate_conditions': [],
+        }
+    return {
+        'rate_approval_enabled': True,
+        'billing_enabled': True,
+        'auditor_enabled': True,
+        'rate_conditions': DEFAULT_RATE_CONDITIONS,
+    }
+
+def _get_order_flow_config(flow_type=ORDER_FLOW_TYPE_ASM):
+    flow_type = _normalize_order_flow_type(flow_type)
+    config, _created = OrderFlowConfig.objects.get_or_create(
+        flow_type=flow_type,
+        defaults=_default_order_flow_values(flow_type),
+    )
+    if not isinstance(config.rate_conditions, list):
+        config.rate_conditions = _default_order_flow_values(flow_type)['rate_conditions']
+    return config
+
+def _order_flow_config_payload(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
+    config = config or _get_order_flow_config(flow_type)
+    rate_conditions = [
+        condition
+        for condition in (config.rate_conditions or [])
+        if condition in RATE_CONDITION_CHOICES
+    ]
+    return {
+        'flow_type': config.flow_type,
+        'flow_label': ORDER_FLOW_TYPE_CHOICES.get(config.flow_type, config.flow_type),
+        'flow_options': [
+            {'code': code, 'label': label}
+            for code, label in ORDER_FLOW_TYPE_CHOICES.items()
+        ],
+        'rate_approval_enabled': bool(config.rate_approval_enabled),
+        'billing_enabled': bool(config.billing_enabled),
+        'auditor_enabled': bool(config.auditor_enabled),
+        'rate_conditions': rate_conditions,
+        'condition_options': [
+            {'code': code, 'label': label}
+            for code, label in RATE_CONDITION_CHOICES.items()
+        ],
+        'updated_at': config.updated_at.isoformat() if config.updated_at else None,
+        'updated_by': getattr(config.updated_by, 'username', None),
+    }
+
+def _get_price_condition_code(basic_price, market_price):
+    if basic_price == 0 and market_price == 0:
+        return 'BASIC_MARKET_ZERO'
+    if basic_price > market_price:
+        return 'BASIC_GT_MARKET'
+    if basic_price < market_price:
+        return 'BASIC_LT_MARKET'
+    return 'BASIC_EQ_MARKET'
+
+def _item_can_match_flow_condition(item):
+    if item.get('item_type') == 'SCHEME':
+        return False
+    try:
+        return float(item.get('qty') or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+def _get_order_price_condition_codes(items, to_float):
+    codes = set()
+    for item in items:
+        if not _item_can_match_flow_condition(item):
+            continue
+        bp = to_float(item.get('basic_price', 0))
+        mp = to_float(item.get('market_price', 0))
+        if bp == 0 and mp == 0:
+            codes.add('BASIC_EQ_MARKET')
+        if bp == 0 and mp > 0:
+            codes.add('BASIC_ZERO_MARKET_GT_ZERO')
+            continue
+        codes.add(_get_price_condition_code(bp, mp))
+    return codes
+
+def _get_status_by_name(name):
+    return (
+        OrderStatus.objects.filter(name__iexact=name).first()
+        or OrderStatus.objects.filter(code__iexact=str(name).replace(' ', '_')).first()
+    )
+
+def _get_configured_stage_statuses(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
+    config = config or _get_order_flow_config(flow_type)
+    stages = []
+    if config.rate_approval_enabled:
+        stages.append('Rate Approval')
+    if config.billing_enabled:
+        stages.append('Billing')
+    if config.auditor_enabled:
+        stages.append('Auditor Approval')
+    stages.append('Completed')
+    return [status for status in (_get_status_by_name(name) for name in stages) if status]
+
+def _get_foc_stage_statuses():
+    return [
+        status
+        for status in (
+            _get_status_by_name('Billing'),
+            _get_status_by_name('Auditor Approval'),
+            _get_status_by_name('Completed'),
+        )
+        if status
+    ]
+
+def _get_next_foc_status(current_status, fallback_name='Billing'):
+    if not current_status:
+        return _get_status_by_name(fallback_name)
+
+    stages = _get_foc_stage_statuses()
+    current_id = getattr(current_status, 'id', None)
+    for index, status_obj in enumerate(stages):
+        if status_obj.id == current_id:
+            if index + 1 < len(stages):
+                return stages[index + 1]
+            return status_obj
+
+    return _get_status_by_name(fallback_name)
+
+def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False):
+    if force_foc_flow:
+        return _get_status_by_name('Billing'), False
+
+    config = _get_order_flow_config(flow_type)
+    condition_codes = _get_order_price_condition_codes(items, to_float)
+    selected_conditions = set(config.rate_conditions or [])
+
+    if (
+        config.rate_approval_enabled
+        and selected_conditions
+        and condition_codes.intersection(selected_conditions)
+    ):
+        rate_status = _get_status_by_name('Rate Approval')
+        if rate_status:
+            return rate_status, True
+
+    for status_name, enabled in (
+        ('Billing', config.billing_enabled),
+        ('Auditor Approval', config.auditor_enabled),
+        ('Completed', True),
+    ):
+        if enabled:
+            status_obj = _get_status_by_name(status_name)
+            if status_obj:
+                return status_obj, False
+
+    return _get_status_by_name(fallback_name), False
+
+def _get_next_order_flow_status(order, current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
+    if getattr(order, 'is_foc', False):
+        return _get_next_foc_status(current_status, fallback_name or 'Billing')
+    return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type)
+
+def _get_next_flow_status(current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
+    if not current_status:
+        return _get_status_by_name(fallback_name) if fallback_name else None
+
+    configured_statuses = _get_configured_stage_statuses(flow_type=flow_type)
+    current_id = getattr(current_status, 'id', None)
+    for index, status_obj in enumerate(configured_statuses):
+        if status_obj.id == current_id:
+            if index + 1 < len(configured_statuses):
+                return configured_statuses[index + 1]
+            return status_obj
+
+    return _get_status_by_name(fallback_name) if fallback_name else None
+
+def _get_order_flow_type_for_order(order):
+    role_name = getattr(getattr(getattr(order, 'created_by', None), 'role', None), 'name', '')
+    return ORDER_FLOW_TYPE_BILLING if str(role_name).strip().lower() == 'billing' else ORDER_FLOW_TYPE_ASM
+
+def _is_rejection_status(status_obj):
+    text = f"{getattr(status_obj, 'code', '')} {getattr(status_obj, 'name', '')}".lower()
+    return 'reject' in text
+
+def _is_completed_status(status_obj):
+    text = f"{getattr(status_obj, 'code', '')} {getattr(status_obj, 'name', '')}".lower()
+    return 'completed' in text
+
+def _pending_log_user_for_status(status_obj, actor_user=None):
+    return actor_user if _is_completed_status(status_obj) else None
+
+def _rate_approval_remarks(flagged_items):
+    return '; '.join(flagged_items) or 'Rate approval required by admin price condition'
 
 def _get_rate_approval_reason(item, basic_price, market_price):
     if item.get('item_type') == 'SCHEME':
@@ -74,6 +284,32 @@ def _get_rate_approval_reason(item, basic_price, market_price):
 
     if market_price > 0 and market_price < basic_price:
         return f"{item_name}: Market ₹{market_price} < Basic ₹{basic_price}"
+
+    return None
+
+def _get_rate_approval_reason(item, basic_price, market_price):
+    if item.get('item_type') == 'SCHEME':
+        return None
+
+    try:
+        qty = float(item.get('qty') or 0)
+    except (TypeError, ValueError):
+        return None
+    if qty <= 0:
+        return None
+
+    item_name = item.get('item_name') or item.get('item_code') or 'Item'
+
+    if basic_price == 0 and market_price == 0:
+        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
+    if basic_price == 0 and market_price > 0:
+        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
+    if basic_price > market_price:
+        return f"{item_name}: Basic Rs {basic_price} > Market Rs {market_price}"
+    if basic_price < market_price:
+        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
+    if basic_price == market_price:
+        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
 
     return None
 
@@ -1662,6 +1898,7 @@ class UpdateOrderView(APIView):
 
         order = get_object_or_404(Order, id=order_id)
         previous_status = order.status
+        order_flow_type = _get_order_flow_type_for_order(order)
 
         serializer = CreateOrderSerializer(data=request.data)
         if not serializer.is_valid():
@@ -1734,20 +1971,20 @@ class UpdateOrderView(APIView):
 
         editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
         is_billing_editor = editor_role == "billing"
+        order_flow_type = _get_order_flow_type_for_order(order)
 
-        # Billing edits always move forward to Auditor, even if prices would normally need rate approval.
         if is_billing_editor:
-            next_status = get_status('Auditor Approval')
-            if next_status:
-                order.status = next_status
-        elif needs_approval:
-            next_status = get_status('Rate Approval')
-            if next_status:
-                order.status = next_status
+            next_status = _get_next_order_flow_status(order, previous_status, 'Auditor Approval', flow_type=order_flow_type)
+            flow_needs_approval = False
         else:
-            next_status = get_status('Billing')
-            if next_status:
-                order.status = next_status
+            next_status, flow_needs_approval = _get_initial_flow_status(
+                items,
+                _to_float,
+                flow_type=order_flow_type,
+                force_foc_flow=order.is_foc,
+            )
+        if next_status:
+            order.status = next_status
 
 
         order.save()
@@ -1757,8 +1994,8 @@ class UpdateOrderView(APIView):
             send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
         
 
-        log_action = 'Auditor Approval' if is_billing_editor else 'Rate Approval' if needs_approval else 'Billing'
-        log_remarks = 'Sent to auditor' if is_billing_editor else '; '.join(flagged_items) if needs_approval else ''
+        log_action = next_status.name if next_status else 'Order Created'
+        log_remarks = 'Sent to auditor' if is_billing_editor else _rate_approval_remarks(flagged_items) if flow_needs_approval else ''
         if is_billing_editor:
             _close_or_create_status_log(
                 order=order,
@@ -1766,7 +2003,7 @@ class UpdateOrderView(APIView):
                 user=user,
                 remarks="Accepted by billing"
             )
-        log_user = None if (is_billing_editor or needs_approval or (not needs_approval and log_action == 'Billing')) else user
+        log_user = _pending_log_user_for_status(next_status, user) if next_status else user
         log_order_action(order, log_action, user=log_user, remarks=log_remarks)
 
         return Response({
@@ -1774,8 +2011,8 @@ class UpdateOrderView(APIView):
             'order_number': order.order_number,
             'total_amount': str(order.total_amount),
             'status': order.status.name if order.status else '',
-            'needs_approval': False if is_billing_editor else needs_approval,
-            'message': 'Order updated and sent to auditor' if is_billing_editor else 'Order updated and sent for rate approval' if needs_approval else 'Order updated and sent to billing',
+            'needs_approval': False if is_billing_editor else flow_needs_approval,
+            'message': f"Order updated and sent to {next_status.name.lower()}" if next_status else 'Order updated successfully',
         }, status=status.HTTP_200_OK)
 
 class CreateOrderView(APIView):
@@ -1868,11 +2105,18 @@ class CreateOrderView(APIView):
 
             editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
             is_billing_editor = editor_role == "billing"
+            order_flow_type = _get_order_flow_type_for_order(order)
 
             if is_billing_editor:
-                next_status = get_status('Auditor Approval')
+                next_status = _get_next_order_flow_status(order, previous_status, 'Auditor Approval', flow_type=order_flow_type)
+                flow_needs_approval = False
             else:
-                next_status = get_status('Rate Approval') if needs_approval else get_status('Billing')
+                next_status, flow_needs_approval = _get_initial_flow_status(
+                    items,
+                    _to_float,
+                    flow_type=order_flow_type,
+                    force_foc_flow=order.is_foc,
+                )
             if next_status:
                 order.status = next_status
             order.save()
@@ -1882,8 +2126,8 @@ class CreateOrderView(APIView):
                 send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
            
 
-            log_action = 'Auditor Approval' if is_billing_editor else 'Rate Approval' if needs_approval else 'Billing'
-            log_remarks = 'Sent to auditor' if is_billing_editor else '; '.join(flagged_items) if needs_approval else ''
+            log_action = next_status.name if next_status else 'Order Created'
+            log_remarks = 'Sent to auditor' if is_billing_editor else _rate_approval_remarks(flagged_items) if flow_needs_approval else ''
             if is_billing_editor:
                 _close_or_create_status_log(
                     order=order,
@@ -1891,7 +2135,7 @@ class CreateOrderView(APIView):
                     user=user,
                     remarks="Accepted by billing"
                 )
-            log_user = None if (is_billing_editor or needs_approval or (not needs_approval and log_action == 'Billing')) else user
+            log_user = _pending_log_user_for_status(next_status, user) if next_status else user
             log_order_action(order, log_action, user=log_user, remarks=log_remarks)
 
             # Save every unique order as a template, but skip true duplicates.
@@ -1902,8 +2146,8 @@ class CreateOrderView(APIView):
                 'order_number': order.order_number,
                 'total_amount': str(order.total_amount),
                 'status': order.status.name if order.status else '',
-                'needs_approval': False if is_billing_editor else needs_approval,
-                'message': 'Order updated and sent to auditor' if is_billing_editor else 'Order updated and sent for rate approval' if needs_approval else 'Order updated and sent to billing',
+                'needs_approval': False if is_billing_editor else flow_needs_approval,
+                'message': f"Order updated and sent to {next_status.name.lower()}" if next_status else 'Order updated successfully',
             }, status=status.HTTP_200_OK)
 
         serializer = CreateOrderSerializer(data=request.data)
@@ -2001,40 +2245,33 @@ class CreateOrderView(APIView):
 
         creator_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
         is_billing_creator = creator_role == "billing"
+        order_flow_type = ORDER_FLOW_TYPE_BILLING if is_billing_creator else ORDER_FLOW_TYPE_ASM
 
-        # Billing-created orders skip rate approval and billing queue; they go straight to auditor.
-        if is_billing_creator:
-            next_status = get_status('Auditor Approval')
-            if next_status:
-                order.status = next_status
-                order.save()
-                send_order_notifications(order, next_status.name, actor=user)
-            log_order_action(order, 'Auditor Approval', user=None, remarks='Sent to auditor')
-        elif needs_approval:
-            next_status = get_status('Rate Approval')
-            if next_status:
-                order.status = next_status
-                order.save()
-                send_order_notifications(order, next_status.name, actor=user)
-               
-            log_order_action(order, 'Rate Approval', user=None, remarks='; '.join(flagged_items))
-        else:
-            next_status = get_status('Billing')
-            if next_status:
-                order.status = next_status
-                order.save()
-                send_order_notifications(order, next_status.name, actor=user)
-            log_order_action(order, 'Billing', user=None)
+        next_status, flow_needs_approval = _get_initial_flow_status(
+            items,
+            _to_float,
+            flow_type=order_flow_type,
+            force_foc_flow=order.is_foc,
+        )
+        if next_status:
+            order.status = next_status
+            order.save()
+            send_order_notifications(order, next_status.name, actor=user)
+
+        log_user = _pending_log_user_for_status(next_status, user) if next_status else user
+        log_remarks = _rate_approval_remarks(flagged_items) if flow_needs_approval else ''
+        if next_status:
+            log_order_action(order, next_status.name, user=log_user, remarks=log_remarks)
 
         return Response({
             'id': order.id,
             'order_number': order.order_number,
             'total_amount': str(order.total_amount),
             'status': order.status.name if order.status else '',
-            'needs_approval': False if is_billing_creator else needs_approval,
-            'flagged_items': [] if is_billing_creator else flagged_items if needs_approval else [],
+            'needs_approval': flow_needs_approval,
+            'flagged_items': flagged_items if flow_needs_approval else [],
             'remarks': order.remarks or '',
-            'message': 'Order sent to auditor' if is_billing_creator else 'Order sent to rate approver' if needs_approval else 'Order sent to billing',
+            'message': f"Order sent to {next_status.name.lower()}" if next_status else 'Order created successfully',
         }, status=status.HTTP_201_CREATED)
     
 
@@ -2070,6 +2307,48 @@ class OrderStatusList(APIView):
     def get(self,request):
         status = OrderStatus.objects.all().values('id','name')
         return Response(list(status))
+
+class OrderFlowConfigView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        flow_type = _normalize_order_flow_type(request.query_params.get('flow_type'))
+        return Response(_order_flow_config_payload(flow_type=flow_type))
+
+    def post(self, request):
+        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
+        is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
+        if not is_admin:
+            return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
+
+        flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
+        config = _get_order_flow_config(flow_type)
+        rate_conditions = request.data.get('rate_conditions', [])
+        if not isinstance(rate_conditions, list):
+            return Response({'message': 'rate_conditions must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        invalid_conditions = [
+            condition for condition in rate_conditions if condition not in RATE_CONDITION_CHOICES
+        ]
+        if invalid_conditions:
+            return Response(
+                {'message': 'Invalid rate condition selected.', 'invalid_conditions': invalid_conditions},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        config.rate_approval_enabled = bool(request.data.get('rate_approval_enabled', False))
+        config.billing_enabled = bool(request.data.get('billing_enabled', False))
+        config.auditor_enabled = bool(request.data.get('auditor_enabled', False))
+        config.flow_type = flow_type
+        config.rate_conditions = list(dict.fromkeys(rate_conditions))
+        config.updated_by = request.user
+        config.save()
+
+        return Response({
+            'success': True,
+            'message': 'Order flow updated successfully.',
+            'data': _order_flow_config_payload(config),
+        })
 
 class SchemeProductView(APIView):
     permission_classes = [AllowAny]
@@ -2117,6 +2396,7 @@ class UpdateOrderStatusView(APIView):
 
         order = get_object_or_404(Order, id=order_id)
         previous_status = order.status
+        order_flow_type = _get_order_flow_type_for_order(order)
 
         status_id = serializer.validated_data["status"]
         reason = serializer.validated_data.get("reason", "")
@@ -2137,6 +2417,12 @@ class UpdateOrderStatusView(APIView):
             )
             if billing_status:
                 status_obj = billing_status
+
+        if previous_status and not _is_rejection_status(status_obj) and prev_name != "rate approval":
+            if "billing" in prev_name or "auditor" in prev_name:
+                configured_next_status = _get_next_order_flow_status(order, previous_status, flow_type=order_flow_type)
+                if configured_next_status:
+                    status_obj = configured_next_status
 
         user = request.user if request.user.is_authenticated else None
 
@@ -2204,19 +2490,22 @@ class UpdateOrderStatusView(APIView):
             # Log the rate approved action
             log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
 
-            # Move order to Billing (status 3)
-            billing_status = OrderStatus.objects.filter(id=3).first()
-            if billing_status:
-                order.status = billing_status
+            next_flow_status = _get_next_order_flow_status(order, previous_status, 'Billing', flow_type=order_flow_type)
+            if next_flow_status:
+                order.status = next_flow_status
                 order.save()
-                # Create pending Billing log
-                log_order_action(order=order, action_name=billing_status.name, user=None, remarks="")
-                send_order_notifications(order, billing_status.name, actor=user, previous_status=previous_status)
+                log_order_action(
+                    order=order,
+                    action_name=next_flow_status.name,
+                    user=_pending_log_user_for_status(next_flow_status, user),
+                    remarks="",
+                )
+                send_order_notifications(order, next_flow_status.name, actor=user, previous_status=previous_status)
 
             return Response({
-                "message": "Rate approved, order sent to billing",
+                "message": f"Rate approved, order sent to {next_flow_status.name.lower()}" if next_flow_status else "Rate approved",
                 "order_id": order.id,
-                "status": billing_status.name if billing_status else status_obj.name
+                "status": next_flow_status.name if next_flow_status else status_obj.name
             })
 
         if is_auditor_to_billing:
@@ -2554,7 +2843,6 @@ class RejectOrderView(APIView):
             order,
             request.user if request.user.is_authenticated else None,
         )
-        
         if order.status:
             send_order_notifications(
                 order,
@@ -3195,4 +3483,3 @@ class UserPartyView(APIView):
             .values("card_code", "card_name")
             .distinct()
         )
-        

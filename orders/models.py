@@ -195,6 +195,30 @@ class OrdersLog(models.Model):
     class Meta:
         db_table = 'orders_log'
 
+class OrderFlowConfig(models.Model):
+    flow_type = models.CharField(max_length=20, default='ASM', unique=True)
+    rate_approval_enabled = models.BooleanField(default=True)
+    billing_enabled = models.BooleanField(default=True)
+    auditor_enabled = models.BooleanField(default=True)
+    rate_conditions = models.JSONField(default=list, blank=True)
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_order_flow_configs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'order_flow_config'
+        verbose_name = 'Order Flow Config'
+        verbose_name_plural = 'Order Flow Config'
+
+    def __str__(self):
+        return f'{self.flow_type} Order Flow Config'
+
 def log_order_action(order, action_name, user=None, remarks=''):
     try:
         status_obj = OrderStatus.objects.get(name=action_name)
