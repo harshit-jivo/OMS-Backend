@@ -4,6 +4,13 @@ from .connection import HANAConnection, Queries
 
 class SalesOrderService():
 
+    def getProductStock(self):
+        with HANAConnection() as conn:
+            query = Queries.get_product_stock()
+            result = conn.execute(query)
+
+        return result
+
     def syncSalesOrder(self, party_code):
         with HANAConnection() as conn:
             query = Queries.get_sales_orders_for_party(party_code)

@@ -362,6 +362,14 @@ class BulkAssignPartyToProductView(APIView):
         errors = []
 
         for card_code, party_category in normalized_party_selections:
+            party_queryset = Party.objects.filter(card_code=card_code)
+            if party_category:
+                party_queryset = party_queryset.filter(category__iexact=party_category)
+            if not party_queryset.exists():
+                category_label = f"|{party_category}" if party_category else ""
+                errors.append(f"{card_code}{category_label}: Party not found")
+                continue
+
             for prod in products:
                 item_code = prod.get('item_code')
                 category = _normalize_category(prod.get('category'))
