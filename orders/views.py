@@ -157,6 +157,8 @@ def _get_order_price_condition_codes(items, to_float):
         if bp == 0 and mp > 0:
             codes.add('BASIC_ZERO_MARKET_GT_ZERO')
             continue
+        if bp > 0 and mp == 0:
+            continue
         codes.add(_get_price_condition_code(bp, mp))
     return codes
 
