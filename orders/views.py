@@ -263,6 +263,13 @@ def _is_completed_status(status_obj):
     text = f"{getattr(status_obj, 'code', '')} {getattr(status_obj, 'name', '')}".lower()
     return 'completed' in text
 
+def _order_status_message(status_obj, default_action='updated'):
+    status_name = getattr(status_obj, 'name', None) or str(status_obj or '').strip() or 'next stage'
+    status_text = status_name.strip().lower()
+    if 'completed' in status_text:
+        return 'Order completed successfully'
+    return f"Order {default_action} and sent to {status_name}"
+
 def _pending_log_user_for_status(status_obj, actor_user=None):
     return actor_user if _is_completed_status(status_obj) else None
 
@@ -1045,12 +1052,12 @@ class WDashboardChartsView(APIView):
         # CHART 2: State-wise Orders (selected month)
         # No FK between Order and Parties; join via card_code in Python
         card_codes_in_month = list(
-            filtered_orders.values_list('card_code', flat=True).distinct()
+            completed_orders.values_list('card_code', flat=True).distinct()
         )
         state_map = _build_party_state_map(card_codes_in_month)
 
         state_counts = defaultdict(lambda: {'orders': 0, 'sales': 0})
-        for order in filtered_orders.values('card_code', 'total_amount'):
+        for order in completed_orders.values('card_code', 'total_amount'):
             state = state_map.get(str(order['card_code'] or '').strip(), 'Unknown')
             state_counts[state]['orders'] += 1
             state_counts[state]['sales'] += float(order['total_amount'] or 0)
@@ -1069,7 +1076,7 @@ class WDashboardChartsView(APIView):
         )
 
         manager_performance = (
-            filtered_orders
+            completed_orders
             .filter(created_by__role__name__iexact='manager')
             .values('created_by_id', 'created_by__name', 'created_by__username')
             .annotate(sales=Sum('total_amount'), orders=Count('id', distinct=True))
@@ -1101,7 +1108,7 @@ class WDashboardChartsView(APIView):
         )
 
         manager_state_counts = defaultdict(lambda: {'orders': 0, 'sales': 0})
-        for order in filtered_orders.filter(created_by__role__name__iexact='manager').values(
+        for order in completed_orders.filter(created_by__role__name__iexact='manager').values(
             'created_by_id',
             'created_by__name',
             'created_by__username',
@@ -1291,7 +1298,7 @@ class WDashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
-        state_item_sales = _build_state_item_sales(filtered_orders, state_map)
+        state_item_sales = _build_state_item_sales(completed_orders, state_map)
         highest_sales_order = (
             filtered_orders
             .order_by('-total_amount')
@@ -1463,6 +1470,10 @@ class DashboardChartsView(APIView):
             created_at__gte=range_start,
             created_at__lte=range_end
         )
+        completed_orders = filtered_orders.filter(
+            Q(status__code__icontains='COMPLETED') |
+            Q(status__name__icontains='Completed')
+        )
 
         year_start = timezone.make_aware(datetime(line_year, 1, 1))
         year_end = timezone.make_aware(datetime(line_year, 12, 31, 23, 59, 59))
@@ -1554,7 +1565,7 @@ class DashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
-        state_item_sales = _build_state_item_sales(filtered_orders, state_map)
+        state_item_sales = _build_state_item_sales(completed_orders, state_map)
 
         return Response({
             'filter': {'year': year, 'month': month, 'line_year': line_year},
@@ -2503,7 +2514,7 @@ class UpdateOrderStatusView(APIView):
                 send_order_notifications(order, next_flow_status.name, actor=user, previous_status=previous_status)
 
             return Response({
-                "message": f"Rate approved, order sent to {next_flow_status.name.lower()}" if next_flow_status else "Rate approved",
+                "message": _order_status_message(next_flow_status, "approved") if next_flow_status else "Rate approved",
                 "order_id": order.id,
                 "status": next_flow_status.name if next_flow_status else status_obj.name
             })
@@ -2541,7 +2552,7 @@ class UpdateOrderStatusView(APIView):
 
 
             return Response({
-                "message": "Order status updated successfully",
+                "message": _order_status_message(status_obj, "accepted"),
                 "order_id": order.id,
                 "status": status_obj.name
             })
@@ -2565,7 +2576,7 @@ class UpdateOrderStatusView(APIView):
 
 
             return Response({
-                "message": "Order status updated successfully",
+                "message": _order_status_message(status_obj, "accepted"),
                 "order_id": order.id,
                 "status": status_obj.name
             })
@@ -2589,7 +2600,7 @@ class UpdateOrderStatusView(APIView):
 
 
             return Response({
-                "message": "Order status updated successfully",
+                "message": _order_status_message(status_obj, "accepted"),
                 "order_id": order.id,
                 "status": status_obj.name
             })
@@ -2613,7 +2624,7 @@ class UpdateOrderStatusView(APIView):
 
 
             return Response({
-                "message": "Order status updated successfully",
+                "message": "Order rejected successfully",
                 "order_id": order.id,
                 "status": status_obj.name
             })
@@ -2642,7 +2653,7 @@ class UpdateOrderStatusView(APIView):
 
 
             return Response({
-                "message": "Order status updated successfully",
+                "message": _order_status_message(status_obj, "accepted"),
                 "order_id": order.id,
                 "status": status_obj.name
             })
@@ -2675,7 +2686,7 @@ class UpdateOrderStatusView(APIView):
 
 
         return Response({
-            "message": "Order status updated successfully",
+            "message": _order_status_message(status_obj),
             "order_id": order.id,
             "status": status_obj.name
         })
