@@ -33,6 +33,20 @@ class GetSalesOrderView(APIView):
         rows = SalesOrderService().syncSalesOrder(party_code)
         grouped = group_sales_orders(rows)
         return Response(grouped)
+
+class GetProductSalesOrderView(APIView):
+    def get(self, request):
+        item_code = request.query_params.get('item_code')
+
+        if not item_code:
+            return Response(
+                {"error": "item_code is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        rows = SalesOrderService().syncSalesOrderByProduct(item_code)
+        grouped = group_sales_orders(rows)
+        return Response(grouped)
     
     
 class GetOpenPartiesView(APIView):

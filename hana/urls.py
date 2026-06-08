@@ -1,9 +1,10 @@
 from django.urls import path
-from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView
+from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView
 
 urlpatterns = [
     path('product-stock/' , GetProductStockView.as_view()),
     path('so/' , GetSalesOrderView.as_view()),
+    path('product-so/' , GetProductSalesOrderView.as_view()),
     path('open-parties/' , GetOpenPartiesView.as_view()),
     path('customer-details/' , GetCustomerDetailsView.as_view()),
     path('warehouse-details/' , GetWarehouseDetailsView.as_view()),

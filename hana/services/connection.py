@@ -205,6 +205,61 @@ class Queries():
 
         ORDER BY T0."DocDate" DESC, T0."DocNum", T1."LineNum"
         """ 
+
+    @staticmethod
+    def get_sales_orders_for_product(item_code):
+        s = Queries.SCHEMA
+        safe_item_code = str(item_code).replace("'", "''")
+        return f"""
+        SELECT
+            T0."DocEntry",
+            T0."DocNum",
+            T0."DocDate",
+            T0."DocDueDate",
+            T0."CardCode",
+            T0."CardName",
+            T0."NumAtCard",
+            T0."DocStatus",
+            T0."DocTotal",
+            T0."VatSum",
+            T0."DiscSum",
+            T0."Comments",
+            T0."SlpCode",
+            T0."ShipToCode",
+            T0."PayToCode",
+            T0."BPLId",
+
+            T1."LineNum",
+            T1."ItemCode",
+            T1."Dscription",
+            T1."Quantity",
+            T1."OpenQty",
+            T1."Price",
+            T1."PriceBefDi",
+            T1."DiscPrcnt",
+            T1."LineTotal",
+            T1."VatPrcnt",
+            T1."VatGroup",
+            T1."WhsCode",
+            T1."TaxCode",
+            T1."ShipDate",
+            T1."AcctCode",
+            T1."Project",
+            T1."OcrCode",
+            T1."LineStatus"
+
+        FROM "{s}"."ORDR" AS T0
+        INNER JOIN "{s}"."RDR1" AS T1
+            ON T0."DocEntry" = T1."DocEntry"
+
+        WHERE T1."ItemCode" = '{safe_item_code}'
+          AND T0."CANCELED" = 'N'
+          AND T0."DocStatus" = 'O'
+          AND T1."LineStatus" = 'O'
+          AND T1."OpenQty" > 0
+
+        ORDER BY T0."CardName", T0."DocDate" DESC, T0."DocNum", T1."LineNum"
+        """
     
     @staticmethod
     def get_customer_details(party_code):

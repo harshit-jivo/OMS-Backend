@@ -79,17 +79,17 @@ class SAPConnection:
             SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand, OnHand, validFor
             FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''OIL'' AS "Category", "SalFactor2", "U_Rev_tax_Rate","Deleted", "U_Variety", "SalPackUn", "U_Brand", "OnHand", "validFor"
             FROM "JIVO_OIL_HANADB"."OITM" 
-            WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' ')
+            WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' OR "ItemCode" LIKE ''CG%''  ')
             UNION ALL 
             SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand, OnHand, validFor
             FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''BEVERAGES'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "SalPackUn", "U_Brand", "OnHand", "validFor"
             FROM "JIVO_BEVERAGES_HANADB"."OITM" 
-            WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' ')
+            WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' OR "ItemCode" LIKE ''CG%'' ')
             UNION ALL
             SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, SalPackUn, U_Brand, OnHand, validFor
             FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''MART'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "SalPackUn", "U_Brand", "OnHand", "validFor"
             FROM "JIVO_MART_HANADB"."OITM" 
-            WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' ')
+            WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' OR "ItemCode" LIKE ''CG%''')
         """
 
     @staticmethod

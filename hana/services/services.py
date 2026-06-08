@@ -17,6 +17,13 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+
+    def syncSalesOrderByProduct(self, item_code):
+        with HANAConnection() as conn:
+            query = Queries.get_sales_orders_for_product(item_code)
+            result = conn.execute(query)
+
+        return result
     
     def syncOpenParties(self):
         with HANAConnection() as conn:
