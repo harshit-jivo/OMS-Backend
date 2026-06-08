@@ -308,3 +308,95 @@ class StaffProductPrice(models.Model):
 
     def __str__(self):
         return f"{self.product.item_name} - {self.rate}"
+    
+class RateApproverRule(models.Model):
+    approver = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="rate_approver_rules"
+    )
+
+    category = models.CharField(max_length=100)
+
+    variety = models.CharField(max_length=100, blank=True, null=True)
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "rate_approver_rules"
+        unique_together = ("category", "variety")
+
+    def __str__(self):
+        return f"{self.category} / {self.variety} -> {self.approver}"
+
+
+class OrderRateApproval(models.Model):
+
+    STATUS_CHOICES = (
+        ("PENDING", "Pending"),
+        ("APPROVED", "Approved"),
+        ("REJECTED", "Rejected"),
+    )
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="rate_approvals"
+    )
+
+    approver = models.ForeignKey(
+    User,
+    on_delete=models.CASCADE,
+    related_name="order_rate_approvals"
+)
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="PENDING"
+    )
+
+    remarks = models.TextField(
+        blank=True,
+        null=True
+    )
+
+    approved_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        db_table = "order_rate_approvals"
+        unique_together = ("order", "approver")
+
+class OrderItemApprovalMapping(models.Model):
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE
+    )
+
+    order_item = models.ForeignKey(
+        OrderItem,
+        on_delete=models.CASCADE
+    )
+
+    approver = models.ForeignKey(
+    User,
+    on_delete=models.CASCADE,
+    related_name="item_approval_mappings"
+)
+
+    class Meta:
+        db_table = "order_item_approval_mapping"
+        unique_together = (
+        "order_item",
+        "approver"
+    )

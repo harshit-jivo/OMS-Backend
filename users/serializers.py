@@ -49,7 +49,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'is_active', 'password'
+            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'variety', 'is_active', 'password'
         ]
 
     def get_company(self, obj):
@@ -137,6 +137,7 @@ class CreateUserSerializer(serializers.Serializer):
     main_groups = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, allow_null=True, many=True)
     states = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, allow_null=True, many=True)
     category = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, allow_null=True)
+    variety = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 
@@ -191,6 +192,7 @@ class UpdateUserSerializer(serializers.Serializer):
     main_groups = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, many=True)
     states = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, many=True)
     category = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, allow_null=True)
+    variety = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def update(self, instance, validated_data):
         main_groups = validated_data.pop('main_groups', None)
@@ -215,7 +217,7 @@ class UpdateUserSerializer(serializers.Serializer):
 
         instance.phone = validated_data.get('phone', instance.phone)
        
-        for field in ['role', 'company', 'main_group', 'state', 'category', 'is_active']:
+        for field in ['role', 'company', 'main_group', 'state', 'category', 'variety', 'is_active']:
             if field in validated_data:
                 setattr(instance, field, validated_data.get(field))
 

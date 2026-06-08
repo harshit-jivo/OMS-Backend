@@ -2,7 +2,7 @@ from urllib import request
 from django.shortcuts import render
 import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -282,9 +282,10 @@ def _get_rate_approval_reason(item, basic_price, market_price):
     if item.get('item_type') == 'SCHEME':
         return None
     
-    qty = float(item.get('qty') or 0)
-    if qty <= 0:
-        return None
+    if item.get('qty') not in (None, ''):
+        qty = float(item.get('qty') or 0)
+        if qty <= 0:
+            return None
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
@@ -300,12 +301,13 @@ def _get_rate_approval_reason(item, basic_price, market_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
-    try:
-        qty = float(item.get('qty') or 0)
-    except (TypeError, ValueError):
-        return None
-    if qty <= 0:
-        return None
+    if item.get('qty') not in (None, ''):
+        try:
+            qty = float(item.get('qty') or 0)
+        except (TypeError, ValueError):
+            return None
+        if qty <= 0:
+            return None
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
@@ -317,9 +319,6 @@ def _get_rate_approval_reason(item, basic_price, market_price):
         return f"{item_name}: Basic Rs {basic_price} > Market Rs {market_price}"
     if basic_price < market_price:
         return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
-    if basic_price == market_price:
-        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
-
     return None
 
 def _resolve_scheme_by_id(scheme_id):
@@ -734,24 +733,12 @@ def _get_base_orders(user):
             Q(logs__action__name__icontains='auditor')
         ).distinct()
     if role_name == 'approver':
-        handled_order_ids = (
-            OrdersLog.objects
-            .filter(performed_by=user)
-            .values_list('order_id', flat=True)
-            .distinct()
-        )
 
         queryset = Order.objects.filter(
-            Q(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']) |
-            Q(id__in=handled_order_ids)
-        ).distinct()
-
-        user_category = _get_user_category_name(user)
-        if user_category:
-            queryset = queryset.filter(
-                Q(items__category__iexact=user_category) |
-                Q(created_by__category__category__iexact=user_category)
-            ).distinct()
+        rate_approvals__approver=user,
+        rate_approvals__status='PENDING',
+        status__code__in=APPROVER_ACTIVE_CODES,
+    ).distinct()
 
         return queryset
     if role_name == 'billing':
@@ -788,6 +775,113 @@ def _with_latest_approver_decision(orders, user):
     return orders.annotate(
         latest_approver_action_id=Subquery(latest_approver_action)
     )
+
+def _get_order_rate_approval(order, user):
+    if not user or not getattr(user, 'is_authenticated', False):
+        return None
+    return OrderRateApproval.objects.filter(order=order, approver=user).first()
+
+def _assigned_rate_approvers_for_order(order, status_filter=None, exclude_user=None):
+    approvals = order.rate_approvals.select_related('approver').all()
+    if status_filter:
+        approvals = approvals.filter(status=status_filter)
+    if exclude_user:
+        approvals = approvals.exclude(approver=exclude_user)
+    return [approval.approver for approval in approvals if approval.approver]
+
+def _has_pending_rate_approvals(order):
+    return order.rate_approvals.filter(status='PENDING').exists()
+
+def _mark_rate_approval_decision(order, user, decision, remarks=''):
+    approval = _get_order_rate_approval(order, user)
+    if not approval:
+        return None
+
+    approval.status = decision
+    approval.remarks = remarks or ''
+    approval.approved_at = timezone.now()
+    approval.save(update_fields=['status', 'remarks', 'approved_at'])
+    return approval
+
+def _get_rate_approvers_for_item(item):
+    category = str(getattr(item, 'category', '') or '').strip()
+    variety = str(getattr(item, 'variety', '') or '').strip()
+    if not category:
+        return []
+
+    rule_query = RateApproverRule.objects.filter(
+        category__iexact=category,
+        is_active=True,
+    )
+    if variety:
+        rule = rule_query.filter(variety__iexact=variety).select_related('approver').first()
+        if not rule:
+            rule = (
+                rule_query
+                .filter(Q(variety__isnull=True) | Q(variety=''))
+                .select_related('approver')
+                .first()
+            )
+    else:
+        rule = (
+            rule_query
+            .filter(Q(variety__isnull=True) | Q(variety=''))
+            .select_related('approver')
+            .first()
+        )
+    if rule and rule.approver:
+        return [rule.approver]
+
+    users = User.objects.filter(
+        role__name__iexact='approver',
+        is_active=True,
+        category__category__iexact=category,
+    )
+
+    matched_users = []
+    for user in users:
+        user_varieties = [
+            value.strip().lower()
+            for value in str(getattr(user, 'variety', '') or '').split(',')
+            if value.strip()
+        ]
+        if not user_varieties:
+            matched_users.append(user)
+            continue
+        if variety and variety.lower() in user_varieties:
+            matched_users.append(user)
+
+    return matched_users
+
+def assign_rate_approvers(order):
+    """
+    Create OrderRateApproval and OrderItemApprovalMapping
+    based on item variety.
+    """
+    OrderRateApproval.objects.filter(order=order).delete()
+    OrderItemApprovalMapping.objects.filter(order=order).delete()
+
+    approvers = set()
+
+    for item in order.items.all():
+
+        for approver in _get_rate_approvers_for_item(item):
+            approvers.add(approver)
+
+            OrderItemApprovalMapping.objects.get_or_create(
+                order=order,
+                order_item=item,
+                approver=approver
+            )
+
+    for approver in approvers:
+        OrderRateApproval.objects.get_or_create(
+            order=order,
+            approver=approver,
+            defaults={
+                "status": "PENDING"
+            }
+        )
     
 
 class WDashboardKPIView(APIView):
@@ -947,22 +1041,14 @@ class WDashboardKPIView(APIView):
             ).count()
 
         if role_name == 'approver':
-            approver_orders_with_decision = _with_latest_approver_decision(
-                period_orders,
-                request.user,
+            user_approvals = OrderRateApproval.objects.filter(
+                order__in=period_orders,
+                approver=request.user,
             )
 
-            accepted_orders = approver_orders_with_decision.filter(
-                latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count()
-
-            rejected_orders = approver_orders_with_decision.filter(
-                latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count()
-
-            pending_review_orders = period_orders.filter(
-                status__code__in=APPROVER_ACTIVE_CODES
-            ).distinct().count()
+            accepted_orders = user_approvals.filter(status='APPROVED').count()
+            rejected_orders = user_approvals.filter(status='REJECTED').count()
+            pending_review_orders = user_approvals.filter(status='PENDING').count()
 
             total_orders = accepted_orders + rejected_orders + pending_review_orders
 
@@ -1238,31 +1324,25 @@ class WDashboardChartsView(APIView):
                 },
             ]
         elif role_name == 'approver':
-            approver_orders_with_decision = _with_latest_approver_decision(
-                filtered_orders,
-                request.user,
+            user_approvals = OrderRateApproval.objects.filter(
+                order__in=filtered_orders,
+                approver=request.user,
             )
             decision_data = [
                 {
                     'status': 'accepted',
                     'label': 'Approved',
-                    'count': approver_orders_with_decision.filter(
-                        latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
-                    ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count(),
+                    'count': user_approvals.filter(status='APPROVED').count(),
                 },
                 {
                     'status': 'rejected',
                     'label': 'Rejected',
-                    'count': approver_orders_with_decision.filter(
-                        latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
-                    ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count(),
+                    'count': user_approvals.filter(status='REJECTED').count(),
                 },
                 {
                     'status': 'pending',
                     'label': 'Pending Approval',
-                    'count': approver_orders_with_decision.filter(
-                        status__code__in=APPROVER_ACTIVE_CODES
-                    ).distinct().count(),
+                    'count': user_approvals.filter(status='PENDING').count(),
                 },
             ]
 
@@ -1373,25 +1453,14 @@ class OrderStatusTrackingView(APIView):
                 latest_decision_action_id=BILLING_REJECTED_ACTION_ID
             ).exclude(status__code__in=BILLING_ACTIVE_CODES)
         elif mode in ['rate_approver', 'rate approver', 'approver']:
-            latest_approver_action = (
-                OrdersLog.objects
-                .filter(
-                    order=OuterRef('pk'),
-                    performed_by=request.user,
-                    action_id__in=APPROVER_DECISION_ACTION_IDS,
-                )
-                .order_by('-created_at', '-id')
-                .values('action_id')[:1]
+            accepted_orders = base_orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='APPROVED',
             )
-            orders = base_orders.annotate(
-                latest_decision_action_id=Subquery(latest_approver_action)
+            rejected_orders = base_orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='REJECTED',
             )
-            accepted_orders = orders.filter(
-                latest_decision_action_id=APPROVER_ACCEPTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES)
-            rejected_orders = orders.filter(
-                latest_decision_action_id=APPROVER_REJECTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES)
         else:
             return Response({'error': 'mode must be auditor, billing, or rate_approver'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2097,6 +2166,7 @@ class CreateOrderView(APIView):
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
+            assign_rate_approvers(order)
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
             user = request.user if request.user.is_authenticated else None
@@ -2234,6 +2304,11 @@ class CreateOrderView(APIView):
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
+        OrderRateApproval.objects.filter(order=order).delete()
+        OrderItemApprovalMapping.objects.filter(order=order).delete()
+
+        assign_rate_approvers(order)
 
         # Save party orders as reusable templates, but keep staff orders separate.
         if order_type != 'STAFF':
@@ -2419,6 +2494,17 @@ class UpdateOrderStatusView(APIView):
 
         prev_name = (previous_status.name or "").strip().lower() if previous_status else ""
 
+        if (
+            previous_status
+            and previous_status.id == status_obj.id
+            and _is_rejection_status(status_obj)
+        ):
+            return Response({
+                "message": "Order already rejected",
+                "order_id": order.id,
+                "status": status_obj.name
+            })
+
         # Guardrail: if client sends Auditor status again while already in Auditor stage,
         # treat it as "Auditor approved -> move to Billing Approval".
         if previous_status and previous_status.id == status_obj.id and prev_name == "auditor approval":
@@ -2491,17 +2577,88 @@ class UpdateOrderStatusView(APIView):
             and status_obj.id == 6
         )
 
-        if is_rate_approved:
-            # Close the Rate Approval pending log with the approver
+        is_rate_rejected = (
+            prev_name == "rate approval"
+            and (
+                status_obj.id == APPROVER_REJECTED_ACTION_ID
+                or getattr(status_obj, "code", "") == "REJECTED"
+                or "reject" in new_name
+            )
+        )
+
+        if is_rate_approved or is_rate_rejected:
+            rate_approval = _get_order_rate_approval(order, user)
+            if not rate_approval:
+                order.status = previous_status
+                order.save(update_fields=["status"])
+                return Response(
+                    {"message": "This order is not assigned to you for rate approval."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if rate_approval.status != "PENDING":
+                order.status = previous_status
+                order.save(update_fields=["status"])
+                return Response(
+                    {
+                        "message": f"You have already {rate_approval.status.lower()} this order.",
+                        "order_id": order.id,
+                        "status": order.status.name if order.status else "",
+                        "approval_status": rate_approval.status,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if is_rate_rejected:
+                _mark_rate_approval_decision(order, user, "REJECTED", reason)
+                _close_or_create_status_log(
+                    order=order,
+                    action_status=previous_status,
+                    user=user,
+                    remarks=reason or "Rejected by rate approver"
+                )
+
+                order.status = status_obj
+                order.rejected_by = user
+                order.rejected_at = timezone.now()
+                if reason:
+                    order.reject_reason = reason
+                    order.rejection_reason = reason
+                order.save()
+
+                log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
+                send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
+
+                return Response({
+                    "message": "Order rejected successfully",
+                    "order_id": order.id,
+                    "status": status_obj.name,
+                    "approval_status": "REJECTED",
+                })
+
+            _mark_rate_approval_decision(order, user, "APPROVED", reason)
+            log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
+
+            if _has_pending_rate_approvals(order):
+                order.status = previous_status
+                order.save(update_fields=["status"])
+                return Response({
+                    "message": "Rate approved. Waiting for remaining approvers.",
+                    "order_id": order.id,
+                    "status": previous_status.name if previous_status else status_obj.name,
+                    "approval_status": "APPROVED",
+                    "pending_approvers": [
+                        _display_user_name(approver)
+                        for approver in _assigned_rate_approvers_for_order(order, status_filter="PENDING")
+                    ],
+                })
+
             _close_or_create_status_log(
                 order=order,
                 action_status=previous_status,
                 user=user,
-                remarks=reason or "Approved by rate approver"
+                remarks=reason or "Approved by all rate approvers"
             )
-
-            # Log the rate approved action
-            log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
 
             next_flow_status = _get_next_order_flow_status(order, previous_status, 'Billing', flow_type=order_flow_type)
             if next_flow_status:
@@ -2518,7 +2675,8 @@ class UpdateOrderStatusView(APIView):
             return Response({
                 "message": _order_status_message(next_flow_status, "approved") if next_flow_status else "Rate approved",
                 "order_id": order.id,
-                "status": next_flow_status.name if next_flow_status else status_obj.name
+                "status": next_flow_status.name if next_flow_status else status_obj.name,
+                "approval_status": "APPROVED",
             })
 
         if is_auditor_to_billing:
@@ -2718,6 +2876,14 @@ class OrderLogsByOrderView(APIView):
             )
             if latest_rate_log:
                 latest_rate_log.performed_by = None
+            elif order.status:
+                latest_rate_log = OrdersLog.objects.create(
+                    order=order,
+                    action=order.status,
+                    performed_by=None,
+                    remarks='Rate approval pending',
+                )
+                logs.append(latest_rate_log)
 
         serializer = OrdersLogSerializer(logs, many=True)
         return Response(serializer.data)
@@ -2896,7 +3062,13 @@ class OrderListView(APIView):
         if user_id:
             orders = orders.filter(created_by=user_id)
 
-        orders = orders.select_related('status', 'created_by').prefetch_related('items').order_by('-created_at').distinct()
+        orders = (
+            orders
+            .select_related('status', 'created_by')
+            .prefetch_related('items', 'rate_approvals__approver')
+            .order_by('-created_at')
+            .distinct()
+        )
 
         data = []
         for order in orders:
@@ -2928,6 +3100,7 @@ class OrderListView(APIView):
                     .values_list('category', flat=True)
                     .distinct()
                 ),
+                'rate_approvals': _order_rate_approval_payload(order),
                 'items': OrderItemSerializer(items_qs, many=True).data
             })
 
@@ -3001,6 +3174,20 @@ def _display_user_name(user):
     if not user:
         return "Unknown"
     return getattr(user, "name", None) or getattr(user, "username", "Unknown")
+
+def _order_rate_approval_payload(order):
+    return [
+        {
+            'id': approval.id,
+            'approver': approval.approver_id,
+            'approver_name': _display_user_name(approval.approver),
+            'status': approval.status,
+            'remarks': approval.remarks or '',
+            'approved_at': approval.approved_at,
+            'created_at': approval.created_at,
+        }
+        for approval in order.rate_approvals.select_related('approver').all()
+    ]
 
 def _mark_order_notifications_read(order, user):
     if not order or not user:
@@ -3127,12 +3314,25 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
     previous_name = (getattr(previous_status, "name", "") or "").strip().lower()
 
     if normalized_status in {"rate approval", "need approval"}:
-        _notify_role(
-            "approver",
+        assigned_approvers = _assigned_rate_approvers_for_order(
             order,
-            f"Order {order.order_number} from {creator_name} needs rate approval.",
+            status_filter="PENDING",
             exclude_user=actor,
         )
+        if assigned_approvers:
+            for approver in assigned_approvers:
+                _create_notification(
+                    approver,
+                    order,
+                    f"Order {order.order_number} from {creator_name} needs your rate approval.",
+                )
+        else:
+            _notify_role(
+                "approver",
+                order,
+                f"Order {order.order_number} from {creator_name} needs rate approval.",
+                exclude_user=actor,
+            )
         return
 
     if normalized_status in {"billing", "billing pending", "billing approval"}:

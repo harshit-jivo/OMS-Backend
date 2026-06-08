@@ -160,6 +160,31 @@ class ProductListView(ListAPIView):
         return queryset
 
 
+class ProductVarietyListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        category = str(request.query_params.get('category') or '').strip()
+        queryset = Product.objects.filter(active_product_q()).exclude(is_deleted='Y')
+        if category:
+            queryset = queryset.filter(category__iexact=category)
+
+        varieties = sorted(
+            {
+                str(variety or '').strip()
+                for variety in queryset.values_list('variety', flat=True)
+                if str(variety or '').strip()
+            },
+            key=str.lower,
+        )
+
+        return Response({
+            'category': category,
+            'count': len(varieties),
+            'varieties': varieties,
+        })
+
+
 class ProductDetailView(RetrieveAPIView):
     """Get single product by ID or item_code"""
     permission_classes = [AllowAny]

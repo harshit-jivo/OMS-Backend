@@ -7,7 +7,7 @@ from .serializers import LoginSerializer, UpdateUserSerializer, UserSerializer,S
 from rest_framework.generics import ListAPIView
 from .models import State, Company, MainGroup,UserRole,User, UserPartyAssignment,PartyProductAssignment
 from sap_sync.models import Party, Product, active_product_q
-from orders.models import Categories
+from orders.models import Categories, RateApproverRule
 from decimal import Decimal
 from django.db.models import Q
 
@@ -15,6 +15,35 @@ from django.db.models import Q
 def _normalize_category(value):
     normalized = str(value or '').strip().upper()
     return normalized or None
+
+
+def _selected_variety_names(value):
+    return list(dict.fromkeys(
+        variety.strip()
+        for variety in str(value or '').split(',')
+        if variety.strip()
+    ))
+
+
+def _sync_rate_approver_rules(user):
+    RateApproverRule.objects.filter(approver=user).delete()
+
+    role_name = str(getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
+    category = _normalize_category(getattr(getattr(user, 'category', None), 'category', None))
+    varieties = _selected_variety_names(getattr(user, 'variety', ''))
+
+    if role_name != 'approver' or not category or not varieties:
+        return
+
+    for variety in varieties:
+        RateApproverRule.objects.update_or_create(
+            category=category,
+            variety=variety,
+            defaults={
+                'approver': user,
+                'is_active': True,
+            },
+        )
 
 
 def _party_key(card_code, category):
@@ -658,6 +687,7 @@ class CreateUserView(APIView):
 
         if serializer.is_valid():
             user = serializer.save()
+            _sync_rate_approver_rules(user)
             return Response({
                 'success': True,
                 'message': 'User created successfully',
@@ -703,6 +733,7 @@ class UserDetailView(APIView):
         serializer = UpdateUserSerializer(user, data=request.data, partial=True)
         if serializer.is_valid():
             updated_user = serializer.save()
+            _sync_rate_approver_rules(updated_user)
             return Response({
  
                 'success': True,

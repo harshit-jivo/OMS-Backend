@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     SyncAllView, SyncProductsView, SyncPartiesView, SyncPartyAddressesView,
     SyncBranchesView, ProductListView, ProductDetailView, ProductByCodeView,
+    ProductVarietyListView,
     PartyListView, PartyDetailView, PartyByCodeView, PartyAddressListView,
     BranchListView, SyncLogListView, SyncScheduleListView,
     SyncScheduleDetailView, ToggleScheduleView, SyncStatusView,
@@ -20,6 +21,7 @@ urlpatterns = [
     
     # ============ Products ============
     path('products/', ProductListView.as_view(), name='product-list'),
+    path('product-varieties/', ProductVarietyListView.as_view(), name='product-varieties'),
     path('products/<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
     path('products/code/<str:item_code>/', ProductByCodeView.as_view(), name='product-by-code'),
     

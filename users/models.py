@@ -227,6 +227,8 @@ class User(AbstractUser):
         related_name='users'
     )
 
+    variety = models.TextField(blank=True, null=True)
+
     main_groups = models.ManyToManyField(
         'MainGroup',
         blank=True,

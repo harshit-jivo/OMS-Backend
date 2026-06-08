@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice
+from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice, OrderRateApproval, OrderItemApprovalMapping
 from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
@@ -206,6 +206,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     scheme_item_code = serializers.SerializerMethodField()
     is_scheme_visible = serializers.SerializerMethodField()
     schemes = OrderItemSchemeSerializer(many=True, read_only=True)
+    approval_approvers = serializers.SerializerMethodField()
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
@@ -234,9 +235,38 @@ class OrderItemSerializer(serializers.ModelSerializer):
             or has_multiple_schemes
         )
 
+    def get_approval_approvers(self, obj):
+        mappings = OrderItemApprovalMapping.objects.filter(order_item=obj).select_related('approver')
+        return [
+            {
+                'id': mapping.approver_id,
+                'name': getattr(mapping.approver, 'name', None) or getattr(mapping.approver, 'username', ''),
+            }
+            for mapping in mappings
+            if mapping.approver_id
+        ]
+
     class Meta:
         model = OrderItem
         fields = "__all__"
+
+class OrderRateApprovalSerializer(serializers.ModelSerializer):
+    approver_name = serializers.SerializerMethodField()
+
+    def get_approver_name(self, obj):
+        return getattr(obj.approver, 'name', None) or getattr(obj.approver, 'username', '')
+
+    class Meta:
+        model = OrderRateApproval
+        fields = [
+            "id",
+            "approver",
+            "approver_name",
+            "status",
+            "remarks",
+            "approved_at",
+            "created_at",
+        ]
 
 class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source="status.name")
@@ -246,6 +276,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source="status.name", read_only=True)
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
+    rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
 
     def get_categories(self, obj):
         return list(
@@ -291,6 +322,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "items",
             "items_count",
             "categories",
+            "rate_approvals",
         ]
 
 class OrderDetailSerializer(serializers.ModelSerializer):
@@ -300,6 +332,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source="status.name")
     party_state = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
+    rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
 
     def get_party_state(self, obj):
         party = SapParty.objects.filter(card_code=obj.card_code).first()
@@ -325,6 +358,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "approved_by", "approved_at", "rejected_by", "rejected_at",
             "rejection_reason", "reject_reason", "updated_at",
             "items", "items_count", "party_state",
+            "rate_approvals",
         ]
 
 class CreateSchemeSerializer(serializers.ModelSerializer):
