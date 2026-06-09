@@ -272,6 +272,95 @@ class AssignPartiesView(APIView):
             'data': {'added': added_count, 'removed': removed_count, 'total_assigned': len(new_assignments)}
         })
 
+class BulkAssignUsersPartiesView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        rows = request.data.get('rows', [])
+        if not isinstance(rows, list) or not rows:
+            return Response(
+                {'success': False, 'message': 'rows must be a non-empty list'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        added_count = 0
+        existing_count = 0
+        errors = []
+
+        for index, row in enumerate(rows):
+            row_number = index + 2
+            if not isinstance(row, dict):
+                errors.append(f'Row {row_number}: invalid row')
+                continue
+
+            user_identifier = str(
+                row.get('user_id')
+                or row.get('username')
+                or row.get('user_name')
+                or row.get('name')
+                or ''
+            ).strip()
+            card_code = str(row.get('card_code') or row.get('party_code') or '').strip()
+
+            if not user_identifier or not card_code:
+                errors.append(f'Row {row_number}: user and party code are required')
+                continue
+
+            user_queryset = User.objects.filter(is_active=True)
+            if str(user_identifier).isdigit():
+                user_queryset = user_queryset.filter(
+                    Q(id=int(user_identifier)) |
+                    Q(username__iexact=user_identifier) |
+                    Q(name__iexact=user_identifier)
+                )
+            else:
+                user_queryset = user_queryset.filter(
+                    Q(username__iexact=user_identifier) |
+                    Q(name__iexact=user_identifier)
+                )
+            user = user_queryset.first()
+            if not user:
+                errors.append(f'Row {row_number}: user {user_identifier} not found')
+                continue
+
+            user_category = _get_user_assignment_category(user)
+            if not user_category:
+                errors.append(f'Row {row_number}: user {user.username} has no category')
+                continue
+
+            party = Party.objects.filter(
+                card_code=card_code,
+                category__iexact=user_category,
+            ).order_by('id').first()
+            if not party:
+                errors.append(f'Row {row_number}: party {card_code} not found in {user_category}')
+                continue
+
+            _assignment, created = UserPartyAssignment.objects.update_or_create(
+                user=user,
+                card_code=card_code,
+                category=user_category,
+                defaults={
+                    'is_active': True,
+                    'assigned_by': request.user if request.user.is_authenticated else None,
+                },
+            )
+            if created:
+                added_count += 1
+            else:
+                existing_count += 1
+
+        return Response({
+            'success': len(errors) == 0,
+            'message': f'Added: {added_count}, Existing/updated: {existing_count}, Errors: {len(errors)}',
+            'data': {
+                'added': added_count,
+                'existing': existing_count,
+                'errors': errors,
+                'total_rows': len(rows),
+            },
+        })
+
 class PartyProductsView(APIView):
     """Get all products assigned to a party with their basic_rate"""
     permission_classes = [IsAuthenticated]
