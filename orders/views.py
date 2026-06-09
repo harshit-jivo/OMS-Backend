@@ -51,7 +51,7 @@ APPROVER_REJECTED_ACTION_ID = 7
 APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
 APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
 RATE_CONDITION_CHOICES = {
-    'BASIC_GT_MARKET': 'Basic Price > Market Price',
+    'BASIC_GT_MARKET': 'Basic Price > Market Price and Market Price != 0',
     'BASIC_LT_MARKET': 'Basic Price < Market Price',
     'BASIC_EQ_MARKET': 'Basic Price = Market Price',
     'BASIC_MARKET_ZERO': 'Basic Price and Market Price = 0',
@@ -1115,6 +1115,10 @@ class WDashboardChartsView(APIView):
         monthly_sales = (
             base_orders
             .filter(created_at__gte=year_start, created_at__lte=year_end)
+            .filter(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed')
+            )
             .annotate(month=TruncMonth('created_at'))
             .values('month')
             .annotate(revenue=Sum('total_amount'), count=Count('id', distinct=True))
@@ -1380,7 +1384,30 @@ class WDashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
-        state_item_sales = _build_state_item_sales(completed_orders, state_map)
+        
+        req_status = request.query_params.get('status', 'completed').lower()
+        if req_status == 'pending':
+            target_orders = filtered_orders.exclude(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed') |
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'rejected':
+            target_orders = filtered_orders.filter(
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'all':
+            target_orders = filtered_orders
+        else:
+            target_orders = completed_orders
+            
+        target_card_codes = list(
+            target_orders.values_list('card_code', flat=True).distinct()
+        )
+        state_map = _build_party_state_map(target_card_codes)
+        state_item_sales = _build_state_item_sales(target_orders, state_map)
         highest_sales_order = (
             filtered_orders
             .order_by('-total_amount')
@@ -1551,6 +1578,10 @@ class DashboardChartsView(APIView):
         monthly_sales = (
             base_orders
             .filter(created_at__gte=year_start, created_at__lte=year_end)
+            .filter(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed')
+            )
             .annotate(month=TruncMonth('created_at'))
             .values('month')
             .annotate(revenue=Sum('total_amount'), count=Count('id'))
@@ -1636,7 +1667,26 @@ class DashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
-        state_item_sales = _build_state_item_sales(completed_orders, state_map)
+        
+        req_status = request.query_params.get('status', 'completed').lower()
+        if req_status == 'pending':
+            target_orders = filtered_orders.exclude(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed') |
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'rejected':
+            target_orders = filtered_orders.filter(
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'all':
+            target_orders = filtered_orders
+        else:
+            target_orders = completed_orders
+
+        state_item_sales = _build_state_item_sales(target_orders, state_map)
 
         return Response({
             'filter': {'year': year, 'month': month, 'line_year': line_year},
