@@ -69,7 +69,8 @@ INSTALLED_APPS = [
     'sap_sync',
     'hana',
     'SKU',
-    'serviceLayer'
+    'serviceLayer',
+    'invoice'
 ]
 
 MIDDLEWARE = [
