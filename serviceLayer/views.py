@@ -31,4 +31,26 @@ class SAPInvoiceCreateView(APIView):
                 
                 
                 
+class DraftCreateView(APIView):
     
+    def post(self , request , *args, **kwargs):
+        
+        draft_payload = request.data
+        draft_url = f"{settings.HANA_SERVICE_LAYER_URL}/Drafts"
+        
+        try:
+            session = SAPServiceLayerManager.get_session()
+            sap_response = session.post(draft_url , json = draft_payload , timeout = 20)
+            
+            if sap_response.status_code == 401:
+                SAPServiceLayerManager.clear_session()
+                session = SAPServiceLayerManager.get_session()
+                sap_response = session.post(draft_url , json = draft_payload , timeout = 20)
+                
+            if sap_response.status_code in [200 , 201]:
+                return Response(sap_response.json(), status=status.HTTP_201_CREATED)
+            
+            return Response({"error": "SAP Error", "details": sap_response.json()}, status=sap_response.status_code)
+        
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
