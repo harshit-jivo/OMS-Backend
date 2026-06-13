@@ -733,13 +733,9 @@ def _get_base_orders(user):
             Q(logs__action__name__icontains='auditor')
         ).distinct()
     if role_name == 'approver':
-
         queryset = Order.objects.filter(
-        rate_approvals__approver=user,
-        rate_approvals__status='PENDING',
-        status__code__in=APPROVER_ACTIVE_CODES,
-    ).distinct()
-
+            rate_approvals__approver=user,
+        ).distinct()
         return queryset
     if role_name == 'billing':
         handled_order_ids = (
@@ -1041,14 +1037,15 @@ class WDashboardKPIView(APIView):
             ).count()
 
         if role_name == 'approver':
-            user_approvals = OrderRateApproval.objects.filter(
-                order__in=period_orders,
+            period_approvals = OrderRateApproval.objects.filter(
                 approver=request.user,
+                order__created_at__gte=range_start,
+                order__created_at__lte=range_end,
             )
 
-            accepted_orders = user_approvals.filter(status='APPROVED').count()
-            rejected_orders = user_approvals.filter(status='REJECTED').count()
-            pending_review_orders = user_approvals.filter(status='PENDING').count()
+            pending_review_orders = period_approvals.filter(status='PENDING').count()
+            accepted_orders = period_approvals.filter(status='APPROVED').count()
+            rejected_orders = period_approvals.filter(status='REJECTED').count()
 
             total_orders = accepted_orders + rejected_orders + pending_review_orders
 
@@ -1328,8 +1325,16 @@ class WDashboardChartsView(APIView):
                 },
             ]
         elif role_name == 'approver':
+            approver_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+            ).values_list('order_id', flat=True).distinct()
+            approver_period_orders = Order.objects.filter(
+                id__in=approver_order_ids,
+                created_at__gte=range_start,
+                created_at__lte=range_end,
+            )
             user_approvals = OrderRateApproval.objects.filter(
-                order__in=filtered_orders,
+                order__in=approver_period_orders,
                 approver=request.user,
             )
             decision_data = [
@@ -3100,9 +3105,26 @@ class OrderListView(APIView):
         else:
             orders = Order.objects.all()
 
+        role = getattr(request.user, 'role', None) if request.user.is_authenticated else None
+        role_name = getattr(role, 'name', '').lower() if role else ''
+
         if billing_view:
             # Billing view: show billing-related orders from the caller's allowed scope.
             orders = orders.filter(status_id__in=[3, 5, 6, 8])
+        elif role_name == 'approver' and request.query_params.get('approval_pending', '').lower() == 'true':
+            # Approver pending tab: orders where this approver hasn't acted yet
+            pending_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+                status='PENDING',
+            ).values_list('order_id', flat=True)
+            orders = Order.objects.filter(id__in=pending_order_ids)
+        elif role_name == 'approver' and status_filter:
+            # Approver others: query directly to avoid double JOIN
+            acted_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+                status__in=['APPROVED', 'REJECTED'],
+            ).values_list('order_id', flat=True)
+            orders = Order.objects.filter(id__in=acted_order_ids)
         else:
             if status_filter:
                 orders = orders.filter(status__code=status_filter)
