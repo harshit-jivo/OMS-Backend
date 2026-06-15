@@ -12,7 +12,7 @@ from datetime import datetime
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
-from django.db.models import Sum, Count,F,Q, OuterRef, Subquery
+from django.db.models import Sum, Count, Max, F, Q, OuterRef, Subquery
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from collections import defaultdict
@@ -51,11 +51,11 @@ APPROVER_REJECTED_ACTION_ID = 7
 APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
 APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
 RATE_CONDITION_CHOICES = {
-    'BASIC_GT_MARKET': 'Basic Price > Market Price and Market Price != 0',
-    'BASIC_LT_MARKET': 'Basic Price < Market Price',
-    'BASIC_EQ_MARKET': 'Basic Price = Market Price',
-    'BASIC_MARKET_ZERO': 'Basic Price and Market Price = 0',
-    'BASIC_ZERO_MARKET_GT_ZERO': 'Basic Price = 0 and Market Price > 0',
+    'BASIC_GT_MARKET': 'Price List (Basic) > Basic Price and Basic Price != 0',
+    'BASIC_LT_MARKET': 'Price List (Basic) < Basic Price',
+    'BASIC_EQ_MARKET': 'Price List (Basic) = Basic Price',
+    'BASIC_MARKET_ZERO': 'Price List (Basic) and Basic Price = 0',
+    'BASIC_ZERO_MARKET_GT_ZERO': 'Price List (Basic) = 0 and Basic Price > 0',
 }
 DEFAULT_RATE_CONDITIONS = ['BASIC_GT_MARKET']
 ORDER_FLOW_TYPE_ASM = 'ASM'
@@ -128,12 +128,12 @@ def _order_flow_config_payload(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
         'updated_by': getattr(config.updated_by, 'username', None),
     }
 
-def _get_price_condition_code(basic_price, market_price):
-    if basic_price == 0 and market_price == 0:
+def _get_price_condition_code(price_list_basic, basic_price):
+    if price_list_basic == 0 and basic_price == 0:
         return 'BASIC_MARKET_ZERO'
-    if basic_price > market_price:
+    if price_list_basic > basic_price:
         return 'BASIC_GT_MARKET'
-    if basic_price < market_price:
+    if price_list_basic < basic_price:
         return 'BASIC_LT_MARKET'
     return 'BASIC_EQ_MARKET'
 
@@ -150,8 +150,8 @@ def _get_order_price_condition_codes(items, to_float):
     for item in items:
         if not _item_can_match_flow_condition(item):
             continue
-        bp = to_float(item.get('basic_price', 0))
-        mp = to_float(item.get('market_price', 0))
+        bp = to_float(item.get('price_list_basic', 0))
+        mp = to_float(item.get('basic_price', 0))
         if bp == 0 and mp == 0:
             codes.add('BASIC_EQ_MARKET')
         if bp == 0 and mp > 0:
@@ -278,7 +278,7 @@ def _pending_log_user_for_status(status_obj, actor_user=None):
 def _rate_approval_remarks(flagged_items):
     return '; '.join(flagged_items) or 'Rate approval required by admin price condition'
 
-def _get_rate_approval_reason(item, basic_price, market_price):
+def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
     
@@ -289,15 +289,15 @@ def _get_rate_approval_reason(item, basic_price, market_price):
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
-    # if basic_price == 0:
-    #     return f"{item_name}: Basic price is 0 (Market ₹{market_price})"
+    # if price_list_basic == 0:
+    #     return f"{item_name}: Price List (Basic) is 0 (Basic ₹{basic_price})"
 
-    if market_price > 0 and market_price < basic_price:
-        return f"{item_name}: Market ₹{market_price} < Basic ₹{basic_price}"
+    if basic_price > 0 and basic_price < price_list_basic:
+        return f"{item_name}: Basic ₹{basic_price} < Price List (Basic) ₹{price_list_basic}"
 
     return None
 
-def _get_rate_approval_reason(item, basic_price, market_price):
+def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
@@ -311,14 +311,14 @@ def _get_rate_approval_reason(item, basic_price, market_price):
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
-    if basic_price == 0 and market_price == 0:
-        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
-    if basic_price == 0 and market_price > 0:
-        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
-    if basic_price > market_price:
-        return f"{item_name}: Basic Rs {basic_price} > Market Rs {market_price}"
-    if basic_price < market_price:
-        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
+    if price_list_basic == 0 and basic_price == 0:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} = Basic Rs {basic_price}"
+    if price_list_basic == 0 and basic_price > 0:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
+    if price_list_basic > basic_price:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} > Basic Rs {basic_price}"
+    if price_list_basic < basic_price:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
     return None
 
 def _resolve_scheme_by_id(scheme_id):
@@ -363,8 +363,8 @@ def _create_order_item(order, item, to_float, to_bool):
         pcs=to_float(item.get('pcs', 0)),
         boxes=to_float(item.get('boxes', 0)),
         ltrs=to_float(item.get('ltrs', 0)),
+        price_list_basic=to_float(item.get('price_list_basic', 0)),
         basic_price=to_float(item.get('basic_price', 0)),
-        market_price=to_float(item.get('market_price', 0)),
         total=to_float(item.get('total', 0)),
         tax_rate=to_float(item.get('tax_rate', 0)),
         scheme=first_scheme,
@@ -421,8 +421,8 @@ def _build_order_template_signature(order):
             _normalize_template_number(item.pcs),
             _normalize_template_number(item.boxes),
             _normalize_template_number(item.ltrs),
+            _normalize_template_number(item.price_list_basic),
             _normalize_template_number(item.basic_price),
-            _normalize_template_number(item.market_price),
             tuple(scheme_signatures),
         ))
 
@@ -1358,8 +1358,13 @@ class WDashboardChartsView(APIView):
         # CHART 4: Top Parties by Revenue (selected period)
         top_parties = (
             filtered_orders
-            .values('card_code', 'card_name')
-            .annotate(revenue=Sum('total_amount'), count=Count('id', distinct=True))
+            .values('card_code')
+            .annotate(
+                card_name=Max('card_name'),
+                revenue=Sum('total_amount'),
+                count=Count('id', distinct=True),
+                completed_count=Count('id', distinct=True, filter=Q(status__code__icontains='COMPLETED') | Q(status__name__icontains='Completed')),
+            )
             .order_by('-count', '-revenue')
         )
         top_parties_data = [
@@ -1367,6 +1372,7 @@ class WDashboardChartsView(APIView):
                 'card_code': entry['card_code'],
                 'card_name': entry['card_name'],
                 'count': entry['count'],
+                'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
             }
             for entry in top_parties
@@ -1642,8 +1648,13 @@ class DashboardChartsView(APIView):
         # CHART 4: Top Parties by Revenue (selected period)
         top_parties = (
             filtered_orders
-            .values('card_code', 'card_name')
-            .annotate(revenue=Sum('total_amount'), count=Count('id'))
+            .values('card_code')
+            .annotate(
+                card_name=Max('card_name'),
+                revenue=Sum('total_amount'),
+                count=Count('id'),
+                completed_count=Count('id', filter=Q(status__code__icontains='COMPLETED') | Q(status__name__icontains='Completed')),
+            )
             .order_by('-revenue', '-count')
         )
         top_parties_data = [
@@ -1651,6 +1662,7 @@ class DashboardChartsView(APIView):
                 'card_code': entry['card_code'],
                 'card_name': entry['card_name'],
                 'count': entry['count'],
+                'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
             }
             for entry in top_parties
@@ -2080,8 +2092,8 @@ class UpdateOrderView(APIView):
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
 
-            bp = _to_float(item.get('basic_price', 0))
-            mp = _to_float(item.get('market_price', 0))
+            bp = _to_float(item.get('price_list_basic', 0))
+            mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
@@ -2215,8 +2227,8 @@ class CreateOrderView(APIView):
             flagged_items = []
             for item in items:
                 _create_order_item(order, item, _to_float, _to_bool)
-                bp = _to_float(item.get('basic_price', 0))
-                mp = _to_float(item.get('market_price', 0))
+                bp = _to_float(item.get('price_list_basic', 0))
+                mp = _to_float(item.get('basic_price', 0))
                 rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
                 if rate_approval_reason:
                     needs_approval = True
@@ -2353,8 +2365,8 @@ class CreateOrderView(APIView):
 
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
-            bp = _to_float(item.get('basic_price', 0))
-            mp = _to_float(item.get('market_price', 0))
+            bp = _to_float(item.get('price_list_basic', 0))
+            mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True

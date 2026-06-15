@@ -608,7 +608,7 @@ class TestSalesQuotation(APIView):
             mock_item = SimpleNamespace(
                 item_code="FG0000145",
                 qty=84,
-                basic_price=1286
+                price_list_basic=1286
             )
             
             order = SimpleNamespace(
