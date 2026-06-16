@@ -1376,22 +1376,28 @@ class WDashboardChartsView(APIView):
                 },
             ]
 
-        # CHART 4: Top Parties by Revenue (selected period)
+        # CHART 4: Top Parties by category (selected period)
         top_parties = (
-            filtered_orders
-            .values('card_code')
+            OrderItem.objects
+            .filter(order__in=filtered_orders)
+            .values('order__card_code', 'category')
             .annotate(
-                card_name=Max('card_name'),
-                revenue=Sum('total_amount'),
-                count=Count('id', distinct=True),
-                completed_count=Count('id', distinct=True, filter=Q(status__code__icontains='COMPLETED') | Q(status__name__icontains='Completed')),
+                card_name=Max('order__card_name'),
+                revenue=Sum('total'),
+                count=Count('order_id', distinct=True),
+                completed_count=Count(
+                    'order_id',
+                    distinct=True,
+                    filter=Q(order__status__code__icontains='COMPLETED') | Q(order__status__name__icontains='Completed'),
+                ),
             )
             .order_by('-count', '-revenue')
         )
         top_parties_data = [
             {
-                'card_code': entry['card_code'],
+                'card_code': entry['order__card_code'],
                 'card_name': entry['card_name'],
+                'category': entry['category'] or 'Unknown',
                 'count': entry['count'],
                 'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
@@ -1666,22 +1672,28 @@ class DashboardChartsView(APIView):
             for os in OrderStatus.objects.all()
         ]
 
-        # CHART 4: Top Parties by Revenue (selected period)
+        # CHART 4: Top Parties by category (selected period)
         top_parties = (
-            filtered_orders
-            .values('card_code')
+            OrderItem.objects
+            .filter(order__in=filtered_orders)
+            .values('order__card_code', 'category')
             .annotate(
-                card_name=Max('card_name'),
-                revenue=Sum('total_amount'),
-                count=Count('id'),
-                completed_count=Count('id', filter=Q(status__code__icontains='COMPLETED') | Q(status__name__icontains='Completed')),
+                card_name=Max('order__card_name'),
+                revenue=Sum('total'),
+                count=Count('order_id', distinct=True),
+                completed_count=Count(
+                    'order_id',
+                    distinct=True,
+                    filter=Q(order__status__code__icontains='COMPLETED') | Q(order__status__name__icontains='Completed'),
+                ),
             )
-            .order_by('-revenue', '-count')
+            .order_by('-count', '-revenue')
         )
         top_parties_data = [
             {
-                'card_code': entry['card_code'],
+                'card_code': entry['order__card_code'],
                 'card_name': entry['card_name'],
+                'category': entry['category'] or 'Unknown',
                 'count': entry['count'],
                 'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
