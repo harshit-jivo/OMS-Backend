@@ -29,21 +29,22 @@ def _sync_rate_approver_rules(user):
     RateApproverRule.objects.filter(approver=user).delete()
 
     role_name = str(getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
-    category = _normalize_category(getattr(getattr(user, 'category', None), 'category', None))
+    categories = _get_user_assignment_categories(user)
     varieties = _selected_variety_names(getattr(user, 'variety', ''))
 
-    if role_name != 'approver' or not category or not varieties:
+    if role_name != 'approver' or not categories or not varieties:
         return
 
-    for variety in varieties:
-        RateApproverRule.objects.update_or_create(
-            category=category,
-            variety=variety,
-            defaults={
-                'approver': user,
-                'is_active': True,
-            },
-        )
+    for category in categories:
+        for variety in varieties:
+            RateApproverRule.objects.update_or_create(
+                category=category,
+                variety=variety,
+                defaults={
+                    'approver': user,
+                    'is_active': True,
+                },
+            )
 
 
 def _party_key(card_code, category):
@@ -95,29 +96,51 @@ def _get_user_assignment_category(user):
     return _normalize_category(getattr(category_obj, 'category', None))
 
 
-def _get_category_filtered_assignments(queryset, user_category):
-    if not user_category:
+def _get_user_assignment_categories(user):
+    categories = []
+    categories_manager = getattr(user, 'categories', None)
+    if categories_manager is not None:
+        categories = [
+            _normalize_category(category.category)
+            for category in categories_manager.all()
+            if _normalize_category(category.category)
+        ]
+
+    primary_category = _get_user_assignment_category(user)
+    if primary_category:
+        categories.insert(0, primary_category)
+
+    return list(dict.fromkeys(category for category in categories if category))
+
+
+def _get_category_filtered_assignments(queryset, user_categories):
+    if not user_categories:
         return queryset
+    if isinstance(user_categories, str):
+        user_categories = [user_categories]
     return queryset.filter(
-        Q(category=user_category) | Q(category__isnull=True) | Q(category='')
+        Q(category__in=user_categories) | Q(category__isnull=True) | Q(category='')
     )
 
 
-def _serialize_user_party_assignments(assignments, preferred_category=None):
+def _serialize_user_party_assignments(assignments, preferred_category=None, preferred_categories=None):
     parties_list = []
     card_codes = []
     party_keys = []
     party_selections = []
     seen_keys = set()
+    preferred_categories = preferred_categories or ([preferred_category] if preferred_category else [])
 
     for assignment in assignments:
-        resolved_category = _normalize_category(assignment.category) or _normalize_category(preferred_category)
+        resolved_category = _normalize_category(assignment.category)
+        if not resolved_category and len(preferred_categories) == 1:
+            resolved_category = _normalize_category(preferred_categories[0])
         party = _get_party_for_assignment(assignment.card_code, resolved_category)
         if not party:
             continue
 
         normalized_category = _normalize_category(
-            assignment.category or preferred_category or getattr(party, 'category', None)
+            assignment.category or resolved_category or getattr(party, 'category', None)
         )
         key = _party_key(assignment.card_code, normalized_category)
         if key in seen_keys:
@@ -194,9 +217,9 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _get_user_assignment_category(user)
-        assignments = _get_category_filtered_assignments(assignments, user_category)
-        serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
+        user_categories = _get_user_assignment_categories(user)
+        assignments = _get_category_filtered_assignments(assignments, user_categories)
+        serialized = _serialize_user_party_assignments(assignments, preferred_categories=user_categories)
 
         return Response({
             'success': True,
@@ -223,20 +246,20 @@ class AssignPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         all_active_assignments = UserPartyAssignment.objects.filter(user=user, is_active=True)
-        user_category = _get_user_assignment_category(user)
+        user_categories = _get_user_assignment_categories(user)
 
-        relevant_existing_qs = _get_category_filtered_assignments(all_active_assignments, user_category)
+        relevant_existing_qs = _get_category_filtered_assignments(all_active_assignments, user_categories)
 
         existing = {
             (assignment.card_code, _normalize_category(assignment.category))
             for assignment in relevant_existing_qs
         }
         raw_new_assignments = _normalize_party_selections(party_selections, card_codes)
-        if user_category:
+        if user_categories:
             new_assignments = {
                 (card_code, category)
                 for card_code, category in raw_new_assignments
-                if _normalize_category(category) == user_category
+                if _normalize_category(category) in user_categories
             }
         else:
             new_assignments = raw_new_assignments
@@ -323,18 +346,19 @@ class BulkAssignUsersPartiesView(APIView):
                 errors.append(f'Row {row_number}: user {user_identifier} not found')
                 continue
 
-            user_category = _get_user_assignment_category(user)
-            if not user_category:
+            user_categories = _get_user_assignment_categories(user)
+            if not user_categories:
                 errors.append(f'Row {row_number}: user {user.username} has no category')
                 continue
 
             party = Party.objects.filter(
                 card_code=card_code,
-                category__iexact=user_category,
+                category__in=user_categories,
             ).order_by('id').first()
             if not party:
-                errors.append(f'Row {row_number}: party {card_code} not found in {user_category}')
+                errors.append(f'Row {row_number}: party {card_code} not found in {", ".join(user_categories)}')
                 continue
+            user_category = _normalize_category(party.category)
 
             _assignment, created = UserPartyAssignment.objects.update_or_create(
                 user=user,
@@ -680,9 +704,9 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _get_user_assignment_category(user)
-        assignments = _get_category_filtered_assignments(assignments, user_category)
-        serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
+        user_categories = _get_user_assignment_categories(user)
+        assignments = _get_category_filtered_assignments(assignments, user_categories)
+        serialized = _serialize_user_party_assignments(assignments, preferred_categories=user_categories)
 
         return Response({
             'success': True,
@@ -728,7 +752,7 @@ class UserListForAssignmentView(APIView):
         users = (
             User.objects.filter(is_active=True)
             .select_related('role', 'company', 'main_group', 'state')
-            .prefetch_related('main_groups', 'user_states__state')
+            .prefetch_related('main_groups', 'categories', 'user_states__state')
             .order_by('id')
         )
         data = UserSerializer(users, many=True).data

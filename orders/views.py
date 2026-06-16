@@ -466,6 +466,23 @@ def _get_user_category_name(user):
     return normalized_category or None
 
 
+def _get_user_category_names(user):
+    categories = []
+    categories_manager = getattr(user, 'categories', None)
+    if categories_manager is not None:
+        categories = [
+            str(getattr(category, 'category', category) or '').strip().upper()
+            for category in categories_manager.all()
+            if str(getattr(category, 'category', category) or '').strip()
+        ]
+
+    primary_category = _get_user_category_name(user)
+    if primary_category:
+        categories.insert(0, primary_category)
+
+    return list(dict.fromkeys(category for category in categories if category))
+
+
 def _normalize_scope_name(value):
     normalized = str(value or '').strip()
     return normalized or None
@@ -657,15 +674,15 @@ def _build_iexact_filter(field_name, values):
 
 
 def _apply_billing_order_scope(queryset, user):
-    user_category = _get_user_category_name(user)
+    user_categories = _get_user_category_names(user)
     user_main_groups = _get_user_main_group_names(user)
 
-    if not user_category and not user_main_groups:
+    if not user_categories and not user_main_groups:
         return queryset
 
     party_queryset = SapParty.objects.all()
-    if user_category:
-        party_queryset = party_queryset.filter(category__iexact=user_category)
+    if user_categories:
+        party_queryset = party_queryset.filter(category__in=user_categories)
     if user_main_groups:
         party_queryset = party_queryset.filter(
             _build_iexact_filter('main_group', user_main_groups)
@@ -675,8 +692,8 @@ def _apply_billing_order_scope(queryset, user):
         card_code__in=party_queryset.values_list('card_code', flat=True)
     )
 
-    if user_category:
-        queryset = queryset.filter(items__category__iexact=user_category)
+    if user_categories:
+        queryset = queryset.filter(items__category__in=user_categories)
 
     return queryset.distinct()
 
@@ -695,8 +712,8 @@ def _billing_users_for_order(order, exclude_user=None):
 
     matching_users = []
     for user in users:
-        user_category = _get_user_category_name(user)
-        if user_category and user_category not in order_categories:
+        user_categories = _get_user_category_names(user)
+        if user_categories and not set(user_categories).intersection(order_categories):
             continue
 
         user_main_groups = _get_user_main_group_names(user)
@@ -704,8 +721,8 @@ def _billing_users_for_order(order, exclude_user=None):
             party_match = SapParty.objects.filter(
                 card_code=order.card_code,
             )
-            if user_category:
-                party_match = party_match.filter(category__iexact=user_category)
+            if user_categories:
+                party_match = party_match.filter(category__in=user_categories)
             party_match = party_match.filter(
                 _build_iexact_filter('main_group', user_main_groups)
             )
