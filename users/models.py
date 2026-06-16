@@ -227,12 +227,6 @@ class User(AbstractUser):
         related_name='users'
     )
 
-    categories = models.ManyToManyField(
-        'orders.Categories',
-        blank=True,
-        related_name='m2m_users'
-    )
-
     variety = models.TextField(blank=True, null=True)
 
     main_groups = models.ManyToManyField(

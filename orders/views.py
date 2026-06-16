@@ -467,20 +467,8 @@ def _get_user_category_name(user):
 
 
 def _get_user_category_names(user):
-    categories = []
-    categories_manager = getattr(user, 'categories', None)
-    if categories_manager is not None:
-        categories = [
-            str(getattr(category, 'category', category) or '').strip().upper()
-            for category in categories_manager.all()
-            if str(getattr(category, 'category', category) or '').strip()
-        ]
-
-    primary_category = _get_user_category_name(user)
-    if primary_category:
-        categories.insert(0, primary_category)
-
-    return list(dict.fromkeys(category for category in categories if category))
+    category = _get_user_category_name(user)
+    return [category] if category else []
 
 
 def _normalize_scope_name(value):
