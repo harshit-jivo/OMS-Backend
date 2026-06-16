@@ -68,3 +68,18 @@ class InvoiceLog(models.Model):
             invoice_payload=self.invoice_payload,
             created_by=self.created_by
         )    
+        
+class InvoiceRefLogs(models.Model):
+    ref_id = models.CharField(max_length=25)
+    card_name =  models.CharField(max_length=255)
+    doc_date = models.DateField()
+    so_number =  models.CharField(max_length=255)
+    
+    status = models.CharField(max_length = 255)
+    error_message = models.TextField(blank = True , null = True)
+        
+    posted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    posted_at = models.DateTimeField(auto_now_add = True)
+    
+    class Meta:
+        db_table = 'invoice_ref_logs'

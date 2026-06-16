@@ -466,3 +466,43 @@ class Queries():
             FROM "{s}"."NNM1" AS T0
         WHERE T0."ObjectCode" = '13' AND T0."Indicator" = '{finYear }' AND T0."BPLId" = '{BPLId}'
         """
+        
+    @staticmethod
+    def get_draft_verification(refId):
+        s = Queries.SCHEMA
+        return f"""SELECT * FROM "{s}"."ODRF" AS T0 WHERE T0."U_OMS_REF" = '{refId}' """
+    
+    @staticmethod
+    def get_invoice_status(statusCode):
+        s = Queries.SCHEMA
+        return f"""
+        SELECT
+        	T0."DocEntry",
+        	T0."DocNum",
+        	T0."DocDate",
+        	T0."DocDueDate",
+        	T0."CardCode",
+        	T0."CardName",
+        	T0."Address",
+        	T0."Address2",
+        	T0."ShipToCode",
+        	T0."U_OMS_REF",
+
+        	T1."LineNum",
+        	T1."BaseRef",
+        	T1."BaseType",
+        	T1."BaseLine",
+        	T1."ItemCode",
+        	T1."Dscription",
+        	T1."ShipDate",
+        	T1."OpenQty",
+        	T1."Price",
+        	T1."LineTotal",
+        	T1."WhsCode"
+
+        FROM "{s}"."ODRF" AS T0
+        LEFT JOIN "{s}"."DRF1" AS T1
+        ON T0."DocEntry" = T1."DocEntry"
+        WHERE T0."WddStatus" = '{statusCode}' AND T0."ObjType" = '13'
+        ORDER BY T0."DocDate" DESC
+    """

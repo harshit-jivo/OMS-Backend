@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView , GetSeries
+from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView , GetSeries , GetDraftVerification , GetInvoiceDrafts
 
 urlpatterns = [
     path('product-stock/' , GetProductStockView.as_view()),
@@ -19,5 +19,7 @@ urlpatterns = [
     path('batch-details/' , GetBatchDetailsView.as_view()),
     path('inventory-details/' , GetInventoryDetailsView.as_view()),
     path('item-price/' , GetItemPriceView.as_view()),
-    path('series/' , GetSeries.as_view())
+    path('series/' , GetSeries.as_view()),
+    path('draft/verify' , GetDraftVerification.as_view()),
+    path('invoice-drafts/', GetInvoiceDrafts.as_view())
 ]

@@ -1,8 +1,8 @@
 from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from .models import InvoiceLog , InvocieHistory
-from .serializers import InvoiceLogSerializer ,InvoiveHistorySerializer
+from .models import InvoiceLog , InvocieHistory, InvoiceRefLogs
+from .serializers import InvoiceLogSerializer ,InvoiveHistorySerializer , InvoiceRefLogsSerializer
 from rest_framework.permissions import IsAuthenticated , AllowAny
 from rest_framework import status
 from rest_framework.generics import CreateAPIView, ListAPIView
@@ -59,3 +59,8 @@ class InvoiceHistoryView(APIView):
         history = invoice_log.history.all()
         serializer = InvoiveHistorySerializer(history, many=True)
         return Response(serializer.data)
+
+class InvoiceRefLogCreateView(CreateAPIView):
+    
+    serializer_class = InvoiceRefLogsSerializer
+    queryset = InvoiceRefLogs.objects.all()
