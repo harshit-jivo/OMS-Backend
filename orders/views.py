@@ -207,6 +207,8 @@ def _get_next_foc_status(current_status, fallback_name='Billing'):
 
 def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False):
     if force_foc_flow:
+        if flow_type == ORDER_FLOW_TYPE_BILLING:
+            return _get_status_by_name('Auditor Approval'), False
         return _get_status_by_name('Billing'), False
 
     config = _get_order_flow_config(flow_type)
@@ -236,6 +238,8 @@ def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type
 
 def _get_next_order_flow_status(order, current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
     if getattr(order, 'is_foc', False):
+        if flow_type == ORDER_FLOW_TYPE_BILLING:
+            return _get_next_flow_status(current_status, fallback_name or 'Auditor Approval', flow_type=flow_type)
         return _get_next_foc_status(current_status, fallback_name or 'Billing')
     return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type)
 
