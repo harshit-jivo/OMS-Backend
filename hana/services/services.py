@@ -122,3 +122,10 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def get_series(self , finYear , groupCode):
+        with HANAConnection() as conn:
+            query = Queries.get_series(finYear , groupCode)
+            result = conn.execute(query)
+
+        return result

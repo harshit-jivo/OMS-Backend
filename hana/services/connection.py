@@ -452,3 +452,17 @@ class Queries():
             FROM "{s}"."ITM1" AS T0
             WHERE T0."ItemCode" = '{item_code}' AND T0."PriceList" = {price_list}
         """
+
+    @staticmethod
+    def get_series(finYear , BPLId):
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+                T0."Series",
+                T0."ObjectCode",
+                T0."SeriesName",
+                T0."GroupCode",
+                T0."Indicator"
+            FROM "{s}"."NNM1" AS T0
+        WHERE T0."ObjectCode" = '13' AND T0."Indicator" = '{finYear }' AND T0."BPLId" = '{BPLId}'
+        """

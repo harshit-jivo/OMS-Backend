@@ -190,3 +190,13 @@ class GetItemPriceView(APIView):
             
         item_price = SalesOrderService().get_item_price(item_code , price_list)
         return Response(item_price)
+
+class GetSeries(APIView):
+    def get(self , request):
+        finYear = request.query_params.get('finYear')
+        groupCode = request.query_params.get('groupCode')
+        if not finYear or not groupCode:
+            return Response({"error" : "Finanical month and year and GroupCode / BPLId is  require"} , status = status.HTTP_400_BAD_REQUEST)
+        
+        series_detail = SalesOrderService().get_series(finYear , groupCode)
+        return Response(series_detail)
