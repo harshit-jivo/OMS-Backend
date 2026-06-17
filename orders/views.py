@@ -744,6 +744,8 @@ def _get_base_orders(user):
     if role_name == 'approver':
         queryset = Order.objects.filter(
             rate_approvals__approver=user,
+            rate_approvals__status='PENDING',
+            status__code__in=APPROVER_ACTIVE_CODES,
         ).distinct()
         return queryset
     if role_name == 'billing':
@@ -3145,12 +3147,15 @@ class OrderListView(APIView):
             # Billing view: show billing-related orders from the caller's allowed scope.
             orders = orders.filter(status_id__in=[3, 5, 6, 8])
         elif role_name == 'approver' and request.query_params.get('approval_pending', '').lower() == 'true':
-            # Approver pending tab: orders where this approver hasn't acted yet
-            pending_order_ids = OrderRateApproval.objects.filter(
-                approver=request.user,
-                status='PENDING',
-            ).values_list('order_id', flat=True)
-            orders = Order.objects.filter(id__in=pending_order_ids)
+            # Approver pending tab: only orders still waiting at the rate approval stage.
+            orders = orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='PENDING',
+            )
+            if status_filter:
+                orders = orders.filter(status__code=status_filter)
+            else:
+                orders = orders.filter(status__code__in=APPROVER_ACTIVE_CODES)
         elif role_name == 'approver' and status_filter:
             # Approver others: query directly to avoid double JOIN
             acted_order_ids = OrderRateApproval.objects.filter(
