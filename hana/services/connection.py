@@ -476,33 +476,28 @@ class Queries():
     def get_invoice_status(statusCode):
         s = Queries.SCHEMA
         return f"""
-        SELECT
-        	T0."DocEntry",
-        	T0."DocNum",
-        	T0."DocDate",
-        	T0."DocDueDate",
-        	T0."CardCode",
-        	T0."CardName",
-        	T0."Address",
-        	T0."Address2",
-        	T0."ShipToCode",
-        	T0."U_OMS_REF",
+        	SELECT 
+		T0."WddCode",
+		T0."Status",
+		T0."UserSign",
 
-        	T1."LineNum",
-        	T1."BaseRef",
-        	T1."BaseType",
-        	T1."BaseLine",
-        	T1."ItemCode",
-        	T1."Dscription",
-        	T1."ShipDate",
-        	T1."OpenQty",
-        	T1."Price",
-        	T1."LineTotal",
-        	T1."WhsCode"
+		T1."DocEntry",
+		T1."DocDueDate",
+		T1."CardCode",
+		T1."CardName",
+		T1."Address",
+		T1."Address2",
+		T1."ShipToCode",
+        T1."DocTotal",
+		T1."U_OMS_REF"
 
-        FROM "{s}"."ODRF" AS T0
-        LEFT JOIN "{s}"."DRF1" AS T1
-        ON T0."DocEntry" = T1."DocEntry"
-        WHERE T0."WddStatus" = '{statusCode}' AND T0."ObjType" = '13'
-        ORDER BY T0."DocDate" DESC
+		FROM "{s}"."OWDD" AS T0
+		LEFT JOIN "{s}"."ODRF" AS T1
+		ON T0."DraftEntry" = T1."DocEntry"
+		WHERE T0."ObjType" = '13' AND T0."Status" = '{statusCode}' AND T1."U_OMS_REF" IS NOT NULL
+        ORDER BY T1."DocDate" DESC
+
     """
+
+
+    

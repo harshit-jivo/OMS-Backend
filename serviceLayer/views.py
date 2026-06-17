@@ -54,3 +54,32 @@ class DraftCreateView(APIView):
         
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class DraftApproveView(APIView):
+
+    def post(self , request , *args , **kwargs):
+        approve_payload =  request.data
+        approval_id = request.query_params.get("approval_id")
+
+        if not approval_id:
+            return Response({"error": "Approval Id is Mandatory"}, status=status.HTTP_400_BAD_REQUEST)
+
+        approve_url = f"{settings.HANA_SERVICE_LAYER_URL}/ApprovalRequests({approval_id})"
+
+        try:
+            session = SAPServiceLayerManager.get_session()
+            sap_response = session.patch(approve_url , json=approve_payload , timeout=20)
+
+            if sap_response.status_code == 401:
+                SAPServiceLayerManager.clear_session()
+                session = SAPServiceLayerManager.get_session()
+                sap_response = session.patch(approve_url , json=approve_payload , timeout=20)
+
+            if sap_response.status_code in [200 , 201, 204]:
+                 return Response({"status": "approved", "approval_id": approval_id}, status=status.HTTP_200_OK)
+
+            return Response({"error": "SAP Error", "details": sap_response.json()}, status=sap_response.status_code)
+        
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
