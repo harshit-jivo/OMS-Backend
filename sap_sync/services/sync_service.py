@@ -441,6 +441,7 @@ class SyncService:
                         #'tax_code': row.get('TaxCode'),
                         'is_deleted': row.get('Deleted', 'N'),
                         'variety': row.get('U_Variety'),
+                        'type': row.get('U_TYPE'),
                         'sub_group': row.get('U_Sub_Group'),
                         'sal_pack_unit': row.get('SalPackUn'),
                         'brand': row.get('U_Brand'),
