@@ -4,7 +4,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from users.models import User, UserRole
 
 from .models import Order, OrderRateApproval, OrderStatus
-from .views import OrderListView, _get_base_orders, _get_rate_approval_reason
+from .views import OrderListView, WDashboardKPIView, _get_base_orders, _get_rate_approval_reason
 
 
 class RateApprovalReasonTests(SimpleTestCase):
@@ -97,3 +97,26 @@ class ApproverOrderScopeTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([order["order_number"] for order in response.data], ["ORD-PENDING"])
+
+    def test_approver_dashboard_pending_matches_active_pending_scope(self):
+        pending_order = self._create_order("ORD-PENDING", self.rate_status)
+        billing_order = self._create_order("ORD-BILLING", self.billing_status)
+
+        OrderRateApproval.objects.create(
+            order=pending_order,
+            approver=self.approver,
+            status="PENDING",
+        )
+        OrderRateApproval.objects.create(
+            order=billing_order,
+            approver=self.approver,
+            status="PENDING",
+        )
+
+        request = APIRequestFactory().get("/orders/dashboardW/?month=0")
+        force_authenticate(request, user=self.approver)
+
+        response = WDashboardKPIView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["pending_review_orders"], 1)

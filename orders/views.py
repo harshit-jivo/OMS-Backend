@@ -1054,7 +1054,7 @@ class WDashboardKPIView(APIView):
                 order__created_at__lte=range_end,
             )
 
-            pending_review_orders = period_approvals.filter(status='PENDING').count()
+            pending_review_orders = period_orders.count()
             accepted_orders = period_approvals.filter(status='APPROVED').count()
             rejected_orders = period_approvals.filter(status='REJECTED').count()
 
@@ -1362,7 +1362,7 @@ class WDashboardChartsView(APIView):
                 {
                     'status': 'pending',
                     'label': 'Pending Approval',
-                    'count': user_approvals.filter(status='PENDING').count(),
+                    'count': filtered_orders.count(),
                 },
             ]
 
