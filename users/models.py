@@ -229,6 +229,10 @@ class User(AbstractUser):
 
     variety = models.TextField(blank=True, null=True)
 
+    # Sub group(s) assigned to the user (comma separated). Replaces variety for
+    # product scoping and rate-approver matching. `variety` is kept for history.
+    sub_group = models.TextField(blank=True, null=True)
+
     main_groups = models.ManyToManyField(
         'MainGroup',
         blank=True,

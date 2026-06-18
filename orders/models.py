@@ -321,16 +321,18 @@ class RateApproverRule(models.Model):
 
     variety = models.CharField(max_length=100, blank=True, null=True)
 
+    sub_group = models.CharField(max_length=100, blank=True, null=True)
+
     is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "rate_approver_rules"
-        unique_together = ("category", "variety")
+        unique_together = ("category", "sub_group")
 
     def __str__(self):
-        return f"{self.category} / {self.variety} -> {self.approver}"
+        return f"{self.category} / {self.sub_group} -> {self.approver}"
 
 
 class OrderRateApproval(models.Model):

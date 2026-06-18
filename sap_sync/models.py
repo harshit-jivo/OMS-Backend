@@ -23,6 +23,7 @@ class Product(models.Model):
     tax_rate = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     is_deleted = models.CharField(max_length=1, default='N', blank=True, null=True)
     variety = models.CharField(max_length=100, blank=True, null=True)
+    sub_group = models.CharField(max_length=100, blank=True, null=True)
     sal_pack_unit = models.CharField(max_length=50, blank=True, null=True)
     brand = models.CharField(max_length=100, blank=True, null=True)
     on_hand = models.DecimalField(max_digits=18, decimal_places=6, blank=True, null=True)

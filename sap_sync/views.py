@@ -169,19 +169,21 @@ class ProductVarietyListView(APIView):
         if category:
             queryset = queryset.filter(category__iexact=category)
 
-        varieties = sorted(
+        sub_groups = sorted(
             {
-                str(variety or '').strip()
-                for variety in queryset.values_list('variety', flat=True)
-                if str(variety or '').strip()
+                str(sub_group or '').strip()
+                for sub_group in queryset.values_list('sub_group', flat=True)
+                if str(sub_group or '').strip()
             },
             key=str.lower,
         )
 
         return Response({
             'category': category,
-            'count': len(varieties),
-            'varieties': varieties,
+            'count': len(sub_groups),
+            # `varieties` kept for backward compatibility; both now carry sub groups.
+            'varieties': sub_groups,
+            'sub_groups': sub_groups,
         })
 
 

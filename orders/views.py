@@ -810,9 +810,28 @@ def _mark_rate_approval_decision(order, user, decision, remarks=''):
     approval.save(update_fields=['status', 'remarks', 'approved_at'])
     return approval
 
+def _get_item_sub_group(item):
+    """Resolve an order item's sub group from the synced SAP product (sap_products).
+
+    OrderItem has no sub_group column, so we look it up by item_code (and
+    category when available).
+    """
+    item_code = str(getattr(item, 'item_code', '') or '').strip()
+    if not item_code:
+        return ''
+
+    category = str(getattr(item, 'category', '') or '').strip()
+    product_query = SapProduct.objects.filter(item_code__iexact=item_code)
+    if category:
+        product_query = product_query.filter(category__iexact=category)
+
+    product = product_query.first()
+    return str(getattr(product, 'sub_group', '') or '').strip() if product else ''
+
+
 def _get_rate_approvers_for_item(item):
     category = str(getattr(item, 'category', '') or '').strip()
-    variety = str(getattr(item, 'variety', '') or '').strip()
+    sub_group = _get_item_sub_group(item)
     if not category:
         return []
 
@@ -820,19 +839,19 @@ def _get_rate_approvers_for_item(item):
         category__iexact=category,
         is_active=True,
     )
-    if variety:
-        rule = rule_query.filter(variety__iexact=variety).select_related('approver').first()
+    if sub_group:
+        rule = rule_query.filter(sub_group__iexact=sub_group).select_related('approver').first()
         if not rule:
             rule = (
                 rule_query
-                .filter(Q(variety__isnull=True) | Q(variety=''))
+                .filter(Q(sub_group__isnull=True) | Q(sub_group=''))
                 .select_related('approver')
                 .first()
             )
     else:
         rule = (
             rule_query
-            .filter(Q(variety__isnull=True) | Q(variety=''))
+            .filter(Q(sub_group__isnull=True) | Q(sub_group=''))
             .select_related('approver')
             .first()
         )
@@ -847,15 +866,15 @@ def _get_rate_approvers_for_item(item):
 
     matched_users = []
     for user in users:
-        user_varieties = [
+        user_sub_groups = [
             value.strip().lower()
-            for value in str(getattr(user, 'variety', '') or '').split(',')
+            for value in str(getattr(user, 'sub_group', '') or '').split(',')
             if value.strip()
         ]
-        if not user_varieties:
+        if not user_sub_groups:
             matched_users.append(user)
             continue
-        if variety and variety.lower() in user_varieties:
+        if sub_group and sub_group.lower() in user_sub_groups:
             matched_users.append(user)
 
     return matched_users
@@ -863,9 +882,9 @@ def _get_rate_approvers_for_item(item):
 def assign_rate_approvers(order):
     """
     Create OrderRateApproval and OrderItemApprovalMapping
-    based on item variety.
+    based on item sub group.
     """
-    OrderRateApproval.objects.filter(order=order).delete()
+  
     OrderItemApprovalMapping.objects.filter(order=order).delete()
 
     approvers = set()
@@ -880,6 +899,15 @@ def assign_rate_approvers(order):
                 order_item=item,
                 approver=approver
             )
+
+    approver_ids = {approver.id for approver in approvers}
+
+    # Drop approvals only for approvers no longer assigned to the order.
+    OrderRateApproval.objects.filter(order=order).exclude(
+        approver_id__in=approver_ids
+    ).delete()
+
+    # Add rows for newly assigned approvers; leave existing decisions untouched.
 
     for approver in approvers:
         OrderRateApproval.objects.get_or_create(
@@ -1794,7 +1822,10 @@ class PartyProductsView(APIView):
                 'tax_rate': getattr(product, 'tax_rate', None),
                 'sal_pack_unit': getattr(product, 'sal_pack_unit', None),
                 'brand': getattr(product, 'brand', None),
-                'variety': getattr(product, 'variety', None),
+                # The Add Sales cascade's "Sub Group" column reads `variety`;
+                # feed it the product's sub_group so the column groups by sub group.
+                'variety': getattr(product, 'sub_group', None),
+                'sub_group': getattr(product, 'sub_group', None),
                 'combo_scheme_id': assignment.scheme_id,
                 'combo_scheme_name': assignment.scheme.scheme_name if assignment.scheme else None,
             })
@@ -2289,6 +2320,18 @@ class CreateOrderView(APIView):
                     _to_float,
                     flow_type=order_flow_type,
                     force_foc_flow=order.is_foc,
+                )
+
+            # If the edit sends the order back into Rate Approval, a fresh approval
+            # round begins (a new pending rate-approval log is created below), so any
+            # prior approver decisions must be cleared back to PENDING. Otherwise the
+            # edit bypasses rate approval and existing decisions are preserved by
+            # assign_rate_approvers().
+            if next_status and (next_status.name or "").strip().lower() == "rate approval":
+                OrderRateApproval.objects.filter(order=order).update(
+                    status="PENDING",
+                    approved_at=None,
+                    remarks="",
                 )
             if next_status:
                 order.status = next_status
@@ -3134,6 +3177,7 @@ class OrderListView(APIView):
         status_filter = request.query_params.get('status', None)
         user_id = request.query_params.get('user_id', None)
         billing_view = request.query_params.get('billing', 'false').lower() == 'true'
+        include_sap = request.query_params.get('include_sap', 'false').lower() == 'true'
 
         if request.user.is_authenticated:
             orders = _get_base_orders(request.user)
@@ -3166,7 +3210,7 @@ class OrderListView(APIView):
         else:
             if status_filter:
                 orders = orders.filter(status__code=status_filter)
-            else:
+            elif not (include_sap and role_name == 'admin'):
                 orders = orders.filter(sap_created=False)
 
         if user_id:

@@ -17,11 +17,11 @@ def _normalize_category(value):
     return normalized or None
 
 
-def _selected_variety_names(value):
+def _selected_csv_names(value):
     return list(dict.fromkeys(
-        variety.strip()
-        for variety in str(value or '').split(',')
-        if variety.strip()
+        name.strip()
+        for name in str(value or '').split(',')
+        if name.strip()
     ))
 
 
@@ -30,15 +30,15 @@ def _sync_rate_approver_rules(user):
 
     role_name = str(getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
     category = _get_user_assignment_category(user)
-    varieties = _selected_variety_names(getattr(user, 'variety', ''))
+    sub_groups = _selected_csv_names(getattr(user, 'sub_group', ''))
 
-    if role_name != 'approver' or not category or not varieties:
+    if role_name != 'approver' or not category or not sub_groups:
         return
 
-    for variety in varieties:
+    for sub_group in sub_groups:
         RateApproverRule.objects.update_or_create(
             category=category,
-            variety=variety,
+            sub_group=sub_group,
             defaults={
                 'approver': user,
                 'is_active': True,
@@ -378,6 +378,7 @@ class PartyProductsView(APIView):
                     'category': product.category,
                     'brand': product.brand,
                     'variety': product.variety,
+                    'sub_group': product.sub_group,
                     'sal_pack_unit': product.sal_pack_unit,
                     'basic_rate': float(a.basic_rate),
                     'assigned_at': a.assigned_at,
