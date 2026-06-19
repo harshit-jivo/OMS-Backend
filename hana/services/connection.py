@@ -96,6 +96,7 @@ class Queries():
                 T0."U_Rev_tax_Rate" AS "tax_rate",
                 T0."Deleted" AS "is_deleted",
                 T0."U_Variety" AS "variety",
+                T0."U_TYPE" AS "type",
                 T0."SalPackUn" AS "sal_pack_unit",
                 T0."U_Brand" AS "brand",
                 T1."WhsCode" AS "warehouse_code",
