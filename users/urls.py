@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import DeleteUserView,LoginView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView
+from .views import DeleteUserView,LoginView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView,PagePermissionsView
 from django.views.decorators.csrf import csrf_exempt
     
 
@@ -16,6 +16,7 @@ urlpatterns = [
     path('users/create/', CreateUserView.as_view(), name='create-user'),
     path('roles/', RoleListView.as_view(), name='roles-list'),
     path('users/list/', UserListForAssignmentView.as_view(), name='users-list'),
+    path('users/<int:user_id>/page-permissions/', PagePermissionsView.as_view(), name='user-page-permissions'),
 
     # User-Party assignment
     path('users/<int:user_id>/parties/', UserPartiesView.as_view(), name='user-parties'),

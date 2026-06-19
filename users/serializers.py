@@ -49,7 +49,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'sub_group', 'is_active', 'password'
+            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'sub_group', 'is_active', 'password', 'extra_pages'
         ]
 
     def get_company(self, obj):

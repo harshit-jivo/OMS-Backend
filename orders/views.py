@@ -18,7 +18,7 @@ from django.utils import timezone
 from collections import defaultdict
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q
+from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
@@ -1176,6 +1176,33 @@ class WDashboardChartsView(APIView):
             }
             for m in range(1, 13)
         ]
+
+        # "Orders Received" for an approver is every order routed to them, grouped by the
+        # month the order was created. base_orders only holds the still-pending ones, so the
+        # default completed-based count is empty for approvers. To stay consistent with the
+        # KPI's total_orders (approved + rejected + pending-at-approver-stage), we count the
+        # same set: approvals this approver decided, plus those still pending in their queue.
+        if role_name == 'approver':
+            approver_monthly = (
+                OrderRateApproval.objects
+                .filter(
+                    approver=request.user,
+                    order__created_at__gte=year_start,
+                    order__created_at__lte=year_end,
+                )
+                .filter(
+                    Q(status__in=['APPROVED', 'REJECTED']) |
+                    Q(status='PENDING', order__status__code__in=APPROVER_ACTIVE_CODES)
+                )
+                .annotate(month=TruncMonth('order__created_at'))
+                .values('month')
+                .annotate(count=Count('order_id', distinct=True))
+            )
+            approver_month_map = {
+                entry['month'].month: entry['count'] for entry in approver_monthly
+            }
+            for entry in monthly_sales_data:
+                entry['count'] = approver_month_map.get(int(entry['month'].split('-')[1]), 0)
 
         # CHART 2: State-wise Orders (selected month)
         # No FK between Order and Parties; join via card_code in Python
@@ -3215,7 +3242,12 @@ class OrderListView(APIView):
             orders = Order.objects.filter(id__in=acted_order_ids)
         else:
             if status_filter:
-                orders = orders.filter(status__code=status_filter)
+
+                status_codes = [code for code in status_filter.split(',') if code]
+                if len(status_codes) > 1:
+                    orders = orders.filter(status__code__in=status_codes)
+                else:
+                    orders = orders.filter(status__code=status_filter)
             elif not (include_sap and role_name == 'admin'):
                 orders = orders.filter(sap_created=False)
 
@@ -3229,6 +3261,22 @@ class OrderListView(APIView):
             .order_by('-created_at')
             .distinct()
         )
+
+        # The SAP document number is stored on the latest successful SalesQuotationLog
+        # (keyed by str(order.id)), not on Order.sap_doc_number. Build a lookup so the
+        # list response can surface it for orders that were pushed to SAP.
+        order_ids = [str(oid) for oid in orders.values_list('id', flat=True)]
+        sap_doc_map = {}
+        if order_ids:
+            quotation_logs = (
+                SalesQuotationLog.objects
+                .filter(order_id__in=order_ids, status='SUCCESS', sap_doc_num__isnull=False)
+                .order_by('order_id', '-created_at')
+                .values_list('order_id', 'sap_doc_num')
+            )
+            for log_order_id, sap_doc_num in quotation_logs:
+                if log_order_id not in sap_doc_map:
+                    sap_doc_map[log_order_id] = sap_doc_num
 
         data = []
         for order in orders:
@@ -3244,7 +3292,7 @@ class OrderListView(APIView):
                 'total_amount': str(order.total_amount),
                 'status': order.status.code,
                 'status_display': order.status.name,
-                'sap_doc_number': order.sap_doc_number or '',
+                'sap_doc_number': order.sap_doc_number or sap_doc_map.get(str(order.id)) or '',
                 'items_count': items_count,
                 'created_by': order.created_by.name if order.created_by else None,
                 'created_at': order.created_at,

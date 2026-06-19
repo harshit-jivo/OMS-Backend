@@ -730,6 +730,55 @@ class ProfileView(APIView):
             'data': UserSerializer(request.user).data
         })
 
+
+class PagePermissionsView(APIView):
+    """Admin-managed per-user page access (list of page keys)."""
+    permission_classes = [IsAuthenticated]
+
+    def _is_admin(self, request):
+        role = getattr(request.user, 'role', None)
+        return bool(role and str(getattr(role, 'name', '')).strip().lower() == 'admin')
+
+    def get(self, request, user_id):
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({'success': False, 'message': 'User not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'success': True,
+            'data': {'user_id': user.id, 'extra_pages': user.extra_pages or []},
+        })
+
+    def put(self, request, user_id):
+        if not self._is_admin(request):
+            return Response({'success': False, 'message': 'Only admin can change page permissions'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({'success': False, 'message': 'User not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        pages = request.data.get('extra_pages', [])
+        if not isinstance(pages, list):
+            return Response({'success': False, 'message': 'extra_pages must be a list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        cleaned = []
+        for page in pages:
+            page = str(page).strip()
+            if page and page not in cleaned:
+                cleaned.append(page)
+
+        user.extra_pages = cleaned
+        user.save(update_fields=['extra_pages', 'updated_at'])
+        return Response({
+            'success': True,
+            'message': 'Page permissions updated',
+            'data': {'user_id': user.id, 'extra_pages': cleaned},
+        })
+
 class StateListView(ListAPIView):
     """Get all active states"""
     permission_classes = [AllowAny]  # Or [IsAuthenticated] if login required
