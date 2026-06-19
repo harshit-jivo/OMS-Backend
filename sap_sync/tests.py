@@ -14,7 +14,7 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             qty=10,
             boxes=240,
             ltrs=240,
-            basic_price=1202,
+            price_list_basic=1202,
             qty_scheme=0,
         )
         order = SimpleNamespace(
@@ -44,8 +44,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             category="OIL",
             qty=10,
             boxes=10,
-            basic_price=100,
-            market_price=0,
+            price_list_basic=100,
+            basic_price=0,
             qty_scheme=3,
             scheme_id=1,
             schemes=SimpleNamespace(all=lambda: [
@@ -91,8 +91,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             qty=0,
             boxes=12,
             ltrs=24,
+            price_list_basic=0,
             basic_price=0,
-            market_price=0,
             qty_scheme=0,
         )
         order = SimpleNamespace(
@@ -112,14 +112,14 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
 
         self.assertEqual(payload["DocumentLines"][0]["Quantity"], 12.0)
 
-    def test_map_order_to_sap_uses_market_price_when_basic_price_is_zero(self):
+    def test_map_order_to_sap_uses_basic_price_when_price_list_basic_is_zero(self):
         item = SimpleNamespace(
             item_code="FG0000007",
             qty=5,
             boxes=5,
             ltrs=10,
-            basic_price=0,
-            market_price=975.5,
+            price_list_basic=0,
+            basic_price=975.5,
             qty_scheme=0,
         )
         order = SimpleNamespace(
@@ -145,7 +145,7 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             qty=5,
             boxes=5,
             ltrs=10,
-            basic_price=975.5,
+            price_list_basic=975.5,
             qty_scheme=0,
         )
         order = SimpleNamespace(
@@ -174,7 +174,7 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=20,
             boxes=12,
             ltrs=240,
-            basic_price=1202,
+            price_list_basic=1202,
             qty_scheme=0,
         )
         order = SimpleNamespace(
@@ -202,8 +202,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=20,
             boxes=12,
             ltrs=240,
-            basic_price=1202,
-            market_price=0,
+            price_list_basic=1202,
+            basic_price=0,
             qty_scheme=60,
             scheme_id=99,
         )
@@ -246,8 +246,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=20,
             boxes=12,
             ltrs=240,
-            basic_price=1202,
-            market_price=0,
+            price_list_basic=1202,
+            basic_price=0,
             qty_scheme=0,
         )
         order = SimpleNamespace(
@@ -294,8 +294,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=20,
             boxes=400,
             ltrs=400,
-            basic_price=1255,
-            market_price=0,
+            price_list_basic=1255,
+            basic_price=0,
             qty_scheme=5,
             scheme_id=102,
         )
@@ -342,8 +342,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=20,
             boxes=400,
             ltrs=400,
-            basic_price=1255,
-            market_price=0,
+            price_list_basic=1255,
+            basic_price=0,
             qty_scheme=5,
             scheme_id=103,
         )
@@ -391,8 +391,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=4,
             boxes=20,
             ltrs=100,
-            basic_price=1255,
-            market_price=0,
+            price_list_basic=1255,
+            basic_price=0,
             qty_scheme=5,
             scheme_id=103,
         )
@@ -442,8 +442,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=20,
             boxes=12,
             ltrs=240,
-            basic_price=1202,
-            market_price=0,
+            price_list_basic=1202,
+            basic_price=0,
             qty_scheme=60,
             scheme_id=100,
         )
@@ -483,8 +483,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=4,
             boxes=5,
             ltrs=100,
-            basic_price=1255,
-            market_price=0,
+            price_list_basic=1255,
+            basic_price=0,
             qty_scheme=5,
             scheme_id=7,
         )
@@ -537,8 +537,8 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
             pcs=4,
             boxes=5,
             ltrs=100,
-            basic_price=1255,
-            market_price=0,
+            price_list_basic=1255,
+            basic_price=0,
             qty_scheme=5,
             scheme_id=7,
         )

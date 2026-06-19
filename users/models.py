@@ -227,7 +227,9 @@ class User(AbstractUser):
         related_name='users'
     )
 
-    variety = models.TextField(blank=True, null=True)
+    # Sub group(s) assigned to the user (comma separated). Used for product
+    # scoping and rate-approver matching.
+    sub_group = models.TextField(blank=True, null=True)
 
     main_groups = models.ManyToManyField(
         'MainGroup',

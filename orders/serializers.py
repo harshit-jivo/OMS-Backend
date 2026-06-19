@@ -96,7 +96,7 @@ class CreateOrderSerializer(serializers.Serializer):
     is_foc = serializers.BooleanField(required=False, default=False)
     remarks = serializers.CharField(required=False, allow_blank=True, default='')
     items = serializers.ListField(child=serializers.DictField())
-    basic_price = serializers.DecimalField(max_digits=12, decimal_places=4, default=0)
+    price_list_basic = serializers.DecimalField(max_digits=12, decimal_places=4, default=0)
     delivery_date = serializers.DateField(required=False, allow_null=True)
     order_type = serializers.CharField(required=False, allow_blank=True, default='PARTY')
     employee_id = serializers.CharField(required=False, allow_blank=True, default='')
@@ -290,7 +290,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return obj.created_by.username
         return None
-   
+
     class Meta:
         model = Order
         fields = [

@@ -17,11 +17,11 @@ def _normalize_category(value):
     return normalized or None
 
 
-def _selected_variety_names(value):
+def _selected_csv_names(value):
     return list(dict.fromkeys(
-        variety.strip()
-        for variety in str(value or '').split(',')
-        if variety.strip()
+        name.strip()
+        for name in str(value or '').split(',')
+        if name.strip()
     ))
 
 
@@ -29,16 +29,16 @@ def _sync_rate_approver_rules(user):
     RateApproverRule.objects.filter(approver=user).delete()
 
     role_name = str(getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
-    category = _normalize_category(getattr(getattr(user, 'category', None), 'category', None))
-    varieties = _selected_variety_names(getattr(user, 'variety', ''))
+    category = _get_user_assignment_category(user)
+    sub_groups = _selected_csv_names(getattr(user, 'sub_group', ''))
 
-    if role_name != 'approver' or not category or not varieties:
+    if role_name != 'approver' or not category or not sub_groups:
         return
 
-    for variety in varieties:
+    for sub_group in sub_groups:
         RateApproverRule.objects.update_or_create(
             category=category,
-            variety=variety,
+            sub_group=sub_group,
             defaults={
                 'approver': user,
                 'is_active': True,
@@ -106,18 +106,18 @@ def _get_category_filtered_assignments(queryset, user_category):
 def _serialize_user_party_assignments(assignments, preferred_category=None):
     parties_list = []
     card_codes = []
-    party_keys = []
-    party_selections = []
     seen_keys = set()
 
     for assignment in assignments:
-        resolved_category = _normalize_category(assignment.category) or _normalize_category(preferred_category)
+        resolved_category = _normalize_category(assignment.category)
+        if not resolved_category and preferred_category:
+            resolved_category = _normalize_category(preferred_category)
         party = _get_party_for_assignment(assignment.card_code, resolved_category)
         if not party:
             continue
 
         normalized_category = _normalize_category(
-            assignment.category or preferred_category or getattr(party, 'category', None)
+            assignment.category or resolved_category or getattr(party, 'category', None)
         )
         key = _party_key(assignment.card_code, normalized_category)
         if key in seen_keys:
@@ -132,21 +132,12 @@ def _serialize_user_party_assignments(assignments, preferred_category=None):
             'main_group': party.main_group,
             'category': getattr(party, 'category', None) or normalized_category,
             'assigned_at': assignment.assigned_at,
-            'party_key': key,
         })
         card_codes.append(assignment.card_code)
-        party_keys.append(key)
-        party_selections.append({
-            'card_code': assignment.card_code,
-            'category': normalized_category,
-            'party_key': key,
-        })
 
     return {
         'parties': parties_list,
         'card_codes': list(dict.fromkeys(card_codes)),
-        'party_keys': party_keys,
-        'party_selections': party_selections,
         'total_assigned': len(parties_list),
     }
 
@@ -211,7 +202,6 @@ class AssignPartiesView(APIView):
 
     def post(self, request):
         user_id = request.data.get('user_id')
-        party_selections = request.data.get('party_selections', [])
         card_codes = request.data.get('card_codes', [])
 
         if not user_id:
@@ -224,22 +214,17 @@ class AssignPartiesView(APIView):
 
         all_active_assignments = UserPartyAssignment.objects.filter(user=user, is_active=True)
         user_category = _get_user_assignment_category(user)
-
         relevant_existing_qs = _get_category_filtered_assignments(all_active_assignments, user_category)
 
         existing = {
             (assignment.card_code, _normalize_category(assignment.category))
             for assignment in relevant_existing_qs
         }
-        raw_new_assignments = _normalize_party_selections(party_selections, card_codes)
-        if user_category:
-            new_assignments = {
-                (card_code, category)
-                for card_code, category in raw_new_assignments
-                if _normalize_category(category) == user_category
-            }
-        else:
-            new_assignments = raw_new_assignments
+        new_assignments = {
+            (str(card_code or '').strip(), user_category)
+            for card_code in card_codes
+            if str(card_code or '').strip()
+        }
         to_add = new_assignments - existing
         to_remove = existing - new_assignments
 
@@ -335,6 +320,7 @@ class BulkAssignUsersPartiesView(APIView):
             if not party:
                 errors.append(f'Row {row_number}: party {card_code} not found in {user_category}')
                 continue
+            user_category = _normalize_category(party.category)
 
             _assignment, created = UserPartyAssignment.objects.update_or_create(
                 user=user,
@@ -392,6 +378,7 @@ class PartyProductsView(APIView):
                     'category': product.category,
                     'brand': product.brand,
                     'variety': product.variety,
+                    'sub_group': product.sub_group,
                     'sal_pack_unit': product.sal_pack_unit,
                     'basic_rate': float(a.basic_rate),
                     'assigned_at': a.assigned_at,

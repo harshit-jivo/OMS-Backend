@@ -12,7 +12,7 @@ from datetime import datetime
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
-from django.db.models import Sum, Count,F,Q, OuterRef, Subquery
+from django.db.models import Sum, Count, Max, F, Q, OuterRef, Subquery
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from collections import defaultdict
@@ -51,11 +51,11 @@ APPROVER_REJECTED_ACTION_ID = 7
 APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
 APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
 RATE_CONDITION_CHOICES = {
-    'BASIC_GT_MARKET': 'Basic Price > Market Price and Market Price != 0',
-    'BASIC_LT_MARKET': 'Basic Price < Market Price',
-    'BASIC_EQ_MARKET': 'Basic Price = Market Price',
-    'BASIC_MARKET_ZERO': 'Basic Price and Market Price = 0',
-    'BASIC_ZERO_MARKET_GT_ZERO': 'Basic Price = 0 and Market Price > 0',
+    'BASIC_GT_MARKET': 'Price List (Basic) > Basic Price and Basic Price != 0',
+    'BASIC_LT_MARKET': 'Price List (Basic) < Basic Price',
+    'BASIC_EQ_MARKET': 'Price List (Basic) = Basic Price',
+    'BASIC_MARKET_ZERO': 'Price List (Basic) and Basic Price = 0',
+    'BASIC_ZERO_MARKET_GT_ZERO': 'Price List (Basic) = 0 and Basic Price > 0',
 }
 DEFAULT_RATE_CONDITIONS = ['BASIC_GT_MARKET']
 ORDER_FLOW_TYPE_ASM = 'ASM'
@@ -128,12 +128,12 @@ def _order_flow_config_payload(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
         'updated_by': getattr(config.updated_by, 'username', None),
     }
 
-def _get_price_condition_code(basic_price, market_price):
-    if basic_price == 0 and market_price == 0:
+def _get_price_condition_code(price_list_basic, basic_price):
+    if price_list_basic == 0 and basic_price == 0:
         return 'BASIC_MARKET_ZERO'
-    if basic_price > market_price:
+    if price_list_basic > basic_price:
         return 'BASIC_GT_MARKET'
-    if basic_price < market_price:
+    if price_list_basic < basic_price:
         return 'BASIC_LT_MARKET'
     return 'BASIC_EQ_MARKET'
 
@@ -150,8 +150,8 @@ def _get_order_price_condition_codes(items, to_float):
     for item in items:
         if not _item_can_match_flow_condition(item):
             continue
-        bp = to_float(item.get('basic_price', 0))
-        mp = to_float(item.get('market_price', 0))
+        bp = to_float(item.get('price_list_basic', 0))
+        mp = to_float(item.get('basic_price', 0))
         if bp == 0 and mp == 0:
             codes.add('BASIC_EQ_MARKET')
         if bp == 0 and mp > 0:
@@ -207,6 +207,8 @@ def _get_next_foc_status(current_status, fallback_name='Billing'):
 
 def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False):
     if force_foc_flow:
+        if flow_type == ORDER_FLOW_TYPE_BILLING:
+            return _get_status_by_name('Auditor Approval'), False
         return _get_status_by_name('Billing'), False
 
     config = _get_order_flow_config(flow_type)
@@ -236,6 +238,8 @@ def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type
 
 def _get_next_order_flow_status(order, current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
     if getattr(order, 'is_foc', False):
+        if flow_type == ORDER_FLOW_TYPE_BILLING:
+            return _get_next_flow_status(current_status, fallback_name or 'Auditor Approval', flow_type=flow_type)
         return _get_next_foc_status(current_status, fallback_name or 'Billing')
     return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type)
 
@@ -278,7 +282,7 @@ def _pending_log_user_for_status(status_obj, actor_user=None):
 def _rate_approval_remarks(flagged_items):
     return '; '.join(flagged_items) or 'Rate approval required by admin price condition'
 
-def _get_rate_approval_reason(item, basic_price, market_price):
+def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
     
@@ -289,15 +293,15 @@ def _get_rate_approval_reason(item, basic_price, market_price):
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
-    # if basic_price == 0:
-    #     return f"{item_name}: Basic price is 0 (Market ₹{market_price})"
+    # if price_list_basic == 0:
+    #     return f"{item_name}: Price List (Basic) is 0 (Basic ₹{basic_price})"
 
-    if market_price > 0 and market_price < basic_price:
-        return f"{item_name}: Market ₹{market_price} < Basic ₹{basic_price}"
+    if basic_price > 0 and basic_price < price_list_basic:
+        return f"{item_name}: Basic ₹{basic_price} < Price List (Basic) ₹{price_list_basic}"
 
     return None
 
-def _get_rate_approval_reason(item, basic_price, market_price):
+def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
@@ -311,14 +315,14 @@ def _get_rate_approval_reason(item, basic_price, market_price):
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
-    if basic_price == 0 and market_price == 0:
-        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
-    if basic_price == 0 and market_price > 0:
-        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
-    if basic_price > market_price:
-        return f"{item_name}: Basic Rs {basic_price} > Market Rs {market_price}"
-    if basic_price < market_price:
-        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
+    if price_list_basic == 0 and basic_price == 0:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} = Basic Rs {basic_price}"
+    if price_list_basic == 0 and basic_price > 0:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
+    if price_list_basic > basic_price:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} > Basic Rs {basic_price}"
+    if price_list_basic < basic_price:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
     return None
 
 def _resolve_scheme_by_id(scheme_id):
@@ -363,8 +367,8 @@ def _create_order_item(order, item, to_float, to_bool):
         pcs=to_float(item.get('pcs', 0)),
         boxes=to_float(item.get('boxes', 0)),
         ltrs=to_float(item.get('ltrs', 0)),
+        price_list_basic=to_float(item.get('price_list_basic', 0)),
         basic_price=to_float(item.get('basic_price', 0)),
-        market_price=to_float(item.get('market_price', 0)),
         total=to_float(item.get('total', 0)),
         tax_rate=to_float(item.get('tax_rate', 0)),
         scheme=first_scheme,
@@ -421,8 +425,8 @@ def _build_order_template_signature(order):
             _normalize_template_number(item.pcs),
             _normalize_template_number(item.boxes),
             _normalize_template_number(item.ltrs),
+            _normalize_template_number(item.price_list_basic),
             _normalize_template_number(item.basic_price),
-            _normalize_template_number(item.market_price),
             tuple(scheme_signatures),
         ))
 
@@ -460,6 +464,11 @@ def _get_user_category_name(user):
     category_name = getattr(category_obj, 'category', category_obj)
     normalized_category = str(category_name or '').strip().upper()
     return normalized_category or None
+
+
+def _get_user_category_names(user):
+    category = _get_user_category_name(user)
+    return [category] if category else []
 
 
 def _normalize_scope_name(value):
@@ -653,15 +662,15 @@ def _build_iexact_filter(field_name, values):
 
 
 def _apply_billing_order_scope(queryset, user):
-    user_category = _get_user_category_name(user)
+    user_categories = _get_user_category_names(user)
     user_main_groups = _get_user_main_group_names(user)
 
-    if not user_category and not user_main_groups:
+    if not user_categories and not user_main_groups:
         return queryset
 
     party_queryset = SapParty.objects.all()
-    if user_category:
-        party_queryset = party_queryset.filter(category__iexact=user_category)
+    if user_categories:
+        party_queryset = party_queryset.filter(category__in=user_categories)
     if user_main_groups:
         party_queryset = party_queryset.filter(
             _build_iexact_filter('main_group', user_main_groups)
@@ -671,8 +680,8 @@ def _apply_billing_order_scope(queryset, user):
         card_code__in=party_queryset.values_list('card_code', flat=True)
     )
 
-    if user_category:
-        queryset = queryset.filter(items__category__iexact=user_category)
+    if user_categories:
+        queryset = queryset.filter(items__category__in=user_categories)
 
     return queryset.distinct()
 
@@ -691,8 +700,8 @@ def _billing_users_for_order(order, exclude_user=None):
 
     matching_users = []
     for user in users:
-        user_category = _get_user_category_name(user)
-        if user_category and user_category not in order_categories:
+        user_categories = _get_user_category_names(user)
+        if user_categories and not set(user_categories).intersection(order_categories):
             continue
 
         user_main_groups = _get_user_main_group_names(user)
@@ -700,8 +709,8 @@ def _billing_users_for_order(order, exclude_user=None):
             party_match = SapParty.objects.filter(
                 card_code=order.card_code,
             )
-            if user_category:
-                party_match = party_match.filter(category__iexact=user_category)
+            if user_categories:
+                party_match = party_match.filter(category__in=user_categories)
             party_match = party_match.filter(
                 _build_iexact_filter('main_group', user_main_groups)
             )
@@ -733,13 +742,11 @@ def _get_base_orders(user):
             Q(logs__action__name__icontains='auditor')
         ).distinct()
     if role_name == 'approver':
-
         queryset = Order.objects.filter(
-        rate_approvals__approver=user,
-        rate_approvals__status='PENDING',
-        status__code__in=APPROVER_ACTIVE_CODES,
-    ).distinct()
-
+            rate_approvals__approver=user,
+            rate_approvals__status='PENDING',
+            status__code__in=APPROVER_ACTIVE_CODES,
+        ).distinct()
         return queryset
     if role_name == 'billing':
         handled_order_ids = (
@@ -803,9 +810,28 @@ def _mark_rate_approval_decision(order, user, decision, remarks=''):
     approval.save(update_fields=['status', 'remarks', 'approved_at'])
     return approval
 
+def _get_item_sub_group(item):
+    """Resolve an order item's sub group from the synced SAP product (sap_products).
+
+    OrderItem has no sub_group column, so we look it up by item_code (and
+    category when available).
+    """
+    item_code = str(getattr(item, 'item_code', '') or '').strip()
+    if not item_code:
+        return ''
+
+    category = str(getattr(item, 'category', '') or '').strip()
+    product_query = SapProduct.objects.filter(item_code__iexact=item_code)
+    if category:
+        product_query = product_query.filter(category__iexact=category)
+
+    product = product_query.first()
+    return str(getattr(product, 'sub_group', '') or '').strip() if product else ''
+
+
 def _get_rate_approvers_for_item(item):
     category = str(getattr(item, 'category', '') or '').strip()
-    variety = str(getattr(item, 'variety', '') or '').strip()
+    sub_group = _get_item_sub_group(item)
     if not category:
         return []
 
@@ -813,19 +839,19 @@ def _get_rate_approvers_for_item(item):
         category__iexact=category,
         is_active=True,
     )
-    if variety:
-        rule = rule_query.filter(variety__iexact=variety).select_related('approver').first()
+    if sub_group:
+        rule = rule_query.filter(sub_group__iexact=sub_group).select_related('approver').first()
         if not rule:
             rule = (
                 rule_query
-                .filter(Q(variety__isnull=True) | Q(variety=''))
+                .filter(Q(sub_group__isnull=True) | Q(sub_group=''))
                 .select_related('approver')
                 .first()
             )
     else:
         rule = (
             rule_query
-            .filter(Q(variety__isnull=True) | Q(variety=''))
+            .filter(Q(sub_group__isnull=True) | Q(sub_group=''))
             .select_related('approver')
             .first()
         )
@@ -840,15 +866,15 @@ def _get_rate_approvers_for_item(item):
 
     matched_users = []
     for user in users:
-        user_varieties = [
+        user_sub_groups = [
             value.strip().lower()
-            for value in str(getattr(user, 'variety', '') or '').split(',')
+            for value in str(getattr(user, 'sub_group', '') or '').split(',')
             if value.strip()
         ]
-        if not user_varieties:
+        if not user_sub_groups:
             matched_users.append(user)
             continue
-        if variety and variety.lower() in user_varieties:
+        if sub_group and sub_group.lower() in user_sub_groups:
             matched_users.append(user)
 
     return matched_users
@@ -856,9 +882,9 @@ def _get_rate_approvers_for_item(item):
 def assign_rate_approvers(order):
     """
     Create OrderRateApproval and OrderItemApprovalMapping
-    based on item variety.
+    based on item sub group.
     """
-    OrderRateApproval.objects.filter(order=order).delete()
+  
     OrderItemApprovalMapping.objects.filter(order=order).delete()
 
     approvers = set()
@@ -873,6 +899,15 @@ def assign_rate_approvers(order):
                 order_item=item,
                 approver=approver
             )
+
+    approver_ids = {approver.id for approver in approvers}
+
+    # Drop approvals only for approvers no longer assigned to the order.
+    OrderRateApproval.objects.filter(order=order).exclude(
+        approver_id__in=approver_ids
+    ).delete()
+
+    # Add rows for newly assigned approvers; leave existing decisions untouched.
 
     for approver in approvers:
         OrderRateApproval.objects.get_or_create(
@@ -1041,14 +1076,15 @@ class WDashboardKPIView(APIView):
             ).count()
 
         if role_name == 'approver':
-            user_approvals = OrderRateApproval.objects.filter(
-                order__in=period_orders,
+            period_approvals = OrderRateApproval.objects.filter(
                 approver=request.user,
+                order__created_at__gte=range_start,
+                order__created_at__lte=range_end,
             )
 
-            accepted_orders = user_approvals.filter(status='APPROVED').count()
-            rejected_orders = user_approvals.filter(status='REJECTED').count()
-            pending_review_orders = user_approvals.filter(status='PENDING').count()
+            pending_review_orders = period_orders.count()
+            accepted_orders = period_approvals.filter(status='APPROVED').count()
+            rejected_orders = period_approvals.filter(status='REJECTED').count()
 
             total_orders = accepted_orders + rejected_orders + pending_review_orders
 
@@ -1328,8 +1364,16 @@ class WDashboardChartsView(APIView):
                 },
             ]
         elif role_name == 'approver':
+            approver_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+            ).values_list('order_id', flat=True).distinct()
+            approver_period_orders = Order.objects.filter(
+                id__in=approver_order_ids,
+                created_at__gte=range_start,
+                created_at__lte=range_end,
+            )
             user_approvals = OrderRateApproval.objects.filter(
-                order__in=filtered_orders,
+                order__in=approver_period_orders,
                 approver=request.user,
             )
             decision_data = [
@@ -1346,22 +1390,34 @@ class WDashboardChartsView(APIView):
                 {
                     'status': 'pending',
                     'label': 'Pending Approval',
-                    'count': user_approvals.filter(status='PENDING').count(),
+                    'count': filtered_orders.count(),
                 },
             ]
 
-        # CHART 4: Top Parties by Revenue (selected period)
+        # CHART 4: Top Parties by category (selected period)
         top_parties = (
-            filtered_orders
-            .values('card_code', 'card_name')
-            .annotate(revenue=Sum('total_amount'), count=Count('id', distinct=True))
+            OrderItem.objects
+            .filter(order__in=filtered_orders)
+            .values('order__card_code', 'category')
+            .annotate(
+                card_name=Max('order__card_name'),
+                revenue=Sum('total'),
+                count=Count('order_id', distinct=True),
+                completed_count=Count(
+                    'order_id',
+                    distinct=True,
+                    filter=Q(order__status__code__icontains='COMPLETED') | Q(order__status__name__icontains='Completed'),
+                ),
+            )
             .order_by('-count', '-revenue')
         )
         top_parties_data = [
             {
-                'card_code': entry['card_code'],
+                'card_code': entry['order__card_code'],
                 'card_name': entry['card_name'],
+                'category': entry['category'] or 'Unknown',
                 'count': entry['count'],
+                'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
             }
             for entry in top_parties
@@ -1634,18 +1690,30 @@ class DashboardChartsView(APIView):
             for os in OrderStatus.objects.all()
         ]
 
-        # CHART 4: Top Parties by Revenue (selected period)
+        # CHART 4: Top Parties by category (selected period)
         top_parties = (
-            filtered_orders
-            .values('card_code', 'card_name')
-            .annotate(revenue=Sum('total_amount'), count=Count('id'))
-            .order_by('-revenue', '-count')
+            OrderItem.objects
+            .filter(order__in=filtered_orders)
+            .values('order__card_code', 'category')
+            .annotate(
+                card_name=Max('order__card_name'),
+                revenue=Sum('total'),
+                count=Count('order_id', distinct=True),
+                completed_count=Count(
+                    'order_id',
+                    distinct=True,
+                    filter=Q(order__status__code__icontains='COMPLETED') | Q(order__status__name__icontains='Completed'),
+                ),
+            )
+            .order_by('-count', '-revenue')
         )
         top_parties_data = [
             {
-                'card_code': entry['card_code'],
+                'card_code': entry['order__card_code'],
                 'card_name': entry['card_name'],
+                'category': entry['category'] or 'Unknown',
                 'count': entry['count'],
+                'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
             }
             for entry in top_parties
@@ -1754,7 +1822,10 @@ class PartyProductsView(APIView):
                 'tax_rate': getattr(product, 'tax_rate', None),
                 'sal_pack_unit': getattr(product, 'sal_pack_unit', None),
                 'brand': getattr(product, 'brand', None),
-                'variety': getattr(product, 'variety', None),
+                # The Add Sales cascade's "Sub Group" column reads `variety`;
+                # feed it the product's sub_group so the column groups by sub group.
+                'variety': getattr(product, 'sub_group', None),
+                'sub_group': getattr(product, 'sub_group', None),
                 'combo_scheme_id': assignment.scheme_id,
                 'combo_scheme_name': assignment.scheme.scheme_name if assignment.scheme else None,
             })
@@ -2075,8 +2146,8 @@ class UpdateOrderView(APIView):
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
 
-            bp = _to_float(item.get('basic_price', 0))
-            mp = _to_float(item.get('market_price', 0))
+            bp = _to_float(item.get('price_list_basic', 0))
+            mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
@@ -2210,8 +2281,8 @@ class CreateOrderView(APIView):
             flagged_items = []
             for item in items:
                 _create_order_item(order, item, _to_float, _to_bool)
-                bp = _to_float(item.get('basic_price', 0))
-                mp = _to_float(item.get('market_price', 0))
+                bp = _to_float(item.get('price_list_basic', 0))
+                mp = _to_float(item.get('basic_price', 0))
                 rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
                 if rate_approval_reason:
                     needs_approval = True
@@ -2249,6 +2320,18 @@ class CreateOrderView(APIView):
                     _to_float,
                     flow_type=order_flow_type,
                     force_foc_flow=order.is_foc,
+                )
+
+            # If the edit sends the order back into Rate Approval, a fresh approval
+            # round begins (a new pending rate-approval log is created below), so any
+            # prior approver decisions must be cleared back to PENDING. Otherwise the
+            # edit bypasses rate approval and existing decisions are preserved by
+            # assign_rate_approvers().
+            if next_status and (next_status.name or "").strip().lower() == "rate approval":
+                OrderRateApproval.objects.filter(order=order).update(
+                    status="PENDING",
+                    approved_at=None,
+                    remarks="",
                 )
             if next_status:
                 order.status = next_status
@@ -2348,8 +2431,8 @@ class CreateOrderView(APIView):
 
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
-            bp = _to_float(item.get('basic_price', 0))
-            mp = _to_float(item.get('market_price', 0))
+            bp = _to_float(item.get('price_list_basic', 0))
+            mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
@@ -3094,19 +3177,40 @@ class OrderListView(APIView):
         status_filter = request.query_params.get('status', None)
         user_id = request.query_params.get('user_id', None)
         billing_view = request.query_params.get('billing', 'false').lower() == 'true'
+        include_sap = request.query_params.get('include_sap', 'false').lower() == 'true'
 
         if request.user.is_authenticated:
             orders = _get_base_orders(request.user)
         else:
             orders = Order.objects.all()
 
+        role = getattr(request.user, 'role', None) if request.user.is_authenticated else None
+        role_name = getattr(role, 'name', '').lower() if role else ''
+
         if billing_view:
             # Billing view: show billing-related orders from the caller's allowed scope.
             orders = orders.filter(status_id__in=[3, 5, 6, 8])
-        else:
+        elif role_name == 'approver' and request.query_params.get('approval_pending', '').lower() == 'true':
+            # Approver pending tab: only orders still waiting at the rate approval stage.
+            orders = orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='PENDING',
+            )
             if status_filter:
                 orders = orders.filter(status__code=status_filter)
             else:
+                orders = orders.filter(status__code__in=APPROVER_ACTIVE_CODES)
+        elif role_name == 'approver' and status_filter:
+            # Approver others: query directly to avoid double JOIN
+            acted_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+                status__in=['APPROVED', 'REJECTED'],
+            ).values_list('order_id', flat=True)
+            orders = Order.objects.filter(id__in=acted_order_ids)
+        else:
+            if status_filter:
+                orders = orders.filter(status__code=status_filter)
+            elif not (include_sap and role_name == 'admin'):
                 orders = orders.filter(sap_created=False)
 
         if user_id:
