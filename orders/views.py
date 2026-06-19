@@ -2,7 +2,7 @@ from urllib import request
 from django.shortcuts import render
 import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -101,6 +101,60 @@ def _get_order_flow_config(flow_type=ORDER_FLOW_TYPE_ASM):
     if not isinstance(config.rate_conditions, list):
         config.rate_conditions = _default_order_flow_values(flow_type)['rate_conditions']
     return config
+
+def _normalize_category(value):
+    return str(value or '').strip().upper()
+
+def _get_order_primary_category(source):
+    """Return the dominant item category (upper-cased) for an order or items list."""
+    if hasattr(source, 'items'):
+        categories = list(source.items.values_list('category', flat=True))
+    else:
+        categories = [item.get('category') for item in (source or [])]
+    counts = {}
+    for raw in categories:
+        cat = _normalize_category(raw)
+        if cat:
+            counts[cat] = counts.get(cat, 0) + 1
+    if not counts:
+        return ''
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+def _get_party_flow_config(card_code, flow_type=ORDER_FLOW_TYPE_ASM, category=''):
+    """Return the per-party, per-category, per-role flow override. Falls back to a
+    category-agnostic ('') config for the party if no category-specific one exists."""
+    code = str(card_code or '').strip()
+    if not code:
+        return None
+    flow_type = _normalize_order_flow_type(flow_type)
+    category = _normalize_category(category)
+    if category:
+        match = PartyOrderFlowConfig.objects.filter(
+            card_code=code, category=category, flow_type=flow_type
+        ).first()
+        if match:
+            return match
+    return PartyOrderFlowConfig.objects.filter(card_code=code, category='', flow_type=flow_type).first()
+
+def _party_flow_config_payload(config):
+    rate_conditions = [
+        condition
+        for condition in (config.rate_conditions or [])
+        if condition in RATE_CONDITION_CHOICES
+    ]
+    flow_type = _normalize_order_flow_type(config.flow_type)
+    return {
+        'card_code': config.card_code,
+        'category': config.category or '',
+        'flow_type': flow_type,
+        'flow_label': ORDER_FLOW_TYPE_CHOICES.get(flow_type, flow_type),
+        'rate_approval_enabled': bool(config.rate_approval_enabled),
+        'billing_enabled': bool(config.billing_enabled),
+        'auditor_enabled': bool(config.auditor_enabled),
+        'rate_conditions': rate_conditions,
+        'updated_at': config.updated_at.isoformat() if config.updated_at else None,
+        'updated_by': getattr(config.updated_by, 'username', None),
+    }
 
 def _order_flow_config_payload(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
     config = config or _get_order_flow_config(flow_type)
@@ -205,13 +259,13 @@ def _get_next_foc_status(current_status, fallback_name='Billing'):
 
     return _get_status_by_name(fallback_name)
 
-def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False):
+def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False, config=None):
     if force_foc_flow:
         if flow_type == ORDER_FLOW_TYPE_BILLING:
             return _get_status_by_name('Auditor Approval'), False
         return _get_status_by_name('Billing'), False
 
-    config = _get_order_flow_config(flow_type)
+    config = config or _get_order_flow_config(flow_type)
     condition_codes = _get_order_price_condition_codes(items, to_float)
     selected_conditions = set(config.rate_conditions or [])
 
@@ -241,13 +295,16 @@ def _get_next_order_flow_status(order, current_status, fallback_name=None, flow_
         if flow_type == ORDER_FLOW_TYPE_BILLING:
             return _get_next_flow_status(current_status, fallback_name or 'Auditor Approval', flow_type=flow_type)
         return _get_next_foc_status(current_status, fallback_name or 'Billing')
-    return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type)
+    party_config = _get_party_flow_config(
+        getattr(order, 'card_code', None), flow_type, _get_order_primary_category(order)
+    )
+    return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type, config=party_config)
 
-def _get_next_flow_status(current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
+def _get_next_flow_status(current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM, config=None):
     if not current_status:
         return _get_status_by_name(fallback_name) if fallback_name else None
 
-    configured_statuses = _get_configured_stage_statuses(flow_type=flow_type)
+    configured_statuses = _get_configured_stage_statuses(config=config, flow_type=flow_type)
     current_id = getattr(current_status, 'id', None)
     for index, status_obj in enumerate(configured_statuses):
         if status_obj.id == current_id:
@@ -2218,6 +2275,7 @@ class UpdateOrderView(APIView):
                 _to_float,
                 flow_type=order_flow_type,
                 force_foc_flow=order.is_foc,
+                config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
             )
         if next_status:
             order.status = next_status
@@ -2353,6 +2411,7 @@ class CreateOrderView(APIView):
                     _to_float,
                     flow_type=order_flow_type,
                     force_foc_flow=order.is_foc,
+                    config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
                 )
 
             # If the edit sends the order back into Rate Approval, a fresh approval
@@ -2501,11 +2560,18 @@ class CreateOrderView(APIView):
         is_billing_creator = creator_role == "billing"
         order_flow_type = ORDER_FLOW_TYPE_BILLING if is_billing_creator else ORDER_FLOW_TYPE_ASM
 
+        # A party-specific flow override (for this role's flow type + order category)
+        # fully replaces the global ASM/BILLING flow.
+        party_flow_config = _get_party_flow_config(
+            order.card_code, order_flow_type, _get_order_primary_category(items)
+        )
+
         next_status, flow_needs_approval = _get_initial_flow_status(
             items,
             _to_float,
             flow_type=order_flow_type,
             force_foc_flow=order.is_foc,
+            config=party_flow_config,
         )
         if next_status:
             order.status = next_status
@@ -2602,6 +2668,128 @@ class OrderFlowConfigView(APIView):
             'success': True,
             'message': 'Order flow updated successfully.',
             'data': _order_flow_config_payload(config),
+        })
+
+class PartyOrderFlowConfigView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _is_admin(self, request):
+        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
+        return request.user.is_staff or str(role_name).strip().lower() == 'admin'
+
+    def _party_name_map(self, card_codes):
+        if not card_codes:
+            return {}
+        try:
+            return {
+                row['card_code']: row['card_name']
+                for row in Parties.objects.filter(card_code__in=card_codes).values('card_code', 'card_name')
+            }
+        except Exception:
+            return {}
+
+    def get(self, request):
+        configs = list(PartyOrderFlowConfig.objects.all().order_by('card_code', 'flow_type'))
+        name_map = self._party_name_map(list({cfg.card_code for cfg in configs}))
+        data = []
+        for cfg in configs:
+            payload = _party_flow_config_payload(cfg)
+            payload['card_name'] = name_map.get(cfg.card_code, '')
+            data.append(payload)
+        return Response({
+            'success': True,
+            'data': data,
+            'flow_options': [
+                {'code': code, 'label': label}
+                for code, label in ORDER_FLOW_TYPE_CHOICES.items()
+            ],
+            'condition_options': [
+                {'code': code, 'label': label}
+                for code, label in RATE_CONDITION_CHOICES.items()
+            ],
+        })
+
+    def _parse_parties(self, request):
+        """Accept either parties=[{card_code, category}] or a plain card_codes list."""
+        parties = request.data.get('parties')
+        result = []
+        if isinstance(parties, list) and parties:
+            for entry in parties:
+                if isinstance(entry, dict):
+                    code = str(entry.get('card_code') or '').strip()
+                    category = _normalize_category(entry.get('category'))
+                else:
+                    code = str(entry or '').strip()
+                    category = ''
+                if code:
+                    result.append((code, category))
+        else:
+            for code in request.data.get('card_codes', []) or []:
+                code = str(code).strip()
+                if code:
+                    result.append((code, ''))
+        # de-dupe
+        return list(dict.fromkeys(result))
+
+    def post(self, request):
+        if not self._is_admin(request):
+            return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
+
+        parties = self._parse_parties(request)
+        if not parties:
+            return Response({'message': 'Select at least one party.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
+
+        rate_conditions = request.data.get('rate_conditions', [])
+        if not isinstance(rate_conditions, list):
+            return Response({'message': 'rate_conditions must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+        invalid_conditions = [c for c in rate_conditions if c not in RATE_CONDITION_CHOICES]
+        if invalid_conditions:
+            return Response(
+                {'message': 'Invalid rate condition selected.', 'invalid_conditions': invalid_conditions},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        values = {
+            'rate_approval_enabled': bool(request.data.get('rate_approval_enabled', False)),
+            'billing_enabled': bool(request.data.get('billing_enabled', False)),
+            'auditor_enabled': bool(request.data.get('auditor_enabled', False)),
+            'rate_conditions': list(dict.fromkeys(rate_conditions)),
+            'updated_by': request.user,
+        }
+
+        saved = []
+        for code, category in parties:
+            cfg, _created = PartyOrderFlowConfig.objects.update_or_create(
+                card_code=code, category=category, flow_type=flow_type, defaults=values
+            )
+            saved.append(_party_flow_config_payload(cfg))
+
+        flow_label = ORDER_FLOW_TYPE_CHOICES.get(flow_type, flow_type)
+        return Response({
+            'success': True,
+            'message': f'{flow_label} applied to {len(saved)} part{"y" if len(saved) == 1 else "ies"}.',
+            'data': saved,
+        })
+
+    def delete(self, request):
+        if not self._is_admin(request):
+            return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
+
+        parties = self._parse_parties(request)
+        if not parties:
+            return Response({'message': 'Select at least one party.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
+        condition = Q()
+        for code, category in parties:
+            condition |= Q(card_code=code, category=category, flow_type=flow_type)
+        PartyOrderFlowConfig.objects.filter(condition).delete()
+        return Response({
+            'success': True,
+            'message': f'Removed custom flow for {len(parties)} part{"y" if len(parties) == 1 else "ies"}.',
+            'removed': [{'card_code': code, 'category': category} for code, category in parties],
         })
 
 class SchemeProductView(APIView):
