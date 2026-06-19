@@ -1395,18 +1395,24 @@ class WDashboardChartsView(APIView):
             ]
 
         # CHART 4: Top Parties by category (selected period)
+        # Revenue reflects only completed orders (scoped to the logged-in user via
+        # _get_base_orders); count stays as the total orders in the period.
+        completed_status_filter = (
+            Q(order__status__code__icontains='COMPLETED')
+            | Q(order__status__name__icontains='Completed')
+        )
         top_parties = (
             OrderItem.objects
             .filter(order__in=filtered_orders)
             .values('order__card_code', 'category')
             .annotate(
                 card_name=Max('order__card_name'),
-                revenue=Sum('total'),
+                revenue=Sum('total', filter=completed_status_filter),
                 count=Count('order_id', distinct=True),
                 completed_count=Count(
                     'order_id',
                     distinct=True,
-                    filter=Q(order__status__code__icontains='COMPLETED') | Q(order__status__name__icontains='Completed'),
+                    filter=completed_status_filter,
                 ),
             )
             .order_by('-count', '-revenue')
