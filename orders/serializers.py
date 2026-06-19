@@ -207,6 +207,9 @@ class OrderItemSerializer(serializers.ModelSerializer):
     is_scheme_visible = serializers.SerializerMethodField()
     schemes = OrderItemSchemeSerializer(many=True, read_only=True)
     approval_approvers = serializers.SerializerMethodField()
+    # Backward-compat: the column was renamed variety -> sub_group. Keep exposing
+    # `variety` (read-only) so existing clients reading item.variety keep working.
+    variety = serializers.CharField(source='sub_group', read_only=True)
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)

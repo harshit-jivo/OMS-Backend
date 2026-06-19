@@ -418,7 +418,7 @@ def _create_order_item(order, item, to_float, to_bool):
         item_name=item.get('item_name', ''),
         category=item.get('category', ''),
         brand=item.get('brand', ''),
-        variety=item.get('variety', ''),
+        sub_group=item.get('sub_group') or item.get('variety') or '',
         item_type=item.get('item_type', ''),
         qty=to_float(item.get('qty', 0)),
         pcs=to_float(item.get('pcs', 0)),
@@ -617,7 +617,7 @@ def _build_state_item_sales(filtered_orders, state_map):
         'item_code',
         'item_name',
         'category',
-        'variety',
+        'sub_group',
         'qty',
         'boxes',
         'ltrs',
@@ -654,7 +654,7 @@ def _build_state_item_sales(filtered_orders, state_map):
         item_code = item['item_code'] or '-'
         item_name = item['item_name'] or item_code
         category = item['category'] or 'Unknown'
-        variety = item['variety'] or 'Unknown'
+        variety = item['sub_group'] or 'Unknown'
         qty = to_float(item['qty'])
         boxes = to_float(item['boxes'])
         ltrs = to_float(item['ltrs'])
@@ -868,11 +868,12 @@ def _mark_rate_approval_decision(order, user, decision, remarks=''):
     return approval
 
 def _get_item_sub_group(item):
-    """Resolve an order item's sub group from the synced SAP product (sap_products).
+    """Resolve an order item's sub group. Prefer the value stored on the order item;
+    fall back to the synced SAP product (sap_products) by item_code (and category)."""
+    stored = str(getattr(item, 'sub_group', '') or '').strip()
+    if stored:
+        return stored
 
-    OrderItem has no sub_group column, so we look it up by item_code (and
-    category when available).
-    """
     item_code = str(getattr(item, 'item_code', '') or '').strip()
     if not item_code:
         return ''
