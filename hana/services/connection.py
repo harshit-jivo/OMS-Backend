@@ -155,6 +155,28 @@ class Queries():
     
        
     @staticmethod
+    def get_quotation_status(doc_entries):
+        """Status of one or more Sales Quotations (OQUT) by DocEntry.
+
+        Returns DocStatus ('O' = open, 'C' = closed) and CANCELED ('Y'/'N') so
+        the caller can decide whether a quotation is still open / cancellable.
+        """
+        s = Queries.SCHEMA
+        safe_entries = [str(int(entry)) for entry in doc_entries]
+        if not safe_entries:
+            return None
+        entries_csv = ",".join(safe_entries)
+        return f"""
+            SELECT
+                T0."DocEntry",
+                T0."DocNum",
+                T0."DocStatus",
+                T0."CANCELED"
+            FROM "{s}"."OQUT" AS T0
+            WHERE T0."DocEntry" IN ({entries_csv})
+        """
+
+    @staticmethod
     def get_sales_orders_for_party(party_code):
         s = Queries.SCHEMA
         return f"""

@@ -4093,3 +4093,194 @@ class UserPartyView(APIView):
             .values("card_code", "card_name")
             .distinct()
         )
+
+
+def _quotation_entries_for_orders(order_ids):
+    """Map order_id -> latest successful quotation {doc_entry, doc_num}.
+
+    The SAP Sales Quotation created when an order completes is recorded in
+    SalesQuotationLog (keyed by str(order.id)). We need the DocEntry to talk to
+    the SAP Service Layer and the DocNum just for display.
+    """
+    str_ids = [str(oid) for oid in order_ids]
+    mapping = {}
+    if not str_ids:
+        return mapping
+    logs = (
+        SalesQuotationLog.objects
+        .filter(order_id__in=str_ids, status='SUCCESS', sap_doc_entry__isnull=False)
+        .order_by('order_id', '-created_at')
+        .values_list('order_id', 'sap_doc_entry', 'sap_doc_num')
+    )
+    for log_order_id, doc_entry, doc_num in logs:
+        # first row per order is the latest (queryset ordered by -created_at)
+        if log_order_id not in mapping:
+            mapping[log_order_id] = {'doc_entry': doc_entry, 'doc_num': doc_num}
+    return mapping
+
+
+def _is_quotation_open(row):
+    """A quotation is open/cancellable when DocStatus is 'O' and not cancelled."""
+    doc_status = str(row.get('DocStatus') or '').upper()
+    canceled = str(row.get('CANCELED') or '').upper()
+    return doc_status == 'O' and canceled != 'Y'
+
+
+class QuotationStatusView(APIView):
+    """Batch lookup of SAP Sales Quotation status for completed orders.
+
+    The View Orders page calls this with the ids of completed orders so it can
+    show the "Cancel Sales Quotation" button only for those whose quotation is
+    still open in SAP. Degrades gracefully (empty map) if SAP is unreachable so
+    the orders list still renders.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from hana.services.services import SalesOrderService
+
+        raw_ids = request.query_params.get('order_ids', '')
+        order_ids = [oid for oid in (i.strip() for i in raw_ids.split(',')) if oid.isdigit()]
+        if not order_ids:
+            return Response({'success': True, 'statuses': {}})
+
+        entry_map = _quotation_entries_for_orders(order_ids)
+        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
+
+        sap_rows_by_entry = {}
+        if doc_entries:
+            try:
+                rows = SalesOrderService().get_quotation_status(doc_entries)
+                for row in rows:
+                    sap_rows_by_entry[int(row['DocEntry'])] = row
+            except Exception as exc:
+                # SAP/HANA unreachable: return what we know but don't break the page.
+                return Response(
+                    {'success': False, 'statuses': {}, 'error': str(exc)},
+                    status=status.HTTP_200_OK,
+                )
+
+        statuses = {}
+        for order_id, info in entry_map.items():
+            doc_entry = info['doc_entry']
+            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
+            statuses[order_id] = {
+                'doc_entry': doc_entry,
+                'doc_num': info['doc_num'],
+                'doc_status': (row or {}).get('DocStatus'),
+                'canceled': (row or {}).get('CANCELED'),
+                'is_open': bool(row) and _is_quotation_open(row),
+            }
+
+        return Response({'success': True, 'statuses': statuses})
+
+
+class CancelSalesQuotationView(APIView):
+    """Cancel a completed order's SAP Sales Quotation, then mirror it in OMS.
+
+    Only allowed for COMPLETED orders whose quotation is still open in SAP. The
+    SAP cancellation is the source of truth: OMS is only updated if SAP confirms.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        from django.conf import settings
+        from serviceLayer.service import SAPServiceLayerManager
+        from hana.services.services import SalesOrderService
+
+        try:
+            order = Order.objects.select_related('status').get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'success': False, 'message': 'Order not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if order.status.code != 'COMPLETED':
+            return Response(
+                {'success': False, 'message': 'Only completed orders can have their quotation cancelled'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if order.quotation_cancelled:
+            return Response(
+                {'success': False, 'message': 'Quotation already cancelled'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        entry_map = _quotation_entries_for_orders([order.id])
+        info = entry_map.get(str(order.id))
+        doc_entry = info['doc_entry'] if info else None
+        doc_num = info['doc_num'] if info else None
+        if doc_entry is None:
+            return Response(
+                {'success': False, 'message': 'No SAP sales quotation found for this order'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Confirm the quotation is still open before the destructive call.
+        try:
+            rows = SalesOrderService().get_quotation_status([doc_entry])
+            current = next((r for r in rows if int(r['DocEntry']) == int(doc_entry)), None)
+        except Exception as exc:
+            return Response(
+                {'success': False, 'message': f'Could not verify quotation status in SAP: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        if not current or not _is_quotation_open(current):
+            return Response(
+                {'success': False, 'message': 'Quotation is not open in SAP and cannot be cancelled'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cancel_url = f"{settings.HANA_SERVICE_LAYER_URL}/Quotations({int(doc_entry)})/Cancel"
+        try:
+            session = SAPServiceLayerManager.get_session()
+            sap_response = session.post(cancel_url, timeout=20)
+            if sap_response.status_code == 401:
+                SAPServiceLayerManager.clear_session()
+                session = SAPServiceLayerManager.get_session()
+                sap_response = session.post(cancel_url, timeout=20)
+        except Exception as exc:
+            return Response(
+                {'success': False, 'message': f'SAP request failed: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if sap_response.status_code not in (200, 201, 204):
+            try:
+                details = sap_response.json()
+            except Exception:
+                details = sap_response.text
+            return Response(
+                {'success': False, 'message': 'SAP rejected the cancellation', 'details': details},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # SAP confirmed — mirror in OMS.
+        actor = request.user if getattr(request.user, 'is_authenticated', False) else None
+        order.quotation_cancelled = True
+        order.quotation_cancelled_at = timezone.now()
+        order.quotation_cancelled_by = actor
+        order.save(update_fields=['quotation_cancelled', 'quotation_cancelled_at', 'quotation_cancelled_by'])
+
+        try:
+            from audit.models import AuditLog
+            AuditLog.objects.create(
+                user=actor,
+                username=getattr(actor, 'username', '') or '',
+                page='View Orders',
+                action='Cancelled',
+                record=f'Order {order.order_number} (Quotation {doc_num})',
+                field='sales_quotation',
+                old_value='Open',
+                new_value='Cancelled',
+            )
+        except Exception:
+            pass  # auditing must never block the operation
+
+        return Response({
+            'success': True,
+            'message': 'Sales quotation cancelled',
+            'order_id': order.id,
+            'doc_num': doc_num,
+        })
+

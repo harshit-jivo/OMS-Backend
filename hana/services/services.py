@@ -122,3 +122,12 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+
+    def get_quotation_status(self, doc_entries):
+        query = Queries.get_quotation_status(doc_entries)
+        if not query:
+            return []
+        with HANAConnection() as conn:
+            result = conn.execute(query)
+
+        return result

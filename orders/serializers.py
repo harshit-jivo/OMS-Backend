@@ -357,7 +357,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "dispatch_from_id", "dispatch_from_name", "company", "po_number","is_foc",
             "remarks", "total_amount", "status", "status_display",
             "created_by", "created_by_name", "created_at", "delivery_date",
-            "sap_created", "sap_doc_number",
+            "sap_created", "sap_doc_number", "quotation_cancelled",
             "approved_by", "approved_at", "rejected_by", "rejected_at",
             "rejection_reason", "reject_reason", "updated_at",
             "items", "items_count", "party_state",
