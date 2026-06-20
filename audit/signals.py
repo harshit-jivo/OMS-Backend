@@ -7,7 +7,7 @@ old and new values land in their own columns. Connected only to the models in
 """
 import logging
 
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
 
 from . import context
 from .pages import page_for_model
@@ -16,14 +16,22 @@ logger = logging.getLogger(__name__)
 
 AUDITED_MODELS = [
     'users.User',
-    'users.UserState',
     'users.UserPartyAssignment',
     'users.PartyProductAssignment',
     'users.SchemeProduct',
     'sap_sync.SyncLog',
 ]
 
+# Many-to-many relations to audit, as (owner model label, field name).
+# These don't fire normal save signals, so they're handled via m2m_changed,
+# which produces a single consolidated row per change (all added/removed at once).
+AUDITED_M2M = [
+    ('users.User', 'main_groups'),
+    ('users.User', 'states'),
+]
+
 _audited_classes = set()
+_m2m_info = {}  # through model -> (owner friendly name, field name)
 
 # Bookkeeping fields the views set automatically (who/when), not a user edit.
 # The audit log already records who did it, so these would just be noise.
@@ -65,7 +73,9 @@ def _show(value):
     if value is None:
         return ''
     text = str(value)
-    return text if len(text) <= 200 else text[:197] + '...'
+    # old_value / new_value are unlimited text; keep a high cap only as a guard
+    # against accidental blobs, so long lists (e.g. sub_group) show in full.
+    return text if len(text) <= 5000 else text[:4997] + '...'
 
 
 def _changed(old_values, new_values):
@@ -81,24 +91,83 @@ def _changed(old_values, new_values):
             yield key, _show(old), _show(new)
 
 
-def _write(model_cls, action, record, field='', old_value='', new_value=''):
+def _entry(model_cls, instance, record, action):
+    """Get (or start) the buffered change-set for one record. During a request
+    all handlers share the same entry (keyed by model + pk) so everything lands
+    in one row; outside a request a throwaway entry is returned and written
+    immediately by the caller."""
+    rec = {
+        'page': context.get().get('page') or page_for_model(model_cls),
+        'record': str(record)[:255],
+        'action': action,
+        'changes': {},  # field -> {'old': ..., 'new': ...}
+    }
+    if not context.is_active():
+        return rec, False  # caller writes it now
+    buf = context.buffer()
+    key = f'{model_cls._meta.label}:{getattr(instance, "pk", "")}'
+    existing = buf.get(key)
+    if existing is None:
+        buf[key] = rec
+        return rec, True
+    # Merge into the existing entry; escalate the action sensibly.
+    if action == 'Created':
+        existing['action'] = 'Created'
+    elif action == 'Deleted':
+        existing['action'] = 'Deleted'
+    return existing, True
+
+
+def _render(rec):
+    """Return (field, old_value, new_value) for a buffered change-set."""
+    changes = rec['changes']
+    if rec['action'] == 'Created':
+        new_value = '; '.join(f'{f}: {c["new"]}' for f, c in changes.items()
+                              if c.get('new') not in (None, ''))
+        return '', '', new_value
+    if rec['action'] == 'Deleted':
+        return '', '', ''
+    field = ', '.join(changes.keys())
+    old_value = '; '.join(f'{f}: {c["old"]}' for f, c in changes.items()
+                          if c.get('old') not in (None, ''))
+    new_value = '; '.join(f'{f}: {c["new"]}' for f, c in changes.items()
+                          if c.get('new') not in (None, ''))
+    return field, old_value, new_value
+
+
+def _write_row(rec):
     from .models import AuditLog
+    if rec['action'] == 'Updated' and not rec['changes']:
+        return  # nothing actually changed
+    field, old_value, new_value = _render(rec)
     ctx = context.get()
     user = ctx.get('user')
     try:
         AuditLog.objects.create(
             user=user if getattr(user, 'pk', None) else None,
             username=getattr(user, 'username', '') or '',
-            page=ctx.get('page') or page_for_model(model_cls),
-            action=action,
-            record=str(record)[:255],
+            page=rec['page'],
+            action=rec['action'],
+            record=rec['record'],
             field=field[:100],
             old_value=old_value,
             new_value=new_value,
         )
-        context.mark_model_write()
     except Exception:
-        logger.exception('Failed to write audit log for %s', model_cls)
+        logger.exception('Failed to write audit log')
+
+
+def flush():
+    """Write one row per buffered record. Called by the middleware at the end
+    of a request. Returns the number of rows written."""
+    buf = context.buffer()
+    if not buf:
+        return 0
+    count = 0
+    for rec in buf.values():
+        _write_row(rec)
+        count += 1
+    return count
 
 
 def capture_old(sender, instance, **kwargs):
@@ -117,35 +186,63 @@ def log_save(sender, instance, created, **kwargs):
     if sender not in _audited_classes:
         return
     record = f'{_friendly(sender)}: {_instance_label(instance)}'
+
     if created:
+        rec, buffered = _entry(sender, instance, record, 'Created')
         pk_name = sender._meta.pk.name
-        parts = []
         for field_name, value in _field_values(instance).items():
             if field_name == pk_name:
-                continue  # skip the auto-generated id
-            if 'password' in field_name.lower():
-                shown = '(hidden)'
-            else:
-                shown = _show(value)
+                continue
+            shown = '(hidden)' if 'password' in field_name.lower() else _show(value)
             if shown == '':
-                continue  # skip empty fields
-            parts.append(f'{field_name}: {shown}')
-        _write(sender, 'Created', record, new_value='; '.join(parts))
+                continue
+            rec['changes'][field_name] = {'old': '', 'new': shown}
+        if not buffered:
+            _write_row(rec)
         return
 
     changes = list(_changed(getattr(instance, '_audit_old', None) or {}, _field_values(instance)))
     if not changes:
-        return  # save() with nothing actually changed
-    fields = ', '.join(field for field, _, _ in changes)
-    old_value = '; '.join(f'{field}: {old}' for field, old, _ in changes)
-    new_value = '; '.join(f'{field}: {new}' for field, _, new in changes)
-    _write(sender, 'Updated', record, field=fields, old_value=old_value, new_value=new_value)
+        return
+    rec, buffered = _entry(sender, instance, record, 'Updated')
+    for field_name, old, new in changes:
+        rec['changes'][field_name] = {'old': old, 'new': new}
+    if not buffered:
+        _write_row(rec)
 
 
 def log_delete(sender, instance, **kwargs):
     if sender not in _audited_classes:
         return
-    _write(sender, 'Deleted', f'{_friendly(sender)}: {_instance_label(instance)}')
+    record = f'{_friendly(sender)}: {_instance_label(instance)}'
+    rec, buffered = _entry(sender, instance, record, 'Deleted')
+    if not buffered:
+        _write_row(rec)
+
+
+def log_m2m(sender, instance, action, pk_set, model, **kwargs):
+    """Audit add/remove on a many-to-many relation (e.g. main_groups, states).
+    Merges into the same record entry so it shares the row with field changes."""
+    if action not in ('post_add', 'post_remove') or not pk_set:
+        return
+    info = _m2m_info.get(sender)
+    if not info:
+        return
+    owner_friendly, field_name = info
+    try:
+        names = ', '.join(str(obj) for obj in model.objects.filter(pk__in=pk_set))
+    except Exception:
+        names = ', '.join(str(pk) for pk in pk_set)
+
+    record = f'{owner_friendly}: {instance}'
+    rec, buffered = _entry(type(instance), instance, record, 'Updated')
+    cell = rec['changes'].setdefault(field_name, {'old': '', 'new': ''})
+    if action == 'post_add':
+        cell['new'] = f'added: {names}'
+    else:
+        cell['old'] = f'removed: {names}'
+    if not buffered:
+        _write_row(rec)
 
 
 def connect():
@@ -163,3 +260,13 @@ def connect():
         pre_save.connect(capture_old, sender=model_cls, dispatch_uid=uid + '_pre')
         post_save.connect(log_save, sender=model_cls, dispatch_uid=uid + '_post')
         post_delete.connect(log_delete, sender=model_cls, dispatch_uid=uid + '_del')
+
+    for label, field_name in AUDITED_M2M:
+        try:
+            model_cls = apps.get_model(label)
+            through = getattr(model_cls, field_name).through
+        except Exception:
+            logger.warning('Audit: could not resolve m2m %s.%s', label, field_name)
+            continue
+        _m2m_info[through] = (_friendly(model_cls), field_name)
+        m2m_changed.connect(log_m2m, sender=through, dispatch_uid=f'audit_m2m_{label}_{field_name}')

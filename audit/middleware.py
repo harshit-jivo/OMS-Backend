@@ -8,7 +8,7 @@ the change is never lost.
 """
 import logging
 
-from . import context
+from . import context, signals
 from .pages import resolve_page
 
 logger = logging.getLogger(__name__)
@@ -53,17 +53,21 @@ class AuditMiddleware:
         try:
             response = self.get_response(request)
         finally:
-            self._maybe_fallback(request, response, page, user)
+            written = 0
+            try:
+                written = signals.flush()  # write one row per changed record
+            except Exception:
+                logger.exception('Failed to flush audit buffer')
+            self._maybe_fallback(request, response, page, user, written)
             context.clear()
 
         return response
 
-    def _maybe_fallback(self, request, response, page, user):
+    def _maybe_fallback(self, request, response, page, user, written):
         # Only for recognised admin changes that succeeded but produced no
-        # model-signal row.
-        if not page:
-            return
-        if context.model_writes() > 0:
+        # model-signal row (e.g. a bulk queryset.update() or an endpoint whose
+        # model isn't individually audited).
+        if not page or written > 0:
             return
         status = getattr(response, 'status_code', None)
         if status is not None and status >= 400:
