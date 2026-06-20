@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, PushTokenView,StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, PushTokenView,StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView
 
 urlpatterns=[
     
@@ -42,6 +42,7 @@ urlpatterns=[
     path(
     "staff-products/",StaffProductsAPIView.as_view(),name="staff-products"),
     path("quotation-status/", QuotationStatusView.as_view(), name="quotation-status"),
+    path("quotation-overview/", QuotationOverviewView.as_view(), name="quotation-overview"),
     path("<int:order_id>/cancel-quotation/", CancelSalesQuotationView.as_view(), name="cancel-quotation")
     
     

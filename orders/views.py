@@ -4298,3 +4298,76 @@ class CancelSalesQuotationView(APIView):
             'doc_num': doc_num,
         })
 
+
+class QuotationOverviewView(APIView):
+    """Admin overview of every completed order and its SAP sales-quotation
+    status (CANCELLED / OPEN / CLOSED / UNKNOWN). Powers the admin
+    "Sales Quotation" screen on web and mobile.
+
+    Degrades gracefully if SAP is unreachable: cancelled orders are still
+    reported from OMS, and the rest show UNKNOWN with a sap_error note.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from hana.services.services import SalesOrderService
+
+        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
+        is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
+        if not is_admin:
+            return Response(
+                {'success': False, 'message': 'Only admin can view quotation status'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        completed = (
+            Order.objects
+            .filter(status__code='COMPLETED')
+            .select_related('quotation_cancelled_by')
+            .order_by('-created_at')
+        )
+
+        order_ids = [str(order.id) for order in completed]
+        entry_map = _quotation_entries_for_orders(order_ids)
+        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
+
+        sap_rows_by_entry = {}
+        sap_error = None
+        if doc_entries:
+            try:
+                rows = SalesOrderService().get_quotation_status(doc_entries)
+                for row in rows:
+                    sap_rows_by_entry[int(row['DocEntry'])] = row
+            except Exception as exc:
+                sap_error = str(exc)
+
+        data = []
+        for order in completed:
+            info = entry_map.get(str(order.id)) or {}
+            doc_entry = info.get('doc_entry')
+            doc_num = info.get('doc_num')
+            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
+
+            if order.quotation_cancelled:
+                quotation_status = 'CANCELLED'
+            elif row is not None:
+                quotation_status = 'OPEN' if _is_quotation_open(row) else 'CLOSED'
+            else:
+                quotation_status = 'UNKNOWN'
+
+            data.append({
+                'id': order.id,
+                'order_number': order.order_number,
+                'card_code': order.card_code,
+                'card_name': order.card_name,
+                'created_at': order.created_at,
+                'doc_num': doc_num,
+                'doc_entry': doc_entry,
+                'quotation_cancelled': order.quotation_cancelled,
+                'quotation_cancelled_at': order.quotation_cancelled_at,
+                'quotation_cancelled_by': getattr(order.quotation_cancelled_by, 'username', None),
+                'quotation_status': quotation_status,
+            })
+
+        return Response({'success': True, 'data': data, 'sap_error': sap_error})
+
