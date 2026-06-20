@@ -24,6 +24,8 @@ _MODEL_PAGE = {
     'users.UserPartyAssignment': 'Party Assignment',
     'users.PartyProductAssignment': 'Party Product Assignment',
     'users.SchemeProduct': 'Add Scheme',
+    'orders.OrderFlowConfig': 'Order Flow Settings',
+    'orders.PartyOrderFlowConfig': 'Order Flow Settings',
     'sap_sync.SyncLog': 'SAP Sync',
 }
 

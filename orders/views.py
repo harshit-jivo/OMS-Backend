@@ -2629,6 +2629,22 @@ class OrderStatusList(APIView):
         status = OrderStatus.objects.all().values('id','name')
         return Response(list(status))
 
+# Page key (see frontend GRANTABLE_ADMIN_PAGES) that unlocks Order Flow Settings.
+ORDER_FLOW_PAGE_KEY = 'Order_Flow_Settings'
+
+
+def _can_manage_order_flow(user):
+    """Admins, or any user explicitly granted the Order Flow Settings page on
+    the Permissions screen (stored in User.extra_pages)."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    role_name = getattr(getattr(user, 'role', None), 'name', '')
+    if user.is_staff or str(role_name).strip().lower() == 'admin':
+        return True
+    extra_pages = getattr(user, 'extra_pages', None) or []
+    return ORDER_FLOW_PAGE_KEY in extra_pages
+
+
 class OrderFlowConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2637,9 +2653,7 @@ class OrderFlowConfigView(APIView):
         return Response(_order_flow_config_payload(flow_type=flow_type))
 
     def post(self, request):
-        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
-        is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
-        if not is_admin:
+        if not _can_manage_order_flow(request.user):
             return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
 
         flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
@@ -2675,8 +2689,8 @@ class PartyOrderFlowConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _is_admin(self, request):
-        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
-        return request.user.is_staff or str(role_name).strip().lower() == 'admin'
+        # Admins, or users granted the Order Flow Settings page on Permissions.
+        return _can_manage_order_flow(request.user)
 
     def _party_name_map(self, card_codes):
         if not card_codes:

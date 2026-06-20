@@ -19,6 +19,8 @@ AUDITED_MODELS = [
     'users.UserPartyAssignment',
     'users.PartyProductAssignment',
     'users.SchemeProduct',
+    'orders.OrderFlowConfig',
+    'orders.PartyOrderFlowConfig',
     'sap_sync.SyncLog',
 ]
 
