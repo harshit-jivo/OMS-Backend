@@ -70,7 +70,8 @@ INSTALLED_APPS = [
     'hana',
     'SKU',
     'serviceLayer',
-    'invoice'
+    'invoice',
+    'audit',
 ]
 
 MIDDLEWARE = [
@@ -83,6 +84,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'audit.middleware.AuditMiddleware',
 ]
 
 ROOT_URLCONF = 'OMS.urls'
