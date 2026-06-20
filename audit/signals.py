@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 AUDITED_MODELS = [
     'users.User',
+    'users.UserState',
     'users.UserPartyAssignment',
     'users.PartyProductAssignment',
     'users.SchemeProduct',
@@ -31,6 +32,16 @@ IGNORED_FIELDS = {'assigned_by', 'created_by', 'updated_by'}
 
 def _friendly(model_cls):
     return model_cls._meta.verbose_name.title()
+
+
+def _instance_label(instance):
+    """Readable label for the record. UserState's own __str__ is just ids."""
+    if type(instance)._meta.label == 'users.UserState':
+        try:
+            return f'{instance.user.username} - {instance.state.name}'
+        except Exception:
+            pass
+    return str(instance)
 
 
 def _field_values(instance):
@@ -105,7 +116,7 @@ def capture_old(sender, instance, **kwargs):
 def log_save(sender, instance, created, **kwargs):
     if sender not in _audited_classes:
         return
-    record = f'{_friendly(sender)}: {instance}'
+    record = f'{_friendly(sender)}: {_instance_label(instance)}'
     if created:
         pk_name = sender._meta.pk.name
         parts = []
@@ -134,7 +145,7 @@ def log_save(sender, instance, created, **kwargs):
 def log_delete(sender, instance, **kwargs):
     if sender not in _audited_classes:
         return
-    _write(sender, 'Deleted', f'{_friendly(sender)}: {instance}')
+    _write(sender, 'Deleted', f'{_friendly(sender)}: {_instance_label(instance)}')
 
 
 def connect():

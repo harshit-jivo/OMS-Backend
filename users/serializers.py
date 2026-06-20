@@ -228,9 +228,16 @@ class UpdateUserSerializer(serializers.Serializer):
                 instance.main_group = main_groups[0]
 
         if states_list is not None:
-            UserState.objects.filter(user=instance).delete()
+            # Apply only the real changes so we don't churn (and so the audit
+            # log records just the states actually added/removed).
+            new_ids = {state.id for state in states_list}
+            existing = {us.state_id: us for us in UserState.objects.filter(user=instance)}
+            for state_id, user_state in existing.items():
+                if state_id not in new_ids:
+                    user_state.delete()
             for state in states_list:
-                UserState.objects.create(user=instance, state=state)
+                if state.id not in existing:
+                    UserState.objects.create(user=instance, state=state)
             if states_list:
                 instance.state = states_list[0]
 
