@@ -136,7 +136,16 @@ class Order(models.Model):
     )
 
     sap_created = models.BooleanField(default=False)
-    sap_doc_number = models.CharField(blank=True, max_length=100, null=True)   
+    sap_doc_number = models.CharField(blank=True, max_length=100, null=True)
+    # Set when a manager cancels the order's SAP Sales Quotation from the
+    # View Orders page. The actual cancellation happens in SAP; this flag mirrors
+    # it in OMS so the UI can show a "Quotation Cancelled" badge.
+    quotation_cancelled = models.BooleanField(default=False)
+    quotation_cancelled_at = models.DateTimeField(null=True, blank=True)
+    quotation_cancelled_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cancelled_quotations',
+    )
     # Approval/Rejection
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_orders')
     approved_at = models.DateTimeField(null=True, blank=True)
