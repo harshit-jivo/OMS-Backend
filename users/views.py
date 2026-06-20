@@ -244,12 +244,18 @@ class AssignPartiesView(APIView):
 
         removed_count = 0
         for card_code, category in to_remove:
-            removed_count += UserPartyAssignment.objects.filter(
+            # Deactivate per-object (not a bulk .update()) so the audit signals
+            # fire and each removal is logged with its is_active change, matching
+            # the single-removal endpoint used by the app.
+            for assignment in UserPartyAssignment.objects.filter(
                 user=user,
                 card_code=card_code,
                 category=category,
                 is_active=True,
-            ).update(is_active=False)
+            ):
+                assignment.is_active = False
+                assignment.save(update_fields=['is_active'])
+                removed_count += 1
 
         return Response({
             'success': True,
