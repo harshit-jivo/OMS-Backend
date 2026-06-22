@@ -2893,6 +2893,7 @@ class UpdateOrderStatusView(APIView):
                     status_obj = configured_next_status
 
         user = request.user if request.user.is_authenticated else None
+        actor_role = (getattr(getattr(user, "role", None), "name", "") or "").strip().lower()
 
         # ✅ Update order
         order.status = status_obj
@@ -2912,8 +2913,14 @@ class UpdateOrderStatusView(APIView):
             and (status_obj.id == 3 or "billing" in new_name)
         )
 
+        # A billing user forwarding an order to the auditor must leave the auditor
+        # stage pending (performed_by=None). Match on the actor's role too, so this
+        # holds even when the previous status name doesn't literally contain
+        # "billing" (otherwise it falls through to the generic handler, which would
+        # stamp the billing user as the auditor-stage performer and make the
+        # Auditor Approval stage look approved).
         is_billing_to_auditor = (
-            "billing" in prev_name
+            ("billing" in prev_name or actor_role == "billing")
             and "auditor" in new_name
         )
 
