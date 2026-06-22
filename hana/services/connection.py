@@ -112,7 +112,9 @@ class Queries():
                 ON T0."ItemCode" = T1."ItemCode"
             INNER JOIN "{schema}"."OWHS" AS T2
                 ON T1."WhsCode" = T2."WhsCode"
-            LEFT JOIN (
+            INNER JOIN (
+                -- Only items/warehouses that appear in an OPEN sales order, so the
+                -- stock page shows just products that are in an open SO.
                 SELECT
                     R1."ItemCode",
                     R1."WhsCode",
