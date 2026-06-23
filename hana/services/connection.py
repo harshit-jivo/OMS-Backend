@@ -60,6 +60,29 @@ class Queries():
     SCHEMA = settings.DATABASES['hana']['SCHEMA']
 
     @staticmethod
+    def _open_so_schemas():
+        """All configured SAP company DBs (OIL / BEVERAGES / MART), de-duplicated.
+
+        Open sales orders live in a different company DB per category, so any
+        query that looks up open SOs must search across all of them - matching
+        get_product_stock(). Otherwise a BEVERAGES/MART item shows open-order
+        demand in the stock list but its drill-down (single schema) finds nothing.
+        """
+        configured = [
+            getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA,
+            getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''),
+            getattr(settings, 'HANA_COMPANY_DB_MART', ''),
+        ]
+        schemas = []
+        seen = set()
+        for schema in configured:
+            schema = str(schema or '').strip()
+            if schema and schema not in seen:
+                seen.add(schema)
+                schemas.append(schema)
+        return schemas
+
+    @staticmethod
     def get_product_stock():
         configured_schemas = [
             (getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA, 'OIL'),
@@ -142,8 +165,8 @@ class Queries():
     
     @staticmethod
     def get_party_with_open_so():
-        s = Queries.SCHEMA
-        return f"""
+        branches = [
+            f"""
             SELECT
                 T0."CardCode",
                 T0."CardName",
@@ -152,6 +175,21 @@ class Queries():
             WHERE T0."DocStatus" = 'O'
               AND T0."CANCELED" = 'N'
             GROUP BY T0."CardCode", T0."CardName"
+            """
+            for s in Queries._open_so_schemas()
+        ]
+        union = "\nUNION ALL\n".join(branches)
+        # Sum across company DBs so a party with open SOs in more than one DB
+        # appears once with its combined total.
+        return f"""
+            SELECT
+                "CardCode",
+                "CardName",
+                SUM("Num_of_Open_SalesOrder") AS "Num_of_Open_SalesOrder"
+            FROM (
+                {union}
+            ) AS T
+            GROUP BY "CardCode", "CardName"
             ORDER BY "Num_of_Open_SalesOrder" DESC
         """
     
@@ -180,111 +218,59 @@ class Queries():
 
     @staticmethod
     def get_sales_orders_for_party(party_code):
-        s = Queries.SCHEMA
-        return f"""
-        SELECT
-            T0."DocEntry",
-            T0."DocNum",
-            T0."DocDate",
-            T0."DocDueDate",
-            T0."CardCode",
-            T0."CardName",
-            T0."NumAtCard",
-            T0."DocStatus",
-            T0."DocTotal",
-            T0."VatSum",
-            T0."DiscSum",
-            T0."Comments",
-            T0."SlpCode",
-            T0."ShipToCode",
-            T0."PayToCode",
-            T0."BPLId",
-
-            T1."LineNum",
-            T1."ItemCode",
-            T1."Dscription",
-            T1."Quantity",
-            T1."OpenQty",
-            T1."Price",
-            T1."PriceBefDi",
-            T1."DiscPrcnt",
-            T1."LineTotal",
-            T1."VatPrcnt",
-            T1."VatGroup",
-            T1."WhsCode",
-            T1."TaxCode",
-            T1."ShipDate",
-            T1."AcctCode",
-            T1."Project",
-            T1."OcrCode",
-            T1."LineStatus"
-
-        FROM "{s}"."ORDR" AS T0
-        INNER JOIN "{s}"."RDR1" AS T1
-            ON T0."DocEntry" = T1."DocEntry"
-
-        WHERE T0."CardCode" = '{party_code}'
-          AND T0."DocStatus" = 'O'
-          AND T1."LineStatus" = 'O'
-          AND T1."OpenQty" > 0
-
-        ORDER BY T0."DocDate" DESC, T0."DocNum", T1."LineNum"
-        """ 
+        safe_party_code = str(party_code).replace("'", "''")
+        branches = [
+            f"""
+            SELECT
+                T0."DocEntry", T0."DocNum", T0."DocDate", T0."DocDueDate",
+                T0."CardCode", T0."CardName", T0."NumAtCard", T0."DocStatus",
+                T0."DocTotal", T0."VatSum", T0."DiscSum", T0."Comments",
+                T0."SlpCode", T0."ShipToCode", T0."PayToCode", T0."BPLId",
+                T1."LineNum", T1."ItemCode", T1."Dscription", T1."Quantity",
+                T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
+                T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
+                T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
+                T1."OcrCode", T1."LineStatus"
+            FROM "{s}"."ORDR" AS T0
+            INNER JOIN "{s}"."RDR1" AS T1
+                ON T0."DocEntry" = T1."DocEntry"
+            WHERE T0."CardCode" = '{safe_party_code}'
+              AND T0."CANCELED" = 'N'
+              AND T0."DocStatus" = 'O'
+              AND T1."LineStatus" = 'O'
+              AND T1."OpenQty" > 0
+            """
+            for s in Queries._open_so_schemas()
+        ]
+        return "\nUNION ALL\n".join(branches) + '\nORDER BY "DocDate" DESC, "DocNum", "LineNum"'
 
     @staticmethod
     def get_sales_orders_for_product(item_code):
-        s = Queries.SCHEMA
         safe_item_code = str(item_code).replace("'", "''")
-        return f"""
-        SELECT
-            T0."DocEntry",
-            T0."DocNum",
-            T0."DocDate",
-            T0."DocDueDate",
-            T0."CardCode",
-            T0."CardName",
-            T0."NumAtCard",
-            T0."DocStatus",
-            T0."DocTotal",
-            T0."VatSum",
-            T0."DiscSum",
-            T0."Comments",
-            T0."SlpCode",
-            T0."ShipToCode",
-            T0."PayToCode",
-            T0."BPLId",
-
-            T1."LineNum",
-            T1."ItemCode",
-            T1."Dscription",
-            T1."Quantity",
-            T1."OpenQty",
-            T1."Price",
-            T1."PriceBefDi",
-            T1."DiscPrcnt",
-            T1."LineTotal",
-            T1."VatPrcnt",
-            T1."VatGroup",
-            T1."WhsCode",
-            T1."TaxCode",
-            T1."ShipDate",
-            T1."AcctCode",
-            T1."Project",
-            T1."OcrCode",
-            T1."LineStatus"
-
-        FROM "{s}"."ORDR" AS T0
-        INNER JOIN "{s}"."RDR1" AS T1
-            ON T0."DocEntry" = T1."DocEntry"
-
-        WHERE T1."ItemCode" = '{safe_item_code}'
-          AND T0."CANCELED" = 'N'
-          AND T0."DocStatus" = 'O'
-          AND T1."LineStatus" = 'O'
-          AND T1."OpenQty" > 0
-
-        ORDER BY T0."CardName", T0."DocDate" DESC, T0."DocNum", T1."LineNum"
-        """
+        branches = [
+            f"""
+            SELECT
+                T0."DocEntry", T0."DocNum", T0."DocDate", T0."DocDueDate",
+                T0."CardCode", T0."CardName", T0."NumAtCard", T0."DocStatus",
+                T0."DocTotal", T0."VatSum", T0."DiscSum", T0."Comments",
+                T0."SlpCode", T0."ShipToCode", T0."PayToCode", T0."BPLId",
+                T1."LineNum", T1."ItemCode", T1."Dscription", T1."Quantity",
+                T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
+                T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
+                T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
+                T1."OcrCode", T1."LineStatus"
+            FROM "{s}"."ORDR" AS T0
+            INNER JOIN "{s}"."RDR1" AS T1
+                ON T0."DocEntry" = T1."DocEntry"
+            WHERE T1."ItemCode" = '{safe_item_code}'
+              AND T0."CANCELED" = 'N'
+              AND T0."DocStatus" = 'O'
+              AND T1."LineStatus" = 'O'
+              AND T1."OpenQty" > 0
+            """
+            for s in Queries._open_so_schemas()
+        ]
+        return "\nUNION ALL\n".join(branches) + '\nORDER BY "CardName", "DocDate" DESC, "DocNum", "LineNum"'
     
     @staticmethod
     def get_customer_details(party_code):
