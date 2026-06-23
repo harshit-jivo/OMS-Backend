@@ -49,7 +49,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'sub_group', 'is_active', 'password'
+            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'sub_group', 'is_active', 'password', 'extra_pages'
         ]
 
     def get_company(self, obj):
@@ -168,12 +168,7 @@ class CreateUserSerializer(serializers.Serializer):
             user.main_groups.set(main_groups)
 
         if states_list:
-            existing_state_ids = set(
-                UserState.objects.filter(user=user).values_list('state_id', flat=True)
-            )
-            for state in states_list:
-                if state.id not in existing_state_ids:
-                    UserState.objects.create(user=user, state=state)
+            user.states.set(states_list)
 
         return user
     
@@ -228,9 +223,9 @@ class UpdateUserSerializer(serializers.Serializer):
                 instance.main_group = main_groups[0]
 
         if states_list is not None:
-            UserState.objects.filter(user=instance).delete()
-            for state in states_list:
-                UserState.objects.create(user=instance, state=state)
+            # .set() applies only the real changes (no churn) and fires a single
+            # m2m_changed event, so the audit log records one consolidated row.
+            instance.states.set(states_list)
             if states_list:
                 instance.state = states_list[0]
 

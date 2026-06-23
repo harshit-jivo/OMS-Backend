@@ -136,7 +136,16 @@ class Order(models.Model):
     )
 
     sap_created = models.BooleanField(default=False)
-    sap_doc_number = models.CharField(blank=True, max_length=100, null=True)   
+    sap_doc_number = models.CharField(blank=True, max_length=100, null=True)
+    # Set when a manager cancels the order's SAP Sales Quotation from the
+    # View Orders page. The actual cancellation happens in SAP; this flag mirrors
+    # it in OMS so the UI can show a "Quotation Cancelled" badge.
+    quotation_cancelled = models.BooleanField(default=False)
+    quotation_cancelled_at = models.DateTimeField(null=True, blank=True)
+    quotation_cancelled_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cancelled_quotations',
+    )
     # Approval/Rejection
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_orders')
     approved_at = models.DateTimeField(null=True, blank=True)
@@ -158,7 +167,7 @@ class OrderItem(models.Model):
     item_name = models.CharField(max_length=255,null=True)
     category = models.CharField(max_length=100, blank=True,null=True)
     brand = models.CharField(max_length=100, blank=True,null=True)
-    variety = models.CharField(max_length=100, blank=True,null=True)
+    sub_group = models.CharField(max_length=100, blank=True,null=True)
     item_type = models.CharField(max_length=100, blank=True,null=True)
 
     qty = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -219,6 +228,38 @@ class OrderFlowConfig(models.Model):
 
     def __str__(self):
         return f'{self.flow_type} Order Flow Config'
+
+
+class PartyOrderFlowConfig(models.Model):
+    """Per-party, per-category, per-role order flow override. When a party has a
+    row here for a given category + flow_type (ASM / BILLING), orders of that
+    category and flow type for the party use these stage settings instead of the
+    global OrderFlowConfig. An empty category matches any category."""
+    card_code = models.CharField(max_length=50, db_index=True)
+    category = models.CharField(max_length=50, blank=True, default='')
+    flow_type = models.CharField(max_length=20, default='ASM')
+    rate_approval_enabled = models.BooleanField(default=True)
+    billing_enabled = models.BooleanField(default=True)
+    auditor_enabled = models.BooleanField(default=True)
+    rate_conditions = models.JSONField(default=list, blank=True)
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_party_order_flow_configs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'party_order_flow_config'
+        unique_together = ('card_code', 'category', 'flow_type')
+        verbose_name = 'Party Order Flow Config'
+        verbose_name_plural = 'Party Order Flow Config'
+
+    def __str__(self):
+        return f'Party Flow Config ({self.card_code} / {self.category or "ANY"} / {self.flow_type})'
 
 def log_order_action(order, action_name, user=None, remarks=''):
     try:

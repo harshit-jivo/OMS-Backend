@@ -244,12 +244,18 @@ class AssignPartiesView(APIView):
 
         removed_count = 0
         for card_code, category in to_remove:
-            removed_count += UserPartyAssignment.objects.filter(
+            # Deactivate per-object (not a bulk .update()) so the audit signals
+            # fire and each removal is logged with its is_active change, matching
+            # the single-removal endpoint used by the app.
+            for assignment in UserPartyAssignment.objects.filter(
                 user=user,
                 card_code=card_code,
                 category=category,
                 is_active=True,
-            ).update(is_active=False)
+            ):
+                assignment.is_active = False
+                assignment.save(update_fields=['is_active'])
+                removed_count += 1
 
         return Response({
             'success': True,
@@ -728,6 +734,55 @@ class ProfileView(APIView):
         return Response({
             'success': True,
             'data': UserSerializer(request.user).data
+        })
+
+
+class PagePermissionsView(APIView):
+    """Admin-managed per-user page access (list of page keys)."""
+    permission_classes = [IsAuthenticated]
+
+    def _is_admin(self, request):
+        role = getattr(request.user, 'role', None)
+        return bool(role and str(getattr(role, 'name', '')).strip().lower() == 'admin')
+
+    def get(self, request, user_id):
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({'success': False, 'message': 'User not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'success': True,
+            'data': {'user_id': user.id, 'extra_pages': user.extra_pages or []},
+        })
+
+    def put(self, request, user_id):
+        if not self._is_admin(request):
+            return Response({'success': False, 'message': 'Only admin can change page permissions'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({'success': False, 'message': 'User not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        pages = request.data.get('extra_pages', [])
+        if not isinstance(pages, list):
+            return Response({'success': False, 'message': 'extra_pages must be a list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        cleaned = []
+        for page in pages:
+            page = str(page).strip()
+            if page and page not in cleaned:
+                cleaned.append(page)
+
+        user.extra_pages = cleaned
+        user.save(update_fields=['extra_pages', 'updated_at'])
+        return Response({
+            'success': True,
+            'message': 'Page permissions updated',
+            'data': {'user_id': user.id, 'extra_pages': cleaned},
         })
 
 class StateListView(ListAPIView):
