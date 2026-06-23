@@ -70,7 +70,8 @@ INSTALLED_APPS = [
     'hana',
     'SKU',
     'serviceLayer',
-    'invoice'
+    'invoice',
+    'legal'
 ]
 
 MIDDLEWARE = [
@@ -153,6 +154,10 @@ SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
 
 SAP_APPROVER_USER = config('SAP_APPROVER_USER')
 SAP_APPROVER_PASSWORD = config('SAP_APPROVER_PASSWORD') 
+
+
+# SAP_DRAFTER = 
+# SAP_DRAFTER_PASS = 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 

@@ -11,16 +11,29 @@ class SAPInvoiceCreateView(APIView):
         
         invoice_payload = request.data
         invoice_url = f"{settings.HANA_SERVICE_LAYER_URL}/Invoices"
-        creator_name = settings.SAP_APPROVER_USER
-        creator_pass = settings.SAP_APPROVER_PASSWORD
+        type = request.query_params.get('type')
+        
+        if not type:
+            return Response({"error" : "Type(DRAFT / INVOICE) is Required"}  , status = status.HTTP_400_BAD_REQUEST)
+        
+        if type == 'DRAFT':
+            user = settings.HANA_USERNAME
+            password = settings.HANA_PASSWORD
+            
+        else:
+            user = settings.SAP_APPROVER_USER
+            password = settings.SAP_APPROVER_PASSWORD
+
         
         try:
-            session = SAPServiceLayerManager.get_session_for(creator_name , creator_pass)
+            print(user)
+            print(password)
+            session = SAPServiceLayerManager.get_session_for(user , password )
             sap_response = session.post(invoice_url , json = invoice_payload , timeout = 20)
             
             if sap_response.status_code == 401:
                 SAPServiceLayerManager.clear_session()
-                session = SAPServiceLayerManager.get_session_for(creator_name , creator_pass)
+                session = SAPServiceLayerManager.get_session_for(user , password)
                 sap_response = session.post(invoice_url , json = invoice_payload , timeout = 20)
                 
             if sap_response.status_code in [200 , 201]:
@@ -39,13 +52,18 @@ class DraftView(APIView):
         draft_payload = request.data
         draft_url = f"{settings.HANA_SERVICE_LAYER_URL}/Drafts"
         
+        drafter_username = settings.HANA_USERNAME
+        drafter_password = settings.HANA_PASSWORD
+        
+        print(drafter_username)
+        print(drafter_password)
         try:
-            session = SAPServiceLayerManager.get_session()
+            session = SAPServiceLayerManager.get_session_for(drafter_username , drafter_password)
             sap_response = session.post(draft_url , json = draft_payload , timeout = 20)
             
             if sap_response.status_code == 401:
                 SAPServiceLayerManager.clear_session()
-                session = SAPServiceLayerManager.get_session()
+                session = SAPServiceLayerManager.get_session(drafter_username , drafter_password)
                 sap_response = session.post(draft_url , json = draft_payload , timeout = 20)
                 
             if sap_response.status_code in [200 , 201]:
@@ -104,9 +122,6 @@ class DraftActionView(APIView):
 
         try:
             session = SAPServiceLayerManager.get_session_for(approver_user, approver_pass)
-
-            # The frontend sends the draft's DocEntry, but ApprovalRequests is
-            # keyed by its own Code. Resolve the Code via the DraftEntry link.
             lookup_url = (
                 f"{settings.HANA_SERVICE_LAYER_URL}/ApprovalRequests"
                 f"?$filter=DraftEntry eq {draft_id}&$select=Code"
