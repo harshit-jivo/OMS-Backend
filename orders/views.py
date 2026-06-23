@@ -2693,23 +2693,34 @@ class PartyOrderFlowConfigView(APIView):
         return _can_manage_order_flow(request.user)
 
     def _party_name_map(self, card_codes):
+        """Resolve party names from the category-aware sap_parties table.
+
+        The same card_code can belong to different parties across categories
+        (e.g. CUSTA000878 is PURAN STORE under OIL and A ONE BEVERAGES under
+        BEVERAGES), so we key by (card_code, category). A code-only fallback is
+        kept for configs whose category is blank/unmatched.
+        """
         if not card_codes:
-            return {}
+            return {}, {}
+        keyed = {}
+        by_code = {}
         try:
-            return {
-                row['card_code']: row['card_name']
-                for row in Parties.objects.filter(card_code__in=card_codes).values('card_code', 'card_name')
-            }
+            for row in SapParty.objects.filter(card_code__in=card_codes).values('card_code', 'card_name', 'category'):
+                cat = (row.get('category') or '').strip().upper()
+                keyed[(row['card_code'], cat)] = row['card_name']
+                by_code.setdefault(row['card_code'], row['card_name'])
         except Exception:
-            return {}
+            return {}, {}
+        return keyed, by_code
 
     def get(self, request):
         configs = list(PartyOrderFlowConfig.objects.all().order_by('card_code', 'flow_type'))
-        name_map = self._party_name_map(list({cfg.card_code for cfg in configs}))
+        keyed_names, code_names = self._party_name_map(list({cfg.card_code for cfg in configs}))
         data = []
         for cfg in configs:
             payload = _party_flow_config_payload(cfg)
-            payload['card_name'] = name_map.get(cfg.card_code, '')
+            cat = (cfg.category or '').strip().upper()
+            payload['card_name'] = keyed_names.get((cfg.card_code, cat)) or code_names.get(cfg.card_code, '')
             data.append(payload)
         return Response({
             'success': True,
