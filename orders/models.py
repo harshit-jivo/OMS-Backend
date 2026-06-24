@@ -276,6 +276,7 @@ class Template(models.Model):
     temp_id = models.AutoField(primary_key=True)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_templates')
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='template_instances')
+    sub_group = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
