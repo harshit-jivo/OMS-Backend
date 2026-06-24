@@ -190,3 +190,35 @@ class GetItemPriceView(APIView):
             
         item_price = SalesOrderService().get_item_price(item_code , price_list)
         return Response(item_price)
+
+class GetSeries(APIView):
+    def get(self , request):
+        finYear = request.query_params.get('finYear')
+        groupCode = request.query_params.get('groupCode')
+        if not finYear or not groupCode:
+            return Response({"error" : "Finanical month and year and GroupCode / BPLId is  require"} , status = status.HTTP_400_BAD_REQUEST)
+        
+        series_detail = SalesOrderService().get_series(finYear , groupCode)
+        return Response(series_detail)
+    
+    
+class GetDraftVerification(APIView):
+    
+    def get(self , request):
+        refId = request.query_params.get('refId')
+        if not refId:
+            return Response({"error" : "Ref ID is Mandatory"} , status = status.HTTP_400_BAD_REQUEST)
+        
+        result = SalesOrderService().get_draft_verfication(refId)
+        return Response({"data" : result})
+            
+class GetInvoiceDrafts(APIView):
+    
+    def get(self , request):
+        statusCode = request.query_params.get('statusCode')
+        if not statusCode:
+            return Response({"error" : "StatusCode is Mandatory"} , status = status.HTTP_400_BAD_REQUEST)
+        
+        result = SalesOrderService().get_invoice_status(statusCode)
+        return Response({"data" : result})
+            

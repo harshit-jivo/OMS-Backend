@@ -28,6 +28,7 @@ urlpatterns = [
     path('api/sku/', include('SKU.urls')),
     path('api/service-layer/' , include('serviceLayer.urls')),
     path('api/invoice/', include('invoice.urls')),
+    path('api/legal/' , include('legal.urls')),
 ]
 
 

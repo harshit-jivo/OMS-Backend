@@ -463,3 +463,52 @@ class Queries():
             FROM "{s}"."ITM1" AS T0
             WHERE T0."ItemCode" = '{item_code}' AND T0."PriceList" = {price_list}
         """
+
+    @staticmethod
+    def get_series(finYear , BPLId):
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+                T0."Series",
+                T0."ObjectCode",
+                T0."SeriesName",
+                T0."GroupCode",
+                T0."Indicator"
+            FROM "{s}"."NNM1" AS T0
+        WHERE T0."ObjectCode" = '13' AND T0."Indicator" = '{finYear }' AND T0."BPLId" = '{BPLId}'
+        """
+        
+    @staticmethod
+    def get_draft_verification(refId):
+        s = Queries.SCHEMA
+        return f"""SELECT * FROM "{s}"."ODRF" AS T0 WHERE T0."U_OMS_REF" = '{refId}' """
+    
+    @staticmethod
+    def get_invoice_status(statusCode):
+        s = Queries.SCHEMA
+        return f"""
+        	SELECT 
+		T0."WddCode",
+		T0."Status",
+		T0."UserSign",
+
+		T1."DocEntry",
+		T1."DocDueDate",
+		T1."CardCode",
+		T1."CardName",
+		T1."Address",
+		T1."Address2",
+		T1."ShipToCode",
+        T1."DocTotal",
+		T1."U_OMS_REF"
+
+		FROM "{s}"."OWDD" AS T0
+		LEFT JOIN "{s}"."ODRF" AS T1
+		ON T0."DraftEntry" = T1."DocEntry"
+		WHERE T0."ObjType" = '13' AND T0."Status" = '{statusCode}' AND T1."U_OMS_REF" IS NOT NULL
+        ORDER BY T1."DocDate" DESC
+
+    """
+
+
+    
