@@ -26,15 +26,12 @@ Parameters to extract:
 9. importer_country_of_origin: Importer name if any and country of origin
 10. date_of_mfg: Manufacturing and packaging date (may say 'see pack' or similar)
 11. expiry_date: Expiry or best before date (may say 'see pack' or similar)
-12. batch_lot_number: Batch or lot number (may say 'see pack' or similar)
-13. mrp: MRP value including currency (may say 'see pack' or similar)
-14. unit_sale_price: Unit sale price if declared
-15. barcode: Is a barcode present? What type if identifiable?
-16. illustration_disclaimer: Any disclaimer about product illustration or image
-17. packaging_epr: Any packaging logo (recycling symbol etc) and EPR compliance declaration
-18. jivo_trademark: Any trademark declaration for Jivo brand
-19. iso_certification: Any ISO certification mentioned
-20. Disclaimer of any signs (* , $ , #) mentioned or not
+13. cost_block : MRP followed by (Inc of all taxes) to the right or below followed by USP also mentioned fullt as Unit Sale Price followed by ₹ per gram or liter followed by Batch No followed by packaginf date nd use by . Also tell whether the order matches the one mentioned respectively.
+14. barcode: Is a barcode present? What type if identifiable?
+15. illustration_disclaimer: Any disclaimer about product illustration or image
+17. jivo_trademark: Any trademark declaration for Jivo brand
+18. compliance_section : Same as the cost_block , this sectioned is ordered as ISO Certification No , followed by EPR Brand Owner Name and lastly the Registration Number
+19. Disclaimer of any signs (* , $ , #) mentioned or not
  
 Return format:
 {

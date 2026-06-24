@@ -71,7 +71,7 @@ INSTALLED_APPS = [
     'SKU',
     'serviceLayer',
     'invoice',
-    'legal'
+    'legal',
     'audit',
 ]
 
