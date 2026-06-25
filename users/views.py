@@ -95,36 +95,6 @@ def _get_user_assignment_category(user):
     return _normalize_category(getattr(category_obj, 'category', None))
 
 
-def _get_user_assignment_categories(user):
-    """All categories assigned to the user (normalized), falling back to the
-    single primary `category` FK for users created before multi-category."""
-    names = []
-    seen = set()
-    manager = getattr(user, 'categories', None)
-    if manager is not None:
-        try:
-            for cat in manager.all():
-                name = _normalize_category(getattr(cat, 'category', cat))
-                if name and name not in seen:
-                    seen.add(name)
-                    names.append(name)
-        except Exception:
-            names = []
-    if names:
-        return names
-    primary = _get_user_assignment_category(user)
-    return [primary] if primary else []
-
-
-def _resolve_requested_category(user, requested):
-    """Category to scope party assignment to. Honor a request-supplied category
-    when it is one of the user's categories; otherwise use the primary."""
-    requested = _normalize_category(requested)
-    if requested and requested in _get_user_assignment_categories(user):
-        return requested
-    return _get_user_assignment_category(user)
-
-
 def _get_category_filtered_assignments(queryset, user_category):
     if not user_category:
         return queryset
@@ -215,7 +185,7 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _resolve_requested_category(user, request.query_params.get('category'))
+        user_category = _get_user_assignment_category(user)
         assignments = _get_category_filtered_assignments(assignments, user_category)
         serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
 
@@ -243,10 +213,7 @@ class AssignPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         all_active_assignments = UserPartyAssignment.objects.filter(user=user, is_active=True)
-        # Assign within the requested category (one of the user's categories);
-        # falls back to the primary. Scoping existing rows to this category means
-        # assigning for one category never disturbs parties in another.
-        user_category = _resolve_requested_category(user, request.data.get('category'))
+        user_category = _get_user_assignment_category(user)
         relevant_existing_qs = _get_category_filtered_assignments(all_active_assignments, user_category)
 
         existing = {
@@ -706,7 +673,7 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _resolve_requested_category(user, request.query_params.get('category'))
+        user_category = _get_user_assignment_category(user)
         assignments = _get_category_filtered_assignments(assignments, user_category)
         serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
 
