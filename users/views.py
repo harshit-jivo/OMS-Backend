@@ -160,7 +160,9 @@ def _serialize_user_party_assignments(assignments, preferred_category=None):
             'card_name': party.card_name,
             'state': party.state,
             'main_group': party.main_group,
-            'category': getattr(party, 'category', None) or normalized_category,
+            # Reflect the assignment's category (not the Party master's), so the
+            # same card_code assigned under OIL and BEVERAGES stays distinct.
+            'category': normalized_category or getattr(party, 'category', None),
             'assigned_at': assignment.assigned_at,
         })
         card_codes.append(assignment.card_code)
@@ -706,9 +708,17 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _resolve_requested_category(user, request.query_params.get('category'))
-        assignments = _get_category_filtered_assignments(assignments, user_category)
-        serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
+        requested_category = request.query_params.get('category')
+        # The dashboard needs every assigned party across all of the user's
+        # categories (e.g. the same card_code under both OIL and BEVERAGES). Pass
+        # ?category=all to bypass the single-category scoping used by the
+        # assignment-management screen.
+        if str(requested_category or '').strip().lower() == 'all':
+            serialized = _serialize_user_party_assignments(assignments)
+        else:
+            user_category = _resolve_requested_category(user, requested_category)
+            assignments = _get_category_filtered_assignments(assignments, user_category)
+            serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
 
         return Response({
             'success': True,
