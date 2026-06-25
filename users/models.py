@@ -243,7 +243,7 @@ class User(AbstractUser):
     # Extra admin pages this user is granted access to (list of page keys),
     # in addition to whatever their role already allows. Managed from the
     # admin Permissions page.
-    extra_pages = models.JSONField(default=list, blank=True)
+    extra_pages = models.JSONField(default=list, blank=True , null = True)
 
     main_groups = models.ManyToManyField(
         'MainGroup',

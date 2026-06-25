@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'SKU',
     'serviceLayer',
     'invoice',
+    'legal',
     'audit',
 ]
 
@@ -152,6 +153,13 @@ SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
 SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
 
+
+SAP_APPROVER_USER = config('SAP_APPROVER_USER')
+SAP_APPROVER_PASSWORD = config('SAP_APPROVER_PASSWORD') 
+
+
+# SAP_DRAFTER = 
+# SAP_DRAFTER_PASS = 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 

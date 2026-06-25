@@ -1,11 +1,9 @@
 from django.urls import path
-from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView
+from .views import InvoiceLogCreateView , InvoiceLogListView  , InvoiceRefLogCreateView
 
 urlpatterns = [
-    path('pending/', InvoiceLogCreateView.as_view(), name='invoice-log-pending'),
+    path('log/create/', InvoiceLogCreateView.as_view(), name='invoice-log-pending'),
     path('all/', InvoiceLogListView.as_view(), name='invoice-log-pending'),
-    path('history/<int:pk>/', InvoiceHistoryView.as_view(), name='invoice-history'),
-    path('<int:pk>/update-status/', InvoicelogStatusUpdateView.as_view(), name='invoice-log-update-status'),
-    
+    path('refLogs/' , InvoiceRefLogCreateView.as_view() ),
 
 ]
