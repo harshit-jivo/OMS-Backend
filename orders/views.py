@@ -524,6 +524,23 @@ def _get_user_category_name(user):
 
 
 def _get_user_category_names(user):
+    # Users can be assigned multiple categories (OIL / BEVERAGES / MART). Scope
+    # data to ALL of them, falling back to the single primary `category` FK for
+    # users that predate the multi-category assignment.
+    names = []
+    seen = set()
+    categories_manager = getattr(user, 'categories', None)
+    if categories_manager is not None:
+        try:
+            for cat in categories_manager.all():
+                name = str(getattr(cat, 'category', cat) or '').strip().upper()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        except Exception:
+            names = []
+    if names:
+        return names
     category = _get_user_category_name(user)
     return [category] if category else []
 
@@ -4342,6 +4359,7 @@ class QuotationOverviewView(APIView):
             Order.objects
             .filter(status__code='COMPLETED')
             .select_related('quotation_cancelled_by')
+            .prefetch_related('items')
             .order_by('-created_at')
         )
 
@@ -4373,6 +4391,15 @@ class QuotationOverviewView(APIView):
             else:
                 quotation_status = 'UNKNOWN'
 
+            # Order category is derived from its line items (OIL / BEVERAGES /
+            # MART). An order can in principle span more than one category, so we
+            # expose the full distinct set plus a display string.
+            categories = sorted({
+                (item.category or '').strip().upper()
+                for item in order.items.all()
+                if (item.category or '').strip()
+            })
+
             data.append({
                 'id': order.id,
                 'order_number': order.order_number,
@@ -4385,6 +4412,8 @@ class QuotationOverviewView(APIView):
                 'quotation_cancelled_at': order.quotation_cancelled_at,
                 'quotation_cancelled_by': getattr(order.quotation_cancelled_by, 'username', None),
                 'quotation_status': quotation_status,
+                'categories': categories,
+                'category': ', '.join(categories),
             })
 
         return Response({'success': True, 'data': data, 'sap_error': sap_error})
