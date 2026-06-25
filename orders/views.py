@@ -3595,19 +3595,43 @@ class TemplatePartyListView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-  
-        templates = Template.objects.filter(user=request.user).select_related('order')
-    
+
+        templates = (
+            Template.objects.filter(user=request.user)
+            .select_related('order')
+            .prefetch_related('order__items')
+        )
+
         parties_dict = {}
         for t in templates:
-            card_code = t.order.card_code
-            if card_code not in parties_dict:
-                parties_dict[card_code] = {
-                    "label": f"{t.order.card_name}",
-                    # "label": f"{t.order.card_name} ({card_code})",
-                    "value": card_code
-                }
-    
+            order = t.order
+            if not order or not order.card_code:
+                continue
+            card_code = order.card_code
+            # An order is placed under a single category; read it off the order's
+            # items so the same card_code ordered under OIL and MART appears as
+            # two selectable parties instead of collapsing into one.
+            category = ''
+            for item in order.items.all():
+                if item.category:
+                    category = str(item.category).strip()
+                    break
+            normalized = category.upper()
+            key = (card_code, normalized)
+            if key in parties_dict:
+                continue
+            label = order.card_name or card_code
+            if category:
+                label = f"{label} - {category}"
+            parties_dict[key] = {
+                "label": label,
+                # Composite value so the same card_code under different
+                # categories stays distinct; the frontend parses card_code||CATEGORY.
+                "value": f"{card_code}||{normalized}",
+                "card_code": card_code,
+                "category": normalized,
+            }
+
         return Response(list(parties_dict.values()), status=status.HTTP_200_OK)
 
 
@@ -3618,12 +3642,21 @@ class TemplateOrderListView(APIView):
         card_code = request.query_params.get('card_code')
         if not card_code:
             return Response({"error": "card_code is required"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
+        # Scope to the selected category so picking "Party - OIL" lists only the
+        # OIL orders, not every order placed for this card_code.
+        category = str(request.query_params.get('category') or '').strip()
+
         templates = Template.objects.filter(
             user=request.user,
             order__card_code=card_code
         ).select_related('order').order_by('-created_at')
-    
+
+        if category:
+            templates = templates.filter(
+                order__items__category__iexact=category
+            ).distinct()
+
         orders_data = []
         for t in templates:
             date_str = t.order.created_at.strftime('%d-%b-%Y') if t.order.created_at else 'Unknown Date'
