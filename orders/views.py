@@ -3666,7 +3666,7 @@ class OrderListView(APIView):
 
         orders = (
             orders
-            .select_related('status', 'created_by')
+            .select_related('status', 'created_by', 'rejected_by')
             .prefetch_related('items', 'rate_approvals__approver')
             .order_by('-created_at')
             .distinct()
@@ -3688,6 +3688,24 @@ class OrderListView(APIView):
                 if log_order_id not in sap_doc_map:
                     sap_doc_map[log_order_id] = sap_doc_num
 
+        # Who rejected each order. order.rejected_by is only set by the rate-approver
+        # rejection path, so for auditor/billing rejections (and older orders) fall
+        # back to the most recent rejection log entry's performer. This covers every
+        # rejection type and historical data.
+        order_id_ints = list(orders.values_list('id', flat=True))
+        rejected_by_map = {}
+        if order_id_ints:
+            rejection_logs = (
+                OrdersLog.objects
+                .filter(order_id__in=order_id_ints, performed_by__isnull=False)
+                .filter(Q(action__code__icontains='reject') | Q(action__name__icontains='reject'))
+                .select_related('performed_by')
+                .order_by('order_id', '-created_at', '-id')
+            )
+            for log in rejection_logs:
+                if log.order_id not in rejected_by_map:
+                    rejected_by_map[log.order_id] = _display_user_name(log.performed_by)
+
         data = []
         for order in orders:
             items_qs = order.items.all()
@@ -3705,6 +3723,7 @@ class OrderListView(APIView):
                 'sap_doc_number': order.sap_doc_number or sap_doc_map.get(str(order.id)) or '',
                 'items_count': items_count,
                 'created_by': order.created_by.name if order.created_by else None,
+                'rejected_by': rejected_by_map.get(order.id) or (_display_user_name(order.rejected_by) if order.rejected_by else None),
                 'created_at': order.created_at,
                 'delivery_date': order.delivery_date,
                 'po_number': order.po_number,
