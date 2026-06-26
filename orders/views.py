@@ -326,6 +326,25 @@ def _is_completed_status(status_obj):
     text = f"{getattr(status_obj, 'code', '')} {getattr(status_obj, 'name', '')}".lower()
     return 'completed' in text
 
+def _log_manager_order_edit(order, user, was_rejected):
+    """Write a timeline entry when a manager edits an order, so Order Tracking
+    shows who edited it and when. ``action`` is left null (the order's new flow
+    status gets its own log row); the remark carries an "edited by manager"
+    marker the tracking page filters on to render the entry."""
+    role_name = (getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
+    if role_name != 'manager':
+        return
+    remark = 'Rejected order edited by manager' if was_rejected else 'Order edited by manager'
+    try:
+        OrdersLog.objects.create(
+            order=order,
+            action=None,
+            performed_by=user,
+            remarks=remark,
+        )
+    except Exception:
+        pass
+
 def _order_status_message(status_obj, default_action='updated'):
     status_name = getattr(status_obj, 'name', None) or str(status_obj or '').strip() or 'next stage'
     status_text = status_name.strip().lower()
@@ -2227,6 +2246,9 @@ class UpdateOrderView(APIView):
 
         order = get_object_or_404(Order, id=order_id)
         previous_status = order.status
+        # Captured before the flow recomputes the status: was this order sitting
+        # in a rejected state when it was opened for editing?
+        was_rejected = _is_rejection_status(previous_status)
         order_flow_type = _get_order_flow_type_for_order(order)
 
         serializer = CreateOrderSerializer(data=request.data)
@@ -2286,6 +2308,7 @@ class UpdateOrderView(APIView):
             order.status = previous_status or get_status('Order Created')
             order.save()
             _mark_order_notifications_read(order, user)
+            _log_manager_order_edit(order, user, was_rejected)
             log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
             return Response({
                 'id': order.id,
@@ -2320,6 +2343,7 @@ class UpdateOrderView(APIView):
         order.save()
 
         _mark_order_notifications_read(order, user)
+        _log_manager_order_edit(order, user, was_rejected)
         if next_status:
             send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
         
@@ -2467,6 +2491,8 @@ class CreateOrderView(APIView):
         if order_id:
             order = get_object_or_404(Order, id=int(order_id))
             previous_status = order.status
+            # Was the order rejected when the manager opened it for editing?
+            was_rejected = _is_rejection_status(previous_status)
             serializer = CreateOrderSerializer(data=request.data)
             if not serializer.is_valid():
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2518,6 +2544,7 @@ class CreateOrderView(APIView):
                 order.status = previous_status or get_status('Order Created')
                 order.save()
                 _mark_order_notifications_read(order, user)
+                _log_manager_order_edit(order, user, was_rejected)
                 log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
                 return Response({
                     'id': order.id,
@@ -2562,6 +2589,7 @@ class CreateOrderView(APIView):
             order.save()
 
             _mark_order_notifications_read(order, user)
+            _log_manager_order_edit(order, user, was_rejected)
             if next_status:
                 send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
            
