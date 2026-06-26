@@ -2348,6 +2348,96 @@ class UpdateOrderView(APIView):
 class CreateOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def _save_as_draft(self, request, _to_float, _to_bool):
+        """Create or update an order with the 'Draft' status. Drafts allow
+        incomplete data, skip the approval flow, notifications, rate-approver
+        assignment and template saving. Submitting the draft later goes through
+        the normal create/edit path (no is_draft flag)."""
+        serializer = CreateOrderSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        order_type = _normalize_order_type(data.get('order_type'))
+        employee_id = str(data.get('employee_id') or '').strip()
+        items = data.pop('items', []) or []
+        order_remarks = request.data.get('remarks', data.get('remarks', ''))
+        user = request.user if request.user.is_authenticated else None
+
+        draft_status = get_status('Draft')
+        if not draft_status:
+            return Response(
+                {'error': 'Draft status is not configured. Run migrations.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        order_id = request.data.get('order_id')
+        if order_id:
+            order = get_object_or_404(Order, id=int(order_id))
+            order.order_type = order_type
+            order.employee_id = employee_id if order_type == 'STAFF' else data.get('employee_id', order.employee_id)
+            order.card_code = data.get('card_code', order.card_code)
+            order.card_name = data.get('card_name', order.card_name)
+            order.bill_to_id = data.get('bill_to_id', order.bill_to_id)
+            order.bill_to_address = data.get('bill_to_address', order.bill_to_address)
+            order.ship_to_id = data.get('ship_to_id', order.ship_to_id)
+            order.ship_to_address = data.get('ship_to_address', order.ship_to_address)
+            order.dispatch_from_id = data.get('dispatch_from_id', order.dispatch_from_id)
+            order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
+            order.company = data.get('company', order.company)
+            order.po_number = data.get('po_number', order.po_number)
+            order.is_foc = data.get('is_foc', order.is_foc)
+            order.delivery_date = data.get('delivery_date') or order.delivery_date
+            order.remarks = order_remarks
+            order.status = draft_status
+            order.items.all().delete()
+        else:
+            today = datetime.now().strftime('%Y%m%d')
+            last_order = Order.objects.filter(
+                order_number__startswith=f'ORD-{today}'
+            ).order_by('-order_number').first()
+            new_num = (int(last_order.order_number.split('-')[-1]) + 1) if last_order else 1
+            order_number = f'ORD-{today}-{new_num:04d}'
+
+            order = Order(
+                order_number=order_number,
+                order_type=order_type,
+                employee_id=employee_id,
+                card_code=data.get('card_code', ''),
+                card_name=data.get('card_name', ''),
+                bill_to_id=data.get('bill_to_id') or 0,
+                bill_to_address=data.get('bill_to_address', ''),
+                ship_to_id=data.get('ship_to_id') or 0,
+                ship_to_address=data.get('ship_to_address', ''),
+                dispatch_from_id=data.get('dispatch_from_id') or 0,
+                dispatch_from_name=data.get('dispatch_from_name', ''),
+                company=data.get('company', ''),
+                po_number=data.get('po_number', ''),
+                is_foc=data.get('is_foc', False),
+                status=draft_status,
+                created_by=user,
+                delivery_date=data.get('delivery_date'),
+                remarks=order_remarks,
+            )
+
+        order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
+        order.save()
+
+        for item in items:
+            _create_order_item(order, item, _to_float, _to_bool)
+
+        log_order_action(order, 'Draft', user=user, remarks='Saved as draft')
+
+        return Response({
+            'id': order.id,
+            'order_number': order.order_number,
+            'total_amount': str(order.total_amount),
+            'status': order.status.name if order.status else '',
+            'is_draft': True,
+            'needs_approval': False,
+            'message': 'Draft saved successfully',
+        }, status=status.HTTP_200_OK)
+
     def post(self, request):
         def _to_float(value, default=0.0):
             try:
@@ -2365,6 +2455,12 @@ class CreateOrderView(APIView):
             if value in (None, ""):
                 return False
             return bool(value)
+
+        # ── Draft mode: save a (possibly incomplete) order without entering the
+        # approval flow or notifying approvers. Drafts can be resumed and either
+        # re-saved as a draft or submitted normally (which runs the flow). ──────
+        if _to_bool(request.data.get('is_draft')):
+            return self._save_as_draft(request, _to_float, _to_bool)
 
         # ── Edit mode: order_id in payload means update existing order ──────
         order_id = request.data.get('order_id')
@@ -2630,6 +2726,36 @@ class CreateOrderView(APIView):
             'message': f"Order sent to {next_status.name.lower()}" if next_status else 'Order created successfully',
         }, status=status.HTTP_201_CREATED)
     
+
+class DeleteDraftOrderView(APIView):
+    """Delete a draft order. Only the creator (or staff) may delete, and only
+    while the order is still a draft — submitted orders cannot be deleted here."""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+        user = request.user
+
+        is_owner = order.created_by_id == getattr(user, 'id', None)
+        if not (is_owner or getattr(user, 'is_staff', False)):
+            return Response(
+                {'error': 'You can only delete your own drafts.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not order.status or (order.status.code or '').upper() != 'DRAFT':
+            return Response(
+                {'error': 'Only draft orders can be deleted.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        order_number = order.order_number
+        order.delete()
+        return Response(
+            {'message': f'Draft {order_number} deleted'},
+            status=status.HTTP_200_OK,
+        )
+
 
 class SchemeListView(APIView):
     permission_classes = [AllowAny]

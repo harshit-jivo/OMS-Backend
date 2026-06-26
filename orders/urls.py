@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, PushTokenView,StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,DeleteDraftOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, PushTokenView,StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView
 
 urlpatterns=[
     
@@ -11,6 +11,7 @@ urlpatterns=[
     path('product-filters/', ProductFiltersView.as_view(), name='product-filters'),
     path('products/', ProductListView.as_view(), name='products'),
     path('create/', CreateOrderView.as_view(), name='create-order'),
+    path('<int:order_id>/delete-draft/', DeleteDraftOrderView.as_view(), name='delete-draft'),
     path('<int:order_id>/update/', UpdateOrderView.as_view(), name='update-order'),
     path('list/', OrderListView.as_view(), name='order_list'),
     path('<int:order_id>/approve/', ApproveOrderView.as_view(), name='approve_list'),
