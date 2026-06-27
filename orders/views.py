@@ -327,14 +327,14 @@ def _is_completed_status(status_obj):
     return 'completed' in text
 
 def _log_manager_order_edit(order, user, was_rejected):
-    """Write a timeline entry when a manager edits an order, so Order Tracking
-    shows who edited it and when. ``action`` is left null (the order's new flow
-    status gets its own log row); the remark carries an "edited by manager"
-    marker the tracking page filters on to render the entry."""
+    """Write a timeline entry whenever a user edits an order, so Order Tracking
+    shows who edited it (and in what role) and when. ``action`` is left null (the
+    order's new flow status gets its own log row); the remark carries an
+    "edited by <role>" marker the tracking page filters on to render the entry."""
     role_name = (getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
-    if role_name != 'manager':
-        return
-    remark = 'Rejected order edited by manager' if was_rejected else 'Order edited by manager'
+    editor_label = role_name or 'user'
+    prefix = 'Rejected order edited by' if was_rejected else 'Order edited by'
+    remark = f'{prefix} {editor_label}'
     try:
         OrdersLog.objects.create(
             order=order,
@@ -2450,7 +2450,11 @@ class CreateOrderView(APIView):
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
 
-        log_order_action(order, 'Draft', user=user, remarks='Saved as draft')
+        # Record the order as created (not as a draft). We no longer write a
+        # separate 'Draft' log; add the 'Order Created' log only if it isn't
+        # there yet so re-saving an existing draft doesn't duplicate it.
+        if not OrdersLog.objects.filter(order=order, action__name='Order Created').exists():
+            log_order_action(order, 'Order Created', user=user)
 
         return Response({
             'id': order.id,
@@ -2493,6 +2497,9 @@ class CreateOrderView(APIView):
             previous_status = order.status
             # Was the order rejected when the manager opened it for editing?
             was_rejected = _is_rejection_status(previous_status)
+            # Submitting a saved draft is the order's first real submission, not
+            # an edit — so we skip the "edited by manager" log in that case.
+            was_draft = (getattr(previous_status, 'code', '') or '').upper() == 'DRAFT'
             serializer = CreateOrderSerializer(data=request.data)
             if not serializer.is_valid():
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2544,7 +2551,8 @@ class CreateOrderView(APIView):
                 order.status = previous_status or get_status('Order Created')
                 order.save()
                 _mark_order_notifications_read(order, user)
-                _log_manager_order_edit(order, user, was_rejected)
+                if not was_draft:
+                    _log_manager_order_edit(order, user, was_rejected)
                 log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
                 return Response({
                     'id': order.id,
@@ -2589,7 +2597,8 @@ class CreateOrderView(APIView):
             order.save()
 
             _mark_order_notifications_read(order, user)
-            _log_manager_order_edit(order, user, was_rejected)
+            if not was_draft:
+                _log_manager_order_edit(order, user, was_rejected)
             if next_status:
                 send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
            
