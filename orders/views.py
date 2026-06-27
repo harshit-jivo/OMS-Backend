@@ -22,6 +22,7 @@ from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, 
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
+from django.conf import settings
 from .scheme_rules import (
     get_ordered_quantity,
     get_party_product_scheme,
@@ -4413,6 +4414,63 @@ def _is_quotation_open(row):
     return doc_status == 'O' and canceled != 'Y'
 
 
+def _quotation_company_db(order):
+    """Return the SAP CompanyDB used when this order's quotation was created."""
+    categories = {
+        str(getattr(item, 'category', '') or '').strip().upper()
+        for item in order.items.all()
+        if str(getattr(item, 'category', '') or '').strip()
+    }
+    if categories == {'BEVERAGES'}:
+        return (
+            getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', '')
+            or settings.HANA_COMPANY_DB
+        )
+    return settings.HANA_COMPANY_DB
+
+
+def _quotation_rows_by_order(orders, entry_map):
+    """Fetch quotation rows from each relevant CompanyDB.
+
+    DocEntry is unique only inside a CompanyDB, so results are associated with
+    orders through (CompanyDB, DocEntry), not DocEntry alone.
+    """
+    from hana.services.services import SalesOrderService
+
+    company_by_order = {
+        str(order.id): _quotation_company_db(order)
+        for order in orders
+    }
+    entries_by_company = defaultdict(set)
+    for order_id, info in entry_map.items():
+        doc_entry = info.get('doc_entry')
+        company_db = company_by_order.get(str(order_id))
+        if doc_entry is not None and company_db:
+            entries_by_company[company_db].add(int(doc_entry))
+
+    rows_by_key = {}
+    errors = []
+    service = SalesOrderService()
+    for company_db, doc_entries in entries_by_company.items():
+        try:
+            rows = service.get_quotation_status(sorted(doc_entries), company_db=company_db)
+            for row in rows:
+                rows_by_key[(company_db, int(row['DocEntry']))] = row
+        except Exception as exc:
+            errors.append(f'{company_db}: {exc}')
+
+    rows_by_order = {}
+    for order_id, info in entry_map.items():
+        doc_entry = info.get('doc_entry')
+        company_db = company_by_order.get(str(order_id))
+        rows_by_order[str(order_id)] = (
+            rows_by_key.get((company_db, int(doc_entry)))
+            if company_db and doc_entry is not None
+            else None
+        )
+    return rows_by_order, '; '.join(errors) or None
+
+
 class QuotationStatusView(APIView):
     """Batch lookup of SAP Sales Quotation status for completed orders.
 
@@ -4424,33 +4482,21 @@ class QuotationStatusView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        from hana.services.services import SalesOrderService
-
         raw_ids = request.query_params.get('order_ids', '')
         order_ids = [oid for oid in (i.strip() for i in raw_ids.split(',')) if oid.isdigit()]
         if not order_ids:
             return Response({'success': True, 'statuses': {}})
 
+        orders = list(
+            Order.objects.filter(id__in=order_ids).prefetch_related('items')
+        )
         entry_map = _quotation_entries_for_orders(order_ids)
-        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
-
-        sap_rows_by_entry = {}
-        if doc_entries:
-            try:
-                rows = SalesOrderService().get_quotation_status(doc_entries)
-                for row in rows:
-                    sap_rows_by_entry[int(row['DocEntry'])] = row
-            except Exception as exc:
-                # SAP/HANA unreachable: return what we know but don't break the page.
-                return Response(
-                    {'success': False, 'statuses': {}, 'error': str(exc)},
-                    status=status.HTTP_200_OK,
-                )
+        sap_rows_by_order, sap_error = _quotation_rows_by_order(orders, entry_map)
 
         statuses = {}
         for order_id, info in entry_map.items():
             doc_entry = info['doc_entry']
-            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
+            row = sap_rows_by_order.get(str(order_id))
             statuses[order_id] = {
                 'doc_entry': doc_entry,
                 'doc_num': info['doc_num'],
@@ -4459,7 +4505,11 @@ class QuotationStatusView(APIView):
                 'is_open': bool(row) and _is_quotation_open(row),
             }
 
-        return Response({'success': True, 'statuses': statuses})
+        return Response({
+            'success': sap_error is None,
+            'statuses': statuses,
+            'error': sap_error,
+        })
 
 
 class CancelSalesQuotationView(APIView):
@@ -4476,7 +4526,7 @@ class CancelSalesQuotationView(APIView):
         from hana.services.services import SalesOrderService
 
         try:
-            order = Order.objects.select_related('status').get(pk=order_id)
+            order = Order.objects.select_related('status').prefetch_related('items').get(pk=order_id)
         except Order.DoesNotExist:
             return Response({'success': False, 'message': 'Order not found'},
                             status=status.HTTP_404_NOT_FOUND)
@@ -4505,7 +4555,10 @@ class CancelSalesQuotationView(APIView):
 
         # Confirm the quotation is still open before the destructive call.
         try:
-            rows = SalesOrderService().get_quotation_status([doc_entry])
+            rows = SalesOrderService().get_quotation_status(
+                [doc_entry],
+                company_db=_quotation_company_db(order),
+            )
             current = next((r for r in rows if int(r['DocEntry']) == int(doc_entry)), None)
         except Exception as exc:
             return Response(
@@ -4583,8 +4636,6 @@ class QuotationOverviewView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from hana.services.services import SalesOrderService
-
         role_name = getattr(getattr(request.user, 'role', None), 'name', '')
         is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
         if not is_admin:
@@ -4593,7 +4644,7 @@ class QuotationOverviewView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        completed = (
+        completed = list(
             Order.objects
             .filter(status__code='COMPLETED')
             .select_related('quotation_cancelled_by')
@@ -4603,24 +4654,14 @@ class QuotationOverviewView(APIView):
 
         order_ids = [str(order.id) for order in completed]
         entry_map = _quotation_entries_for_orders(order_ids)
-        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
-
-        sap_rows_by_entry = {}
-        sap_error = None
-        if doc_entries:
-            try:
-                rows = SalesOrderService().get_quotation_status(doc_entries)
-                for row in rows:
-                    sap_rows_by_entry[int(row['DocEntry'])] = row
-            except Exception as exc:
-                sap_error = str(exc)
+        sap_rows_by_order, sap_error = _quotation_rows_by_order(completed, entry_map)
 
         data = []
         for order in completed:
             info = entry_map.get(str(order.id)) or {}
             doc_entry = info.get('doc_entry')
             doc_num = info.get('doc_num')
-            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
+            row = sap_rows_by_order.get(str(order.id))
 
             if order.quotation_cancelled:
                 quotation_status = 'CANCELLED'
