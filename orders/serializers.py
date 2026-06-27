@@ -100,6 +100,39 @@ class CreateOrderSerializer(serializers.Serializer):
     delivery_date = serializers.DateField(required=False, allow_null=True)
     order_type = serializers.CharField(required=False, allow_blank=True, default='PARTY')
     employee_id = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_items(self, items):
+        raw_is_draft = self.initial_data.get('is_draft', False)
+        is_draft = (
+            raw_is_draft
+            if isinstance(raw_is_draft, bool)
+            else str(raw_is_draft).strip().lower() in {'1', 'true', 'yes', 'on'}
+        )
+        if is_draft:
+            return items
+
+        quantity_fields = (
+            ('pcs', 'PCS'),
+            ('boxes', 'boxes'),
+            ('qty', 'quantity'),
+        )
+        errors = []
+        for index, item in enumerate(items, start=1):
+            item_name = str(item.get('item_name') or item.get('item_code') or f'Item {index}')
+            invalid_fields = []
+            for field, label in quantity_fields:
+                try:
+                    value = float(item.get(field) or 0)
+                except (TypeError, ValueError):
+                    value = 0
+                if value <= 0:
+                    invalid_fields.append(label)
+            if invalid_fields:
+                errors.append(f"{item_name}: {', '.join(invalid_fields)} must be greater than 0")
+
+        if errors:
+            raise serializers.ValidationError(errors)
+        return items
    
 
 class BranchSerializer(serializers.ModelSerializer):
