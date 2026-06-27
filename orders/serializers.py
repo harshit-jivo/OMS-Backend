@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice, OrderRateApproval, OrderItemApprovalMapping
-from users.models import SchemeProduct, State
+from users.models import SchemeProduct, State, User
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
 from sap_sync.models import Party as SapParty
@@ -253,6 +253,70 @@ class OrderItemSerializer(serializers.ModelSerializer):
         model = OrderItem
         fields = "__all__"
 
+# Statuses where the order is sitting on someone's desk, grouped by who holds it.
+PENDING_RATE_APPROVAL_CODES = {"RATE_APPROVAL", "NEED_APPROVAL"}
+PENDING_AUDITOR_CODES = {"AUDITOR_APPROVAL"}
+PENDING_BILLING_CODES = {"BILLING", "BILLING_PENDING"}
+
+
+def _user_display_name(user):
+    if not user:
+        return ""
+    return (getattr(user, "name", "") or getattr(user, "username", "") or "").strip()
+
+
+def _active_role_user_names(role_name, cache=None):
+    if cache is not None and role_name in cache:
+        return cache[role_name]
+    names = [
+        name
+        for name in (
+            _user_display_name(u)
+            for u in User.objects.filter(role__name__iexact=role_name, is_active=True)
+        )
+        if name
+    ]
+    if cache is not None:
+        cache[role_name] = names
+    return names
+
+
+def compute_pending_with(order, cache=None):
+    """Names of whoever the order is currently waiting on, based on its status.
+
+    - Rate/need approval -> the rate approver(s) still PENDING on this order.
+    - Auditor approval    -> the active auditor(s).
+    - Billing             -> the active billing user(s).
+    Terminal/other statuses return an empty list (no one is pending).
+    """
+    status_code = (getattr(getattr(order, "status", None), "code", "") or "").upper()
+    if status_code in PENDING_RATE_APPROVAL_CODES:
+        return [
+            name
+            for name in (
+                _user_display_name(a.approver)
+                for a in order.rate_approvals.all()
+                if a.status == "PENDING"
+            )
+            if name
+        ]
+    if status_code in PENDING_AUDITOR_CODES:
+        # Auditors are a flat pool (no per-order routing) — list the active ones.
+        return _active_role_user_names("auditor", cache)
+    if status_code in PENDING_BILLING_CODES:
+        # Billing is routed by category/main-group, so only the billing user(s)
+        # who actually need to act on this order are returned. Lazy import keeps
+        # serializers <-> views from importing each other at module load.
+        from .views import _billing_users_for_order
+
+        return [
+            name
+            for name in (_user_display_name(u) for u in _billing_users_for_order(order))
+            if name
+        ]
+    return []
+
+
 class OrderRateApprovalSerializer(serializers.ModelSerializer):
     approver_name = serializers.SerializerMethodField()
 
@@ -280,6 +344,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
+    pending_with = serializers.SerializerMethodField()
 
     def get_categories(self, obj):
         return list(
@@ -293,6 +358,13 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return obj.created_by.username
         return None
+
+    def get_pending_with(self, obj):
+        cache = getattr(self, "_pending_with_role_cache", None)
+        if cache is None:
+            cache = {}
+            self._pending_with_role_cache = cache
+        return compute_pending_with(obj, cache)
 
     class Meta:
         model = Order
@@ -326,6 +398,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "items_count",
             "categories",
             "rate_approvals",
+            "pending_with",
         ]
 
 class OrderDetailSerializer(serializers.ModelSerializer):
@@ -336,6 +409,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     party_state = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
+    pending_with = serializers.SerializerMethodField()
 
     def get_party_state(self, obj):
         party = SapParty.objects.filter(card_code=obj.card_code).first()
@@ -348,6 +422,9 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return obj.created_by.username
         return None
+
+    def get_pending_with(self, obj):
+        return compute_pending_with(obj)
 
     class Meta:
         model = Order
@@ -362,6 +439,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "rejection_reason", "reject_reason", "updated_at",
             "items", "items_count", "party_state",
             "rate_approvals",
+            "pending_with",
         ]
 
 class CreateSchemeSerializer(serializers.ModelSerializer):

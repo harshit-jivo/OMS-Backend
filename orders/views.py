@@ -1,7 +1,7 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer, compute_pending_with
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -3706,6 +3706,10 @@ class OrderListView(APIView):
                 if log.order_id not in rejected_by_map:
                     rejected_by_map[log.order_id] = _display_user_name(log.performed_by)
 
+        # Cache role->names lookups (auditor pool) across the whole list pass so
+        # we don't re-query users for every order.
+        pending_with_role_cache = {}
+
         data = []
         for order in orders:
             items_qs = order.items.all()
@@ -3738,6 +3742,7 @@ class OrderListView(APIView):
                     .distinct()
                 ),
                 'rate_approvals': _order_rate_approval_payload(order),
+                'pending_with': compute_pending_with(order, pending_with_role_cache),
                 'items': OrderItemSerializer(items_qs, many=True).data
             })
 
