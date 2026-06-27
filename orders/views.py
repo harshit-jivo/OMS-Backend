@@ -1059,7 +1059,9 @@ class WDashboardKPIView(APIView):
             )
 
         base_order_ids = _get_base_orders(request.user).values_list('id', flat=True).distinct()
-        all_orders = Order.objects.filter(id__in=base_order_ids)
+        all_orders = Order.objects.filter(id__in=base_order_ids).exclude(
+            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
+        )
         period_orders = all_orders.filter(
             created_at__gte=range_start,
             created_at__lte=range_end,
@@ -1202,7 +1204,9 @@ class WDashboardKPIView(APIView):
             total_orders = accepted_orders + rejected_orders + pending_review_orders
 
         status_counts = {}
-        for os in OrderStatus.objects.all():
+        for os in OrderStatus.objects.exclude(
+            Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
+        ):
             status_counts[os.name] = period_orders.filter(status=os).count()
 
         return Response({
@@ -1246,7 +1250,9 @@ class WDashboardChartsView(APIView):
             range_end = timezone.make_aware(datetime(year, month, last_day, 23, 59, 59))
 
         base_order_ids = _get_base_orders(request.user).values_list('id', flat=True).distinct()
-        base_orders = Order.objects.filter(id__in=base_order_ids)
+        base_orders = Order.objects.filter(id__in=base_order_ids).exclude(
+            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
+        )
         filtered_orders = base_orders.filter(
             created_at__gte=range_start,
             created_at__lte=range_end
@@ -1413,7 +1419,9 @@ class WDashboardChartsView(APIView):
         )
         status_data = [
             {'status': os.code, 'label': os.name, 'count': status_counts_map.get(os.id, 0)}
-            for os in OrderStatus.objects.all()
+            for os in OrderStatus.objects.exclude(
+                Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
+            )
         ]
 
         decision_data = []
@@ -1717,7 +1725,9 @@ class DashboardKPIView(APIView):
         today = timezone.now().date()
         current_month_start = today.replace(day=1)
 
-        all_orders = _get_base_orders(request.user)
+        all_orders = _get_base_orders(request.user).exclude(
+            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
+        )
 
         total_orders = all_orders.count()
         total_revenue = all_orders.aggregate(total=Sum('total_amount'))['total'] or 0
@@ -1725,7 +1735,9 @@ class DashboardKPIView(APIView):
         this_month_orders = all_orders.filter(created_at__date__gte=current_month_start).count()
 
         status_counts = {}
-        for os in OrderStatus.objects.all():
+        for os in OrderStatus.objects.exclude(
+            Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
+        ):
             status_counts[os.name] = all_orders.filter(status=os).count()
 
         User = get_user_model()
@@ -1765,7 +1777,9 @@ class DashboardChartsView(APIView):
             last_day = calendar.monthrange(year, month)[1]
             range_end = timezone.make_aware(datetime(year, month, last_day, 23, 59, 59))
 
-        base_orders = _get_base_orders(request.user)
+        base_orders = _get_base_orders(request.user).exclude(
+            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
+        )
         filtered_orders = base_orders.filter(
             created_at__gte=range_start,
             created_at__lte=range_end
@@ -1833,7 +1847,9 @@ class DashboardChartsView(APIView):
         )
         status_data = [
             {'status': os.code, 'label': os.name, 'count': status_counts_map.get(os.id, 0)}
-            for os in OrderStatus.objects.all()
+            for os in OrderStatus.objects.exclude(
+                Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
+            )
         ]
 
         # CHART 4: Top Parties by category (selected period)
