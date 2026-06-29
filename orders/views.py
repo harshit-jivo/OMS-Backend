@@ -477,6 +477,7 @@ def _build_order_template_signature(order):
 
         item_signatures.append((
             item.item_code or '',
+            item.sub_group or '',
             item.item_type or '',
             _normalize_template_number(item.qty),
             _normalize_template_number(item.pcs),
@@ -506,6 +507,15 @@ def _has_duplicate_template(user, order):
     return False
 
 
+def _get_order_template_sub_group(order):
+    sub_groups = [
+        str(sub_group or '').strip()
+        for sub_group in order.items.values_list('sub_group', flat=True).distinct()
+        if str(sub_group or '').strip()
+    ]
+    return ', '.join(sorted(sub_groups)) or None
+
+
 def _save_template_if_unique(user, order):
     if not user:
         return
@@ -513,7 +523,15 @@ def _save_template_if_unique(user, order):
     if _has_duplicate_template(user, order):
         return
 
-    Template.objects.get_or_create(user=user, order=order)
+    sub_group = _get_order_template_sub_group(order)
+    template, created = Template.objects.get_or_create(
+        user=user,
+        order=order,
+        defaults={'sub_group': sub_group},
+    )
+    if not created and template.sub_group != sub_group:
+        template.sub_group = sub_group
+        template.save(update_fields=['sub_group'])
 
 
 def _get_user_category_name(user):
@@ -4388,4 +4406,3 @@ class QuotationOverviewView(APIView):
             })
 
         return Response({'success': True, 'data': data, 'sap_error': sap_error})
-
