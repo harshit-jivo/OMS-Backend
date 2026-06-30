@@ -25,27 +25,26 @@ def get_prompt(nutritional_facts):
     3. veg_nonveg: Is veg or non-veg symbol present? State: present/absent and color seen
     4. ingredients: List all ingredients IN THE ORDER they appear on label (as ordered array)
     5. serving_details: Serving size and servings per package
-    6. nutritional_facts: All nutrients listed IN ORDER they appear (as ordered array with per100g and per serving values) . The figures should exactcly match with the json provided {nutritional_facts}
+    6. nutritional_facts: All nutrients listed IN ORDER they appear (as ordered array with per100g and per serving values). The figures should exactly match with the json provided {nutritional_facts}
     7. manufacturer_packer_details: Full manufacturer and packer name and address
     8. fssai_details: FSSAI logo present? and FSSAI licence number
     9. importer_country_of_origin: Importer name if any and country of origin
     10. date_of_mfg: Manufacturing and packaging date (may say 'see pack' or similar)
     11. expiry_date: Expiry or best before date (may say 'see pack' or similar)
-    13. cost_block : MRP followed by (Inc of all taxes) to the right or below followed by USP also mentioned fullt as Unit Sale Price followed by ₹ per gram or liter followed by Batch No followed by packaginf date nd use by . Also tell whether the order matches the one mentioned respectively.
+    13. cost_block: MRP followed by (Inc of all taxes) to the right or below followed by USP also mentioned fully as Unit Sale Price followed by ₹ per gram or liter followed by Batch No followed by packaging date and use by. Also tell whether the order matches the one mentioned respectively.
     14. barcode: Is a barcode present? What type if identifiable?
     15. illustration_disclaimer: Any disclaimer about product illustration or image
     17. jivo_trademark: Any trademark declaration for Jivo brand
-    18. compliance_section : Same as the cost_block , this sectioned is ordered as ISO Certification No , followed by EPR Brand Owner Name and lastly the Registration Number
+    18. compliance_section: Same as the cost_block, this section is ordered as ISO Certification No, followed by EPR Brand Owner Name and lastly the Registration Number
     19. Disclaimer of any signs (* , $ , #) mentioned or not
     
     Return format:
-    {
-      "food_name": {"value": "...", "confidence": "high", "notes": "..."},
-      "product_category": {"value": "...", "confidence": "high", "notes": "..."},
+    {{
+      "food_name": {{"value": "...", "confidence": "high", "notes": "..."}},
+      "product_category": {{"value": "...", "confidence": "high", "notes": "..."}},
       ... (all 19 parameters)
-    }
+    }}
     """
-
 
 def run_extraction(pdf_path , item_id):
     
@@ -53,9 +52,11 @@ def run_extraction(pdf_path , item_id):
     
     nutritional_facts = LabelNutrition.objects.filter(label_item = item_id)
     nutritional_facts_serialized =  LabelNutritionSerializers(nutritional_facts , many=True).data
+    print(nutritional_facts)
     PROMPT = get_prompt(nutritional_facts_serialized)
     
-    print(PROMPT)
+    
+    # print(PROMPT)
     pages = convert_from_path(
         pdf_path,
         dpi=300,
