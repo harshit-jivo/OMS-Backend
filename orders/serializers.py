@@ -341,7 +341,13 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         
 
         category = obj.items.first().category 
-        party = SapParty.objects.filter(card_name=obj.card_name , category=category).first()
+        print(category)
+
+
+        party = SapParty.objects.filter(card_code=obj.card_code , category=category).first()
+        print(party)
+
+        
         if not party or not party.state:
             return None
         
