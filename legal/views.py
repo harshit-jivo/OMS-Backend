@@ -14,7 +14,7 @@ class FeedtoAIView(APIView):
     parser_class = (MultiPartParser , FormParser)    
     def post(self , request , *args , **kwargs):
         label_file = request.data.get('label_file')
-        item_id =  request.query_params.get('item_id')
+        item_id =  request.data.get('item_id')
         
         if not label_file:
             return Response({"error:  File was not Uplaoded"} , status = status.HTTP_400_BAD_REQUEST)
