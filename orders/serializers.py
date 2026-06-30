@@ -338,9 +338,13 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
 
     def get_party_state(self, obj):
-        party = SapParty.objects.filter(card_code=obj.card_code).first()
+        
+
+        category = obj.items.first().category 
+        party = SapParty.objects.filter(card_name=obj.card_name , category=category).first()
         if not party or not party.state:
             return None
+        
         state = State.objects.filter(code=party.state).first()
         return state.name if state else party.state
 
