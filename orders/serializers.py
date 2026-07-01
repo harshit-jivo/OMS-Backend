@@ -101,6 +101,32 @@ class CreateOrderSerializer(serializers.Serializer):
     order_type = serializers.CharField(required=False, allow_blank=True, default='PARTY')
     employee_id = serializers.CharField(required=False, allow_blank=True, default='')
 
+    def validate(self, attrs):
+        """Keep the persisted dispatch name consistent with its branch ID.
+
+        The branch API exposes ``bpl_id`` from a CharField, while orders store
+        the same value as an integer.  Resolve the authoritative name here so
+        every client path (including older cached frontends) produces the same
+        order header.
+        """
+        dispatch_id = attrs.get('dispatch_from_id')
+        if dispatch_id:
+            branch = (
+                Branches.objects
+                .filter(bpl_id=str(dispatch_id))
+                .exclude(bpl_name__isnull=True)
+                .exclude(bpl_name='')
+                .order_by('id')
+                .first()
+            )
+            if not branch:
+                raise serializers.ValidationError({
+                    'dispatch_from_id': 'Selected dispatch location was not found.'
+                })
+            attrs['dispatch_from_name'] = branch.bpl_name
+
+        return attrs
+
     def validate_items(self, items):
         raw_is_draft = self.initial_data.get('is_draft', False)
         is_draft = (
