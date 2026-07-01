@@ -1,7 +1,7 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer, compute_pending_with
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -22,7 +22,6 @@ from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, 
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
-from django.conf import settings
 from .scheme_rules import (
     get_ordered_quantity,
     get_party_product_scheme,
@@ -327,25 +326,6 @@ def _is_completed_status(status_obj):
     text = f"{getattr(status_obj, 'code', '')} {getattr(status_obj, 'name', '')}".lower()
     return 'completed' in text
 
-def _log_manager_order_edit(order, user, was_rejected):
-    """Write a timeline entry whenever a user edits an order, so Order Tracking
-    shows who edited it (and in what role) and when. ``action`` is left null (the
-    order's new flow status gets its own log row); the remark carries an
-    "edited by <role>" marker the tracking page filters on to render the entry."""
-    role_name = (getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
-    editor_label = role_name or 'user'
-    prefix = 'Rejected order edited by' if was_rejected else 'Order edited by'
-    remark = f'{prefix} {editor_label}'
-    try:
-        OrdersLog.objects.create(
-            order=order,
-            action=None,
-            performed_by=user,
-            remarks=remark,
-        )
-    except Exception:
-        pass
-
 def _order_status_message(status_obj, default_action='updated'):
     status_name = getattr(status_obj, 'name', None) or str(status_obj or '').strip() or 'next stage'
     status_text = status_name.strip().lower()
@@ -562,23 +542,6 @@ def _get_user_category_name(user):
 
 
 def _get_user_category_names(user):
-    # Users can be assigned multiple categories (OIL / BEVERAGES / MART). Scope
-    # data to ALL of them, falling back to the single primary `category` FK for
-    # users that predate the multi-category assignment.
-    names = []
-    seen = set()
-    categories_manager = getattr(user, 'categories', None)
-    if categories_manager is not None:
-        try:
-            for cat in categories_manager.all():
-                name = str(getattr(cat, 'category', cat) or '').strip().upper()
-                if name and name not in seen:
-                    seen.add(name)
-                    names.append(name)
-        except Exception:
-            names = []
-    if names:
-        return names
     category = _get_user_category_name(user)
     return [category] if category else []
 
@@ -1059,9 +1022,7 @@ class WDashboardKPIView(APIView):
             )
 
         base_order_ids = _get_base_orders(request.user).values_list('id', flat=True).distinct()
-        all_orders = Order.objects.filter(id__in=base_order_ids).exclude(
-            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
-        )
+        all_orders = Order.objects.filter(id__in=base_order_ids)
         period_orders = all_orders.filter(
             created_at__gte=range_start,
             created_at__lte=range_end,
@@ -1204,9 +1165,7 @@ class WDashboardKPIView(APIView):
             total_orders = accepted_orders + rejected_orders + pending_review_orders
 
         status_counts = {}
-        for os in OrderStatus.objects.exclude(
-            Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
-        ):
+        for os in OrderStatus.objects.all():
             status_counts[os.name] = period_orders.filter(status=os).count()
 
         return Response({
@@ -1250,9 +1209,7 @@ class WDashboardChartsView(APIView):
             range_end = timezone.make_aware(datetime(year, month, last_day, 23, 59, 59))
 
         base_order_ids = _get_base_orders(request.user).values_list('id', flat=True).distinct()
-        base_orders = Order.objects.filter(id__in=base_order_ids).exclude(
-            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
-        )
+        base_orders = Order.objects.filter(id__in=base_order_ids)
         filtered_orders = base_orders.filter(
             created_at__gte=range_start,
             created_at__lte=range_end
@@ -1419,9 +1376,7 @@ class WDashboardChartsView(APIView):
         )
         status_data = [
             {'status': os.code, 'label': os.name, 'count': status_counts_map.get(os.id, 0)}
-            for os in OrderStatus.objects.exclude(
-                Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
-            )
+            for os in OrderStatus.objects.all()
         ]
 
         decision_data = []
@@ -1701,6 +1656,7 @@ class OrderStatusTrackingView(APIView):
         else:
             return Response({'error': 'mode must be auditor, billing, or rate_approver'}, status=status.HTTP_400_BAD_REQUEST)
 
+        
         accepted_data = OrderListByUserIdSerializer(accepted_orders.distinct(), many=True).data
         rejected_data = OrderListByUserIdSerializer(rejected_orders.distinct(), many=True).data
 
@@ -1725,9 +1681,7 @@ class DashboardKPIView(APIView):
         today = timezone.now().date()
         current_month_start = today.replace(day=1)
 
-        all_orders = _get_base_orders(request.user).exclude(
-            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
-        )
+        all_orders = _get_base_orders(request.user)
 
         total_orders = all_orders.count()
         total_revenue = all_orders.aggregate(total=Sum('total_amount'))['total'] or 0
@@ -1735,9 +1689,7 @@ class DashboardKPIView(APIView):
         this_month_orders = all_orders.filter(created_at__date__gte=current_month_start).count()
 
         status_counts = {}
-        for os in OrderStatus.objects.exclude(
-            Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
-        ):
+        for os in OrderStatus.objects.all():
             status_counts[os.name] = all_orders.filter(status=os).count()
 
         User = get_user_model()
@@ -1777,9 +1729,7 @@ class DashboardChartsView(APIView):
             last_day = calendar.monthrange(year, month)[1]
             range_end = timezone.make_aware(datetime(year, month, last_day, 23, 59, 59))
 
-        base_orders = _get_base_orders(request.user).exclude(
-            Q(status__code__iexact='DRAFT') | Q(status__name__iexact='Draft')
-        )
+        base_orders = _get_base_orders(request.user)
         filtered_orders = base_orders.filter(
             created_at__gte=range_start,
             created_at__lte=range_end
@@ -1847,9 +1797,7 @@ class DashboardChartsView(APIView):
         )
         status_data = [
             {'status': os.code, 'label': os.name, 'count': status_counts_map.get(os.id, 0)}
-            for os in OrderStatus.objects.exclude(
-                Q(code__iexact='DRAFT') | Q(name__iexact='Draft')
-            )
+            for os in OrderStatus.objects.all()
         ]
 
         # CHART 4: Top Parties by category (selected period)
@@ -2263,9 +2211,6 @@ class UpdateOrderView(APIView):
 
         order = get_object_or_404(Order, id=order_id)
         previous_status = order.status
-        # Captured before the flow recomputes the status: was this order sitting
-        # in a rejected state when it was opened for editing?
-        was_rejected = _is_rejection_status(previous_status)
         order_flow_type = _get_order_flow_type_for_order(order)
 
         serializer = CreateOrderSerializer(data=request.data)
@@ -2325,7 +2270,6 @@ class UpdateOrderView(APIView):
             order.status = previous_status or get_status('Order Created')
             order.save()
             _mark_order_notifications_read(order, user)
-            _log_manager_order_edit(order, user, was_rejected)
             log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
             return Response({
                 'id': order.id,
@@ -2360,7 +2304,6 @@ class UpdateOrderView(APIView):
         order.save()
 
         _mark_order_notifications_read(order, user)
-        _log_manager_order_edit(order, user, was_rejected)
         if next_status:
             send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
         
@@ -2389,100 +2332,6 @@ class UpdateOrderView(APIView):
 class CreateOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _save_as_draft(self, request, _to_float, _to_bool):
-        """Create or update an order with the 'Draft' status. Drafts allow
-        incomplete data, skip the approval flow, notifications, rate-approver
-        assignment and template saving. Submitting the draft later goes through
-        the normal create/edit path (no is_draft flag)."""
-        serializer = CreateOrderSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        data = serializer.validated_data
-        order_type = _normalize_order_type(data.get('order_type'))
-        employee_id = str(data.get('employee_id') or '').strip()
-        items = data.pop('items', []) or []
-        order_remarks = request.data.get('remarks', data.get('remarks', ''))
-        user = request.user if request.user.is_authenticated else None
-
-        draft_status = get_status('Draft')
-        if not draft_status:
-            return Response(
-                {'error': 'Draft status is not configured. Run migrations.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        order_id = request.data.get('order_id')
-        if order_id:
-            order = get_object_or_404(Order, id=int(order_id))
-            order.order_type = order_type
-            order.employee_id = employee_id if order_type == 'STAFF' else data.get('employee_id', order.employee_id)
-            order.card_code = data.get('card_code', order.card_code)
-            order.card_name = data.get('card_name', order.card_name)
-            order.bill_to_id = data.get('bill_to_id', order.bill_to_id)
-            order.bill_to_address = data.get('bill_to_address', order.bill_to_address)
-            order.ship_to_id = data.get('ship_to_id', order.ship_to_id)
-            order.ship_to_address = data.get('ship_to_address', order.ship_to_address)
-            order.dispatch_from_id = data.get('dispatch_from_id', order.dispatch_from_id)
-            order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
-            order.company = data.get('company', order.company)
-            order.po_number = data.get('po_number', order.po_number)
-            order.is_foc = data.get('is_foc', order.is_foc)
-            order.delivery_date = data.get('delivery_date') or order.delivery_date
-            order.remarks = order_remarks
-            order.status = draft_status
-            order.items.all().delete()
-        else:
-            today = datetime.now().strftime('%Y%m%d')
-            last_order = Order.objects.filter(
-                order_number__startswith=f'ORD-{today}'
-            ).order_by('-order_number').first()
-            new_num = (int(last_order.order_number.split('-')[-1]) + 1) if last_order else 1
-            order_number = f'ORD-{today}-{new_num:04d}'
-
-            order = Order(
-                order_number=order_number,
-                order_type=order_type,
-                employee_id=employee_id,
-                card_code=data.get('card_code', ''),
-                card_name=data.get('card_name', ''),
-                bill_to_id=data.get('bill_to_id') or 0,
-                bill_to_address=data.get('bill_to_address', ''),
-                ship_to_id=data.get('ship_to_id') or 0,
-                ship_to_address=data.get('ship_to_address', ''),
-                dispatch_from_id=data.get('dispatch_from_id') or 0,
-                dispatch_from_name=data.get('dispatch_from_name', ''),
-                company=data.get('company', ''),
-                po_number=data.get('po_number', ''),
-                is_foc=data.get('is_foc', False),
-                status=draft_status,
-                created_by=user,
-                delivery_date=data.get('delivery_date'),
-                remarks=order_remarks,
-            )
-
-        order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
-        order.save()
-
-        for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
-
-        # Record the order as created (not as a draft). We no longer write a
-        # separate 'Draft' log; add the 'Order Created' log only if it isn't
-        # there yet so re-saving an existing draft doesn't duplicate it.
-        if not OrdersLog.objects.filter(order=order, action__name='Order Created').exists():
-            log_order_action(order, 'Order Created', user=user)
-
-        return Response({
-            'id': order.id,
-            'order_number': order.order_number,
-            'total_amount': str(order.total_amount),
-            'status': order.status.name if order.status else '',
-            'is_draft': True,
-            'needs_approval': False,
-            'message': 'Draft saved successfully',
-        }, status=status.HTTP_200_OK)
-
     def post(self, request):
         def _to_float(value, default=0.0):
             try:
@@ -2501,22 +2350,11 @@ class CreateOrderView(APIView):
                 return False
             return bool(value)
 
-        # ── Draft mode: save a (possibly incomplete) order without entering the
-        # approval flow or notifying approvers. Drafts can be resumed and either
-        # re-saved as a draft or submitted normally (which runs the flow). ──────
-        if _to_bool(request.data.get('is_draft')):
-            return self._save_as_draft(request, _to_float, _to_bool)
-
         # ── Edit mode: order_id in payload means update existing order ──────
         order_id = request.data.get('order_id')
         if order_id:
             order = get_object_or_404(Order, id=int(order_id))
             previous_status = order.status
-            # Was the order rejected when the manager opened it for editing?
-            was_rejected = _is_rejection_status(previous_status)
-            # Submitting a saved draft is the order's first real submission, not
-            # an edit — so we skip the "edited by manager" log in that case.
-            was_draft = (getattr(previous_status, 'code', '') or '').upper() == 'DRAFT'
             serializer = CreateOrderSerializer(data=request.data)
             if not serializer.is_valid():
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2568,8 +2406,6 @@ class CreateOrderView(APIView):
                 order.status = previous_status or get_status('Order Created')
                 order.save()
                 _mark_order_notifications_read(order, user)
-                if not was_draft:
-                    _log_manager_order_edit(order, user, was_rejected)
                 log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
                 return Response({
                     'id': order.id,
@@ -2614,8 +2450,6 @@ class CreateOrderView(APIView):
             order.save()
 
             _mark_order_notifications_read(order, user)
-            if not was_draft:
-                _log_manager_order_edit(order, user, was_rejected)
             if next_status:
                 send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
            
@@ -2780,36 +2614,6 @@ class CreateOrderView(APIView):
             'message': f"Order sent to {next_status.name.lower()}" if next_status else 'Order created successfully',
         }, status=status.HTTP_201_CREATED)
     
-
-class DeleteDraftOrderView(APIView):
-    """Delete a draft order. Only the creator (or staff) may delete, and only
-    while the order is still a draft — submitted orders cannot be deleted here."""
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request, order_id):
-        order = get_object_or_404(Order, id=order_id)
-        user = request.user
-
-        is_owner = order.created_by_id == getattr(user, 'id', None)
-        if not (is_owner or getattr(user, 'is_staff', False)):
-            return Response(
-                {'error': 'You can only delete your own drafts.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        if not order.status or (order.status.code or '').upper() != 'DRAFT':
-            return Response(
-                {'error': 'Only draft orders can be deleted.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        order_number = order.order_number
-        order.delete()
-        return Response(
-            {'message': f'Draft {order_number} deleted'},
-            status=status.HTTP_200_OK,
-        )
-
 
 class SchemeListView(APIView):
     permission_classes = [AllowAny]
@@ -3674,7 +3478,8 @@ class OrderListView(APIView):
             acted_order_ids = OrderRateApproval.objects.filter(
                 approver=request.user,
                 status__in=['APPROVED', 'REJECTED'],
-            ).values_list('order_id', flat=True)
+            ).values_list('order_id', flat=True) 
+            
             orders = Order.objects.filter(id__in=acted_order_ids)
         else:
             if status_filter:
@@ -3692,7 +3497,7 @@ class OrderListView(APIView):
 
         orders = (
             orders
-            .select_related('status', 'created_by', 'rejected_by')
+            .select_related('status', 'created_by')
             .prefetch_related('items', 'rate_approvals__approver')
             .order_by('-created_at')
             .distinct()
@@ -3714,28 +3519,6 @@ class OrderListView(APIView):
                 if log_order_id not in sap_doc_map:
                     sap_doc_map[log_order_id] = sap_doc_num
 
-        # Who rejected each order. order.rejected_by is only set by the rate-approver
-        # rejection path, so for auditor/billing rejections (and older orders) fall
-        # back to the most recent rejection log entry's performer. This covers every
-        # rejection type and historical data.
-        order_id_ints = list(orders.values_list('id', flat=True))
-        rejected_by_map = {}
-        if order_id_ints:
-            rejection_logs = (
-                OrdersLog.objects
-                .filter(order_id__in=order_id_ints, performed_by__isnull=False)
-                .filter(Q(action__code__icontains='reject') | Q(action__name__icontains='reject'))
-                .select_related('performed_by')
-                .order_by('order_id', '-created_at', '-id')
-            )
-            for log in rejection_logs:
-                if log.order_id not in rejected_by_map:
-                    rejected_by_map[log.order_id] = _display_user_name(log.performed_by)
-
-        # Cache role->names lookups (auditor pool) across the whole list pass so
-        # we don't re-query users for every order.
-        pending_with_role_cache = {}
-
         data = []
         for order in orders:
             items_qs = order.items.all()
@@ -3753,23 +3536,21 @@ class OrderListView(APIView):
                 'sap_doc_number': order.sap_doc_number or sap_doc_map.get(str(order.id)) or '',
                 'items_count': items_count,
                 'created_by': order.created_by.name if order.created_by else None,
-                'rejected_by': rejected_by_map.get(order.id) or (_display_user_name(order.rejected_by) if order.rejected_by else None),
                 'created_at': order.created_at,
                 'delivery_date': order.delivery_date,
-                'po_number': order.po_number,
+                # 'po_number': order.po_number,
                 'is_foc': order.is_foc,
-                'bill_to_address': order.bill_to_address,
-                'ship_to_address': order.ship_to_address,
-                'dispatch_from_id': order.dispatch_from_id,
-                'categories': list(
-                    items_qs.exclude(category__isnull=True)
-                    .exclude(category__exact='')
-                    .values_list('category', flat=True)
-                    .distinct()
-                ),
-                'rate_approvals': _order_rate_approval_payload(order),
-                'pending_with': compute_pending_with(order, pending_with_role_cache),
-                'items': OrderItemSerializer(items_qs, many=True).data
+                # 'bill_to_address': order.bill_to_address,
+                # 'ship_to_address': order.ship_to_address,
+                # 'dispatch_from_id': order.dispatch_from_id,
+                # 'categories': list(
+                #     items_qs.exclude(category__isnull=True)
+                #     .exclude(category__exact='')
+                #     .values_list('category', flat=True)
+                #     .distinct()
+                # ),
+                # 'rate_approvals': _order_rate_approval_payload(order),
+                # 'items': OrderItemSerializer(items_qs, many=True).data
             })
 
         return Response(data)
@@ -3799,43 +3580,19 @@ class TemplatePartyListView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-
-        templates = (
-            Template.objects.filter(user=request.user)
-            .select_related('order')
-            .prefetch_related('order__items')
-        )
-
+  
+        templates = Template.objects.filter(user=request.user).select_related('order')
+    
         parties_dict = {}
         for t in templates:
-            order = t.order
-            if not order or not order.card_code:
-                continue
-            card_code = order.card_code
-            # An order is placed under a single category; read it off the order's
-            # items so the same card_code ordered under OIL and MART appears as
-            # two selectable parties instead of collapsing into one.
-            category = ''
-            for item in order.items.all():
-                if item.category:
-                    category = str(item.category).strip()
-                    break
-            normalized = category.upper()
-            key = (card_code, normalized)
-            if key in parties_dict:
-                continue
-            label = order.card_name or card_code
-            if category:
-                label = f"{label} - {category}"
-            parties_dict[key] = {
-                "label": label,
-                # Composite value so the same card_code under different
-                # categories stays distinct; the frontend parses card_code||CATEGORY.
-                "value": f"{card_code}||{normalized}",
-                "card_code": card_code,
-                "category": normalized,
-            }
-
+            card_code = t.order.card_code
+            if card_code not in parties_dict:
+                parties_dict[card_code] = {
+                    "label": f"{t.order.card_name}",
+                    # "label": f"{t.order.card_name} ({card_code})",
+                    "value": card_code
+                }
+    
         return Response(list(parties_dict.values()), status=status.HTTP_200_OK)
 
 
@@ -3846,21 +3603,12 @@ class TemplateOrderListView(APIView):
         card_code = request.query_params.get('card_code')
         if not card_code:
             return Response({"error": "card_code is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Scope to the selected category so picking "Party - OIL" lists only the
-        # OIL orders, not every order placed for this card_code.
-        category = str(request.query_params.get('category') or '').strip()
-
+    
         templates = Template.objects.filter(
             user=request.user,
             order__card_code=card_code
         ).select_related('order').order_by('-created_at')
-
-        if category:
-            templates = templates.filter(
-                order__items__category__iexact=category
-            ).distinct()
-
+    
         orders_data = []
         for t in templates:
             date_str = t.order.created_at.strftime('%d-%b-%Y') if t.order.created_at else 'Unknown Date'
@@ -4430,63 +4178,6 @@ def _is_quotation_open(row):
     return doc_status == 'O' and canceled != 'Y'
 
 
-def _quotation_company_db(order):
-    """Return the SAP CompanyDB used when this order's quotation was created."""
-    categories = {
-        str(getattr(item, 'category', '') or '').strip().upper()
-        for item in order.items.all()
-        if str(getattr(item, 'category', '') or '').strip()
-    }
-    if categories == {'BEVERAGES'}:
-        return (
-            getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', '')
-            or settings.HANA_COMPANY_DB
-        )
-    return settings.HANA_COMPANY_DB
-
-
-def _quotation_rows_by_order(orders, entry_map):
-    """Fetch quotation rows from each relevant CompanyDB.
-
-    DocEntry is unique only inside a CompanyDB, so results are associated with
-    orders through (CompanyDB, DocEntry), not DocEntry alone.
-    """
-    from hana.services.services import SalesOrderService
-
-    company_by_order = {
-        str(order.id): _quotation_company_db(order)
-        for order in orders
-    }
-    entries_by_company = defaultdict(set)
-    for order_id, info in entry_map.items():
-        doc_entry = info.get('doc_entry')
-        company_db = company_by_order.get(str(order_id))
-        if doc_entry is not None and company_db:
-            entries_by_company[company_db].add(int(doc_entry))
-
-    rows_by_key = {}
-    errors = []
-    service = SalesOrderService()
-    for company_db, doc_entries in entries_by_company.items():
-        try:
-            rows = service.get_quotation_status(sorted(doc_entries), company_db=company_db)
-            for row in rows:
-                rows_by_key[(company_db, int(row['DocEntry']))] = row
-        except Exception as exc:
-            errors.append(f'{company_db}: {exc}')
-
-    rows_by_order = {}
-    for order_id, info in entry_map.items():
-        doc_entry = info.get('doc_entry')
-        company_db = company_by_order.get(str(order_id))
-        rows_by_order[str(order_id)] = (
-            rows_by_key.get((company_db, int(doc_entry)))
-            if company_db and doc_entry is not None
-            else None
-        )
-    return rows_by_order, '; '.join(errors) or None
-
-
 class QuotationStatusView(APIView):
     """Batch lookup of SAP Sales Quotation status for completed orders.
 
@@ -4498,21 +4189,33 @@ class QuotationStatusView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from hana.services.services import SalesOrderService
+
         raw_ids = request.query_params.get('order_ids', '')
         order_ids = [oid for oid in (i.strip() for i in raw_ids.split(',')) if oid.isdigit()]
         if not order_ids:
             return Response({'success': True, 'statuses': {}})
 
-        orders = list(
-            Order.objects.filter(id__in=order_ids).prefetch_related('items')
-        )
         entry_map = _quotation_entries_for_orders(order_ids)
-        sap_rows_by_order, sap_error = _quotation_rows_by_order(orders, entry_map)
+        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
+
+        sap_rows_by_entry = {}
+        if doc_entries:
+            try:
+                rows = SalesOrderService().get_quotation_status(doc_entries)
+                for row in rows:
+                    sap_rows_by_entry[int(row['DocEntry'])] = row
+            except Exception as exc:
+                # SAP/HANA unreachable: return what we know but don't break the page.
+                return Response(
+                    {'success': False, 'statuses': {}, 'error': str(exc)},
+                    status=status.HTTP_200_OK,
+                )
 
         statuses = {}
         for order_id, info in entry_map.items():
             doc_entry = info['doc_entry']
-            row = sap_rows_by_order.get(str(order_id))
+            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
             statuses[order_id] = {
                 'doc_entry': doc_entry,
                 'doc_num': info['doc_num'],
@@ -4521,11 +4224,7 @@ class QuotationStatusView(APIView):
                 'is_open': bool(row) and _is_quotation_open(row),
             }
 
-        return Response({
-            'success': sap_error is None,
-            'statuses': statuses,
-            'error': sap_error,
-        })
+        return Response({'success': True, 'statuses': statuses})
 
 
 class CancelSalesQuotationView(APIView):
@@ -4542,7 +4241,7 @@ class CancelSalesQuotationView(APIView):
         from hana.services.services import SalesOrderService
 
         try:
-            order = Order.objects.select_related('status').prefetch_related('items').get(pk=order_id)
+            order = Order.objects.select_related('status').get(pk=order_id)
         except Order.DoesNotExist:
             return Response({'success': False, 'message': 'Order not found'},
                             status=status.HTTP_404_NOT_FOUND)
@@ -4571,10 +4270,7 @@ class CancelSalesQuotationView(APIView):
 
         # Confirm the quotation is still open before the destructive call.
         try:
-            rows = SalesOrderService().get_quotation_status(
-                [doc_entry],
-                company_db=_quotation_company_db(order),
-            )
+            rows = SalesOrderService().get_quotation_status([doc_entry])
             current = next((r for r in rows if int(r['DocEntry']) == int(doc_entry)), None)
         except Exception as exc:
             return Response(
@@ -4652,6 +4348,8 @@ class QuotationOverviewView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from hana.services.services import SalesOrderService
+
         role_name = getattr(getattr(request.user, 'role', None), 'name', '')
         is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
         if not is_admin:
@@ -4660,24 +4358,33 @@ class QuotationOverviewView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        completed = list(
+        completed = (
             Order.objects
             .filter(status__code='COMPLETED')
             .select_related('quotation_cancelled_by')
-            .prefetch_related('items')
             .order_by('-created_at')
         )
 
         order_ids = [str(order.id) for order in completed]
         entry_map = _quotation_entries_for_orders(order_ids)
-        sap_rows_by_order, sap_error = _quotation_rows_by_order(completed, entry_map)
+        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
+
+        sap_rows_by_entry = {}
+        sap_error = None
+        if doc_entries:
+            try:
+                rows = SalesOrderService().get_quotation_status(doc_entries)
+                for row in rows:
+                    sap_rows_by_entry[int(row['DocEntry'])] = row
+            except Exception as exc:
+                sap_error = str(exc)
 
         data = []
         for order in completed:
             info = entry_map.get(str(order.id)) or {}
             doc_entry = info.get('doc_entry')
             doc_num = info.get('doc_num')
-            row = sap_rows_by_order.get(str(order.id))
+            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
 
             if order.quotation_cancelled:
                 quotation_status = 'CANCELLED'
@@ -4685,15 +4392,6 @@ class QuotationOverviewView(APIView):
                 quotation_status = 'OPEN' if _is_quotation_open(row) else 'CLOSED'
             else:
                 quotation_status = 'UNKNOWN'
-
-            # Order category is derived from its line items (OIL / BEVERAGES /
-            # MART). An order can in principle span more than one category, so we
-            # expose the full distinct set plus a display string.
-            categories = sorted({
-                (item.category or '').strip().upper()
-                for item in order.items.all()
-                if (item.category or '').strip()
-            })
 
             data.append({
                 'id': order.id,
@@ -4707,8 +4405,21 @@ class QuotationOverviewView(APIView):
                 'quotation_cancelled_at': order.quotation_cancelled_at,
                 'quotation_cancelled_by': getattr(order.quotation_cancelled_by, 'username', None),
                 'quotation_status': quotation_status,
-                'categories': categories,
-                'category': ', '.join(categories),
             })
 
         return Response({'success': True, 'data': data, 'sap_error': sap_error})
+
+
+
+class GetOrdersByItemView(APIView):
+    # permission_classes = [IsAuthenticate]
+
+    def get(self, request):
+        item_code = request.query_params.get('item_code')
+        if not item_code:
+            return Response({"error": "item_code is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        orders = OrderItem.objects.filter(item_code=item_code).select_related('order').order_by('-order__created_at')
+
+        serializer = OrdersByItemSerializer(orders, many=True)
+        return Response(serializer.data)
