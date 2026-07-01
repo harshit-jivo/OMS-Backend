@@ -4,7 +4,7 @@ from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
 from sap_sync.models import Party as SapParty
-
+from decimal import Decimal
 
 def get_scheme_item_code_raw(scheme_id):
     if not scheme_id:
@@ -336,19 +336,93 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     party_state = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
+    vareity_cost = serializers.SerializerMethodField()
+
+    # commodity_total = serializers.SerializerMethodField()
 
     def get_party_state(self, obj):
-        party = SapParty.objects.filter(card_code=obj.card_code).first()
+        category = obj.items.first().category 
+        party = SapParty.objects.filter(card_code=obj.card_code , category=category).first()
         if not party or not party.state:
             return None
+       
         state = State.objects.filter(code=party.state).first()
         return state.name if state else party.state
+    
+    def get_vareity_cost(self, obj):
+         
+        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","OLIVE","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
+        others_list = [
+            "ATTA",
+            "COFFEE",
+            "DRINKS",
+            "DRY FRUITS/NUTS",
+            "FLAKES",
+            "GHEE",
+            "GIFT PACK",
+            "HONEY",
+            "RICE",
+            "SEEDS",
+            "SLICED OLIVE",
+            "SNACKS",
+            "SOYA CHUNK",
+            "SPICES",
+            "TEA",
+            "VITAMINS"
+        ]
+
+        premium_list = [
+            "BLENDED",
+            "CANOLA",
+            "COCONUT",
+            "DRY FRUITS/NUTS",
+            "EXTRA VIRGIN",
+            "GHEE",
+            "GIFT PACK",
+            "GROUNDNUT",
+            "MUSTARD",
+            "OLIVE",
+            "SESAME",
+            "SPICES"
+        ]
+
+        commodity_price = Decimal(0)
+        other_total = Decimal(0)
+        premium_total = Decimal(0)
+
+        for item in OrderItem.objects.filter(order=obj.id):
+            product = SapProduct.objects.filter(item_code=item.item_code).first()
+            product_group = product.sub_group if product else None 
+
+            if product_group in commodity_list:
+                category = "COMMODITY"
+                commodity_price += item.total
+            elif product_group in others_list:
+                category = "OTHERS"
+                other_total += item.total
+            elif product_group in premium_list:
+                category = "PREMIUM"
+                premium_total += item.total
+            else:
+                category = "OTHERS"
+                other_total += item.total
+
+
+        return {
+                    "commodity_price": commodity_price,
+                    "other_total": other_total,
+                    "premium_total": premium_total
+                }
+
 
     def get_created_by_name(self, obj):
         if obj.created_by:
             return obj.created_by.username
         return None
+    
 
+    # def get_commodity_total(self, obj):
+     
     class Meta:
         model = Order
         fields = [
@@ -361,7 +435,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "approved_by", "approved_at", "rejected_by", "rejected_at",
             "rejection_reason", "reject_reason", "updated_at",
             "items", "items_count", "party_state",
-            "rate_approvals",
+            "rate_approvals", "vareity_cost"
         ]
 
 class CreateSchemeSerializer(serializers.ModelSerializer):
@@ -405,6 +479,7 @@ class StaffProductSerializer(serializers.ModelSerializer):
 
 
 # New Architecture Serializers 
-
-
-# class PendingOrdersSerializer
+class OrdersByItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = ['id', 'order', 'item_code', 'item_name', 'category', 'brand', 'sub_group']

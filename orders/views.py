@@ -1,7 +1,7 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -3478,7 +3478,8 @@ class OrderListView(APIView):
             acted_order_ids = OrderRateApproval.objects.filter(
                 approver=request.user,
                 status__in=['APPROVED', 'REJECTED'],
-            ).values_list('o    rder_id', flat=True)
+            ).values_list('order_id', flat=True) 
+            
             orders = Order.objects.filter(id__in=acted_order_ids)
         else:
             if status_filter:
@@ -4407,3 +4408,18 @@ class QuotationOverviewView(APIView):
             })
 
         return Response({'success': True, 'data': data, 'sap_error': sap_error})
+
+
+
+class GetOrdersByItemView(APIView):
+    # permission_classes = [IsAuthenticate]
+
+    def get(self, request):
+        item_code = request.query_params.get('item_code')
+        if not item_code:
+            return Response({"error": "item_code is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        orders = OrderItem.objects.filter(item_code=item_code).select_related('order').order_by('-order__created_at')
+
+        serializer = OrdersByItemSerializer(orders, many=True)
+        return Response(serializer.data)
