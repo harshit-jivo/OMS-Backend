@@ -273,13 +273,13 @@ class OrderRateApprovalSerializer(serializers.ModelSerializer):
 
 class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source="status.name")
-    items = OrderItemSerializer(many=True, read_only=True)
-    items_count = serializers.IntegerField(source="items.count", read_only=True)
-    categories = serializers.SerializerMethodField()
+    # items = OrderItemSerializer(many=True, read_only=True)
+    # items_count = serializers.IntegerField(source="items.count", read_only=True)
+    # categories = serializers.SerializerMethodField()
     status_display = serializers.CharField(source="status.name", read_only=True)
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
-    rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
+    # rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
 
     def get_categories(self, obj):
         return list(
@@ -300,32 +300,32 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "id",
             "order_number",
             "order_type",
-            "employee_id",
+            # "employee_id",
             "card_code",
             "card_name",
-            "bill_to_id",
-            "bill_to_address",
-            "ship_to_id",
-            "ship_to_address",
-            "dispatch_from_id",
-            "dispatch_from_name",
-            "company",
-            "po_number",
+            # "bill_to_id",
+            # "bill_to_address",
+            # "ship_to_id",
+            # "ship_to_address",
+            # "dispatch_from_id",
+            # "dispatch_from_name",
+            # "company",
+            # "po_number",
             "is_foc",
-            "remarks",
+            # "remarks",
             "total_amount",
             "status",
             "status_name",
             "status_display",
             "created_by",
             "created_by_name",
-            "created_at",
-            "delivery_date",
-            "sap_doc_number",
-            "items",
-            "items_count",
-            "categories",
-            "rate_approvals",
+            "created_at",   
+            "delivery_date",  
+            # "sap_doc_number",
+            # "items",
+            # "items_count",
+            # "categories",
+            # "rate_approvals",
         ]
 
 class OrderDetailSerializer(serializers.ModelSerializer):
@@ -400,3 +400,11 @@ class StaffProductSerializer(serializers.ModelSerializer):
         ).first()
 
         return staff_price.rate if staff_price else 0
+
+
+
+
+# New Architecture Serializers 
+
+
+# class PendingOrdersSerializer
