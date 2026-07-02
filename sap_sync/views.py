@@ -160,6 +160,33 @@ class ProductListView(ListAPIView):
         return queryset
 
 
+class ProductVarietyListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        category = str(request.query_params.get('category') or '').strip()
+        queryset = Product.objects.filter(active_product_q()).exclude(is_deleted='Y')
+        if category:
+            queryset = queryset.filter(category__iexact=category)
+
+        sub_groups = sorted(
+            {
+                str(sub_group or '').strip()
+                for sub_group in queryset.values_list('sub_group', flat=True)
+                if str(sub_group or '').strip()
+            },
+            key=str.lower,
+        )
+
+        return Response({
+            'category': category,
+            'count': len(sub_groups),
+            # `varieties` kept for backward compatibility; both now carry sub groups.
+            'varieties': sub_groups,
+            'sub_groups': sub_groups,
+        })
+
+
 class ProductDetailView(RetrieveAPIView):
     """Get single product by ID or item_code"""
     permission_classes = [AllowAny]
@@ -583,7 +610,7 @@ class TestSalesQuotation(APIView):
             mock_item = SimpleNamespace(
                 item_code="FG0000145",
                 qty=84,
-                basic_price=1286
+                price_list_basic=1286
             )
             
             order = SimpleNamespace(

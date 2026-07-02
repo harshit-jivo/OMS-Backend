@@ -1,8 +1,8 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -12,13 +12,13 @@ from datetime import datetime
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
-from django.db.models import Sum, Count,F,Q, OuterRef, Subquery
+from django.db.models import Sum, Count, Max, F, Q, OuterRef, Subquery
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from collections import defaultdict
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q
+from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
@@ -51,11 +51,11 @@ APPROVER_REJECTED_ACTION_ID = 7
 APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
 APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
 RATE_CONDITION_CHOICES = {
-    'BASIC_GT_MARKET': 'Basic Price > Market Price',
-    'BASIC_LT_MARKET': 'Basic Price < Market Price',
-    'BASIC_EQ_MARKET': 'Basic Price = Market Price',
-    'BASIC_MARKET_ZERO': 'Basic Price and Market Price = 0',
-    'BASIC_ZERO_MARKET_GT_ZERO': 'Basic Price = 0 and Market Price > 0',
+    'BASIC_GT_MARKET': 'Price List (Basic) > Basic Price and Basic Price != 0',
+    'BASIC_LT_MARKET': 'Price List (Basic) < Basic Price',
+    'BASIC_EQ_MARKET': 'Price List (Basic) = Basic Price',
+    'BASIC_MARKET_ZERO': 'Price List (Basic) and Basic Price = 0',
+    'BASIC_ZERO_MARKET_GT_ZERO': 'Price List (Basic) = 0 and Basic Price > 0',
 }
 DEFAULT_RATE_CONDITIONS = ['BASIC_GT_MARKET']
 ORDER_FLOW_TYPE_ASM = 'ASM'
@@ -102,6 +102,60 @@ def _get_order_flow_config(flow_type=ORDER_FLOW_TYPE_ASM):
         config.rate_conditions = _default_order_flow_values(flow_type)['rate_conditions']
     return config
 
+def _normalize_category(value):
+    return str(value or '').strip().upper()
+
+def _get_order_primary_category(source):
+    """Return the dominant item category (upper-cased) for an order or items list."""
+    if hasattr(source, 'items'):
+        categories = list(source.items.values_list('category', flat=True))
+    else:
+        categories = [item.get('category') for item in (source or [])]
+    counts = {}
+    for raw in categories:
+        cat = _normalize_category(raw)
+        if cat:
+            counts[cat] = counts.get(cat, 0) + 1
+    if not counts:
+        return ''
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+def _get_party_flow_config(card_code, flow_type=ORDER_FLOW_TYPE_ASM, category=''):
+    """Return the per-party, per-category, per-role flow override. Falls back to a
+    category-agnostic ('') config for the party if no category-specific one exists."""
+    code = str(card_code or '').strip()
+    if not code:
+        return None
+    flow_type = _normalize_order_flow_type(flow_type)
+    category = _normalize_category(category)
+    if category:
+        match = PartyOrderFlowConfig.objects.filter(
+            card_code=code, category=category, flow_type=flow_type
+        ).first()
+        if match:
+            return match
+    return PartyOrderFlowConfig.objects.filter(card_code=code, category='', flow_type=flow_type).first()
+
+def _party_flow_config_payload(config):
+    rate_conditions = [
+        condition
+        for condition in (config.rate_conditions or [])
+        if condition in RATE_CONDITION_CHOICES
+    ]
+    flow_type = _normalize_order_flow_type(config.flow_type)
+    return {
+        'card_code': config.card_code,
+        'category': config.category or '',
+        'flow_type': flow_type,
+        'flow_label': ORDER_FLOW_TYPE_CHOICES.get(flow_type, flow_type),
+        'rate_approval_enabled': bool(config.rate_approval_enabled),
+        'billing_enabled': bool(config.billing_enabled),
+        'auditor_enabled': bool(config.auditor_enabled),
+        'rate_conditions': rate_conditions,
+        'updated_at': config.updated_at.isoformat() if config.updated_at else None,
+        'updated_by': getattr(config.updated_by, 'username', None),
+    }
+
 def _order_flow_config_payload(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
     config = config or _get_order_flow_config(flow_type)
     rate_conditions = [
@@ -128,12 +182,12 @@ def _order_flow_config_payload(config=None, flow_type=ORDER_FLOW_TYPE_ASM):
         'updated_by': getattr(config.updated_by, 'username', None),
     }
 
-def _get_price_condition_code(basic_price, market_price):
-    if basic_price == 0 and market_price == 0:
+def _get_price_condition_code(price_list_basic, basic_price):
+    if price_list_basic == 0 and basic_price == 0:
         return 'BASIC_MARKET_ZERO'
-    if basic_price > market_price:
+    if price_list_basic > basic_price:
         return 'BASIC_GT_MARKET'
-    if basic_price < market_price:
+    if price_list_basic < basic_price:
         return 'BASIC_LT_MARKET'
     return 'BASIC_EQ_MARKET'
 
@@ -150,8 +204,8 @@ def _get_order_price_condition_codes(items, to_float):
     for item in items:
         if not _item_can_match_flow_condition(item):
             continue
-        bp = to_float(item.get('basic_price', 0))
-        mp = to_float(item.get('market_price', 0))
+        bp = to_float(item.get('price_list_basic', 0))
+        mp = to_float(item.get('basic_price', 0))
         if bp == 0 and mp == 0:
             codes.add('BASIC_EQ_MARKET')
         if bp == 0 and mp > 0:
@@ -205,11 +259,13 @@ def _get_next_foc_status(current_status, fallback_name='Billing'):
 
     return _get_status_by_name(fallback_name)
 
-def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False):
+def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False, config=None):
     if force_foc_flow:
+        if flow_type == ORDER_FLOW_TYPE_BILLING:
+            return _get_status_by_name('Auditor Approval'), False
         return _get_status_by_name('Billing'), False
 
-    config = _get_order_flow_config(flow_type)
+    config = config or _get_order_flow_config(flow_type)
     condition_codes = _get_order_price_condition_codes(items, to_float)
     selected_conditions = set(config.rate_conditions or [])
 
@@ -236,14 +292,19 @@ def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type
 
 def _get_next_order_flow_status(order, current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
     if getattr(order, 'is_foc', False):
+        if flow_type == ORDER_FLOW_TYPE_BILLING:
+            return _get_next_flow_status(current_status, fallback_name or 'Auditor Approval', flow_type=flow_type)
         return _get_next_foc_status(current_status, fallback_name or 'Billing')
-    return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type)
+    party_config = _get_party_flow_config(
+        getattr(order, 'card_code', None), flow_type, _get_order_primary_category(order)
+    )
+    return _get_next_flow_status(current_status, fallback_name, flow_type=flow_type, config=party_config)
 
-def _get_next_flow_status(current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
+def _get_next_flow_status(current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM, config=None):
     if not current_status:
         return _get_status_by_name(fallback_name) if fallback_name else None
 
-    configured_statuses = _get_configured_stage_statuses(flow_type=flow_type)
+    configured_statuses = _get_configured_stage_statuses(config=config, flow_type=flow_type)
     current_id = getattr(current_status, 'id', None)
     for index, status_obj in enumerate(configured_statuses):
         if status_obj.id == current_id:
@@ -278,48 +339,47 @@ def _pending_log_user_for_status(status_obj, actor_user=None):
 def _rate_approval_remarks(flagged_items):
     return '; '.join(flagged_items) or 'Rate approval required by admin price condition'
 
-def _get_rate_approval_reason(item, basic_price, market_price):
+def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
     
-    qty = float(item.get('qty') or 0)
-    if qty <= 0:
-        return None
+    if item.get('qty') not in (None, ''):
+        qty = float(item.get('qty') or 0)
+        if qty <= 0:
+            return None
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
-    # if basic_price == 0:
-    #     return f"{item_name}: Basic price is 0 (Market ₹{market_price})"
+    # if price_list_basic == 0:
+    #     return f"{item_name}: Price List (Basic) is 0 (Basic ₹{basic_price})"
 
-    if market_price > 0 and market_price < basic_price:
-        return f"{item_name}: Market ₹{market_price} < Basic ₹{basic_price}"
+    if basic_price > 0 and basic_price < price_list_basic:
+        return f"{item_name}: Basic ₹{basic_price} < Price List (Basic) ₹{price_list_basic}"
 
     return None
 
-def _get_rate_approval_reason(item, basic_price, market_price):
+def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
-    try:
-        qty = float(item.get('qty') or 0)
-    except (TypeError, ValueError):
-        return None
-    if qty <= 0:
-        return None
+    if item.get('qty') not in (None, ''):
+        try:
+            qty = float(item.get('qty') or 0)
+        except (TypeError, ValueError):
+            return None
+        if qty <= 0:
+            return None
 
     item_name = item.get('item_name') or item.get('item_code') or 'Item'
 
-    if basic_price == 0 and market_price == 0:
-        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
-    if basic_price == 0 and market_price > 0:
-        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
-    if basic_price > market_price:
-        return f"{item_name}: Basic Rs {basic_price} > Market Rs {market_price}"
-    if basic_price < market_price:
-        return f"{item_name}: Basic Rs {basic_price} < Market Rs {market_price}"
-    if basic_price == market_price:
-        return f"{item_name}: Basic Rs {basic_price} = Market Rs {market_price}"
-
+    if price_list_basic == 0 and basic_price == 0:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} = Basic Rs {basic_price}"
+    if price_list_basic == 0 and basic_price > 0:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
+    if price_list_basic > basic_price:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} > Basic Rs {basic_price}"
+    if price_list_basic < basic_price:
+        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
     return None
 
 def _resolve_scheme_by_id(scheme_id):
@@ -358,14 +418,14 @@ def _create_order_item(order, item, to_float, to_bool):
         item_name=item.get('item_name', ''),
         category=item.get('category', ''),
         brand=item.get('brand', ''),
-        variety=item.get('variety', ''),
+        sub_group=item.get('sub_group') or item.get('variety') or '',
         item_type=item.get('item_type', ''),
         qty=to_float(item.get('qty', 0)),
         pcs=to_float(item.get('pcs', 0)),
         boxes=to_float(item.get('boxes', 0)),
         ltrs=to_float(item.get('ltrs', 0)),
+        price_list_basic=to_float(item.get('price_list_basic', 0)),
         basic_price=to_float(item.get('basic_price', 0)),
-        market_price=to_float(item.get('market_price', 0)),
         total=to_float(item.get('total', 0)),
         tax_rate=to_float(item.get('tax_rate', 0)),
         scheme=first_scheme,
@@ -417,13 +477,14 @@ def _build_order_template_signature(order):
 
         item_signatures.append((
             item.item_code or '',
+            item.sub_group or '',
             item.item_type or '',
             _normalize_template_number(item.qty),
             _normalize_template_number(item.pcs),
             _normalize_template_number(item.boxes),
             _normalize_template_number(item.ltrs),
+            _normalize_template_number(item.price_list_basic),
             _normalize_template_number(item.basic_price),
-            _normalize_template_number(item.market_price),
             tuple(scheme_signatures),
         ))
 
@@ -446,6 +507,15 @@ def _has_duplicate_template(user, order):
     return False
 
 
+def _get_order_template_sub_group(order):
+    sub_groups = [
+        str(sub_group or '').strip()
+        for sub_group in order.items.values_list('sub_group', flat=True).distinct()
+        if str(sub_group or '').strip()
+    ]
+    return ', '.join(sorted(sub_groups)) or None
+
+
 def _save_template_if_unique(user, order):
     if not user:
         return
@@ -453,7 +523,15 @@ def _save_template_if_unique(user, order):
     if _has_duplicate_template(user, order):
         return
 
-    Template.objects.get_or_create(user=user, order=order)
+    sub_group = _get_order_template_sub_group(order)
+    template, created = Template.objects.get_or_create(
+        user=user,
+        order=order,
+        defaults={'sub_group': sub_group},
+    )
+    if not created and template.sub_group != sub_group:
+        template.sub_group = sub_group
+        template.save(update_fields=['sub_group'])
 
 
 def _get_user_category_name(user):
@@ -461,6 +539,11 @@ def _get_user_category_name(user):
     category_name = getattr(category_obj, 'category', category_obj)
     normalized_category = str(category_name or '').strip().upper()
     return normalized_category or None
+
+
+def _get_user_category_names(user):
+    category = _get_user_category_name(user)
+    return [category] if category else []
 
 
 def _normalize_scope_name(value):
@@ -552,7 +635,7 @@ def _build_state_item_sales(filtered_orders, state_map):
         'item_code',
         'item_name',
         'category',
-        'variety',
+        'sub_group',
         'qty',
         'boxes',
         'ltrs',
@@ -589,7 +672,7 @@ def _build_state_item_sales(filtered_orders, state_map):
         item_code = item['item_code'] or '-'
         item_name = item['item_name'] or item_code
         category = item['category'] or 'Unknown'
-        variety = item['variety'] or 'Unknown'
+        variety = item['sub_group'] or 'Unknown'
         qty = to_float(item['qty'])
         boxes = to_float(item['boxes'])
         ltrs = to_float(item['ltrs'])
@@ -654,15 +737,15 @@ def _build_iexact_filter(field_name, values):
 
 
 def _apply_billing_order_scope(queryset, user):
-    user_category = _get_user_category_name(user)
+    user_categories = _get_user_category_names(user)
     user_main_groups = _get_user_main_group_names(user)
 
-    if not user_category and not user_main_groups:
+    if not user_categories and not user_main_groups:
         return queryset
 
     party_queryset = SapParty.objects.all()
-    if user_category:
-        party_queryset = party_queryset.filter(category__iexact=user_category)
+    if user_categories:
+        party_queryset = party_queryset.filter(category__in=user_categories)
     if user_main_groups:
         party_queryset = party_queryset.filter(
             _build_iexact_filter('main_group', user_main_groups)
@@ -672,8 +755,8 @@ def _apply_billing_order_scope(queryset, user):
         card_code__in=party_queryset.values_list('card_code', flat=True)
     )
 
-    if user_category:
-        queryset = queryset.filter(items__category__iexact=user_category)
+    if user_categories:
+        queryset = queryset.filter(items__category__in=user_categories)
 
     return queryset.distinct()
 
@@ -692,8 +775,8 @@ def _billing_users_for_order(order, exclude_user=None):
 
     matching_users = []
     for user in users:
-        user_category = _get_user_category_name(user)
-        if user_category and user_category not in order_categories:
+        user_categories = _get_user_category_names(user)
+        if user_categories and not set(user_categories).intersection(order_categories):
             continue
 
         user_main_groups = _get_user_main_group_names(user)
@@ -701,8 +784,8 @@ def _billing_users_for_order(order, exclude_user=None):
             party_match = SapParty.objects.filter(
                 card_code=order.card_code,
             )
-            if user_category:
-                party_match = party_match.filter(category__iexact=user_category)
+            if user_categories:
+                party_match = party_match.filter(category__in=user_categories)
             party_match = party_match.filter(
                 _build_iexact_filter('main_group', user_main_groups)
             )
@@ -734,25 +817,11 @@ def _get_base_orders(user):
             Q(logs__action__name__icontains='auditor')
         ).distinct()
     if role_name == 'approver':
-        handled_order_ids = (
-            OrdersLog.objects
-            .filter(performed_by=user)
-            .values_list('order_id', flat=True)
-            .distinct()
-        )
-
         queryset = Order.objects.filter(
-            Q(status__code__in=['NEED_APPROVAL', 'RATE_APPROVAL']) |
-            Q(id__in=handled_order_ids)
+            rate_approvals__approver=user,
+            rate_approvals__status='PENDING',
+            status__code__in=APPROVER_ACTIVE_CODES,
         ).distinct()
-
-        user_category = _get_user_category_name(user)
-        if user_category:
-            queryset = queryset.filter(
-                Q(items__category__iexact=user_category) |
-                Q(created_by__category__category__iexact=user_category)
-            ).distinct()
-
         return queryset
     if role_name == 'billing':
         handled_order_ids = (
@@ -788,6 +857,142 @@ def _with_latest_approver_decision(orders, user):
     return orders.annotate(
         latest_approver_action_id=Subquery(latest_approver_action)
     )
+
+def _get_order_rate_approval(order, user):
+    if not user or not getattr(user, 'is_authenticated', False):
+        return None
+    return OrderRateApproval.objects.filter(order=order, approver=user).first()
+
+def _assigned_rate_approvers_for_order(order, status_filter=None, exclude_user=None):
+    approvals = order.rate_approvals.select_related('approver').all()
+    if status_filter:
+        approvals = approvals.filter(status=status_filter)
+    if exclude_user:
+        approvals = approvals.exclude(approver=exclude_user)
+    return [approval.approver for approval in approvals if approval.approver]
+
+def _has_pending_rate_approvals(order):
+    return order.rate_approvals.filter(status='PENDING').exists()
+
+def _mark_rate_approval_decision(order, user, decision, remarks=''):
+    approval = _get_order_rate_approval(order, user)
+    if not approval:
+        return None
+
+    approval.status = decision
+    approval.remarks = remarks or ''
+    approval.approved_at = timezone.now()
+    approval.save(update_fields=['status', 'remarks', 'approved_at'])
+    return approval
+
+def _get_item_sub_group(item):
+    """Resolve an order item's sub group. Prefer the value stored on the order item;
+    fall back to the synced SAP product (sap_products) by item_code (and category)."""
+    stored = str(getattr(item, 'sub_group', '') or '').strip()
+    if stored:
+        return stored
+
+    item_code = str(getattr(item, 'item_code', '') or '').strip()
+    if not item_code:
+        return ''
+
+    category = str(getattr(item, 'category', '') or '').strip()
+    product_query = SapProduct.objects.filter(item_code__iexact=item_code)
+    if category:
+        product_query = product_query.filter(category__iexact=category)
+
+    product = product_query.first()
+    return str(getattr(product, 'sub_group', '') or '').strip() if product else ''
+
+
+def _get_rate_approvers_for_item(item):
+    category = str(getattr(item, 'category', '') or '').strip()
+    sub_group = _get_item_sub_group(item)
+    if not category:
+        return []
+
+    rule_query = RateApproverRule.objects.filter(
+        category__iexact=category,
+        is_active=True,
+    )
+    if sub_group:
+        rule = rule_query.filter(sub_group__iexact=sub_group).select_related('approver').first()
+        if not rule:
+            rule = (
+                rule_query
+                .filter(Q(sub_group__isnull=True) | Q(sub_group=''))
+                .select_related('approver')
+                .first()
+            )
+    else:
+        rule = (
+            rule_query
+            .filter(Q(sub_group__isnull=True) | Q(sub_group=''))
+            .select_related('approver')
+            .first()
+        )
+    if rule and rule.approver:
+        return [rule.approver]
+
+    users = User.objects.filter(
+        role__name__iexact='approver',
+        is_active=True,
+        category__category__iexact=category,
+    )
+
+    matched_users = []
+    for user in users:
+        user_sub_groups = [
+            value.strip().lower()
+            for value in str(getattr(user, 'sub_group', '') or '').split(',')
+            if value.strip()
+        ]
+        if not user_sub_groups:
+            matched_users.append(user)
+            continue
+        if sub_group and sub_group.lower() in user_sub_groups:
+            matched_users.append(user)
+
+    return matched_users
+
+def assign_rate_approvers(order):
+    """
+    Create OrderRateApproval and OrderItemApprovalMapping
+    based on item sub group.
+    """
+  
+    OrderItemApprovalMapping.objects.filter(order=order).delete()
+
+    approvers = set()
+
+    for item in order.items.all():
+
+        for approver in _get_rate_approvers_for_item(item):
+            approvers.add(approver)
+
+            OrderItemApprovalMapping.objects.get_or_create(
+                order=order,
+                order_item=item,
+                approver=approver
+            )
+
+    approver_ids = {approver.id for approver in approvers}
+
+    # Drop approvals only for approvers no longer assigned to the order.
+    OrderRateApproval.objects.filter(order=order).exclude(
+        approver_id__in=approver_ids
+    ).delete()
+
+    # Add rows for newly assigned approvers; leave existing decisions untouched.
+
+    for approver in approvers:
+        OrderRateApproval.objects.get_or_create(
+            order=order,
+            approver=approver,
+            defaults={
+                "status": "PENDING"
+            }
+        )
     
 
 class WDashboardKPIView(APIView):
@@ -947,22 +1152,15 @@ class WDashboardKPIView(APIView):
             ).count()
 
         if role_name == 'approver':
-            approver_orders_with_decision = _with_latest_approver_decision(
-                period_orders,
-                request.user,
+            period_approvals = OrderRateApproval.objects.filter(
+                approver=request.user,
+                order__created_at__gte=range_start,
+                order__created_at__lte=range_end,
             )
 
-            accepted_orders = approver_orders_with_decision.filter(
-                latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count()
-
-            rejected_orders = approver_orders_with_decision.filter(
-                latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count()
-
-            pending_review_orders = period_orders.filter(
-                status__code__in=APPROVER_ACTIVE_CODES
-            ).distinct().count()
+            pending_review_orders = period_orders.count()
+            accepted_orders = period_approvals.filter(status='APPROVED').count()
+            rejected_orders = period_approvals.filter(status='REJECTED').count()
 
             total_orders = accepted_orders + rejected_orders + pending_review_orders
 
@@ -1029,6 +1227,10 @@ class WDashboardChartsView(APIView):
         monthly_sales = (
             base_orders
             .filter(created_at__gte=year_start, created_at__lte=year_end)
+            .filter(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed')
+            )
             .annotate(month=TruncMonth('created_at'))
             .values('month')
             .annotate(revenue=Sum('total_amount'), count=Count('id', distinct=True))
@@ -1050,6 +1252,33 @@ class WDashboardChartsView(APIView):
             }
             for m in range(1, 13)
         ]
+
+        # "Orders Received" for an approver is every order routed to them, grouped by the
+        # month the order was created. base_orders only holds the still-pending ones, so the
+        # default completed-based count is empty for approvers. To stay consistent with the
+        # KPI's total_orders (approved + rejected + pending-at-approver-stage), we count the
+        # same set: approvals this approver decided, plus those still pending in their queue.
+        if role_name == 'approver':
+            approver_monthly = (
+                OrderRateApproval.objects
+                .filter(
+                    approver=request.user,
+                    order__created_at__gte=year_start,
+                    order__created_at__lte=year_end,
+                )
+                .filter(
+                    Q(status__in=['APPROVED', 'REJECTED']) |
+                    Q(status='PENDING', order__status__code__in=APPROVER_ACTIVE_CODES)
+                )
+                .annotate(month=TruncMonth('order__created_at'))
+                .values('month')
+                .annotate(count=Count('order_id', distinct=True))
+            )
+            approver_month_map = {
+                entry['month'].month: entry['count'] for entry in approver_monthly
+            }
+            for entry in monthly_sales_data:
+                entry['count'] = approver_month_map.get(int(entry['month'].split('-')[1]), 0)
 
         # CHART 2: State-wise Orders (selected month)
         # No FK between Order and Parties; join via card_code in Python
@@ -1238,46 +1467,66 @@ class WDashboardChartsView(APIView):
                 },
             ]
         elif role_name == 'approver':
-            approver_orders_with_decision = _with_latest_approver_decision(
-                filtered_orders,
-                request.user,
+            approver_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+            ).values_list('order_id', flat=True).distinct()
+            approver_period_orders = Order.objects.filter(
+                id__in=approver_order_ids,
+                created_at__gte=range_start,
+                created_at__lte=range_end,
+            )
+            user_approvals = OrderRateApproval.objects.filter(
+                order__in=approver_period_orders,
+                approver=request.user,
             )
             decision_data = [
                 {
                     'status': 'accepted',
                     'label': 'Approved',
-                    'count': approver_orders_with_decision.filter(
-                        latest_approver_action_id=APPROVER_ACCEPTED_ACTION_ID
-                    ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count(),
+                    'count': user_approvals.filter(status='APPROVED').count(),
                 },
                 {
                     'status': 'rejected',
                     'label': 'Rejected',
-                    'count': approver_orders_with_decision.filter(
-                        latest_approver_action_id=APPROVER_REJECTED_ACTION_ID
-                    ).exclude(status__code__in=APPROVER_ACTIVE_CODES).distinct().count(),
+                    'count': user_approvals.filter(status='REJECTED').count(),
                 },
                 {
                     'status': 'pending',
                     'label': 'Pending Approval',
-                    'count': approver_orders_with_decision.filter(
-                        status__code__in=APPROVER_ACTIVE_CODES
-                    ).distinct().count(),
+                    'count': filtered_orders.count(),
                 },
             ]
 
-        # CHART 4: Top Parties by Revenue (selected period)
+        # CHART 4: Top Parties by category (selected period)
+        # Revenue reflects only completed orders (scoped to the logged-in user via
+        # _get_base_orders); count stays as the total orders in the period.
+        completed_status_filter = (
+            Q(order__status__code__icontains='COMPLETED')
+            | Q(order__status__name__icontains='Completed')
+        )
         top_parties = (
-            filtered_orders
-            .values('card_code', 'card_name')
-            .annotate(revenue=Sum('total_amount'), count=Count('id', distinct=True))
+            OrderItem.objects
+            .filter(order__in=filtered_orders)
+            .values('order__card_code', 'category')
+            .annotate(
+                card_name=Max('order__card_name'),
+                revenue=Sum('total', filter=completed_status_filter),
+                count=Count('order_id', distinct=True),
+                completed_count=Count(
+                    'order_id',
+                    distinct=True,
+                    filter=completed_status_filter,
+                ),
+            )
             .order_by('-count', '-revenue')
         )
         top_parties_data = [
             {
-                'card_code': entry['card_code'],
+                'card_code': entry['order__card_code'],
                 'card_name': entry['card_name'],
+                'category': entry['category'] or 'Unknown',
                 'count': entry['count'],
+                'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
             }
             for entry in top_parties
@@ -1300,7 +1549,30 @@ class WDashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
-        state_item_sales = _build_state_item_sales(completed_orders, state_map)
+        
+        req_status = request.query_params.get('status', 'completed').lower()
+        if req_status == 'pending':
+            target_orders = filtered_orders.exclude(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed') |
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'rejected':
+            target_orders = filtered_orders.filter(
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'all':
+            target_orders = filtered_orders
+        else:
+            target_orders = completed_orders
+            
+        target_card_codes = list(
+            target_orders.values_list('card_code', flat=True).distinct()
+        )
+        state_map = _build_party_state_map(target_card_codes)
+        state_item_sales = _build_state_item_sales(target_orders, state_map)
         highest_sales_order = (
             filtered_orders
             .order_by('-total_amount')
@@ -1373,28 +1645,18 @@ class OrderStatusTrackingView(APIView):
                 latest_decision_action_id=BILLING_REJECTED_ACTION_ID
             ).exclude(status__code__in=BILLING_ACTIVE_CODES)
         elif mode in ['rate_approver', 'rate approver', 'approver']:
-            latest_approver_action = (
-                OrdersLog.objects
-                .filter(
-                    order=OuterRef('pk'),
-                    performed_by=request.user,
-                    action_id__in=APPROVER_DECISION_ACTION_IDS,
-                )
-                .order_by('-created_at', '-id')
-                .values('action_id')[:1]
+            accepted_orders = base_orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='APPROVED',
             )
-            orders = base_orders.annotate(
-                latest_decision_action_id=Subquery(latest_approver_action)
+            rejected_orders = base_orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='REJECTED',
             )
-            accepted_orders = orders.filter(
-                latest_decision_action_id=APPROVER_ACCEPTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES)
-            rejected_orders = orders.filter(
-                latest_decision_action_id=APPROVER_REJECTED_ACTION_ID
-            ).exclude(status__code__in=APPROVER_ACTIVE_CODES)
         else:
             return Response({'error': 'mode must be auditor, billing, or rate_approver'}, status=status.HTTP_400_BAD_REQUEST)
 
+        
         accepted_data = OrderListByUserIdSerializer(accepted_orders.distinct(), many=True).data
         rejected_data = OrderListByUserIdSerializer(rejected_orders.distinct(), many=True).data
 
@@ -1482,6 +1744,10 @@ class DashboardChartsView(APIView):
         monthly_sales = (
             base_orders
             .filter(created_at__gte=year_start, created_at__lte=year_end)
+            .filter(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed')
+            )
             .annotate(month=TruncMonth('created_at'))
             .values('month')
             .annotate(revenue=Sum('total_amount'), count=Count('id'))
@@ -1534,18 +1800,30 @@ class DashboardChartsView(APIView):
             for os in OrderStatus.objects.all()
         ]
 
-        # CHART 4: Top Parties by Revenue (selected period)
+        # CHART 4: Top Parties by category (selected period)
         top_parties = (
-            filtered_orders
-            .values('card_code', 'card_name')
-            .annotate(revenue=Sum('total_amount'), count=Count('id'))
-            .order_by('-revenue', '-count')
+            OrderItem.objects
+            .filter(order__in=filtered_orders)
+            .values('order__card_code', 'category')
+            .annotate(
+                card_name=Max('order__card_name'),
+                revenue=Sum('total'),
+                count=Count('order_id', distinct=True),
+                completed_count=Count(
+                    'order_id',
+                    distinct=True,
+                    filter=Q(order__status__code__icontains='COMPLETED') | Q(order__status__name__icontains='Completed'),
+                ),
+            )
+            .order_by('-count', '-revenue')
         )
         top_parties_data = [
             {
-                'card_code': entry['card_code'],
+                'card_code': entry['order__card_code'],
                 'card_name': entry['card_name'],
+                'category': entry['category'] or 'Unknown',
                 'count': entry['count'],
+                'completed_count': entry['completed_count'],
                 'revenue': float(entry['revenue'] or 0),
             }
             for entry in top_parties
@@ -1567,7 +1845,26 @@ class DashboardChartsView(APIView):
             }
             for entry in category_sales
         ]
-        state_item_sales = _build_state_item_sales(completed_orders, state_map)
+        
+        req_status = request.query_params.get('status', 'completed').lower()
+        if req_status == 'pending':
+            target_orders = filtered_orders.exclude(
+                Q(status__code__icontains='COMPLETED') |
+                Q(status__name__icontains='Completed') |
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'rejected':
+            target_orders = filtered_orders.filter(
+                Q(status__code__icontains='REJECTED') |
+                Q(status__name__icontains='Rejected')
+            )
+        elif req_status == 'all':
+            target_orders = filtered_orders
+        else:
+            target_orders = completed_orders
+
+        state_item_sales = _build_state_item_sales(target_orders, state_map)
 
         return Response({
             'filter': {'year': year, 'month': month, 'line_year': line_year},
@@ -1635,7 +1932,10 @@ class PartyProductsView(APIView):
                 'tax_rate': getattr(product, 'tax_rate', None),
                 'sal_pack_unit': getattr(product, 'sal_pack_unit', None),
                 'brand': getattr(product, 'brand', None),
-                'variety': getattr(product, 'variety', None),
+                # The Add Sales cascade's "Sub Group" column reads `variety`;
+                # feed it the product's sub_group so the column groups by sub group.
+                'variety': getattr(product, 'sub_group', None),
+                'sub_group': getattr(product, 'sub_group', None),
                 'combo_scheme_id': assignment.scheme_id,
                 'combo_scheme_name': assignment.scheme.scheme_name if assignment.scheme else None,
             })
@@ -1956,8 +2256,8 @@ class UpdateOrderView(APIView):
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
 
-            bp = _to_float(item.get('basic_price', 0))
-            mp = _to_float(item.get('market_price', 0))
+            bp = _to_float(item.get('price_list_basic', 0))
+            mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
@@ -1995,6 +2295,7 @@ class UpdateOrderView(APIView):
                 _to_float,
                 flow_type=order_flow_type,
                 force_foc_flow=order.is_foc,
+                config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
             )
         if next_status:
             order.status = next_status
@@ -2091,12 +2392,13 @@ class CreateOrderView(APIView):
             flagged_items = []
             for item in items:
                 _create_order_item(order, item, _to_float, _to_bool)
-                bp = _to_float(item.get('basic_price', 0))
-                mp = _to_float(item.get('market_price', 0))
+                bp = _to_float(item.get('price_list_basic', 0))
+                mp = _to_float(item.get('basic_price', 0))
                 rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
+            assign_rate_approvers(order)
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
             user = request.user if request.user.is_authenticated else None
@@ -2129,6 +2431,19 @@ class CreateOrderView(APIView):
                     _to_float,
                     flow_type=order_flow_type,
                     force_foc_flow=order.is_foc,
+                    config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
+                )
+
+            # If the edit sends the order back into Rate Approval, a fresh approval
+            # round begins (a new pending rate-approval log is created below), so any
+            # prior approver decisions must be cleared back to PENDING. Otherwise the
+            # edit bypasses rate approval and existing decisions are preserved by
+            # assign_rate_approvers().
+            if next_status and (next_status.name or "").strip().lower() == "rate approval":
+                OrderRateApproval.objects.filter(order=order).update(
+                    status="PENDING",
+                    approved_at=None,
+                    remarks="",
                 )
             if next_status:
                 order.status = next_status
@@ -2228,12 +2543,17 @@ class CreateOrderView(APIView):
 
         for item in items:
             _create_order_item(order, item, _to_float, _to_bool)
-            bp = _to_float(item.get('basic_price', 0))
-            mp = _to_float(item.get('market_price', 0))
+            bp = _to_float(item.get('price_list_basic', 0))
+            mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
+        OrderRateApproval.objects.filter(order=order).delete()
+        OrderItemApprovalMapping.objects.filter(order=order).delete()
+
+        assign_rate_approvers(order)
 
         # Save party orders as reusable templates, but keep staff orders separate.
         if order_type != 'STAFF':
@@ -2260,11 +2580,18 @@ class CreateOrderView(APIView):
         is_billing_creator = creator_role == "billing"
         order_flow_type = ORDER_FLOW_TYPE_BILLING if is_billing_creator else ORDER_FLOW_TYPE_ASM
 
+        # A party-specific flow override (for this role's flow type + order category)
+        # fully replaces the global ASM/BILLING flow.
+        party_flow_config = _get_party_flow_config(
+            order.card_code, order_flow_type, _get_order_primary_category(items)
+        )
+
         next_status, flow_needs_approval = _get_initial_flow_status(
             items,
             _to_float,
             flow_type=order_flow_type,
             force_foc_flow=order.is_foc,
+            config=party_flow_config,
         )
         if next_status:
             order.status = next_status
@@ -2321,6 +2648,22 @@ class OrderStatusList(APIView):
         status = OrderStatus.objects.all().values('id','name')
         return Response(list(status))
 
+# Page key (see frontend GRANTABLE_ADMIN_PAGES) that unlocks Order Flow Settings.
+ORDER_FLOW_PAGE_KEY = 'Order_Flow_Settings'
+
+
+def _can_manage_order_flow(user):
+    """Admins, or any user explicitly granted the Order Flow Settings page on
+    the Permissions screen (stored in User.extra_pages)."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    role_name = getattr(getattr(user, 'role', None), 'name', '')
+    if user.is_staff or str(role_name).strip().lower() == 'admin':
+        return True
+    extra_pages = getattr(user, 'extra_pages', None) or []
+    return ORDER_FLOW_PAGE_KEY in extra_pages
+
+
 class OrderFlowConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2329,9 +2672,7 @@ class OrderFlowConfigView(APIView):
         return Response(_order_flow_config_payload(flow_type=flow_type))
 
     def post(self, request):
-        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
-        is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
-        if not is_admin:
+        if not _can_manage_order_flow(request.user):
             return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
 
         flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
@@ -2361,6 +2702,139 @@ class OrderFlowConfigView(APIView):
             'success': True,
             'message': 'Order flow updated successfully.',
             'data': _order_flow_config_payload(config),
+        })
+
+class PartyOrderFlowConfigView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _is_admin(self, request):
+        # Admins, or users granted the Order Flow Settings page on Permissions.
+        return _can_manage_order_flow(request.user)
+
+    def _party_name_map(self, card_codes):
+        """Resolve party names from the category-aware sap_parties table.
+
+        The same card_code can belong to different parties across categories
+        (e.g. CUSTA000878 is PURAN STORE under OIL and A ONE BEVERAGES under
+        BEVERAGES), so we key by (card_code, category). A code-only fallback is
+        kept for configs whose category is blank/unmatched.
+        """
+        if not card_codes:
+            return {}, {}
+        keyed = {}
+        by_code = {}
+        try:
+            for row in SapParty.objects.filter(card_code__in=card_codes).values('card_code', 'card_name', 'category'):
+                cat = (row.get('category') or '').strip().upper()
+                keyed[(row['card_code'], cat)] = row['card_name']
+                by_code.setdefault(row['card_code'], row['card_name'])
+        except Exception:
+            return {}, {}
+        return keyed, by_code
+
+    def get(self, request):
+        configs = list(PartyOrderFlowConfig.objects.all().order_by('card_code', 'flow_type'))
+        keyed_names, code_names = self._party_name_map(list({cfg.card_code for cfg in configs}))
+        data = []
+        for cfg in configs:
+            payload = _party_flow_config_payload(cfg)
+            cat = (cfg.category or '').strip().upper()
+            payload['card_name'] = keyed_names.get((cfg.card_code, cat)) or code_names.get(cfg.card_code, '')
+            data.append(payload)
+        return Response({
+            'success': True,
+            'data': data,
+            'flow_options': [
+                {'code': code, 'label': label}
+                for code, label in ORDER_FLOW_TYPE_CHOICES.items()
+            ],
+            'condition_options': [
+                {'code': code, 'label': label}
+                for code, label in RATE_CONDITION_CHOICES.items()
+            ],
+        })
+
+    def _parse_parties(self, request):
+        """Accept either parties=[{card_code, category}] or a plain card_codes list."""
+        parties = request.data.get('parties')
+        result = []
+        if isinstance(parties, list) and parties:
+            for entry in parties:
+                if isinstance(entry, dict):
+                    code = str(entry.get('card_code') or '').strip()
+                    category = _normalize_category(entry.get('category'))
+                else:
+                    code = str(entry or '').strip()
+                    category = ''
+                if code:
+                    result.append((code, category))
+        else:
+            for code in request.data.get('card_codes', []) or []:
+                code = str(code).strip()
+                if code:
+                    result.append((code, ''))
+        # de-dupe
+        return list(dict.fromkeys(result))
+
+    def post(self, request):
+        if not self._is_admin(request):
+            return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
+
+        parties = self._parse_parties(request)
+        if not parties:
+            return Response({'message': 'Select at least one party.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
+
+        rate_conditions = request.data.get('rate_conditions', [])
+        if not isinstance(rate_conditions, list):
+            return Response({'message': 'rate_conditions must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+        invalid_conditions = [c for c in rate_conditions if c not in RATE_CONDITION_CHOICES]
+        if invalid_conditions:
+            return Response(
+                {'message': 'Invalid rate condition selected.', 'invalid_conditions': invalid_conditions},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        values = {
+            'rate_approval_enabled': bool(request.data.get('rate_approval_enabled', False)),
+            'billing_enabled': bool(request.data.get('billing_enabled', False)),
+            'auditor_enabled': bool(request.data.get('auditor_enabled', False)),
+            'rate_conditions': list(dict.fromkeys(rate_conditions)),
+            'updated_by': request.user,
+        }
+
+        saved = []
+        for code, category in parties:
+            cfg, _created = PartyOrderFlowConfig.objects.update_or_create(
+                card_code=code, category=category, flow_type=flow_type, defaults=values
+            )
+            saved.append(_party_flow_config_payload(cfg))
+
+        flow_label = ORDER_FLOW_TYPE_CHOICES.get(flow_type, flow_type)
+        return Response({
+            'success': True,
+            'message': f'{flow_label} applied to {len(saved)} part{"y" if len(saved) == 1 else "ies"}.',
+            'data': saved,
+        })
+
+    def delete(self, request):
+        if not self._is_admin(request):
+            return Response({'message': 'Only admin can update order flow.'}, status=status.HTTP_403_FORBIDDEN)
+
+        parties = self._parse_parties(request)
+        if not parties:
+            return Response({'message': 'Select at least one party.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        flow_type = _normalize_order_flow_type(request.data.get('flow_type'))
+        condition = Q()
+        for code, category in parties:
+            condition |= Q(card_code=code, category=category, flow_type=flow_type)
+        PartyOrderFlowConfig.objects.filter(condition).delete()
+        return Response({
+            'success': True,
+            'message': f'Removed custom flow for {len(parties)} part{"y" if len(parties) == 1 else "ies"}.',
+            'removed': [{'card_code': code, 'category': category} for code, category in parties],
         })
 
 class SchemeProductView(APIView):
@@ -2419,6 +2893,17 @@ class UpdateOrderStatusView(APIView):
 
         prev_name = (previous_status.name or "").strip().lower() if previous_status else ""
 
+        if (
+            previous_status
+            and previous_status.id == status_obj.id
+            and _is_rejection_status(status_obj)
+        ):
+            return Response({
+                "message": "Order already rejected",
+                "order_id": order.id,
+                "status": status_obj.name
+            })
+
         # Guardrail: if client sends Auditor status again while already in Auditor stage,
         # treat it as "Auditor approved -> move to Billing Approval".
         if previous_status and previous_status.id == status_obj.id and prev_name == "auditor approval":
@@ -2438,6 +2923,7 @@ class UpdateOrderStatusView(APIView):
                     status_obj = configured_next_status
 
         user = request.user if request.user.is_authenticated else None
+        actor_role = (getattr(getattr(user, "role", None), "name", "") or "").strip().lower()
 
         # ✅ Update order
         order.status = status_obj
@@ -2457,8 +2943,14 @@ class UpdateOrderStatusView(APIView):
             and (status_obj.id == 3 or "billing" in new_name)
         )
 
+        # A billing user forwarding an order to the auditor must leave the auditor
+        # stage pending (performed_by=None). Match on the actor's role too, so this
+        # holds even when the previous status name doesn't literally contain
+        # "billing" (otherwise it falls through to the generic handler, which would
+        # stamp the billing user as the auditor-stage performer and make the
+        # Auditor Approval stage look approved).
         is_billing_to_auditor = (
-            "billing" in prev_name
+            ("billing" in prev_name or actor_role == "billing")
             and "auditor" in new_name
         )
 
@@ -2491,17 +2983,88 @@ class UpdateOrderStatusView(APIView):
             and status_obj.id == 6
         )
 
-        if is_rate_approved:
-            # Close the Rate Approval pending log with the approver
+        is_rate_rejected = (
+            prev_name == "rate approval"
+            and (
+                status_obj.id == APPROVER_REJECTED_ACTION_ID
+                or getattr(status_obj, "code", "") == "REJECTED"
+                or "reject" in new_name
+            )
+        )
+
+        if is_rate_approved or is_rate_rejected:
+            rate_approval = _get_order_rate_approval(order, user)
+            if not rate_approval:
+                order.status = previous_status
+                order.save(update_fields=["status"])
+                return Response(
+                    {"message": "This order is not assigned to you for rate approval."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if rate_approval.status != "PENDING":
+                order.status = previous_status
+                order.save(update_fields=["status"])
+                return Response(
+                    {
+                        "message": f"You have already {rate_approval.status.lower()} this order.",
+                        "order_id": order.id,
+                        "status": order.status.name if order.status else "",
+                        "approval_status": rate_approval.status,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if is_rate_rejected:
+                _mark_rate_approval_decision(order, user, "REJECTED", reason)
+                _close_or_create_status_log(
+                    order=order,
+                    action_status=previous_status,
+                    user=user,
+                    remarks=reason or "Rejected by rate approver"
+                )
+
+                order.status = status_obj
+                order.rejected_by = user
+                order.rejected_at = timezone.now()
+                if reason:
+                    order.reject_reason = reason
+                    order.rejection_reason = reason
+                order.save()
+
+                log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
+                send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
+
+                return Response({
+                    "message": "Order rejected successfully",
+                    "order_id": order.id,
+                    "status": status_obj.name,
+                    "approval_status": "REJECTED",
+                })
+
+            _mark_rate_approval_decision(order, user, "APPROVED", reason)
+            log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
+
+            if _has_pending_rate_approvals(order):
+                order.status = previous_status
+                order.save(update_fields=["status"])
+                return Response({
+                    "message": "Rate approved. Waiting for remaining approvers.",
+                    "order_id": order.id,
+                    "status": previous_status.name if previous_status else status_obj.name,
+                    "approval_status": "APPROVED",
+                    "pending_approvers": [
+                        _display_user_name(approver)
+                        for approver in _assigned_rate_approvers_for_order(order, status_filter="PENDING")
+                    ],
+                })
+
             _close_or_create_status_log(
                 order=order,
                 action_status=previous_status,
                 user=user,
-                remarks=reason or "Approved by rate approver"
+                remarks=reason or "Approved by all rate approvers"
             )
-
-            # Log the rate approved action
-            log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
 
             next_flow_status = _get_next_order_flow_status(order, previous_status, 'Billing', flow_type=order_flow_type)
             if next_flow_status:
@@ -2518,7 +3081,8 @@ class UpdateOrderStatusView(APIView):
             return Response({
                 "message": _order_status_message(next_flow_status, "approved") if next_flow_status else "Rate approved",
                 "order_id": order.id,
-                "status": next_flow_status.name if next_flow_status else status_obj.name
+                "status": next_flow_status.name if next_flow_status else status_obj.name,
+                "approval_status": "APPROVED",
             })
 
         if is_auditor_to_billing:
@@ -2718,6 +3282,14 @@ class OrderLogsByOrderView(APIView):
             )
             if latest_rate_log:
                 latest_rate_log.performed_by = None
+            elif order.status:
+                latest_rate_log = OrdersLog.objects.create(
+                    order=order,
+                    action=order.status,
+                    performed_by=None,
+                    remarks='Rate approval pending',
+                )
+                logs.append(latest_rate_log)
 
         serializer = OrdersLogSerializer(logs, many=True)
         return Response(serializer.data)
@@ -2878,25 +3450,74 @@ class OrderListView(APIView):
         status_filter = request.query_params.get('status', None)
         user_id = request.query_params.get('user_id', None)
         billing_view = request.query_params.get('billing', 'false').lower() == 'true'
+        include_sap = request.query_params.get('include_sap', 'false').lower() == 'true'
 
         if request.user.is_authenticated:
             orders = _get_base_orders(request.user)
         else:
             orders = Order.objects.all()
 
+        role = getattr(request.user, 'role', None) if request.user.is_authenticated else None
+        role_name = getattr(role, 'name', '').lower() if role else ''
+
         if billing_view:
             # Billing view: show billing-related orders from the caller's allowed scope.
             orders = orders.filter(status_id__in=[3, 5, 6, 8])
-        else:
+        elif role_name == 'approver' and request.query_params.get('approval_pending', '').lower() == 'true':
+            # Approver pending tab: only orders still waiting at the rate approval stage.
+            orders = orders.filter(
+                rate_approvals__approver=request.user,
+                rate_approvals__status='PENDING',
+            )
             if status_filter:
                 orders = orders.filter(status__code=status_filter)
             else:
+                orders = orders.filter(status__code__in=APPROVER_ACTIVE_CODES)
+        elif role_name == 'approver' and status_filter:
+            # Approver others: query directly to avoid double JOIN
+            acted_order_ids = OrderRateApproval.objects.filter(
+                approver=request.user,
+                status__in=['APPROVED', 'REJECTED'],
+            ).values_list('order_id', flat=True) 
+            
+            orders = Order.objects.filter(id__in=acted_order_ids)
+        else:
+            if status_filter:
+
+                status_codes = [code for code in status_filter.split(',') if code]
+                if len(status_codes) > 1:
+                    orders = orders.filter(status__code__in=status_codes)
+                else:
+                    orders = orders.filter(status__code=status_filter)
+            elif not (include_sap and role_name == 'admin'):
                 orders = orders.filter(sap_created=False)
 
         if user_id:
             orders = orders.filter(created_by=user_id)
 
-        orders = orders.select_related('status', 'created_by').prefetch_related('items').order_by('-created_at').distinct()
+        orders = (
+            orders
+            .select_related('status', 'created_by')
+            .prefetch_related('items', 'rate_approvals__approver')
+            .order_by('-created_at')
+            .distinct()
+        )
+
+        # The SAP document number is stored on the latest successful SalesQuotationLog
+        # (keyed by str(order.id)), not on Order.sap_doc_number. Build a lookup so the
+        # list response can surface it for orders that were pushed to SAP.
+        order_ids = [str(oid) for oid in orders.values_list('id', flat=True)]
+        sap_doc_map = {}
+        if order_ids:
+            quotation_logs = (
+                SalesQuotationLog.objects
+                .filter(order_id__in=order_ids, status='SUCCESS', sap_doc_num__isnull=False)
+                .order_by('order_id', '-created_at')
+                .values_list('order_id', 'sap_doc_num')
+            )
+            for log_order_id, sap_doc_num in quotation_logs:
+                if log_order_id not in sap_doc_map:
+                    sap_doc_map[log_order_id] = sap_doc_num
 
         data = []
         for order in orders:
@@ -2912,23 +3533,24 @@ class OrderListView(APIView):
                 'total_amount': str(order.total_amount),
                 'status': order.status.code,
                 'status_display': order.status.name,
-                'sap_doc_number': order.sap_doc_number or '',
+                'sap_doc_number': order.sap_doc_number or sap_doc_map.get(str(order.id)) or '',
                 'items_count': items_count,
                 'created_by': order.created_by.name if order.created_by else None,
                 'created_at': order.created_at,
                 'delivery_date': order.delivery_date,
-                'po_number': order.po_number,
+                # 'po_number': order.po_number,
                 'is_foc': order.is_foc,
-                'bill_to_address': order.bill_to_address,
-                'ship_to_address': order.ship_to_address,
-                'dispatch_from_id': order.dispatch_from_id,
-                'categories': list(
-                    items_qs.exclude(category__isnull=True)
-                    .exclude(category__exact='')
-                    .values_list('category', flat=True)
-                    .distinct()
-                ),
-                'items': OrderItemSerializer(items_qs, many=True).data
+                # 'bill_to_address': order.bill_to_address,
+                # 'ship_to_address': order.ship_to_address,
+                # 'dispatch_from_id': order.dispatch_from_id,
+                # 'categories': list(
+                #     items_qs.exclude(category__isnull=True)
+                #     .exclude(category__exact='')
+                #     .values_list('category', flat=True)
+                #     .distinct()
+                # ),
+                # 'rate_approvals': _order_rate_approval_payload(order),
+                # 'items': OrderItemSerializer(items_qs, many=True).data
             })
 
         return Response(data)
@@ -3001,6 +3623,20 @@ def _display_user_name(user):
     if not user:
         return "Unknown"
     return getattr(user, "name", None) or getattr(user, "username", "Unknown")
+
+def _order_rate_approval_payload(order):
+    return [
+        {
+            'id': approval.id,
+            'approver': approval.approver_id,
+            'approver_name': _display_user_name(approval.approver),
+            'status': approval.status,
+            'remarks': approval.remarks or '',
+            'approved_at': approval.approved_at,
+            'created_at': approval.created_at,
+        }
+        for approval in order.rate_approvals.select_related('approver').all()
+    ]
 
 def _mark_order_notifications_read(order, user):
     if not order or not user:
@@ -3127,12 +3763,25 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
     previous_name = (getattr(previous_status, "name", "") or "").strip().lower()
 
     if normalized_status in {"rate approval", "need approval"}:
-        _notify_role(
-            "approver",
+        assigned_approvers = _assigned_rate_approvers_for_order(
             order,
-            f"Order {order.order_number} from {creator_name} needs rate approval.",
+            status_filter="PENDING",
             exclude_user=actor,
         )
+        if assigned_approvers:
+            for approver in assigned_approvers:
+                _create_notification(
+                    approver,
+                    order,
+                    f"Order {order.order_number} from {creator_name} needs your rate approval.",
+                )
+        else:
+            _notify_role(
+                "approver",
+                order,
+                f"Order {order.order_number} from {creator_name} needs rate approval.",
+                exclude_user=actor,
+            )
         return
 
     if normalized_status in {"billing", "billing pending", "billing approval"}:
@@ -3496,3 +4145,281 @@ class UserPartyView(APIView):
             .values("card_code", "card_name")
             .distinct()
         )
+
+
+def _quotation_entries_for_orders(order_ids):
+    """Map order_id -> latest successful quotation {doc_entry, doc_num}.
+
+    The SAP Sales Quotation created when an order completes is recorded in
+    SalesQuotationLog (keyed by str(order.id)). We need the DocEntry to talk to
+    the SAP Service Layer and the DocNum just for display.
+    """
+    str_ids = [str(oid) for oid in order_ids]
+    mapping = {}
+    if not str_ids:
+        return mapping
+    logs = (
+        SalesQuotationLog.objects
+        .filter(order_id__in=str_ids, status='SUCCESS', sap_doc_entry__isnull=False)
+        .order_by('order_id', '-created_at')
+        .values_list('order_id', 'sap_doc_entry', 'sap_doc_num')
+    )
+    for log_order_id, doc_entry, doc_num in logs:
+        # first row per order is the latest (queryset ordered by -created_at)
+        if log_order_id not in mapping:
+            mapping[log_order_id] = {'doc_entry': doc_entry, 'doc_num': doc_num}
+    return mapping
+
+
+def _is_quotation_open(row):
+    """A quotation is open/cancellable when DocStatus is 'O' and not cancelled."""
+    doc_status = str(row.get('DocStatus') or '').upper()
+    canceled = str(row.get('CANCELED') or '').upper()
+    return doc_status == 'O' and canceled != 'Y'
+
+
+class QuotationStatusView(APIView):
+    """Batch lookup of SAP Sales Quotation status for completed orders.
+
+    The View Orders page calls this with the ids of completed orders so it can
+    show the "Cancel Sales Quotation" button only for those whose quotation is
+    still open in SAP. Degrades gracefully (empty map) if SAP is unreachable so
+    the orders list still renders.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from hana.services.services import SalesOrderService
+
+        raw_ids = request.query_params.get('order_ids', '')
+        order_ids = [oid for oid in (i.strip() for i in raw_ids.split(',')) if oid.isdigit()]
+        if not order_ids:
+            return Response({'success': True, 'statuses': {}})
+
+        entry_map = _quotation_entries_for_orders(order_ids)
+        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
+
+        sap_rows_by_entry = {}
+        if doc_entries:
+            try:
+                rows = SalesOrderService().get_quotation_status(doc_entries)
+                for row in rows:
+                    sap_rows_by_entry[int(row['DocEntry'])] = row
+            except Exception as exc:
+                # SAP/HANA unreachable: return what we know but don't break the page.
+                return Response(
+                    {'success': False, 'statuses': {}, 'error': str(exc)},
+                    status=status.HTTP_200_OK,
+                )
+
+        statuses = {}
+        for order_id, info in entry_map.items():
+            doc_entry = info['doc_entry']
+            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
+            statuses[order_id] = {
+                'doc_entry': doc_entry,
+                'doc_num': info['doc_num'],
+                'doc_status': (row or {}).get('DocStatus'),
+                'canceled': (row or {}).get('CANCELED'),
+                'is_open': bool(row) and _is_quotation_open(row),
+            }
+
+        return Response({'success': True, 'statuses': statuses})
+
+
+class CancelSalesQuotationView(APIView):
+    """Cancel a completed order's SAP Sales Quotation, then mirror it in OMS.
+
+    Only allowed for COMPLETED orders whose quotation is still open in SAP. The
+    SAP cancellation is the source of truth: OMS is only updated if SAP confirms.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        from django.conf import settings
+        from serviceLayer.service import SAPServiceLayerManager
+        from hana.services.services import SalesOrderService
+
+        try:
+            order = Order.objects.select_related('status').get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'success': False, 'message': 'Order not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if order.status.code != 'COMPLETED':
+            return Response(
+                {'success': False, 'message': 'Only completed orders can have their quotation cancelled'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if order.quotation_cancelled:
+            return Response(
+                {'success': False, 'message': 'Quotation already cancelled'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        entry_map = _quotation_entries_for_orders([order.id])
+        info = entry_map.get(str(order.id))
+        doc_entry = info['doc_entry'] if info else None
+        doc_num = info['doc_num'] if info else None
+        if doc_entry is None:
+            return Response(
+                {'success': False, 'message': 'No SAP sales quotation found for this order'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Confirm the quotation is still open before the destructive call.
+        try:
+            rows = SalesOrderService().get_quotation_status([doc_entry])
+            current = next((r for r in rows if int(r['DocEntry']) == int(doc_entry)), None)
+        except Exception as exc:
+            return Response(
+                {'success': False, 'message': f'Could not verify quotation status in SAP: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        if not current or not _is_quotation_open(current):
+            return Response(
+                {'success': False, 'message': 'Quotation is not open in SAP and cannot be cancelled'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cancel_url = f"{settings.HANA_SERVICE_LAYER_URL}/Quotations({int(doc_entry)})/Cancel"
+        try:
+            session = SAPServiceLayerManager.get_session()
+            sap_response = session.post(cancel_url, timeout=20)
+            if sap_response.status_code == 401:
+                SAPServiceLayerManager.clear_session()
+                session = SAPServiceLayerManager.get_session()
+                sap_response = session.post(cancel_url, timeout=20)
+        except Exception as exc:
+            return Response(
+                {'success': False, 'message': f'SAP request failed: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if sap_response.status_code not in (200, 201, 204):
+            try:
+                details = sap_response.json()
+            except Exception:
+                details = sap_response.text
+            return Response(
+                {'success': False, 'message': 'SAP rejected the cancellation', 'details': details},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # SAP confirmed — mirror in OMS.
+        actor = request.user if getattr(request.user, 'is_authenticated', False) else None
+        order.quotation_cancelled = True
+        order.quotation_cancelled_at = timezone.now()
+        order.quotation_cancelled_by = actor
+        order.save(update_fields=['quotation_cancelled', 'quotation_cancelled_at', 'quotation_cancelled_by'])
+
+        try:
+            from audit.models import AuditLog
+            AuditLog.objects.create(
+                user=actor,
+                username=getattr(actor, 'username', '') or '',
+                page='View Orders',
+                action='Cancelled',
+                record=f'Order {order.order_number} (Quotation {doc_num})',
+                field='sales_quotation',
+                old_value='Open',
+                new_value='Cancelled',
+            )
+        except Exception:
+            pass  # auditing must never block the operation
+
+        return Response({
+            'success': True,
+            'message': 'Sales quotation cancelled',
+            'order_id': order.id,
+            'doc_num': doc_num,
+        })
+
+
+class QuotationOverviewView(APIView):
+    """Admin overview of every completed order and its SAP sales-quotation
+    status (CANCELLED / OPEN / CLOSED / UNKNOWN). Powers the admin
+    "Sales Quotation" screen on web and mobile.
+
+    Degrades gracefully if SAP is unreachable: cancelled orders are still
+    reported from OMS, and the rest show UNKNOWN with a sap_error note.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from hana.services.services import SalesOrderService
+
+        role_name = getattr(getattr(request.user, 'role', None), 'name', '')
+        is_admin = request.user.is_staff or str(role_name).strip().lower() == 'admin'
+        if not is_admin:
+            return Response(
+                {'success': False, 'message': 'Only admin can view quotation status'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        completed = (
+            Order.objects
+            .filter(status__code='COMPLETED')
+            .select_related('quotation_cancelled_by')
+            .order_by('-created_at')
+        )
+
+        order_ids = [str(order.id) for order in completed]
+        entry_map = _quotation_entries_for_orders(order_ids)
+        doc_entries = [v['doc_entry'] for v in entry_map.values() if v['doc_entry'] is not None]
+
+        sap_rows_by_entry = {}
+        sap_error = None
+        if doc_entries:
+            try:
+                rows = SalesOrderService().get_quotation_status(doc_entries)
+                for row in rows:
+                    sap_rows_by_entry[int(row['DocEntry'])] = row
+            except Exception as exc:
+                sap_error = str(exc)
+
+        data = []
+        for order in completed:
+            info = entry_map.get(str(order.id)) or {}
+            doc_entry = info.get('doc_entry')
+            doc_num = info.get('doc_num')
+            row = sap_rows_by_entry.get(int(doc_entry)) if doc_entry is not None else None
+
+            if order.quotation_cancelled:
+                quotation_status = 'CANCELLED'
+            elif row is not None:
+                quotation_status = 'OPEN' if _is_quotation_open(row) else 'CLOSED'
+            else:
+                quotation_status = 'UNKNOWN'
+
+            data.append({
+                'id': order.id,
+                'order_number': order.order_number,
+                'card_code': order.card_code,
+                'card_name': order.card_name,
+                'created_at': order.created_at,
+                'doc_num': doc_num,
+                'doc_entry': doc_entry,
+                'quotation_cancelled': order.quotation_cancelled,
+                'quotation_cancelled_at': order.quotation_cancelled_at,
+                'quotation_cancelled_by': getattr(order.quotation_cancelled_by, 'username', None),
+                'quotation_status': quotation_status,
+            })
+
+        return Response({'success': True, 'data': data, 'sap_error': sap_error})
+
+
+
+class GetOrdersByItemView(APIView):
+    # permission_classes = [IsAuthenticate]
+
+    def get(self, request):
+        item_code = request.query_params.get('item_code')
+        if not item_code:
+            return Response({"error": "item_code is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        orders = OrderItem.objects.filter(item_code=item_code).select_related('order').order_by('-order__created_at')
+
+        serializer = OrdersByItemSerializer(orders, many=True)
+        return Response(serializer.data)

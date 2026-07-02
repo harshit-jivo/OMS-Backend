@@ -186,13 +186,13 @@ def _get_sap_line_quantity(item):
 
 
 def _get_sap_unit_price(item):
+    price_list_basic = _to_float(getattr(item, "price_list_basic", None), 0)
     basic_price = _to_float(getattr(item, "basic_price", None), 0)
-    market_price = _to_float(getattr(item, "market_price", None), 0)
 
-    if market_price > 0:
-        return market_price
+    if basic_price > 0:
+        return basic_price
 
-    return basic_price
+    return price_list_basic
 
 
 def _iter_related_schemes(item):
@@ -441,6 +441,8 @@ class SyncService:
                         #'tax_code': row.get('TaxCode'),
                         'is_deleted': row.get('Deleted', 'N'),
                         'variety': row.get('U_Variety'),
+                        'type': row.get('U_TYPE'),
+                        'sub_group': row.get('U_Sub_Group'),
                         'sal_pack_unit': row.get('SalPackUn'),
                         'brand': row.get('U_Brand'),
                         'on_hand': row.get('OnHand'),

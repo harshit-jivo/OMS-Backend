@@ -17,6 +17,13 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+
+    def syncSalesOrderByProduct(self, item_code):
+        with HANAConnection() as conn:
+            query = Queries.get_sales_orders_for_product(item_code)
+            result = conn.execute(query)
+
+        return result
     
     def syncOpenParties(self):
         with HANAConnection() as conn:
@@ -112,6 +119,36 @@ class SalesOrderService():
     def get_item_price(self , itemCode , priceList):
         with HANAConnection() as conn:
             query = Queries.get_item_price(itemCode , priceList)
+            result = conn.execute(query)
+
+        return result
+
+    def get_quotation_status(self, doc_entries):
+        query = Queries.get_quotation_status(doc_entries)
+        if not query:
+            return []
+        with HANAConnection() as conn:
+            result = conn.execute(query)
+
+        return result
+
+    def get_series(self , finYear , groupCode):
+        with HANAConnection() as conn:
+            query = Queries.get_series(finYear , groupCode)
+            result = conn.execute(query)
+
+        return result
+
+    def get_draft_verfication(self , refId):
+        with HANAConnection() as conn:
+            query = Queries.get_draft_verification(refId)
+            result = conn.execute(query)
+
+        return result
+
+    def get_invoice_status(self , statusCode):
+        with HANAConnection() as conn:
+            query = Queries.get_invoice_status(statusCode)
             result = conn.execute(query)
 
         return result

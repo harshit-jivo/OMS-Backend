@@ -60,6 +60,29 @@ class Queries():
     SCHEMA = settings.DATABASES['hana']['SCHEMA']
 
     @staticmethod
+    def _open_so_schemas():
+        """All configured SAP company DBs (OIL / BEVERAGES / MART), de-duplicated.
+
+        Open sales orders live in a different company DB per category, so any
+        query that looks up open SOs must search across all of them - matching
+        get_product_stock(). Otherwise a BEVERAGES/MART item shows open-order
+        demand in the stock list but its drill-down (single schema) finds nothing.
+        """
+        configured = [
+            getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA,
+            getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''),
+            getattr(settings, 'HANA_COMPANY_DB_MART', ''),
+        ]
+        schemas = []
+        seen = set()
+        for schema in configured:
+            schema = str(schema or '').strip()
+            if schema and schema not in seen:
+                seen.add(schema)
+                schemas.append(schema)
+        return schemas
+
+    @staticmethod
     def get_product_stock():
         configured_schemas = [
             (getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA, 'OIL'),
@@ -96,6 +119,7 @@ class Queries():
                 T0."U_Rev_tax_Rate" AS "tax_rate",
                 T0."Deleted" AS "is_deleted",
                 T0."U_Variety" AS "variety",
+                T0."U_TYPE" AS "type",
                 T0."SalPackUn" AS "sal_pack_unit",
                 T0."U_Brand" AS "brand",
                 T1."WhsCode" AS "warehouse_code",
@@ -111,7 +135,9 @@ class Queries():
                 ON T0."ItemCode" = T1."ItemCode"
             INNER JOIN "{schema}"."OWHS" AS T2
                 ON T1."WhsCode" = T2."WhsCode"
-            LEFT JOIN (
+            INNER JOIN (
+                -- Only items/warehouses that appear in an OPEN sales order, so the
+                -- stock page shows just products that are in an open SO.
                 SELECT
                     R1."ItemCode",
                     R1."WhsCode",
@@ -139,8 +165,8 @@ class Queries():
     
     @staticmethod
     def get_party_with_open_so():
-        s = Queries.SCHEMA
-        return f"""
+        branches = [
+            f"""
             SELECT
                 T0."CardCode",
                 T0."CardName",
@@ -149,62 +175,102 @@ class Queries():
             WHERE T0."DocStatus" = 'O'
               AND T0."CANCELED" = 'N'
             GROUP BY T0."CardCode", T0."CardName"
+            """
+            for s in Queries._open_so_schemas()
+        ]
+        union = "\nUNION ALL\n".join(branches)
+        # Sum across company DBs so a party with open SOs in more than one DB
+        # appears once with its combined total.
+        return f"""
+            SELECT
+                "CardCode",
+                "CardName",
+                SUM("Num_of_Open_SalesOrder") AS "Num_of_Open_SalesOrder"
+            FROM (
+                {union}
+            ) AS T
+            GROUP BY "CardCode", "CardName"
             ORDER BY "Num_of_Open_SalesOrder" DESC
         """
     
        
     @staticmethod
-    def get_sales_orders_for_party(party_code):
+    def get_quotation_status(doc_entries):
+        """Status of one or more Sales Quotations (OQUT) by DocEntry.
+
+        Returns DocStatus ('O' = open, 'C' = closed) and CANCELED ('Y'/'N') so
+        the caller can decide whether a quotation is still open / cancellable.
+        """
         s = Queries.SCHEMA
+        safe_entries = [str(int(entry)) for entry in doc_entries]
+        if not safe_entries:
+            return None
+        entries_csv = ",".join(safe_entries)
         return f"""
-        SELECT
-            T0."DocEntry",
-            T0."DocNum",
-            T0."DocDate",
-            T0."DocDueDate",
-            T0."CardCode",
-            T0."CardName",
-            T0."NumAtCard",
-            T0."DocStatus",
-            T0."DocTotal",
-            T0."VatSum",
-            T0."DiscSum",
-            T0."Comments",
-            T0."SlpCode",
-            T0."ShipToCode",
-            T0."PayToCode",
-            T0."BPLId",
+            SELECT
+                T0."DocEntry",
+                T0."DocNum",
+                T0."DocStatus",
+                T0."CANCELED"
+            FROM "{s}"."OQUT" AS T0
+            WHERE T0."DocEntry" IN ({entries_csv})
+        """
 
-            T1."LineNum",
-            T1."ItemCode",
-            T1."Dscription",
-            T1."Quantity",
-            T1."OpenQty",
-            T1."Price",
-            T1."PriceBefDi",
-            T1."DiscPrcnt",
-            T1."LineTotal",
-            T1."VatPrcnt",
-            T1."VatGroup",
-            T1."WhsCode",
-            T1."TaxCode",
-            T1."ShipDate",
-            T1."AcctCode",
-            T1."Project",
-            T1."OcrCode",
-            T1."LineStatus"
+    @staticmethod
+    def get_sales_orders_for_party(party_code):
+        safe_party_code = str(party_code).replace("'", "''")
+        branches = [
+            f"""
+            SELECT
+                T0."DocEntry", T0."DocNum", T0."DocDate", T0."DocDueDate",
+                T0."CardCode", T0."CardName", T0."NumAtCard", T0."DocStatus",
+                T0."DocTotal", T0."VatSum", T0."DiscSum", T0."Comments",
+                T0."SlpCode", T0."ShipToCode", T0."PayToCode", T0."BPLId",
+                T1."LineNum", T1."ItemCode", T1."Dscription", T1."Quantity",
+                T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
+                T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
+                T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
+                T1."OcrCode", T1."LineStatus"
+            FROM "{s}"."ORDR" AS T0
+            INNER JOIN "{s}"."RDR1" AS T1
+                ON T0."DocEntry" = T1."DocEntry"
+            WHERE T0."CardCode" = '{safe_party_code}'
+              AND T0."CANCELED" = 'N'
+              AND T0."DocStatus" = 'O'
+              AND T1."LineStatus" = 'O'
+              AND T1."OpenQty" > 0
+            """
+            for s in Queries._open_so_schemas()
+        ]
+        return "\nUNION ALL\n".join(branches) + '\nORDER BY "DocDate" DESC, "DocNum", "LineNum"'
 
-        FROM "{s}"."ORDR" AS T0
-        INNER JOIN "{s}"."RDR1" AS T1
-            ON T0."DocEntry" = T1."DocEntry"
-
-        WHERE T0."CardCode" = '{party_code}'
-          AND T0."DocStatus" = 'O'
-          AND T1."LineStatus" = 'O'
-          AND T1."OpenQty" > 0
-
-        ORDER BY T0."DocDate" DESC, T0."DocNum", T1."LineNum"
-        """ 
+    @staticmethod
+    def get_sales_orders_for_product(item_code):
+        safe_item_code = str(item_code).replace("'", "''")
+        branches = [
+            f"""
+            SELECT
+                T0."DocEntry", T0."DocNum", T0."DocDate", T0."DocDueDate",
+                T0."CardCode", T0."CardName", T0."NumAtCard", T0."DocStatus",
+                T0."DocTotal", T0."VatSum", T0."DiscSum", T0."Comments",
+                T0."SlpCode", T0."ShipToCode", T0."PayToCode", T0."BPLId",
+                T1."LineNum", T1."ItemCode", T1."Dscription", T1."Quantity",
+                T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
+                T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
+                T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
+                T1."OcrCode", T1."LineStatus"
+            FROM "{s}"."ORDR" AS T0
+            INNER JOIN "{s}"."RDR1" AS T1
+                ON T0."DocEntry" = T1."DocEntry"
+            WHERE T1."ItemCode" = '{safe_item_code}'
+              AND T0."CANCELED" = 'N'
+              AND T0."DocStatus" = 'O'
+              AND T1."LineStatus" = 'O'
+              AND T1."OpenQty" > 0
+            """
+            for s in Queries._open_so_schemas()
+        ]
+        return "\nUNION ALL\n".join(branches) + '\nORDER BY "CardName", "DocDate" DESC, "DocNum", "LineNum"'
     
     @staticmethod
     def get_customer_details(party_code):
@@ -397,3 +463,52 @@ class Queries():
             FROM "{s}"."ITM1" AS T0
             WHERE T0."ItemCode" = '{item_code}' AND T0."PriceList" = {price_list}
         """
+
+    @staticmethod
+    def get_series(finYear , BPLId):
+        s = Queries.SCHEMA
+        return f"""
+            SELECT 
+                T0."Series",
+                T0."ObjectCode",
+                T0."SeriesName",
+                T0."GroupCode",
+                T0."Indicator"
+            FROM "{s}"."NNM1" AS T0
+        WHERE T0."ObjectCode" = '13' AND T0."Indicator" = '{finYear }' AND T0."BPLId" = '{BPLId}'
+        """
+        
+    @staticmethod
+    def get_draft_verification(refId):
+        s = Queries.SCHEMA
+        return f"""SELECT * FROM "{s}"."ODRF" AS T0 WHERE T0."U_OMS_REF" = '{refId}' """
+    
+    @staticmethod
+    def get_invoice_status(statusCode):
+        s = Queries.SCHEMA
+        return f"""
+        	SELECT 
+		T0."WddCode",
+		T0."Status",
+		T0."UserSign",
+
+		T1."DocEntry",
+		T1."DocDueDate",
+		T1."CardCode",
+		T1."CardName",
+		T1."Address",
+		T1."Address2",
+		T1."ShipToCode",
+        T1."DocTotal",
+		T1."U_OMS_REF"
+
+		FROM "{s}"."OWDD" AS T0
+		LEFT JOIN "{s}"."ODRF" AS T1
+		ON T0."DraftEntry" = T1."DocEntry"
+		WHERE T0."ObjType" = '13' AND T0."Status" = '{statusCode}' AND T1."U_OMS_REF" IS NOT NULL
+        ORDER BY T1."DocDate" DESC
+
+    """
+
+
+    

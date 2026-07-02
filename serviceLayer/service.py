@@ -49,9 +49,38 @@ class SAPServiceLayerManager():
         
         
     @classmethod
+    def get_session_for(cls, username, password):
+        """Log in to Service Layer as a specific user and return that session.
+
+        Used for actions (e.g. approvals) where SAP checks permissions against
+        the logged-in user, not against credentials passed in the payload.
+        This session is NOT cached under the shared key.
+        """
+        session = requests.Session()
+        session.verify = False
+
+        login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
+        login_payload = {
+            "CompanyDB": settings.HANA_COMPANY_DB,
+            "UserName": username,
+            "Password": password,
+        }
+
+        try:
+            response = requests.post(login_url, json=login_payload, verify=False, timeout=10)
+            if response.status_code == 200:
+                sap_data = response.json()
+                session.cookies.set('B1SESSION', sap_data.get('SessionId'))
+                session.cookies.set('ROUTEID', response.cookies.get('ROUTEID'))
+                return session
+            raise Exception(f"Approver login failed with status code {response.status_code}: {response.text}")
+        except requests.RequestException as e:
+            raise Exception(f"Approver login request failed: {str(e)}")
+
+    @classmethod
     def clear_session(cls):
         cache.delete('b1_session')
-        cache.delete('route_id') 
+        cache.delete('route_id')
             
     
         
