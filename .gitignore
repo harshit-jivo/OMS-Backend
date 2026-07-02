@@ -3,6 +3,7 @@ env/
 venv/
 ENV/
 .env
+.env.*
 .venv/
 
 # Python
@@ -10,6 +11,14 @@ ENV/
 *.pyc
 *.pyo
 *.pyd
+
+# Test / tooling caches & logs
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Databases
 *.sqlite3
@@ -19,6 +28,17 @@ db.sqlite3
 local_settings.py
 staticfiles/
 media/
+
+# NIC e-Invoice / e-Way Bill private keys & test artifacts
+secrets/
+test_results/
+# Belt-and-suspenders: never commit crypto keys/certs even outside secrets/
+*.pem
+*.cer
+*.der
+*.key
+*.p12
+*.pfx
 
 # IDEs
 .vscode/
