@@ -230,7 +230,6 @@ SIMPLE_JWT = {
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
-<<<<<<< HEAD
 
 
 # =========================================================================
@@ -293,6 +292,4 @@ EWB = {
     "GSTIN": config('EWB_GSTIN', default=EINV["GSTIN"]),
     "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
 }
-=======
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
->>>>>>> origin/test
