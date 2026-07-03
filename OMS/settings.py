@@ -195,6 +195,11 @@ USE_TZ = True
 
 AUTH_USER_MODEL = 'users.User'
 
+# Existing tables use 32-bit integer primary keys, so keep AutoField as the
+# project-wide default (this also silences models.W042). Apps that need 64-bit
+# ids (e.g. einvoice) opt in via default_auto_field = BigAutoField in apps.py.
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
@@ -292,4 +297,3 @@ EWB = {
     "GSTIN": config('EWB_GSTIN', default=EINV["GSTIN"]),
     "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
 }
-DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
