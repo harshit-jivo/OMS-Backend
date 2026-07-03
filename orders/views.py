@@ -1,7 +1,7 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -1656,6 +1656,7 @@ class OrderStatusTrackingView(APIView):
         else:
             return Response({'error': 'mode must be auditor, billing, or rate_approver'}, status=status.HTTP_400_BAD_REQUEST)
 
+        
         accepted_data = OrderListByUserIdSerializer(accepted_orders.distinct(), many=True).data
         rejected_data = OrderListByUserIdSerializer(rejected_orders.distinct(), many=True).data
 
@@ -3477,7 +3478,8 @@ class OrderListView(APIView):
             acted_order_ids = OrderRateApproval.objects.filter(
                 approver=request.user,
                 status__in=['APPROVED', 'REJECTED'],
-            ).values_list('order_id', flat=True)
+            ).values_list('order_id', flat=True) 
+            
             orders = Order.objects.filter(id__in=acted_order_ids)
         else:
             if status_filter:
@@ -3536,19 +3538,19 @@ class OrderListView(APIView):
                 'created_by': order.created_by.name if order.created_by else None,
                 'created_at': order.created_at,
                 'delivery_date': order.delivery_date,
-                'po_number': order.po_number,
+                # 'po_number': order.po_number,
                 'is_foc': order.is_foc,
-                'bill_to_address': order.bill_to_address,
-                'ship_to_address': order.ship_to_address,
-                'dispatch_from_id': order.dispatch_from_id,
-                'categories': list(
-                    items_qs.exclude(category__isnull=True)
-                    .exclude(category__exact='')
-                    .values_list('category', flat=True)
-                    .distinct()
-                ),
-                'rate_approvals': _order_rate_approval_payload(order),
-                'items': OrderItemSerializer(items_qs, many=True).data
+                # 'bill_to_address': order.bill_to_address,
+                # 'ship_to_address': order.ship_to_address,
+                # 'dispatch_from_id': order.dispatch_from_id,
+                # 'categories': list(
+                #     items_qs.exclude(category__isnull=True)
+                #     .exclude(category__exact='')
+                #     .values_list('category', flat=True)
+                #     .distinct()
+                # ),
+                # 'rate_approvals': _order_rate_approval_payload(order),
+                # 'items': OrderItemSerializer(items_qs, many=True).data
             })
 
         return Response(data)
@@ -4406,3 +4408,18 @@ class QuotationOverviewView(APIView):
             })
 
         return Response({'success': True, 'data': data, 'sap_error': sap_error})
+
+
+
+class GetOrdersByItemView(APIView):
+    # permission_classes = [IsAuthenticate]
+
+    def get(self, request):
+        item_code = request.query_params.get('item_code')
+        if not item_code:
+            return Response({"error": "item_code is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        orders = OrderItem.objects.filter(item_code=item_code).select_related('order').order_by('-order__created_at')
+
+        serializer = OrdersByItemSerializer(orders, many=True)
+        return Response(serializer.data)
