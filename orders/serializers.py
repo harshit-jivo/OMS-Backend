@@ -210,6 +210,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     # Backward-compat: the column was renamed variety -> sub_group. Keep exposing
     # `variety` (read-only) so existing clients reading item.variety keep working.
     variety = serializers.CharField(source='sub_group', read_only=True)
+    variety_type = serializers.SerializerMethodField()
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
@@ -248,6 +249,57 @@ class OrderItemSerializer(serializers.ModelSerializer):
             for mapping in mappings
             if mapping.approver_id
         ]
+
+
+    def get_variety_type(self, obj):
+        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
+        others_list = [
+            "ATTA",
+            "COFFEE",
+            "DRINKS",
+            "DRY FRUITS/NUTS",
+            "FLAKES",
+            "GHEE",
+            "GIFT PACK",
+            "HONEY",
+            "RICE",
+            "SEEDS",
+            "SLICED OLIVE",
+            "SNACKS",
+            "SOYA CHUNK",
+            "SPICES",
+            "TEA",
+            "VITAMINS"
+        ]
+
+        premium_list = [
+            "BLENDED",
+            "CANOLA",
+            "COCONUT",
+            "DRY FRUITS/NUTS",
+            "EXTRA VIRGIN",
+            "GHEE",
+            "GIFT PACK",
+            "GROUNDNUT",
+            "MUSTARD",
+            "OLIVE",
+            "SESAME",
+            "SPICES"
+        ]
+
+        sub_group =  SapProduct.objects.filter(item_code=obj.item_code).values_list('sub_group', flat=True).first()
+        
+        if sub_group in commodity_list:
+            variety_type = "COMMODITY"
+        elif sub_group in others_list:
+            variety_type = "OTHERS"
+        elif sub_group in premium_list:
+            variety_type = "PREMIUM"
+        else:
+            variety_type = "OTHERS"
+
+        print(f"{obj.item_name} - {sub_group} - {variety_type}")
+        return variety_type
 
     class Meta:
         model = OrderItem
