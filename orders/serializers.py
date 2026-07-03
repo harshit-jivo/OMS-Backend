@@ -4,7 +4,7 @@ from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
 from sap_sync.models import Party as SapParty
-
+from decimal import Decimal
 
 def get_scheme_item_code_raw(scheme_id):
     if not scheme_id:
@@ -210,6 +210,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     # Backward-compat: the column was renamed variety -> sub_group. Keep exposing
     # `variety` (read-only) so existing clients reading item.variety keep working.
     variety = serializers.CharField(source='sub_group', read_only=True)
+    variety_type = serializers.SerializerMethodField()
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
@@ -249,6 +250,57 @@ class OrderItemSerializer(serializers.ModelSerializer):
             if mapping.approver_id
         ]
 
+
+    def get_variety_type(self, obj):
+        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
+        others_list = [
+            "ATTA",
+            "COFFEE",
+            "DRINKS",
+            "DRY FRUITS/NUTS",
+            "FLAKES",
+            "GHEE",
+            "GIFT PACK",
+            "HONEY",
+            "RICE",
+            "SEEDS",
+            "SLICED OLIVE",
+            "SNACKS",
+            "SOYA CHUNK",
+            "SPICES",
+            "TEA",
+            "VITAMINS"
+        ]
+
+        premium_list = [
+            "BLENDED",
+            "CANOLA",
+            "COCONUT",
+            "DRY FRUITS/NUTS",
+            "EXTRA VIRGIN",
+            "GHEE",
+            "GIFT PACK",
+            "GROUNDNUT",
+            "MUSTARD",
+            "OLIVE",
+            "SESAME",
+            "SPICES"
+        ]
+
+        sub_group =  SapProduct.objects.filter(item_code=obj.item_code).values_list('sub_group', flat=True).first()
+        
+        if sub_group in commodity_list:
+            variety_type = "COMMODITY"
+        elif sub_group in others_list:
+            variety_type = "OTHERS"
+        elif sub_group in premium_list:
+            variety_type = "PREMIUM"
+        else:
+            variety_type = "OTHERS"
+
+        print(f"{obj.item_name} - {sub_group} - {variety_type}")
+        return variety_type
+
     class Meta:
         model = OrderItem
         fields = "__all__"
@@ -273,13 +325,13 @@ class OrderRateApprovalSerializer(serializers.ModelSerializer):
 
 class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source="status.name")
-    items = OrderItemSerializer(many=True, read_only=True)
-    items_count = serializers.IntegerField(source="items.count", read_only=True)
-    categories = serializers.SerializerMethodField()
+    # items = OrderItemSerializer(many=True, read_only=True)
+    # items_count = serializers.IntegerField(source="items.count", read_only=True)
+    # categories = serializers.SerializerMethodField()
     status_display = serializers.CharField(source="status.name", read_only=True)
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
-    rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
+    # rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
 
     def get_categories(self, obj):
         return list(
@@ -300,32 +352,32 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "id",
             "order_number",
             "order_type",
-            "employee_id",
+            # "employee_id",
             "card_code",
             "card_name",
-            "bill_to_id",
-            "bill_to_address",
-            "ship_to_id",
-            "ship_to_address",
-            "dispatch_from_id",
-            "dispatch_from_name",
-            "company",
-            "po_number",
+            # "bill_to_id",
+            # "bill_to_address",
+            # "ship_to_id",
+            # "ship_to_address",
+            # "dispatch_from_id",
+            # "dispatch_from_name",
+            # "company",
+            # "po_number",
             "is_foc",
-            "remarks",
+            # "remarks",
             "total_amount",
             "status",
             "status_name",
             "status_display",
             "created_by",
             "created_by_name",
-            "created_at",
-            "delivery_date",
-            "sap_doc_number",
-            "items",
-            "items_count",
-            "categories",
-            "rate_approvals",
+            "created_at",   
+            "delivery_date",  
+            # "sap_doc_number",
+            # "items",
+            # "items_count",
+            # "categories",
+            # "rate_approvals",
         ]
 
 class OrderDetailSerializer(serializers.ModelSerializer):
@@ -336,29 +388,93 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     party_state = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
+    vareity_cost = serializers.SerializerMethodField()
+
+    # commodity_total = serializers.SerializerMethodField()
 
     def get_party_state(self, obj):
-        
-
         category = obj.items.first().category 
-        print(category)
-
-
         party = SapParty.objects.filter(card_code=obj.card_code , category=category).first()
-        print(party)
-
-        
         if not party or not party.state:
             return None
-        
+       
         state = State.objects.filter(code=party.state).first()
         return state.name if state else party.state
+    
+    def get_vareity_cost(self, obj):
+         
+        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","OLIVE","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
+        others_list = [
+            "ATTA",
+            "COFFEE",
+            "DRINKS",
+            "DRY FRUITS/NUTS",
+            "FLAKES",
+            "GHEE",
+            "GIFT PACK",
+            "HONEY",
+            "RICE",
+            "SEEDS",
+            "SLICED OLIVE",
+            "SNACKS",
+            "SOYA CHUNK",
+            "SPICES",
+            "TEA",
+            "VITAMINS"
+        ]
+
+        premium_list = [
+            "BLENDED",
+            "CANOLA",
+            "COCONUT",
+            "DRY FRUITS/NUTS",
+            "EXTRA VIRGIN",
+            "GHEE",
+            "GIFT PACK",
+            "GROUNDNUT",
+            "MUSTARD",
+            "OLIVE",
+            "SESAME",
+            "SPICES"
+        ]
+
+        commodity_price = Decimal(0)
+        other_total = Decimal(0)
+        premium_total = Decimal(0)
+
+        for item in OrderItem.objects.filter(order=obj.id):
+            product = SapProduct.objects.filter(item_code=item.item_code).first()
+            product_group = product.sub_group if product else None 
+
+            if product_group in commodity_list:
+                category = "COMMODITY"
+                commodity_price += item.total
+            elif product_group in others_list:
+                category = "OTHERS"
+                other_total += item.total
+            elif product_group in premium_list:
+                category = "PREMIUM"
+                premium_total += item.total
+            else:
+                category = "OTHERS"
+                other_total += item.total
+
+
+        return {
+                    "commodity_price": commodity_price,
+                    "other_total": other_total,
+                    "premium_total": premium_total
+                }
+
 
     def get_created_by_name(self, obj):
         if obj.created_by:
             return obj.created_by.username
         return None
+    
 
+    # def get_commodity_total(self, obj):
+     
     class Meta:
         model = Order
         fields = [
@@ -371,7 +487,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "approved_by", "approved_at", "rejected_by", "rejected_at",
             "rejection_reason", "reject_reason", "updated_at",
             "items", "items_count", "party_state",
-            "rate_approvals",
+            "rate_approvals", "vareity_cost"
         ]
 
 class CreateSchemeSerializer(serializers.ModelSerializer):
@@ -410,3 +526,12 @@ class StaffProductSerializer(serializers.ModelSerializer):
         ).first()
 
         return staff_price.rate if staff_price else 0
+
+
+
+
+# New Architecture Serializers 
+class OrdersByItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = ['id', 'order', 'item_code', 'item_name', 'category', 'brand', 'sub_group']
