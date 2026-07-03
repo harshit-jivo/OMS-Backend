@@ -284,6 +284,15 @@ EINV = {
 # is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
 EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), default=False)
 
+# After a successful IRN generation:
+#  - EINV_MIRROR_HANA: also write the record (incl. QR PNG) into the HANA table
+#    EINVOICE_IRN (run `manage.py setup_hana_irn_table` once per schema first).
+#  - EINV_SAP_WRITEBACK: PATCH the IRN back onto the SAP invoice's e-Billing
+#    protocol so SAP shows it as e-invoiced (validate on sandbox first).
+# Both off by default and best-effort (never break IRN generation).
+EINV_MIRROR_HANA = _parse_bool(config('EINV_MIRROR_HANA', default='false'), default=False)
+EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), default=False)
+
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
 # EWB_* vars in .env only if the e-Way Bill portal issued different ones.

@@ -172,6 +172,9 @@ def irn_from_invoice(request, docentry):
     except FileNotFoundError:
         return Response(_KEY_MISSING, status=500)
 
+    # Best-effort HANA mirror (+ QR PNG) and SAP write-back, if enabled.
+    services.post_generate_hooks(record, result, company_db=company_db, docentry=int(docentry))
+
     resp = {"docentry": int(docentry), "result": result}
     if record is not None:
         resp["record_id"] = record.id

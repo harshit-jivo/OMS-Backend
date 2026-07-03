@@ -112,3 +112,44 @@ def fetch_invoice_for_irn(docentry: int, company_db: str | None = None):
     entries = [ln.get("HSNEntry") for ln in (invoice.get("DocumentLines") or [])]
     hsn_map = resolve_hsn(entries, session=session)
     return invoice, hsn_map
+
+
+def _ddmmyyyy_to_iso(dt):
+    """NIC AckDt 'yyyy-mm-dd HH:MM:SS' -> SAP-friendly 'yyyy-mm-dd'."""
+    if not dt:
+        return None
+    return str(dt)[:10]
+
+
+def write_irn_to_invoice(docentry: int, result: dict, company_db: str | None = None) -> bool:
+    """
+    Option B — write the IRN response back onto the SAP invoice's e-Billing
+    protocol (so SAP itself shows the invoice as e-invoiced). PATCHes
+    /Invoices(docentry).ElectronicProtocols[edpc_EBilling]. Best-effort.
+
+    NOTE: whether these fields are patchable on a posted invoice depends on the
+    SAP B1 version / GST add-on config — validate on the sandbox company before
+    enabling in production. Returns True on HTTP success.
+    """
+    session = get_session(company_db)
+    ebilling = {
+        "ProtocolCode": "edpc_EBilling",
+        "EBillingIRN": result.get("Irn"),
+        "EBillingAckNo": str(result.get("AckNo")) if result.get("AckNo") is not None else None,
+        "EBillingAckDt": _ddmmyyyy_to_iso(result.get("AckDt")),
+        "EBillingSignedInvoice": result.get("SignedInvoice"),
+        "EBillingSignedQRCode": result.get("SignedQRCode"),
+        "EBillingResponseStatus": str(result.get("Status") or "ACT"),
+    }
+    body = {"ElectronicProtocols": [{k: v for k, v in ebilling.items() if v is not None}]}
+    try:
+        resp = session.patch(f"{_base()}/Invoices({int(docentry)})",
+                             json=body, verify=_verify(), timeout=_timeout())
+    except requests.RequestException as exc:
+        logger.warning("SAP write-back PATCH failed for DocEntry %s: %s", docentry, exc)
+        return False
+    if resp.status_code in (200, 204):
+        return True
+    logger.warning("SAP write-back for DocEntry %s returned %s: %s",
+                   docentry, resp.status_code, resp.text[:300])
+    return False

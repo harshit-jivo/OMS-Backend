@@ -319,6 +319,28 @@ def store_standalone_ewb(result, *, order_id=None, request_payload=None):
 
 # ---- automatic IRN generation from a SAP invoice (with audit log) ---------
 
+def post_generate_hooks(record, result, *, company_db=None, docentry=None):
+    """
+    Best-effort side effects after a successful IRN generation, gated by settings:
+      - EINV_MIRROR_HANA   -> mirror the record (incl. QR PNG) into HANA EINVOICE_IRN
+      - EINV_SAP_WRITEBACK -> write the IRN back onto the SAP invoice (e-Billing)
+    Never raises; failures are logged so they can't break the IRN flow.
+    """
+    if record is not None and getattr(settings, "EINV_MIRROR_HANA", False):
+        try:
+            from . import hana_store
+            hana_store.mirror_record(record, schema=company_db, docentry=docentry)
+        except Exception:
+            logger.exception("HANA mirror hook failed for doc %s", getattr(record, "doc_no", None))
+
+    if docentry is not None and getattr(settings, "EINV_SAP_WRITEBACK", False) and result.get("Irn"):
+        try:
+            from . import sap
+            sap.write_irn_to_invoice(docentry, result, company_db)
+        except Exception:
+            logger.exception("SAP write-back hook failed for DocEntry %s", docentry)
+
+
 def _first_error(exc):
     """(code, message) from the first NIC error detail on an EInvoiceError."""
     details = normalize_error_details(getattr(exc, "error_details", None))
@@ -381,6 +403,7 @@ def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=N
     # 3. generate (validation + NIC + persist)
     try:
         record, result = generate_and_store(invoice, order_id=order_id, source=f"AUTO:OINV:{docentry}")
+        post_generate_hooks(record, result, company_db=company_db, docentry=docentry)
         return _log("SUCCESS", doc_no=doc_no, irn=result.get("Irn"),
                     ack_no=str(result.get("AckNo")) if result.get("AckNo") is not None else None,
                     irn_record=record)
