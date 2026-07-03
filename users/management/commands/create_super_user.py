@@ -29,6 +29,8 @@ ALL_PAGE_KEYS = [
     "Order_Flow_Settings",
     "Product_Stock",
     "Reports",
+    "Einvoice",
+    "Ewaybill",
 ]
 
 

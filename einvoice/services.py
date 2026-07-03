@@ -16,7 +16,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from .client import EInvoiceClient, EInvoiceError
-from .models import IrnRecord, EwayBill
+from .models import IrnRecord, EwayBill, IrnGenerationLog
 from . import validation
 from .errors import normalize_error_details
 
@@ -315,6 +315,97 @@ def ewb_by_irn_and_store(payload: dict, *, order_id=None):
 def store_standalone_ewb(result, *, order_id=None, request_payload=None):
     """Persist a standalone (non-IRN) EWB generation result."""
     return store_ewb(result, environment=ewb_environment(), order_id=order_id, request_payload=request_payload)
+
+
+# ---- automatic IRN generation from a SAP invoice (with audit log) ---------
+
+def _first_error(exc):
+    """(code, message) from the first NIC error detail on an EInvoiceError."""
+    details = normalize_error_details(getattr(exc, "error_details", None))
+    if isinstance(details, list) and details and isinstance(details[0], dict):
+        return str(details[0].get("code") or ""), str(details[0].get("message") or str(exc))
+    return "", str(exc)
+
+
+def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=None):
+    """
+    Fetch a SAP invoice by DocEntry, map it, generate the IRN, and record the
+    attempt in IrnGenerationLog — always. Best-effort: never raises, so it is
+    safe to call inline from the invoice-create flow or a polling job.
+
+    Returns the IrnGenerationLog row. Skips (logs SKIPPED) if the invoice already
+    has a GENERATED IRN, so it is safe to re-run.
+    """
+    import time
+    from . import sap, mapping  # local import avoids any app-load ordering issues
+
+    started = time.monotonic()
+    attempt_no = IrnGenerationLog.objects.filter(docentry=docentry).count() + 1
+
+    def _log(outcome, **fields):
+        try:
+            return IrnGenerationLog.objects.create(
+                docentry=int(docentry),
+                company_db=company_db,
+                environment=current_environment(),
+                trigger=trigger,
+                attempt_no=attempt_no,
+                outcome=outcome,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                **fields,
+            )
+        except Exception:
+            logger.exception("Failed to write IrnGenerationLog for DocEntry %s", docentry)
+            return None
+
+    # 1. fetch + map
+    try:
+        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
+        invoice = mapping.build_irn(sap_invoice, hsn_map)
+    except Exception as exc:  # noqa: BLE001 — SAP fetch / mapping failure
+        logger.exception("auto IRN: fetch/map failed for DocEntry %s", docentry)
+        return _log("FAILED", error_code="FETCH", error_message=str(exc))
+
+    doc_no = (invoice.get("DocDtls") or {}).get("No")
+
+    # 2. skip if already generated
+    try:
+        ident = _identity(invoice)
+        existing = IrnRecord.objects.filter(**_key(ident), generation_status="GENERATED").first()
+        if existing:
+            return _log("SKIPPED", doc_no=doc_no, irn=existing.irn, ack_no=existing.ack_no,
+                        irn_record=existing, error_message="IRN already generated for this invoice.")
+    except Exception:
+        logger.exception("auto IRN: identity/skip check failed for DocEntry %s", docentry)
+
+    # 3. generate (validation + NIC + persist)
+    try:
+        record, result = generate_and_store(invoice, order_id=order_id, source=f"AUTO:OINV:{docentry}")
+        return _log("SUCCESS", doc_no=doc_no, irn=result.get("Irn"),
+                    ack_no=str(result.get("AckNo")) if result.get("AckNo") is not None else None,
+                    irn_record=record)
+    except PayloadInvalid as exc:
+        return _log("FAILED", doc_no=doc_no, error_code="VALIDATION",
+                    error_message="Pre-submit validation failed.", validation_errors=exc.errors)
+    except EInvoiceError as exc:
+        code, msg = _first_error(exc)
+        return _log("FAILED", doc_no=doc_no, error_code=code or "NIC", error_message=msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto IRN: unexpected failure for DocEntry %s", docentry)
+        return _log("FAILED", doc_no=doc_no, error_code="ERROR", error_message=str(exc))
+
+
+def auto_generate_irn_async(docentry, *, company_db=None, trigger="invoice_create", order_id=None):
+    """Fire auto_generate_irn in a background thread (does not block the caller)."""
+    import threading
+
+    def _run():
+        try:
+            auto_generate_irn(docentry, company_db=company_db, trigger=trigger, order_id=order_id)
+        except Exception:
+            logger.exception("auto IRN async thread crashed for DocEntry %s", docentry)
+
+    threading.Thread(target=_run, daemon=True, name=f"auto-irn-{docentry}").start()
 
 
 def mark_ewb_cancelled(ewb_no, reason_code, remarks, result=None):

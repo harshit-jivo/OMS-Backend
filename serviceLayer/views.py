@@ -37,14 +37,25 @@ class SAPInvoiceCreateView(APIView):
                 sap_response = session.post(invoice_url , json = invoice_payload , timeout = 20)
                 
             if sap_response.status_code in [200 , 201]:
-                return Response(sap_response.json(), status=status.HTTP_201_CREATED)
-            
+                data = sap_response.json()
+                # Fire-and-forget auto IRN generation for real invoices (not drafts),
+                # when enabled. Never blocks or fails the invoice response.
+                if type != 'DRAFT' and getattr(settings, 'EINV_AUTO_GENERATE', False):
+                    try:
+                        from einvoice.services import auto_generate_irn_async
+                        docentry = data.get('DocEntry')
+                        if docentry is not None:
+                            auto_generate_irn_async(docentry, trigger='invoice_create')
+                    except Exception:
+                        pass
+                return Response(data, status=status.HTTP_201_CREATED)
+
             return Response({"error": "SAP Error", "details": sap_response.json()}, status=sap_response.status_code)
-        
+
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-                
-                
+
+
 class DraftView(APIView):
     
     def post(self , request , *args, **kwargs):

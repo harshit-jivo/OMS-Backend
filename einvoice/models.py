@@ -145,3 +145,64 @@ class EwayBill(models.Model):
 
     def __str__(self):
         return f"EWB {self.ewb_no or self.generation_status}"
+
+
+class IrnGenerationLog(models.Model):
+    """
+    Audit log of every automatic (and manual) IRN generation attempt for a SAP
+    invoice DocEntry — one row per attempt, so a failure records exactly what
+    went wrong (NIC error code/message or pre-submit validation issues).
+
+    Lives in the order_management DB. Separate from IrnRecord (which holds the
+    authoritative successful IRN); this table is the operational trail for the
+    automation.
+    """
+
+    OUTCOME_CHOICES = (
+        ("SUCCESS", "Success"),
+        ("FAILED", "Failed"),
+        ("SKIPPED", "Skipped"),        # already had an IRN / not eligible
+    )
+    TRIGGER_CHOICES = (
+        ("invoice_create", "Invoice Created"),  # fired from the OMS invoice-create flow
+        ("poll", "Polling Job"),                # scheduled sweep
+        ("manual", "Manual"),                   # re-run from UI / command
+        ("retry", "Retry"),
+    )
+
+    docentry = models.IntegerField(db_index=True)
+    company_db = models.CharField(max_length=100, null=True, blank=True)
+    environment = models.CharField(max_length=10, choices=ENVIRONMENT_CHOICES, default="sandbox")
+    trigger = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default="manual", db_index=True)
+    attempt_no = models.PositiveIntegerField(default=1)
+
+    outcome = models.CharField(max_length=10, choices=OUTCOME_CHOICES, db_index=True)
+
+    # what got produced (on success)
+    doc_no = models.CharField(max_length=16, null=True, blank=True)
+    irn = models.CharField(max_length=64, null=True, blank=True)
+    ack_no = models.CharField(max_length=20, null=True, blank=True)
+    irn_record = models.ForeignKey(
+        IrnRecord, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="generation_logs",
+    )
+
+    # why it failed
+    error_code = models.CharField(max_length=20, null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    validation_errors = models.JSONField(null=True, blank=True)  # pre-submit issues, if any
+
+    duration_ms = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "einvoice_irn_generation_log"
+        verbose_name = "IRN Generation Log"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["docentry", "-created_at"]),
+            models.Index(fields=["outcome", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"[{self.outcome}] DocEntry {self.docentry} ({self.trigger})"

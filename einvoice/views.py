@@ -7,7 +7,7 @@ from . import mapping, qr as qrgen, sap
 from . import services, validation
 from .client import EInvoiceClient, EInvoiceError
 from .errors import build_error_response
-from .models import IrnRecord
+from .models import IrnRecord, IrnGenerationLog
 from .sample import sample_invoice
 
 _KEY_MISSING = {"error": "GST public key not found. Set EINV_PUBLIC_KEY_PATH to your .pem/.cer file."}
@@ -181,6 +181,117 @@ def irn_from_invoice(request, docentry):
             "(check logs / run migrations). The result above is authoritative — store it."
         )
     return Response(resp)
+
+
+@api_view(["GET"])
+def list_invoices(request):
+    """
+    List recent SAP invoices (Service Layer) annotated with their IRN status, so a
+    user can manually pick one and generate its IRN. Works for invoices from any
+    source (OMS-created or SAP-synced).
+
+    Query params: ?company_db=.. ?limit=25 ?search=<DocNum|CardName>
+    """
+    company_db = request.query_params.get("company_db") or None
+    search = (request.query_params.get("search") or "").strip()
+    try:
+        limit = min(int(request.query_params.get("limit", 25)), 100)
+    except ValueError:
+        limit = 25
+
+    base = settings.HANA_SERVICE_LAYER_URL.rstrip("/")
+    try:
+        session = sap.get_session(company_db)
+        flt = ""
+        if search:
+            if search.isdigit():
+                flt = f"&$filter=DocNum eq {search}"
+            else:
+                flt = f"&$filter=contains(CardName,'{search.replace(chr(39), chr(39) * 2)}')"
+        url = (f"{base}/Invoices?$select=DocEntry,DocNum,CardName,DocDate,DocTotal"
+               f"&$orderby=DocEntry desc&$top={limit}{flt}")
+        resp = session.get(url, verify=getattr(settings, "HANA_SSL_VERIFY", False), timeout=60)
+        resp.raise_for_status()
+        rows = resp.json().get("value", [])
+    except Exception as exc:  # noqa: BLE001
+        return Response({"error": f"Failed to list invoices from SAP: {exc}"}, status=502)
+
+    docnums = [str(r.get("DocNum")) for r in rows]
+    docentries = [r["DocEntry"] for r in rows]
+    irn_by_docno = {
+        rec.doc_no: rec for rec in
+        IrnRecord.objects.filter(doc_no__in=docnums, generation_status="GENERATED")
+    }
+    last_log = {}
+    for lg in IrnGenerationLog.objects.filter(docentry__in=docentries).order_by("docentry", "-created_at"):
+        last_log.setdefault(lg.docentry, lg)  # first per docentry = most recent
+
+    out = []
+    for r in rows:
+        rec = irn_by_docno.get(str(r.get("DocNum")))
+        lg = last_log.get(r["DocEntry"])
+        out.append({
+            "docentry": r["DocEntry"],
+            "docnum": r.get("DocNum"),
+            "cardname": r.get("CardName"),
+            "docdate": r.get("DocDate"),
+            "doctotal": r.get("DocTotal"),
+            "irn": rec.irn if rec else None,
+            "irn_status": "GENERATED" if rec else (lg.outcome if lg else None),
+            "last_error": (lg.error_message if (lg and lg.outcome == "FAILED") else None),
+        })
+    return Response({"company_db": company_db or settings.HANA_COMPANY_DB, "results": out})
+
+
+@api_view(["GET"])
+def generation_logs(request):
+    """
+    List IRN auto-generation attempts (einvoice_irn_generation_log).
+    Query params: ?outcome=FAILED|SUCCESS|SKIPPED · ?docentry=<n> · ?trigger=<t> · ?limit=<n>
+    """
+    qs = IrnGenerationLog.objects.all()
+    outcome = request.query_params.get("outcome")
+    docentry = request.query_params.get("docentry")
+    trigger = request.query_params.get("trigger")
+    if outcome:
+        qs = qs.filter(outcome=outcome.upper())
+    if trigger:
+        qs = qs.filter(trigger=trigger)
+    if docentry and docentry.isdigit():
+        qs = qs.filter(docentry=int(docentry))
+    try:
+        limit = min(int(request.query_params.get("limit", 100)), 500)
+    except ValueError:
+        limit = 100
+
+    rows = list(qs.values(
+        "id", "docentry", "company_db", "environment", "trigger", "attempt_no",
+        "outcome", "doc_no", "irn", "ack_no", "error_code", "error_message",
+        "validation_errors", "duration_ms", "created_at",
+    )[:limit])
+    counts = {
+        "SUCCESS": IrnGenerationLog.objects.filter(outcome="SUCCESS").count(),
+        "FAILED": IrnGenerationLog.objects.filter(outcome="FAILED").count(),
+        "SKIPPED": IrnGenerationLog.objects.filter(outcome="SKIPPED").count(),
+    }
+    return Response({"count": len(rows), "totals": counts, "results": rows})
+
+
+@api_view(["POST"])
+def retry_generation(request):
+    """Re-run auto IRN generation for a DocEntry. Body: { "docentry": n, "company_db": "..." }"""
+    d = request.data if isinstance(request.data, dict) else {}
+    docentry = d.get("docentry")
+    if docentry is None:
+        return Response({"error": "'docentry' is required."}, status=400)
+    log = services.auto_generate_irn(int(docentry), company_db=d.get("company_db") or None, trigger="retry")
+    return Response({
+        "outcome": getattr(log, "outcome", None),
+        "irn": getattr(log, "irn", None),
+        "error_code": getattr(log, "error_code", None),
+        "error_message": getattr(log, "error_message", None),
+        "log_id": getattr(log, "id", None),
+    })
 
 
 @api_view(["POST"])

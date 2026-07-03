@@ -279,6 +279,11 @@ EINV = {
     ),
 }
 
+# When true, creating a real invoice (serviceLayer.SAPInvoiceCreateView, type=INVOICE)
+# fires automatic IRN generation for that DocEntry in the background. Every attempt
+# is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
+EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), default=False)
+
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
 # EWB_* vars in .env only if the e-Way Bill portal issued different ones.
