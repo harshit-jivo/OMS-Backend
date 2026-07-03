@@ -3,7 +3,7 @@ from django.http import HttpResponse
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from . import qr as qrgen
+from . import mapping, qr as qrgen, sap
 from . import services, validation
 from .client import EInvoiceClient, EInvoiceError
 from .errors import build_error_response
@@ -108,6 +108,71 @@ def generate_irn(request):
         return Response(_KEY_MISSING, status=500)
 
     resp = {"result": result}
+    if record is not None:
+        resp["record_id"] = record.id
+    else:
+        resp["persistence_warning"] = (
+            "IRN generated at NIC but could not be saved to the database "
+            "(check logs / run migrations). The result above is authoritative — store it."
+        )
+    return Response(resp)
+
+
+@api_view(["GET", "POST"])
+def irn_from_invoice(request, docentry):
+    """
+    Build an IRN payload straight from a SAP B1 invoice (OINV DocEntry).
+
+    GET  -> fetch + map + validate only (preview; does NOT call NIC). Returns
+            { docentry, company_db, invoice, valid, validation_errors }.
+    POST -> the above, then generate the IRN at NIC and persist it (fails with
+            422 if pre-submit validation does not pass — no NIC call in that case).
+
+    Optional query params:
+      ?company_db=JIVO_OIL_HANADB   pick a specific company DB (defaults to the
+                                    configured HANA_COMPANY_DB).
+      ?order_id=<id>&source=<label> stamped onto the persisted record (POST).
+    """
+    company_db = request.query_params.get("company_db") or None
+    try:
+        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
+    except sap.SapFetchError as exc:
+        return Response({"error": str(exc)}, status=502)
+
+    invoice = mapping.build_irn(sap_invoice, hsn_map)
+    errs = validation.validate_invoice(invoice)
+
+    if request.method == "GET":
+        return Response({
+            "docentry": int(docentry),
+            "company_db": company_db or settings.HANA_COMPANY_DB,
+            "doc_no": invoice.get("DocDtls", {}).get("No"),
+            "invoice": invoice,
+            "valid": not errs,
+            "error_count": len(errs),
+            "validation_errors": errs,
+        })
+
+    # POST -> generate + store.
+    order_id = request.query_params.get("order_id")
+    order_id = int(order_id) if order_id and order_id.isdigit() else None
+    source = request.query_params.get("source") or f"OINV:{docentry}"
+    try:
+        record, result = services.generate_and_store(invoice, order_id=order_id, source=source)
+    except services.PayloadInvalid as exc:
+        return Response(
+            {"error": "Mapped invoice failed pre-submit validation; fix these before submitting to NIC.",
+             "docentry": int(docentry), "invoice": invoice, "validation_errors": exc.errors},
+            status=422,
+        )
+    except EInvoiceError as exc:
+        resp = build_error_response(exc)
+        resp["invoice"] = invoice
+        return Response(resp, status=exc.status_code or 502)
+    except FileNotFoundError:
+        return Response(_KEY_MISSING, status=500)
+
+    resp = {"docentry": int(docentry), "result": result}
     if record is not None:
         resp["record_id"] = record.id
     else:

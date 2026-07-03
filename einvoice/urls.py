@@ -11,6 +11,7 @@ urlpatterns = [
     # IRN
     path("irn/", views.generate_irn, name="einvoice-generate-irn"),
     path("irn/validate/", views.validate_irn, name="einvoice-validate-irn"),
+    path("irn/from-invoice/<int:docentry>/", views.irn_from_invoice, name="einvoice-irn-from-invoice"),
     path("irn/sample/", views.generate_irn_sample, name="einvoice-generate-irn-sample"),
     path("irn/cancel/", views.cancel_irn, name="einvoice-cancel-irn"),
     path("irn/by-doc/", views.get_irn_by_doc, name="einvoice-irn-by-doc"),
