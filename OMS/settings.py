@@ -70,6 +70,9 @@ INSTALLED_APPS = [
     'hana',
     'SKU',
     'serviceLayer',
+    # NIC e-Invoice (IRN) + e-Way Bill (ported from the standalone IRN project)
+    'einvoice',
+    'ewaybill',
     'invoice',
     'legal',
     'audit',
@@ -192,6 +195,11 @@ USE_TZ = True
 
 AUTH_USER_MODEL = 'users.User'
 
+# Existing tables use 32-bit integer primary keys, so keep AutoField as the
+# project-wide default (this also silences models.W042). Apps that need 64-bit
+# ids (e.g. einvoice) opt in via default_auto_field = BigAutoField in apps.py.
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
@@ -227,4 +235,65 @@ SIMPLE_JWT = {
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
-DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
+
+# =========================================================================
+# NIC e-Invoice (IRN) + e-Way Bill configuration
+# Ported from the standalone IRN project. The einvoice/ewaybill apps read
+# these two dicts off `settings`. Values come from .env (python-decouple).
+#
+# Sandbox (test) and production credentials both live in .env under the same
+# variable names — comment/uncomment the appropriate block per server. So
+# switching environments is a .env edit only; no code or setting changes here.
+#
+# The session AuthToken + SEK are cached in Django's default (LocMemCache)
+# cache; switch CACHES to Redis for multi-process/Gunicorn deployments.
+# =========================================================================
+def _split_urls(raw, fallback=''):
+    return [u.strip().rstrip('/') for u in (raw or fallback).split(',') if u.strip()]
+
+
+# ---- NIC e-Invoice ----
+EINV = {
+    "BASE_URL": config('EINV_BASE_URL', default='https://einv1api.gstsandbox.nic.in'),
+    # Failover hosts (NIC runs a load-balanced pair); comma-separated in .env.
+    "BASE_URLS": _split_urls(
+        config('EINV_BASE_URLS', default=''),
+        'https://einv1api.gstsandbox.nic.in,https://einv2api.gstsandbox.nic.in',
+    ),
+    "AUTH_PATH": config('EINV_AUTH_PATH', default='/eivital/v1.04/auth'),
+    "IRN_PATH": config('EINV_IRN_PATH', default='/eicore/v1.03/Invoice'),
+    "CANCEL_PATH": config('EINV_CANCEL_PATH', default='/eicore/v1.03/Invoice/Cancel'),
+    "MASTER_GSTIN_PATH": config('EINV_MASTER_GSTIN_PATH', default='/eivital/v1.04/Master/gstin'),
+    "SYNC_GSTIN_PATH": config('EINV_SYNC_GSTIN_PATH', default='/eivital/v1.04/Master/syncgstin'),
+    "EWB_PATH": config('EINV_EWB_PATH', default='/eiewb/v1.03/ewaybill'),
+    "HEARTBEAT_PATH": config('EINV_HEARTBEAT_PATH', default='/eivital/v1.04/heartbeat/ping'),
+    "CLIENT_ID": config('EINV_CLIENT_ID', default=''),
+    "CLIENT_SECRET": config('EINV_CLIENT_SECRET', default=''),
+    "USERNAME": config('EINV_USERNAME', default=''),
+    "PASSWORD": config('EINV_PASSWORD', default=''),
+    "GSTIN": config('EINV_GSTIN', default=''),
+    "PUBLIC_KEY_PATH": config(
+        'EINV_PUBLIC_KEY_PATH',
+        default=str(BASE_DIR / 'secrets' / 'PublicKey' / 'einv_sandbox.pem'),
+    ),
+}
+
+# ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
+# Defaults reuse the e-Invoice credentials/public key (same PAN); override the
+# EWB_* vars in .env only if the e-Way Bill portal issued different ones.
+EWB = {
+    "BASE_URLS": _split_urls(
+        config('EWB_BASE_URLS', default=''),
+        'https://ewb1api.gstsandbox.nic.in/ewaybillapi/v1.03,'
+        'https://ewb2api.gstsandbox.nic.in/ewaybillapi/v1.03',
+    ),
+    "AUTH_PATH": config('EWB_AUTH_PATH', default='/Auth'),
+    "API_PATH": config('EWB_API_PATH', default='/ewayapi'),
+    "CLIENT_ID": config('EWB_CLIENT_ID', default=EINV["CLIENT_ID"]),
+    "CLIENT_SECRET": config('EWB_CLIENT_SECRET', default=EINV["CLIENT_SECRET"]),
+    "USERNAME": config('EWB_USERNAME', default=EINV["USERNAME"]),
+    "PASSWORD": config('EWB_PASSWORD', default=EINV["PASSWORD"]),
+    "GSTIN": config('EWB_GSTIN', default=EINV["GSTIN"]),
+    "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
+}
