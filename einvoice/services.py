@@ -9,7 +9,9 @@ signalling the failure via the returned `record is None`.
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
@@ -349,6 +351,35 @@ def _first_error(exc):
     return "", str(exc)
 
 
+_IRN_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+
+def _duplicate_irn(invoice, exc):
+    """For a 2150 (Duplicate IRN) error, return the already-registered IRN.
+
+    First tries to read a 64-char IRN straight out of the NIC error payload
+    (some responses embed it); otherwise falls back to a NIC lookup by document
+    details (Typ + No + Dt). Best-effort — returns None if it can't be found.
+    """
+    try:
+        m = _IRN_RE.search(json.dumps(getattr(exc, "error_details", None)))
+        if m:
+            return m.group(0)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        doc = invoice.get("DocDtls") or {}
+        res = EInvoiceClient().get_irn_by_doc(
+            str(doc.get("Typ") or "INV"), str(doc.get("No") or ""), str(doc.get("Dt") or "")
+        )
+        if isinstance(res, dict):
+            return res.get("Irn") or (_IRN_RE.search(json.dumps(res)) or [None])[0]
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not look up existing IRN for duplicate doc %s",
+                       (invoice.get("DocDtls") or {}).get("No"))
+    return None
+
+
 def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=None):
     """
     Fetch a SAP invoice by DocEntry, map it, generate the IRN, and record the
@@ -412,6 +443,16 @@ def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=N
                     error_message="Pre-submit validation failed.", validation_errors=exc.errors)
     except EInvoiceError as exc:
         code, msg = _first_error(exc)
+        # Duplicate at NIC (2150): the invoice is already e-invoiced there but we
+        # have no local record. Surface the existing IRN in the log rather than a
+        # bare error, and treat it as SKIPPED (nothing to regenerate).
+        if str(code) == "2150":
+            existing = _duplicate_irn(invoice, exc)
+            return _log(
+                "SKIPPED", doc_no=doc_no, irn=existing, error_code="2150",
+                error_message=(f"Duplicate — already registered at NIC (IRN {existing})."
+                               if existing else "Duplicate IRN at NIC (existing IRN could not be retrieved)."),
+            )
         return _log("FAILED", doc_no=doc_no, error_code=code or "NIC", error_message=msg)
     except Exception as exc:  # noqa: BLE001
         logger.exception("auto IRN: unexpected failure for DocEntry %s", docentry)
