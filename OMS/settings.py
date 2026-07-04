@@ -293,6 +293,13 @@ EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), 
 EINV_MIRROR_HANA = _parse_bool(config('EINV_MIRROR_HANA', default='false'), default=False)
 EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), default=False)
 
+# Company DBs scanned when looking up an invoice by DocNum (the configured
+# HANA_COMPANY_DB is always tried first). Comma-separated in .env.
+EINV_COMPANY_DBS = [d.strip() for d in config(
+    'EINV_COMPANY_DBS',
+    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,TEST_OIL_15122025',
+).split(',') if d.strip()]
+
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
 # EWB_* vars in .env only if the e-Way Bill portal issued different ones.

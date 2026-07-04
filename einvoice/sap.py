@@ -70,6 +70,72 @@ def get_session(company_db: str | None = None) -> requests.Session:
     return session
 
 
+def _known_company_dbs() -> list[str]:
+    """The company DBs a DocNum search may scan. Configurable via
+    settings.EINV_COMPANY_DBS; the configured default is always tried first."""
+    dbs = list(getattr(settings, "EINV_COMPANY_DBS", None)
+               or ["JIVO_OIL_HANADB", "JIVO_BEVERAGES_HANADB", "TEST_OIL_15122025"])
+    default = settings.HANA_COMPANY_DB
+    if default:
+        dbs = [default] + [d for d in dbs if d != default]
+    return dbs
+
+
+def _docentry_for_docnum(docnum, company_db, session) -> int | None:
+    """Return the DocEntry for a DocNum in one company DB, or None if absent.
+    Best-effort: login / query failures return None (so a scan can continue)."""
+    try:
+        resp = session.get(
+            f"{_base()}/Invoices?$select=DocEntry&$filter=DocNum eq {int(docnum)}&$top=1",
+            verify=_verify(), timeout=_timeout(),
+        )
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    rows = resp.json().get("value", [])
+    return int(rows[0]["DocEntry"]) if rows else None
+
+
+def find_invoice_by_docnum(docnum, prefer_db: str | None = None):
+    """Search company DBs for an invoice DocNum. Tries `prefer_db` first, then the
+    other known DBs. Returns (docentry, company_db) of the first match, or raises
+    SapFetchError listing everywhere it looked."""
+    order: list[str] = []
+    for db in ([prefer_db] if prefer_db else []) + _known_company_dbs():
+        if db and db not in order:
+            order.append(db)
+
+    searched = []
+    for db in order:
+        try:
+            session = get_session(db)
+        except SapFetchError:
+            searched.append(f"{db} (login failed)")
+            continue
+        de = _docentry_for_docnum(docnum, db, session)
+        if de is not None:
+            return de, db
+        searched.append(db)
+
+    raise SapFetchError(
+        f"No invoice found with DocNum {docnum}. Searched: {', '.join(searched)}."
+    )
+
+
+def resolve_invoice_ref(identifier, id_type: str = "docentry", company_db: str | None = None):
+    """Resolve (docentry, company_db) from a DocEntry or a visible DocNum.
+
+    id_type="docentry" (default) -> identifier IS the DocEntry, in `company_db`.
+    id_type="docnum"             -> search for the DocNum (prefer `company_db`,
+                                    then scan the other known company DBs) and
+                                    return where it was actually found.
+    """
+    if (id_type or "docentry").lower() != "docnum":
+        return int(identifier), company_db
+    return find_invoice_by_docnum(identifier, prefer_db=company_db)
+
+
 def fetch_invoice(docentry: int, company_db: str | None = None, session=None) -> dict:
     """GET Invoices(DocEntry) and return the full invoice dict."""
     session = session or get_session(company_db)
@@ -104,10 +170,10 @@ def resolve_hsn(entries, company_db: str | None = None, session=None) -> dict:
     return out
 
 
-def fetch_invoice_for_irn(docentry: int, company_db: str | None = None):
+def fetch_invoice_for_irn(docentry: int, company_db: str | None = None, session=None):
     """Fetch an invoice and resolve all its line HSN codes in one session.
     Returns (invoice_dict, hsn_map)."""
-    session = get_session(company_db)
+    session = session or get_session(company_db)
     invoice = fetch_invoice(docentry, session=session)
     entries = [ln.get("HSNEntry") for ln in (invoice.get("DocumentLines") or [])]
     hsn_map = resolve_hsn(entries, session=session)

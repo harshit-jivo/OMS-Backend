@@ -128,14 +128,23 @@ def irn_from_invoice(request, docentry):
     POST -> the above, then generate the IRN at NIC and persist it (fails with
             422 if pre-submit validation does not pass — no NIC call in that case).
 
+    The <docentry> path segment is interpreted as a SAP DocEntry by default, or
+    as a visible Doc Number when ?id_type=docnum is passed.
+
     Optional query params:
       ?company_db=JIVO_OIL_HANADB   pick a specific company DB (defaults to the
-                                    configured HANA_COMPANY_DB).
+                                    configured HANA_COMPANY_DB). For a DocNum this
+                                    is only a preference — if not found there, the
+                                    other known company DBs are searched.
+      ?id_type=docentry|docnum      how to interpret the path value (default docentry).
       ?order_id=<id>&source=<label> stamped onto the persisted record (POST).
     """
     company_db = request.query_params.get("company_db") or None
+    id_type = (request.query_params.get("id_type") or "docentry").lower()
     try:
-        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
+        docentry, company_db = sap.resolve_invoice_ref(docentry, id_type, company_db)
+        session = sap.get_session(company_db)
+        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db, session=session)
     except sap.SapFetchError as exc:
         return Response({"error": str(exc)}, status=502)
 
@@ -175,7 +184,8 @@ def irn_from_invoice(request, docentry):
     # Best-effort HANA mirror (+ QR PNG) and SAP write-back, if enabled.
     services.post_generate_hooks(record, result, company_db=company_db, docentry=int(docentry))
 
-    resp = {"docentry": int(docentry), "result": result}
+    resp = {"docentry": int(docentry), "company_db": company_db or settings.HANA_COMPANY_DB,
+            "result": result}
     if record is not None:
         resp["record_id"] = record.id
     else:
