@@ -300,6 +300,13 @@ EINV_COMPANY_DBS = [d.strip() for d in config(
     default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,TEST_OIL_15122025',
 ).split(',') if d.strip()]
 
+# Non-production (test) company DBs. Generating an IRN from one of these while the
+# NIC target is PRODUCTION still works, but produces a real live e-invoice for test
+# data — so a loud "cancel it immediately" warning is attached to the result.
+EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
+    'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
+).split(',') if d.strip()]
+
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
 # EWB_* vars in .env only if the e-Way Bill portal issued different ones.

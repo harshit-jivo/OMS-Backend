@@ -42,6 +42,24 @@ def current_environment() -> str:
     return "sandbox" if ("sandbox" in base or "gstsandbox" in base) else "production"
 
 
+def is_test_company(company_db) -> bool:
+    """True if company_db (or the configured default) is a non-production test DB."""
+    db = company_db or settings.HANA_COMPANY_DB
+    return db in getattr(settings, "EINV_TEST_COMPANY_DBS", ["TEST_OIL_15122025"])
+
+
+def test_irn_warning(company_db, irn=None):
+    """Warning to CANCEL immediately when an IRN was generated from a test company
+    against NIC production (a real live e-invoice for test data). None otherwise."""
+    if is_test_company(company_db) and current_environment() == "production":
+        db = company_db or settings.HANA_COMPANY_DB
+        msg = (f"⚠ Generated from TEST company {db} against NIC PRODUCTION — this is a "
+               f"REAL, live e-invoice for test data. CANCEL THIS IRN IMMEDIATELY "
+               f"(within 24 hours).")
+        return f"{msg} IRN: {irn}" if irn else msg
+    return None
+
+
 def _parse_doc_date(s):
     try:
         return datetime.strptime(str(s), "%d/%m/%Y").date()
@@ -437,7 +455,7 @@ def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=N
         post_generate_hooks(record, result, company_db=company_db, docentry=docentry)
         return _log("SUCCESS", doc_no=doc_no, irn=result.get("Irn"),
                     ack_no=str(result.get("AckNo")) if result.get("AckNo") is not None else None,
-                    irn_record=record)
+                    irn_record=record, error_message=test_irn_warning(company_db, result.get("Irn")))
     except PayloadInvalid as exc:
         return _log("FAILED", doc_no=doc_no, error_code="VALIDATION",
                     error_message="Pre-submit validation failed.", validation_errors=exc.errors)

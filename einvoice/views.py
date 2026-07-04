@@ -186,6 +186,9 @@ def irn_from_invoice(request, docentry):
 
     resp = {"docentry": int(docentry), "company_db": company_db or settings.HANA_COMPANY_DB,
             "result": result}
+    warning = services.test_irn_warning(company_db, (result or {}).get("Irn"))
+    if warning:
+        resp["test_warning"] = warning
     if record is not None:
         resp["record_id"] = record.id
     else:
