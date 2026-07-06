@@ -211,6 +211,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
     # `variety` (read-only) so existing clients reading item.variety keep working.
     variety = serializers.CharField(source='sub_group', read_only=True)
     variety_type = serializers.SerializerMethodField()
+    last_purchase_price = serializers.SerializerMethodField()
+
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
@@ -298,8 +300,38 @@ class OrderItemSerializer(serializers.ModelSerializer):
         else:
             variety_type = "OTHERS"
 
-        print(f"{obj.item_name} - {sub_group} - {variety_type}")
+        # print(f"{obj.item_name} - {sub_group} - {variety_type}")
         return variety_type
+    
+
+    def get_last_purchase_price(self, obj):
+        card_code = getattr(obj.order, 'card_code', None)
+        item_code = getattr(obj, 'item_code', None)
+
+        current_order = getattr(obj, 'order', None)
+        current_order_id = Order.objects.filter(id=current_order.id).values('id').first() if current_order else None
+        print(current_order_id)
+
+
+        last_order_id = Order.objects.filter(
+            card_code=card_code, 
+            items__item_code=item_code,
+            id__lt=current_order_id['id'] if current_order_id else None
+
+        ).values('id').order_by('-created_at').first()
+        
+        if not last_order_id:
+            return None
+        else:
+            last_purchase_price = OrderItem.objects.filter(order_id=last_order_id['id'], item_code=item_code).values_list('basic_price', flat=True).first()
+            print(last_order_id)        
+            print(f"Last purchase price for card_code: {card_code}, item_code: {item_code} is {last_purchase_price}")
+            return last_purchase_price if last_purchase_price is not None else None
+        
+
+        
+
+
 
     class Meta:
         model = OrderItem
