@@ -184,7 +184,8 @@ def generate_and_store(invoice: dict, *, order_id=None, source=None):
 
     ident = _identity(invoice)
     try:
-        result = EInvoiceClient().generate_irn(invoice)
+        seller_gstin = (invoice.get("SellerDtls") or {}).get("Gstin")
+        result = EInvoiceClient(gstin=seller_gstin).generate_irn(invoice)
     except EInvoiceError as exc:
         _persist_failure(invoice, ident, order_id, source, exc)
         raise
@@ -195,10 +196,11 @@ def generate_and_store(invoice: dict, *, order_id=None, source=None):
 
 def cancel_and_store(irn: str, reason_code, remarks: str):
     """Cancel an IRN at NIC and update the stored record. Returns (record, result)."""
-    result = EInvoiceClient().cancel_irn(irn, reason_code, remarks)  # raises EInvoiceError on failure
-    record = None
+    # Cancel must be authenticated as the GSTIN that owns the IRN (multi-GSTIN PAN).
+    record = IrnRecord.objects.filter(irn=irn).first()
+    seller_gstin = record.supplier_gstin if record else None
+    result = EInvoiceClient(gstin=seller_gstin).cancel_irn(irn, reason_code, remarks)  # raises on failure
     try:
-        record = IrnRecord.objects.filter(irn=irn).first()
         if record:
             record.generation_status = "CANCELLED"
             record.irp_status = "CNL"
@@ -308,7 +310,6 @@ def ewb_by_irn_and_store(payload: dict, *, order_id=None):
     record). Returns (record, result). Raises EInvoiceError on a NIC failure.
     Validation of the payload (incl. ExpShipDtls.Gstin) is the caller's job.
     """
-    result = EInvoiceClient().generate_ewb_by_irn(payload)
     irn_record = None
     try:
         irn = payload.get("Irn")
@@ -316,6 +317,10 @@ def ewb_by_irn_and_store(payload: dict, *, order_id=None):
             irn_record = IrnRecord.objects.filter(irn=irn).first()
     except Exception:
         irn_record = None
+
+    # Authenticate as the GSTIN that owns the IRN (multi-GSTIN PAN).
+    seller_gstin = irn_record.supplier_gstin if irn_record else None
+    result = EInvoiceClient(gstin=seller_gstin).generate_ewb_by_irn(payload)
 
     record = store_ewb(result, environment=current_environment(), irn_record=irn_record,
                         order_id=order_id, request_payload=payload)
@@ -387,7 +392,8 @@ def _duplicate_irn(invoice, exc):
         pass
     try:
         doc = invoice.get("DocDtls") or {}
-        res = EInvoiceClient().get_irn_by_doc(
+        seller_gstin = (invoice.get("SellerDtls") or {}).get("Gstin")
+        res = EInvoiceClient(gstin=seller_gstin).get_irn_by_doc(
             str(doc.get("Typ") or "INV"), str(doc.get("No") or ""), str(doc.get("Dt") or "")
         )
         if isinstance(res, dict):
