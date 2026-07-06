@@ -1,9 +1,32 @@
+import logging
+
 from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from .service import SAPServiceLayerManager
 from rest_framework import status
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+
+def _maybe_auto_irn(docentry, *, trigger, company_db=None, context=""):
+    """Fire fire-and-forget auto IRN generation, with clear logging of why it was
+    skipped (so a missing IRN is never silent). Never raises."""
+    if not getattr(settings, "EINV_AUTO_GENERATE", False):
+        logger.info("Auto-IRN skipped: EINV_AUTO_GENERATE is off (%s). "
+                    "Set it in .env and restart to enable.", context or f"DocEntry {docentry}")
+        return
+    if docentry is None:
+        logger.warning("Auto-IRN skipped: no DocEntry to generate for (%s).", context)
+        return
+    try:
+        from einvoice.services import auto_generate_irn_async
+        auto_generate_irn_async(docentry, trigger=trigger, company_db=company_db)
+        logger.info("Auto-IRN queued (trigger=%s) for DocEntry %s %s", trigger, docentry, context)
+    except Exception:
+        logger.exception("Auto-IRN could not be queued for DocEntry %s", docentry)
+
 
 class SAPInvoiceCreateView(APIView):
     
@@ -38,16 +61,11 @@ class SAPInvoiceCreateView(APIView):
                 
             if sap_response.status_code in [200 , 201]:
                 data = sap_response.json()
-                # Fire-and-forget auto IRN generation for real invoices (not drafts),
-                # when enabled. Never blocks or fails the invoice response.
-                if type != 'DRAFT' and getattr(settings, 'EINV_AUTO_GENERATE', False):
-                    try:
-                        from einvoice.services import auto_generate_irn_async
-                        docentry = data.get('DocEntry')
-                        if docentry is not None:
-                            auto_generate_irn_async(docentry, trigger='invoice_create')
-                    except Exception:
-                        pass
+                # Fire-and-forget auto IRN generation for real invoices (not drafts).
+                # Never blocks or fails the invoice response; skips are logged.
+                if type != 'DRAFT':
+                    _maybe_auto_irn(data.get('DocEntry'), trigger='invoice_create',
+                                    context=f"invoice DocNum {data.get('DocNum')}")
                 return Response(data, status=status.HTTP_201_CREATED)
 
             return Response({"error": "SAP Error", "details": sap_response.json()}, status=sap_response.status_code)
@@ -154,6 +172,26 @@ class DraftActionView(APIView):
             sap_response = session.patch(approve_url , json=payload , timeout=20)
 
             if sap_response.status_code in [200 , 201, 204]:
+                 # On approval, SAP converts the draft into an invoice (linked by
+                 # DraftKey). Find it and fire auto IRN generation (best-effort). If
+                 # the invoice isn't posted yet, the polling sweep will catch it.
+                 if (action_status or "").lower() == "approved":
+                     try:
+                         inv_url = (
+                             f"{settings.HANA_SERVICE_LAYER_URL}/Invoices"
+                             f"?$filter=DraftKey eq {int(draft_id)}"
+                             f"&$select=DocEntry,DocNum&$orderby=DocEntry desc"
+                         )
+                         inv_resp = session.get(inv_url, timeout=20)
+                         invoice = (inv_resp.json().get("value") or [None])[0] if inv_resp.status_code == 200 else None
+                         if invoice:
+                             _maybe_auto_irn(invoice.get("DocEntry"), trigger="invoice_create",
+                                             context=f"approved draft {draft_id} -> DocNum {invoice.get('DocNum')}")
+                         else:
+                             logger.warning("Approved draft %s: no invoice found yet (DraftKey lookup empty); "
+                                            "the polling sweep will pick it up.", draft_id)
+                     except Exception:
+                         logger.exception("Auto-IRN after approval failed for draft %s", draft_id)
                  return Response({"status": action_status.lower(), "draft_id": draft_id}, status=status.HTTP_200_OK)
 
             return Response({"error": "SAP Error", "details": sap_response.json()}, status=sap_response.status_code)
