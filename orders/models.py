@@ -282,6 +282,7 @@ class Template(models.Model):
     class Meta:
         db_table = 'order_template'
         unique_together = ('user', 'order') 
+        
 class OrderItemScheme(models.Model):
     order_item = models.ForeignKey(OrderItem, related_name='schemes', on_delete=models.CASCADE)
     scheme = models.ForeignKey(
