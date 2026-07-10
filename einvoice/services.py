@@ -9,14 +9,16 @@ signalling the failure via the returned `record is None`.
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
 
 from .client import EInvoiceClient, EInvoiceError
-from .models import IrnRecord, EwayBill
+from .models import IrnRecord, EwayBill, IrnGenerationLog
 from . import validation
 from .errors import normalize_error_details
 
@@ -38,6 +40,24 @@ class PayloadInvalid(Exception):
 def current_environment() -> str:
     base = (settings.EINV.get("BASE_URL") or "").lower()
     return "sandbox" if ("sandbox" in base or "gstsandbox" in base) else "production"
+
+
+def is_test_company(company_db) -> bool:
+    """True if company_db (or the configured default) is a non-production test DB."""
+    db = company_db or settings.HANA_COMPANY_DB
+    return db in getattr(settings, "EINV_TEST_COMPANY_DBS", ["TEST_OIL_15122025"])
+
+
+def test_irn_warning(company_db, irn=None):
+    """Warning to CANCEL immediately when an IRN was generated from a test company
+    against NIC production (a real live e-invoice for test data). None otherwise."""
+    if is_test_company(company_db) and current_environment() == "production":
+        db = company_db or settings.HANA_COMPANY_DB
+        msg = (f"⚠ Generated from TEST company {db} against NIC PRODUCTION — this is a "
+               f"REAL, live e-invoice for test data. CANCEL THIS IRN IMMEDIATELY "
+               f"(within 24 hours).")
+        return f"{msg} IRN: {irn}" if irn else msg
+    return None
 
 
 def _parse_doc_date(s):
@@ -164,7 +184,8 @@ def generate_and_store(invoice: dict, *, order_id=None, source=None):
 
     ident = _identity(invoice)
     try:
-        result = EInvoiceClient().generate_irn(invoice)
+        seller_gstin = (invoice.get("SellerDtls") or {}).get("Gstin")
+        result = EInvoiceClient(gstin=seller_gstin).generate_irn(invoice)
     except EInvoiceError as exc:
         _persist_failure(invoice, ident, order_id, source, exc)
         raise
@@ -175,10 +196,11 @@ def generate_and_store(invoice: dict, *, order_id=None, source=None):
 
 def cancel_and_store(irn: str, reason_code, remarks: str):
     """Cancel an IRN at NIC and update the stored record. Returns (record, result)."""
-    result = EInvoiceClient().cancel_irn(irn, reason_code, remarks)  # raises EInvoiceError on failure
-    record = None
+    # Cancel must be authenticated as the GSTIN that owns the IRN (multi-GSTIN PAN).
+    record = IrnRecord.objects.filter(irn=irn).first()
+    seller_gstin = record.supplier_gstin if record else None
+    result = EInvoiceClient(gstin=seller_gstin).cancel_irn(irn, reason_code, remarks)  # raises on failure
     try:
-        record = IrnRecord.objects.filter(irn=irn).first()
         if record:
             record.generation_status = "CANCELLED"
             record.irp_status = "CNL"
@@ -288,7 +310,6 @@ def ewb_by_irn_and_store(payload: dict, *, order_id=None):
     record). Returns (record, result). Raises EInvoiceError on a NIC failure.
     Validation of the payload (incl. ExpShipDtls.Gstin) is the caller's job.
     """
-    result = EInvoiceClient().generate_ewb_by_irn(payload)
     irn_record = None
     try:
         irn = payload.get("Irn")
@@ -296,6 +317,10 @@ def ewb_by_irn_and_store(payload: dict, *, order_id=None):
             irn_record = IrnRecord.objects.filter(irn=irn).first()
     except Exception:
         irn_record = None
+
+    # Authenticate as the GSTIN that owns the IRN (multi-GSTIN PAN).
+    seller_gstin = irn_record.supplier_gstin if irn_record else None
+    result = EInvoiceClient(gstin=seller_gstin).generate_ewb_by_irn(payload)
 
     record = store_ewb(result, environment=current_environment(), irn_record=irn_record,
                         order_id=order_id, request_payload=payload)
@@ -315,6 +340,160 @@ def ewb_by_irn_and_store(payload: dict, *, order_id=None):
 def store_standalone_ewb(result, *, order_id=None, request_payload=None):
     """Persist a standalone (non-IRN) EWB generation result."""
     return store_ewb(result, environment=ewb_environment(), order_id=order_id, request_payload=request_payload)
+
+
+# ---- automatic IRN generation from a SAP invoice (with audit log) ---------
+
+def post_generate_hooks(record, result, *, company_db=None, docentry=None):
+    """
+    Best-effort side effects after a successful IRN generation, gated by settings:
+      - EINV_MIRROR_HANA   -> mirror the record (incl. QR PNG) into HANA EINVOICE_IRN
+      - EINV_SAP_WRITEBACK -> write the IRN back onto the SAP invoice (e-Billing)
+    Never raises; failures are logged so they can't break the IRN flow.
+    """
+    if record is not None and getattr(settings, "EINV_MIRROR_HANA", False):
+        try:
+            from . import hana_store
+            hana_store.mirror_record(record, schema=company_db, docentry=docentry)
+        except Exception:
+            logger.exception("HANA mirror hook failed for doc %s", getattr(record, "doc_no", None))
+
+    if docentry is not None and getattr(settings, "EINV_SAP_WRITEBACK", False) and result.get("Irn"):
+        try:
+            from . import sap
+            sap.write_irn_to_invoice(docentry, result, company_db)
+        except Exception:
+            logger.exception("SAP write-back hook failed for DocEntry %s", docentry)
+
+
+def _first_error(exc):
+    """(code, message) from the first NIC error detail on an EInvoiceError."""
+    details = normalize_error_details(getattr(exc, "error_details", None))
+    if isinstance(details, list) and details and isinstance(details[0], dict):
+        return str(details[0].get("code") or ""), str(details[0].get("message") or str(exc))
+    return "", str(exc)
+
+
+_IRN_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+
+def _duplicate_irn(invoice, exc):
+    """For a 2150 (Duplicate IRN) error, return the already-registered IRN.
+
+    First tries to read a 64-char IRN straight out of the NIC error payload
+    (some responses embed it); otherwise falls back to a NIC lookup by document
+    details (Typ + No + Dt). Best-effort — returns None if it can't be found.
+    """
+    try:
+        m = _IRN_RE.search(json.dumps(getattr(exc, "error_details", None)))
+        if m:
+            return m.group(0)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        doc = invoice.get("DocDtls") or {}
+        seller_gstin = (invoice.get("SellerDtls") or {}).get("Gstin")
+        res = EInvoiceClient(gstin=seller_gstin).get_irn_by_doc(
+            str(doc.get("Typ") or "INV"), str(doc.get("No") or ""), str(doc.get("Dt") or "")
+        )
+        if isinstance(res, dict):
+            return res.get("Irn") or (_IRN_RE.search(json.dumps(res)) or [None])[0]
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not look up existing IRN for duplicate doc %s",
+                       (invoice.get("DocDtls") or {}).get("No"))
+    return None
+
+
+def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=None):
+    """
+    Fetch a SAP invoice by DocEntry, map it, generate the IRN, and record the
+    attempt in IrnGenerationLog — always. Best-effort: never raises, so it is
+    safe to call inline from the invoice-create flow or a polling job.
+
+    Returns the IrnGenerationLog row. Skips (logs SKIPPED) if the invoice already
+    has a GENERATED IRN, so it is safe to re-run.
+    """
+    import time
+    from . import sap, mapping  # local import avoids any app-load ordering issues
+
+    started = time.monotonic()
+    attempt_no = IrnGenerationLog.objects.filter(docentry=docentry).count() + 1
+
+    def _log(outcome, **fields):
+        try:
+            return IrnGenerationLog.objects.create(
+                docentry=int(docentry),
+                company_db=company_db,
+                environment=current_environment(),
+                trigger=trigger,
+                attempt_no=attempt_no,
+                outcome=outcome,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                **fields,
+            )
+        except Exception:
+            logger.exception("Failed to write IrnGenerationLog for DocEntry %s", docentry)
+            return None
+
+    # 1. fetch + map
+    try:
+        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
+        invoice = mapping.build_irn(sap_invoice, hsn_map)
+    except Exception as exc:  # noqa: BLE001 — SAP fetch / mapping failure
+        logger.exception("auto IRN: fetch/map failed for DocEntry %s", docentry)
+        return _log("FAILED", error_code="FETCH", error_message=str(exc))
+
+    doc_no = (invoice.get("DocDtls") or {}).get("No")
+
+    # 2. skip if already generated
+    try:
+        ident = _identity(invoice)
+        existing = IrnRecord.objects.filter(**_key(ident), generation_status="GENERATED").first()
+        if existing:
+            return _log("SKIPPED", doc_no=doc_no, irn=existing.irn, ack_no=existing.ack_no,
+                        irn_record=existing, error_message="IRN already generated for this invoice.")
+    except Exception:
+        logger.exception("auto IRN: identity/skip check failed for DocEntry %s", docentry)
+
+    # 3. generate (validation + NIC + persist)
+    try:
+        record, result = generate_and_store(invoice, order_id=order_id, source=f"AUTO:OINV:{docentry}")
+        post_generate_hooks(record, result, company_db=company_db, docentry=docentry)
+        return _log("SUCCESS", doc_no=doc_no, irn=result.get("Irn"),
+                    ack_no=str(result.get("AckNo")) if result.get("AckNo") is not None else None,
+                    irn_record=record, error_message=test_irn_warning(company_db, result.get("Irn")))
+    except PayloadInvalid as exc:
+        return _log("FAILED", doc_no=doc_no, error_code="VALIDATION",
+                    error_message="Pre-submit validation failed.", validation_errors=exc.errors)
+    except EInvoiceError as exc:
+        code, msg = _first_error(exc)
+        # Duplicate at NIC (2150): the invoice is already e-invoiced there but we
+        # have no local record. Surface the existing IRN in the log rather than a
+        # bare error, and treat it as SKIPPED (nothing to regenerate).
+        if str(code) == "2150":
+            existing = _duplicate_irn(invoice, exc)
+            return _log(
+                "SKIPPED", doc_no=doc_no, irn=existing, error_code="2150",
+                error_message=(f"Duplicate — already registered at NIC (IRN {existing})."
+                               if existing else "Duplicate IRN at NIC (existing IRN could not be retrieved)."),
+            )
+        return _log("FAILED", doc_no=doc_no, error_code=code or "NIC", error_message=msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto IRN: unexpected failure for DocEntry %s", docentry)
+        return _log("FAILED", doc_no=doc_no, error_code="ERROR", error_message=str(exc))
+
+
+def auto_generate_irn_async(docentry, *, company_db=None, trigger="invoice_create", order_id=None):
+    """Fire auto_generate_irn in a background thread (does not block the caller)."""
+    import threading
+
+    def _run():
+        try:
+            auto_generate_irn(docentry, company_db=company_db, trigger=trigger, order_id=order_id)
+        except Exception:
+            logger.exception("auto IRN async thread crashed for DocEntry %s", docentry)
+
+    threading.Thread(target=_run, daemon=True, name=f"auto-irn-{docentry}").start()
 
 
 def mark_ewb_cancelled(ewb_no, reason_code, remarks, result=None):

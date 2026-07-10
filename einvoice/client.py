@@ -41,9 +41,23 @@ _EXPIRY_SAFETY = timedelta(minutes=2)
 
 
 class EInvoiceClient:
-    def __init__(self):
-        self.cfg = settings.EINV
+    def __init__(self, gstin: str | None = None):
+        """Build a client for a specific seller GSTIN.
+
+        Defaults to settings.EINV (the primary GSTIN). If `gstin` matches an entry
+        in settings.EINV_CREDENTIALS (multi-GSTIN, same PAN), that GSTIN's
+        USERNAME/PASSWORD/CLIENT_* override the defaults, so the NIC call is
+        authenticated as the GSTIN that actually owns the invoice.
+        """
+        cfg = dict(settings.EINV)
+        creds = (getattr(settings, "EINV_CREDENTIALS", {}) or {}).get(gstin) if gstin else None
+        if creds:
+            cfg.update({k: v for k, v in creds.items() if v})
+        self.cfg = cfg
+        self.gstin = self.cfg.get("GSTIN") or ""
         self.hosts = self.cfg.get("BASE_URLS") or [self.cfg["BASE_URL"].rstrip("/")]
+        # Cache the auth session per GSTIN so identities don't collide.
+        self._cache_key = f"{_CACHE_KEY}:{self.gstin}"
 
     # -- low level ----------------------------------------------------------
 
@@ -121,7 +135,7 @@ class EInvoiceClient:
 
         ttl = max(int((session.expires_at - self._now() - _EXPIRY_SAFETY).total_seconds()), 30)
         cache.set(
-            _CACHE_KEY,
+            self._cache_key,
             {
                 "auth_token": session.auth_token,
                 "sek": crypto.b64(session.sek),
@@ -162,7 +176,7 @@ class EInvoiceClient:
 
     def _get_session(self, force: bool = False) -> Session:
         if not force:
-            cached = cache.get(_CACHE_KEY)
+            cached = cache.get(self._cache_key)
             if cached:
                 expires_at = datetime.fromisoformat(cached["expires_at"])
                 if expires_at - _EXPIRY_SAFETY > self._now():

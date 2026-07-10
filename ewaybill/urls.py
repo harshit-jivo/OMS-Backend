@@ -5,6 +5,7 @@ from . import views as v
 urlpatterns = [
     path("token/", v.ewb_token, name="ewb-token"),
     path("generate/", v.generate_ewb, name="ewb-generate"),
+    path("from-invoice/<int:docentry>/", v.ewb_from_invoice, name="ewb-from-invoice"),
     path("update-part-b/", v.update_part_b, name="ewb-update-part-b"),
     path("cancel/", v.cancel_ewb, name="ewb-cancel"),
     path("close/", v.close_ewb, name="ewb-close"),

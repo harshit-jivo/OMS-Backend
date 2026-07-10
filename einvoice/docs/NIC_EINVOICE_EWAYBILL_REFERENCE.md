@@ -317,8 +317,8 @@ Prod base `https://api.ewaybillgst.gov.in/v1.03` (+ `/Auth`, `/ewayapi`).
 1. **Cache the token/SEK** — never auth per transaction (risk of NIC blocking). *(Client already caches.)*
 2. **Refresh ~10 min before the 6 h expiry**; recheck & resubmit requests that failed in the window.
 3. **Persist** `AckNo, AckDt, Irn, SignedInvoice, SignedQRCode` with the source record
-   (IRP purges after 24 h; QR must be printed). *(Not yet done — needs a model.)*
-4. **Validate schema + regexes + arithmetic client-side before calling Generate IRN.** *(Not yet done.)*
+   (IRP purges after 24 h; QR must be printed). *(Done — `IrnRecord`/`EwayBill`.)*
+4. **Validate schema + regexes + arithmetic client-side before calling Generate IRN.** *(Done — `einvoice/validation.py`.)*
 5. **Handle `Status`/`ErrorDetails`** — correct & resubmit; surface codes, don't just 502.
 6. **Don't store/hardcode NIC's SSL cert** — it rotates; rely on CA trust, TLS 1.2+.
 
@@ -328,7 +328,17 @@ become a production integration they still need:
 - ✅ **Persistence models** for IRN/EWB responses (practice #3) — `IrnRecord`, `EwayBill`.
 - ✅ **Pre-submit validation** (regexes §6 + arithmetic §4) (practice #4) — `einvoice/validation.py`.
 - ✅ **Structured error surfacing** mapped to §3/§7 code tables (practice #5) — `einvoice/errors.py`.
-- An **invoice builder** that maps OMS order/sales data → the §5 schema paths.
+- ✅ **Invoice builder (SAP OINV → IRN JSON)** — `einvoice/mapping.py` (`build_irn`) +
+  `einvoice/sap.py` (Service Layer fetch + `IndiaHsn` resolution), exposed at
+  `GET|POST /api/einvoice/irn/from-invoice/<docentry>/` (see §12). GET previews the mapped
+  payload + validation; POST generates + persists. Long SAP dispatch addresses are split
+  across `Addr1`/`Addr2` (NIC caps each at 100 chars — error 5002); `validation` now also
+  checks party field lengths and requires a resolved HSN. Verified end-to-end against the
+  sandbox with a live `JIVO_OIL_HANADB` invoice.
+- ✅ **e-Way Bill builder (SAP OINV → EWB)** — `ewaybill/mapping.py` + `ewaybill/validation.py`,
+  exposed at `GET|POST /api/ewaybill/from-invoice/<docentry>/` (see §13). Auto-picks EWB-by-IRN
+  (when an IRN exists) or standalone GENEWAYBILL; reuses the §12 IRN mapper. EWB-by-IRN verified
+  at the sandbox; standalone GENEWAYBILL needs separate EWB-portal credentials (auth 107).
 - ✅ **01/08/2026 readiness (§11):** Ship-to GSTIN validations (5002/2323/2325) in
   `validation.validate_invoice`; `validation.validate_ewb_by_irn` enforces `ExpShipDtls.Gstin`
   (5001/4074); `ewaybill.close_ewb` (`CLOSEEWB`) at `/api/ewaybill/close/`. The *caller* must
@@ -407,3 +417,117 @@ cannot be replaced · `4074` Ship-to state code must match GSTIN state · `3039`
 - **Status:** a separate `Closed` status is proposed later; during stabilisation the existing
   Active/Cancelled/Discarded framework continues, and post-closure actions (Update Transporter,
   Extend Validity, Vehicle Updation) **remain allowed** for now.
+
+---
+
+## 12. SAP B1 invoice (OINV) → IRN JSON builder
+
+Maps a SAP Business One Service Layer **`Invoices`** (OINV) document straight to the
+§5 IRN payload. Code: `einvoice/mapping.py` (`build_irn`) + `einvoice/sap.py` (fetch + HSN).
+
+### 12.1 Endpoint
+`GET|POST /api/einvoice/irn/from-invoice/<docentry>/`
+- **GET** — fetch + map + validate only (**no NIC call**). Returns
+  `{ docentry, company_db, doc_no, invoice, valid, error_count, validation_errors }`. Use it
+  to preview the mapped payload and see what NIC would flag.
+- **POST** — the above, then **generate the IRN at NIC and persist** (`IrnRecord`). Returns
+  `{ docentry, result, record_id }`. If pre-submit validation fails it returns **422** with the
+  errors and the mapped `invoice` (no NIC call).
+- Query params: `?company_db=JIVO_OIL_HANADB` (defaults to `HANA_COMPANY_DB`; a non-default DB
+  triggers a fresh, uncached Service Layer login) · `?order_id=<id>&source=<label>` (stamped on POST).
+
+### 12.2 Field mapping (SAP → IRN)
+| IRN path | SAP source |
+|---|---|
+| `DocDtls.No` / `.Dt` | `DocNum` / `DocDate` (→ `dd/mm/yyyy`); `Typ`=`INV` |
+| `SellerDtls.Gstin/LglNm` | `EWayBillDetails.BillFromGSTIN`/`BillFromName` (GSTIN falls back to `VATRegNum`) |
+| `SellerDtls.Addr1/Addr2/Loc/Pin/Stcd` | `EWayBillDetails.DispatchFromAddress1` (split at 100), `DispatchFromPlace`, `DispatchFromZipCode`, `BillFromStateGSTCode` |
+| `BuyerDtls.Gstin/LglNm` | `EWayBillDetails.BillToGSTIN` / `CardName` |
+| `BuyerDtls.Pos/Stcd` | `EWayBillDetails.BillToStateGSTCode` |
+| `BuyerDtls.Addr1/Addr2/Loc/Pin` | `AddressExtension.BillToBlock`/`BillToAddress2`/`BillToStreet`/`Address` (split), `BillToCity`, `BillToZipCode` |
+| `ItemList[].HsnCd` | `DocumentLines[].HSNEntry` → **`/IndiaHsn(<entry>)`** → `ChapterID` with dots stripped (`1514.99.90`→`15149990`) |
+| `ItemList[].AssAmt/TotAmt` | `DocumentLines[].LineTotal` · `GstRt`←`TaxPercentagePerRow` · `Qty`/`Unit`/`UnitPrice`←`Quantity`/`MeasureUnit`/`Price` |
+| item tax split | intra-state (seller Stcd == POS): `Cgst=Sgst=TaxTotal/2`; inter-state: `Igst=TaxTotal` |
+| `ValDtls.*` | summed over items |
+| `ShipDtls` | `EWayBillDetails.ShipTo*` — **only when `ShipToGSTIN` differs from the buyer GSTIN** (a same-GSTIN ship-to → NIC 2323, so it's omitted → a regular invoice) |
+
+### 12.3 Notes / gotchas
+- **`Addr1`/`Addr2` are capped at 100 chars each** by NIC (error **5002**). SAP dispatch
+  addresses regularly exceed this, so `mapping._split_addr` splits on a word boundary near 100.
+  `validation._check_party_lengths` also flags any `LglNm/Addr1/Addr2/Loc` outside NIC limits.
+- **HSN must resolve** — if `/IndiaHsn(<entry>)` returns nothing, `HsnCd` is left `""` and
+  validation raises `HSN_REQUIRED` rather than silently sending a blank code.
+- **Seller GSTIN must equal the authenticated GSTIN** for the environment (same PAN across
+  sister concerns). The live `JIVO_OIL_HANADB` seller `06AACCJ4223F1Z0` matches the sandbox
+  auth GSTIN, which is why sandbox generation succeeds.
+- Only **priced** lines contribute value; `AssVal`/`TotInvVal` reconcile to SAP `DocTotal`
+  within the ±1 rupee tolerance (§4).
+- **`Loc` (Place) is mandatory** and SAP `BillToCity` is often empty. `mapping._loc()` falls
+  back to the **GST state name** (`STATE_NAMES[Stcd]`, e.g. `07`→`DELHI`) so NIC doesn't reject
+  with 5002 "Location required". `validation._check_party_required` also flags any missing
+  mandatory party field (Gstin/LglNm/Addr1/Loc/Pin/Stcd) pre-submit.
+- **B2C / unregistered buyers are not eligible.** When the SAP buyer GSTIN is `URP` on a
+  **domestic** supply (cash sales, free samples), `validation` returns **`B2C_NOT_ELIGIBLE`** and
+  the invoice is *not* sent to NIC — the IRP handles B2B/SEZ/Export only. The OMS caller should
+  skip IRN for these.
+- **Exports are mapped** (buyer `BillToCountry` ≠ `IN`):
+  - `TranDtls.SupTyp` = **`EXPWP`** if any IGST was charged, else **`EXPWOP`** (LUT/bond).
+  - `BuyerDtls`: `Gstin`=**`URP`**, `Pos`=**`96`**, `Stcd`=**`96`**, `Pin`=**`999999`**
+    (NIC needs a 6-digit 100000-999999 PIN; a foreign postcode won't conform), `Loc` from
+    `BillToCity` else `"OTHER COUNTRY"`. Treated as inter-state (IGST / zero-rated).
+  - `ExpDtls`: `CntCode`=`BillToCountry` (ISO-2), `ForCur`=`DocCurrency` when ≠ `INR`.
+    Shipping-bill no/date/port are not in OINV, so omitted (optional at IRN time).
+  - **Foreign-currency values → INR:** when `DocCurrency` ≠ `INR`, amounts are read from SAP's
+    system-currency fields (`RowTotalSC`, `LineTaxJurisdictions[].TaxAmountSC`) since NIC expects
+    INR. *(SEZ supplies — `SEZWP`/`SEZWOP` — are not auto-detected; add if needed.)*
+
+### 12.4 Sandbox batch results (live JIVO_OIL_HANADB invoices)
+Ran live invoices end-to-end through the wired backend against the NIC sandbox:
+- **IRN-OK — domestic (6):** 76029, 76037, 76038, 76008 (inter-state IGST); **76014, 76006
+  (intra-state — CGST/SGST split confirmed at NIC)**.
+- **IRN-OK — export (2):** 53542 (Qatar, `CntCode QA`), 50073 (UAE, `CntCode AE`) — both
+  `EXPWOP`/URP/POS 96, USD → INR via `*SC` fields. *(Submitted with a patched recent DocDate,
+  as the real docs are >1 yr old and NIC rejects stale dates.)*
+- **`B2C_NOT_ELIGIBLE` (2):** 75992, 76021 — URP domestic buyers, correctly refused pre-submit.
+- **NIC 3028 "GSTIN invalid" (3):** 76036/76034/76033 — the *real* buyer GSTINs are not in the
+  **sandbox's** test registry (sandbox has its own). Not a mapping bug; they validate in production.
+
+Mapping fixes shipped from these runs: `Addr1`/`Addr2` 100-char split (5002); `Loc` state-name
+fallback (5002); export buyer PIN `999999` (5002); required-field + B2C pre-submit checks.
+
+---
+
+## 13. SAP B1 invoice (OINV) → e-Way Bill builder
+
+Builds an e-Way Bill straight from a SAP invoice, reusing the §12 IRN mapper so the
+EWB stays consistent with the e-Invoice. Code: `ewaybill/mapping.py` +
+`ewaybill/validation.py`.
+
+### 13.1 Endpoint
+`GET|POST /api/ewaybill/from-invoice/<docentry>/`
+- **Auto-selects the path:** if the invoice already has a **generated IRN** (an `IrnRecord`),
+  it uses **EWB-by-IRN** (only transport + Ship-to sent; the IRP fills the rest — the preferred
+  route). Otherwise it builds a standalone **GENEWAYBILL** (full payload) via the §10 map.
+- **GET** — map + validate only (no NIC call): `{ docentry, mode, irn, payload, valid, validation_errors }`.
+- **POST** — generate at NIC + persist (`EwayBill`). 422 on validation failure.
+- Body (transport is usually entered at dispatch, so pass overrides — they win over SAP):
+  `{ "transport": { "transMode":"1", "transDistance":0, "vehicleNo":"HR26AB1234", "vehicleType":"R",
+  "transporterId":"06AAA…", "transDocNo":"…", "transDocDate":"dd/mm/yyyy" }, "expShip": { … } }`
+- Query params: `?company_db=…` · `?mode=auto|irn|standalone` · `?order_id=<id>`.
+
+### 13.2 Transport + Ship-to mapping
+- Transport from `EWayBillDetails`: `TransportationMode`→`transMode` (tm_Road→1, …),
+  `Distance`→`transDistance`, `TransporterID/Name`, `TransporterDocNo/Date`, `VehicleNo`,
+  `VehicleType`→`R`/`O`. These are usually empty in SAP at invoice time → supply overrides.
+- **`transDistance` defaults to `0`** so NIC auto-computes road distance from the pincodes
+  (avoids NIC 4038 "distance too high" from a wrong manual value).
+- **`ExpShipDtls`** (advisory 17.06.2026): the IRN `ShipDtls` when present; otherwise the buyer's
+  **address** with **`Gstin`=`URP`** — sending the buyer's own GSTIN as the Ship-to GSTIN is
+  rejected (**NIC 4073** "Buyer and Ship-to GSTIN should not be same").
+
+### 13.3 Verified against sandbox
+- **EWB-by-IRN — OK:** invoice 76029 → IRN → EWB **`EwbNo 391010809803`**, valid till next day.
+- **Standalone GENEWAYBILL:** payload maps + validates cleanly, **but the NIC standalone EWB API
+  rejects auth with error 107** — the e-Invoice sandbox credentials are not valid for the separate
+  e-Way Bill system. Provision EWB API access on the NIC EWB portal (`EWB_USERNAME`/`EWB_PASSWORD`,
+  possibly a distinct client-id) to enable this path. EWB-by-IRN needs no extra credentials.

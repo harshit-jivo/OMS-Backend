@@ -43,6 +43,40 @@ def _num(v, default=0.0):
         return default
 
 
+# ---- party field length limits (NIC master codes / e-Invoice schema) ------
+# (min, max) character counts. NIC rejects out-of-range strings, most commonly
+# Addr1 > 100 (error 5002) when a long SAP dispatch address is not split.
+_PARTY_LEN = {
+    "LglNm": (3, 100),
+    "TrdNm": (3, 100),
+    "Addr1": (1, 100),
+    "Addr2": (1, 100),
+    "Loc": (2, 60),
+}
+
+
+def _check_party_lengths(block, prefix, err):
+    """Report any party string field whose length is outside the NIC limits."""
+    for field, (lo, hi) in _PARTY_LEN.items():
+        v = block.get(field)
+        if v in (None, ""):
+            continue
+        n = len(str(v))
+        if n < lo or n > hi:
+            err(f"{prefix}.{field}", "FIELD_LENGTH",
+                f"{prefix}.{field} must be {lo}-{hi} chars (got {n}). "
+                f"{'Split a long address across Addr1/Addr2. [5002]' if field.startswith('Addr') else ''}".strip())
+
+
+def _check_party_required(block, prefix, fields, err):
+    """Report NIC-mandatory party fields that are missing/empty (would come back
+    as error 5002 — 'The X field is required')."""
+    for field in fields:
+        if block.get(field) in (None, ""):
+            err(f"{prefix}.{field}", "FIELD_REQUIRED",
+                f"{prefix}.{field} is mandatory and could not be mapped from SAP. [5002]")
+
+
 def validate_invoice(invoice: dict) -> list[dict]:
     errors: list[dict] = []
 
@@ -94,13 +128,20 @@ def validate_invoice(invoice: dict) -> list[dict]:
         err("SellerDtls.Stcd", "STATE_MISMATCH", "Supplier state code must match the first 2 digits of the GSTIN. [2258]")
     if seller.get("Pin") and not RE_PIN.match(str(seller["Pin"])):
         err("SellerDtls.Pin", "BAD_PIN", "Supplier PIN must be 6 digits.")
+    _check_party_required(seller, "SellerDtls", ("Gstin", "LglNm", "Addr1", "Loc", "Pin", "Stcd"), err)
+    _check_party_required(buyer, "BuyerDtls", ("Gstin", "LglNm", "Pos", "Addr1", "Loc", "Pin", "Stcd"), err)
+    _check_party_lengths(seller, "SellerDtls", err)
+    _check_party_lengths(buyer, "BuyerDtls", err)
 
     b_gstin = str(buyer.get("Gstin", "") or "")
     is_export = sup_typ in EXPORT_TYPES
     if b_gstin and b_gstin != "URP" and not RE_GSTIN.match(b_gstin):
         err("BuyerDtls.Gstin", "BAD_GSTIN", "Recipient GSTIN format is invalid (or use 'URP').")
-    if b_gstin and b_gstin == "URP" and not is_export:
-        err("BuyerDtls.Gstin", "URP_NOT_ALLOWED", "Recipient GSTIN can be URP only for exports. [2212]")
+    if b_gstin == "URP" and not is_export:
+        err("BuyerDtls.Gstin", "B2C_NOT_ELIGIBLE",
+            "Recipient is unregistered (URP) on a domestic supply — this is a B2C invoice and is "
+            "NOT eligible for e-Invoice/IRN (the IRP handles B2B, SEZ and Export only). "
+            "Skip IRN generation for this invoice. [2212]")
     if s_gstin and b_gstin and s_gstin == b_gstin:
         err("BuyerDtls.Gstin", "SAME_GSTIN", "Supplier and recipient GSTIN must not be the same. [2211]")
     if buyer.get("Pos") and not RE_STATE.match(str(buyer["Pos"])):
@@ -132,6 +173,8 @@ def validate_invoice(invoice: dict) -> list[dict]:
         err("ShipDtls.Stcd", "STATE_MISMATCH", "Ship-to state code must match the Ship-to GSTIN state. [2325]")
     if ship.get("Pin") and not RE_PIN.match(str(ship["Pin"])):
         err("ShipDtls.Pin", "BAD_PIN", "Ship-to PIN must be 6 digits.")
+    if ship:
+        _check_party_lengths(ship, "ShipDtls", err)
 
     # ---- tax jurisdiction -------------------------------------------------
     seller_state = str(seller.get("Stcd") or s_gstin[:2] or "").zfill(2) if (seller.get("Stcd") or s_gstin) else ""
@@ -148,7 +191,9 @@ def validate_invoice(invoice: dict) -> list[dict]:
         f = f"ItemList[{i}]"
 
         hsn = str(item.get("HsnCd", "") or "")
-        if hsn and not RE_HSN.match(hsn):
+        if not hsn:
+            err(f"{f}.HsnCd", "HSN_REQUIRED", "HSN code is mandatory (could not be resolved from SAP). [2176]")
+        elif not RE_HSN.match(hsn):
             err(f"{f}.HsnCd", "BAD_HSN", "HSN must be 4-8 digits (min 6; 4 allowed if turnover < Rs 5cr). [2176]")
 
         qty = _num(item.get("Qty"))

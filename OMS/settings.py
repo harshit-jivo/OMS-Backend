@@ -22,7 +22,9 @@ def _parse_bool(value, default=False):
     if isinstance(value, bool):
         return value
 
-    normalized = str(value).strip().lower()
+    # Tolerate an inline "# comment" after the value — python-decouple does NOT
+    # strip these, so "true   # note" would otherwise parse as neither true nor false.
+    normalized = str(value).split('#', 1)[0].strip().lower()
     if normalized in {'1', 'true', 'yes', 'on'}:
         return True
     if normalized in {'0', 'false', 'no', 'off', '', 'release'}:
@@ -306,6 +308,52 @@ EINV = {
         default=str(BASE_DIR / 'secrets' / 'PublicKey' / 'einv_sandbox.pem'),
     ),
 }
+
+# ---- Multi-GSTIN NIC credentials (same PAN, different state GSTINs) ----
+# client-id/secret are reusable across GSTINs of one PAN; the API username/password
+# are per-GSTIN (created on the e-invoice portal under each GSTIN). List the GSTINs
+# in EINV_GSTINS, then add per-GSTIN vars (see .env). The generate/cancel flow picks
+# the credential set that matches each invoice's seller GSTIN.
+EINV_GSTINS = [g.strip() for g in config('EINV_GSTINS', default='').split(',') if g.strip()]
+EINV_CREDENTIALS = {
+    g: {
+        "GSTIN": g,
+        "USERNAME": config(f'EINV_{g}_USERNAME', default=''),
+        "PASSWORD": config(f'EINV_{g}_PASSWORD', default=''),
+        "CLIENT_ID": config(f'EINV_{g}_CLIENT_ID', default=EINV["CLIENT_ID"]),
+        "CLIENT_SECRET": config(f'EINV_{g}_CLIENT_SECRET', default=EINV["CLIENT_SECRET"]),
+        "PUBLIC_KEY_PATH": config(f'EINV_{g}_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
+    }
+    for g in EINV_GSTINS
+}
+
+# When true, creating a real invoice (serviceLayer.SAPInvoiceCreateView, type=INVOICE)
+# fires automatic IRN generation for that DocEntry in the background. Every attempt
+# is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
+EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), default=False)
+
+# After a successful IRN generation:
+#  - EINV_MIRROR_HANA: also write the record (incl. QR PNG) into the HANA table
+#    EINVOICE_IRN (run `manage.py setup_hana_irn_table` once per schema first).
+#  - EINV_SAP_WRITEBACK: PATCH the IRN back onto the SAP invoice's e-Billing
+#    protocol so SAP shows it as e-invoiced (validate on sandbox first).
+# Both off by default and best-effort (never break IRN generation).
+EINV_MIRROR_HANA = _parse_bool(config('EINV_MIRROR_HANA', default='false'), default=False)
+EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), default=False)
+
+# Company DBs scanned when looking up an invoice by DocNum (the configured
+# HANA_COMPANY_DB is always tried first). Comma-separated in .env.
+EINV_COMPANY_DBS = [d.strip() for d in config(
+    'EINV_COMPANY_DBS',
+    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,TEST_OIL_15122025',
+).split(',') if d.strip()]
+
+# Non-production (test) company DBs. Generating an IRN from one of these while the
+# NIC target is PRODUCTION still works, but produces a real live e-invoice for test
+# data — so a loud "cancel it immediately" warning is attached to the result.
+EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
+    'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
+).split(',') if d.strip()]
 
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
