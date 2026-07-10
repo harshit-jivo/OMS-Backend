@@ -1,8 +1,15 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from django.contrib.auth.models import update_last_login
 from .serializers import LoginSerializer, UpdateUserSerializer, UserSerializer,StateSerializer, CompanySerializer,MainGroupSerializer,CreateUserSerializer, CategorySerializer
 from rest_framework.generics import ListAPIView
 from .models import State, Company, MainGroup,UserRole,User, UserPartyAssignment,PartyProductAssignment
@@ -10,6 +17,8 @@ from sap_sync.models import Party, Product, active_product_q
 from orders.models import Categories, RateApproverRule
 from decimal import Decimal
 from django.db.models import Q
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_category(value):
@@ -733,28 +742,99 @@ class LoginView(APIView):
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
-        
+
         if serializer.is_valid():
             user = serializer.validated_data['user']
             refresh = RefreshToken.for_user(user)
-                
+            update_last_login(None, user)
+
+            access_lifetime = jwt_settings.ACCESS_TOKEN_LIFETIME
+            logger.info("Login successful user_id=%s", user.id)
+
             return Response({
                 'success': True,
                 'message': 'Login successful',
                 'data': {
                     'user': UserSerializer(user).data,
+                    # Existing fields kept exactly (clients read data.tokens.*);
+                    # token_type + expires_in are additive (Task 4).
                     'tokens': {
                         'access': str(refresh.access_token),
                         'refresh': str(refresh),
-                    }
+                        'token_type': 'Bearer',
+                        'expires_in': int(access_lifetime.total_seconds()),
+                    },
                 }
             })
 
+        logger.warning(
+            "Login failed for username=%s",
+            str(request.data.get('username', ''))[:150],
+        )
         return Response({
             'success': False,
             'message': 'Login failed',
             'errors': serializer.errors
         }, status=status.HTTP_401_UNAUTHORIZED)
+
+
+class ActiveUserTokenRefreshSerializer(TokenRefreshSerializer):
+    """Refresh serializer that also rejects tokens whose user is now missing or
+    inactive (Task 7). The parent already handles expired/invalid tokens and,
+    with BLACKLIST_AFTER_ROTATION, rotates + blacklists the old refresh token.
+    """
+
+    def validate(self, attrs):
+        # Decode/verify the refresh token BEFORE rotation so we can look up the
+        # subject. This raises for expired/invalid/blacklisted tokens.
+        token = RefreshToken(attrs['refresh'])
+        user_id = token.get(jwt_settings.USER_ID_CLAIM)
+        try:
+            user = User.objects.get(**{jwt_settings.USER_ID_FIELD: user_id})
+        except User.DoesNotExist:
+            raise InvalidToken('No active account found for this token')
+        if not user.is_active:
+            raise InvalidToken('User account is disabled')
+
+        return super().validate(attrs)
+
+
+class AuthTokenRefreshView(TokenRefreshView):
+    """POST /api/auth/refresh/ — exchange a refresh token for a new access
+    token, honouring rotation/blacklist settings and blocking inactive users.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = ActiveUserTokenRefreshSerializer
+
+
+class LogoutView(APIView):
+    """POST /api/auth/logout/ — blacklist the refresh token so it cannot be
+    reused (server-side invalidation, not just a client-side clear)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        refresh_token = (
+            request.data.get('refresh')
+            or request.data.get('refresh_token')
+            or ''
+        )
+        if not refresh_token:
+            return Response(
+                {'success': False, 'message': 'Refresh token is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            RefreshToken(refresh_token).blacklist()
+        except TokenError:
+            # Already expired/invalid/blacklisted — logout is idempotent.
+            logger.info("Logout with already-invalid refresh user_id=%s", request.user.id)
+            return Response({'success': True, 'message': 'Logged out'})
+
+        logger.info("Logout success user_id=%s", request.user.id)
+        return Response({'success': True, 'message': 'Logged out'})
     
 class UserListForAssignmentView(APIView):
     permission_classes = [AllowAny]

@@ -2,7 +2,7 @@ from urllib import request
 from django.shortcuts import render
 import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
+from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
@@ -30,8 +30,22 @@ from users.models import SchemeProduct, User, State
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
+import logging
 import requests
 from .ai_service import get_order_summary
+from .notifications import (
+    NotificationEvents,
+    NotificationPlan,
+    NotificationTemplates,
+    NotificationTypes,
+    deactivate_push_token,
+    deliver_notification,
+    deliver_notification_to_many,
+    mark_order_notifications_read,
+)
+from .webpush import get_vapid_public_key
+
+logger = logging.getLogger(__name__)
 
 
 def _active_sap_item_codes():
@@ -2189,7 +2203,7 @@ class ProductListView(APIView):
         return Response(serializer.data)
 
 class UpdateOrderView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def put(self, request, order_id):
         def _to_float(value, default=0.0):
@@ -2269,7 +2283,7 @@ class UpdateOrderView(APIView):
         if order_type == 'STAFF':
             order.status = previous_status or get_status('Order Created')
             order.save()
-            _mark_order_notifications_read(order, user)
+            mark_order_notifications_read(order, user)
             log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
             return Response({
                 'id': order.id,
@@ -2303,7 +2317,7 @@ class UpdateOrderView(APIView):
 
         order.save()
 
-        _mark_order_notifications_read(order, user)
+        mark_order_notifications_read(order, user)
         if next_status:
             send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
         
@@ -2405,7 +2419,7 @@ class CreateOrderView(APIView):
             if order_type == 'STAFF':
                 order.status = previous_status or get_status('Order Created')
                 order.save()
-                _mark_order_notifications_read(order, user)
+                mark_order_notifications_read(order, user)
                 log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
                 return Response({
                     'id': order.id,
@@ -2449,7 +2463,7 @@ class CreateOrderView(APIView):
                 order.status = next_status
             order.save()
 
-            _mark_order_notifications_read(order, user)
+            mark_order_notifications_read(order, user)
             if next_status:
                 send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
            
@@ -2876,6 +2890,7 @@ class BranchView(APIView):
         return Response(serializer.data)
 
 class UpdateOrderStatusView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, order_id):
         serializer = OrderStatusUpdateSerializer(data=request.data)
@@ -2932,7 +2947,7 @@ class UpdateOrderStatusView(APIView):
         if reason:
             order.reject_reason = reason
 
-        _mark_order_notifications_read(order, user)
+        mark_order_notifications_read(order, user)
 
 
         order.save()
@@ -3258,7 +3273,7 @@ class UpdateOrderStatusView(APIView):
         })
 
 class OrderLogsByOrderView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, order_id):
         order = get_object_or_404(Order, id=order_id)
@@ -3295,7 +3310,7 @@ class OrderLogsByOrderView(APIView):
         return Response(serializer.data)
 
 class OrderDetailsByOrderView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, order_id):
         order = get_object_or_404(
@@ -3308,7 +3323,7 @@ class OrderDetailsByOrderView(APIView):
         return Response(serializer.data)
 
 class OrdersByUserView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self,request, user_id):
         orders = (
@@ -3357,7 +3372,7 @@ def _close_or_create_status_log(order, action_status, user, remarks=''):
     )
 
 class ApproveOrderView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, order_id):
         try:
@@ -3376,7 +3391,7 @@ class ApproveOrderView(APIView):
         order.approved_at = datetime.now()
         order.save()
 
-        _mark_order_notifications_read(
+        mark_order_notifications_read(
             order,
             request.user if request.user.is_authenticated else None,
         )
@@ -3396,7 +3411,7 @@ class ApproveOrderView(APIView):
         })
 
 class RejectOrderView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, order_id):
         try:
@@ -3424,7 +3439,7 @@ class RejectOrderView(APIView):
         order.rejection_reason = reason
         order.save()
 
-        _mark_order_notifications_read(
+        mark_order_notifications_read(
             order,
             request.user if request.user.is_authenticated else None,
         )
@@ -3444,7 +3459,7 @@ class RejectOrderView(APIView):
         })
 
 class OrderListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     
     def get(self, request):
         status_filter = request.query_params.get('status', None)
@@ -3638,207 +3653,178 @@ def _order_rate_approval_payload(order):
         for approval in order.rate_approvals.select_related('approver').all()
     ]
 
-def _mark_order_notifications_read(order, user):
-    if not order or not user:
-        return
-    Notification.objects.filter(order=order, user=user, is_read=False).update(is_read=True)
+def _active_users_with_role(role_name, exclude_user=None):
+    """Return active users holding ``role_name`` (case-insensitive).
 
-
-def _create_notification(user, order, message):
-    if not user or not order or not message:
-        return
-    notification = Notification.objects.create(user=user, order=order, message=message)
-    print(
-        'Notification created:',
-        {
-            'notification_id': notification.id,
-            'user_id': user.id,
-            'order_id': order.id,
-            'message': message,
-        },
-    )
-    _send_push_notification(user, notification)
-
-
-def _send_push_notification(user, notification):
-    tokens = list(
-        PushToken.objects.filter(user=user, is_active=True)
-        .values_list('token', flat=True)
-        .distinct()
-    )
-    if not tokens:
-        print(
-            'Expo push skipped: no active tokens',
-            {
-                'user_id': user.id,
-                'notification_id': notification.id,
-            },
-        )
-        return
-
-    payload = [
-        {
-            'to': token,
-            'body': notification.message,
-            'sound': 'default',
-            'channelId': 'default',
-            'priority': 'high',
-            'data': {
-                'notification_id': notification.id,
-                'order_id': notification.order_id,
-                'screen': 'notifications',
-            },
-        }
-        for token in tokens
-        if token
-    ]
-    if not payload:
-        return
-
-    try:
-        response = requests.post(
-            'https://exp.host/--/api/v2/push/send',
-            json=payload,
-            headers={
-                'Accept': 'application/json',
-                'Accept-encoding': 'gzip, deflate',
-                'Content-Type': 'application/json',
-            },
-            timeout=10,
-        )
-        response_data = {}
-        try:
-            response_data = response.json()
-        except ValueError:
-            response_data = {'raw': response.text}
-
-        if response.status_code >= 400:
-            print('Expo push notification failed:', response.status_code, response_data)
-            return
-
-        ticket_errors = [
-            ticket
-            for ticket in response_data.get('data', [])
-            if ticket.get('status') != 'ok'
-        ]
-        if response_data.get('errors') or ticket_errors:
-            print(
-                'Expo push notification ticket errors:',
-                {
-                    'errors': response_data.get('errors', []),
-                    'ticket_errors': ticket_errors,
-                    'user_id': user.id,
-                    'notification_id': notification.id,
-                },
-            )
-            return
-
-        print(
-            'Expo push notification accepted:',
-            {
-                'user_id': user.id,
-                'notification_id': notification.id,
-                'token_count': len(tokens),
-                'tickets': response_data.get('data', []),
-            },
-        )
-    except requests.RequestException as error:
-        print('Expo push notification error:', error)
-
-
-
-def _notify_role(role_name, order, message, exclude_user=None):
+    Used to resolve role-scoped recipients (e.g. auditors) for the next
+    workflow action. This targets a specific role -- it is never a broadcast
+    to all users.
+    """
     users = User.objects.filter(role__name__iexact=role_name, is_active=True)
     if exclude_user:
         users = users.exclude(id=exclude_user.id)
-    for user in users:
-        _create_notification(user, order, message)
+    return list(users)
 
 
-def send_order_notifications(order, status_name, actor=None, previous_status=None):
+def _resolve_notification_recipients(order, status_name, actor, previous_status):
+    """Determine *who* should be notified for a status transition and *what*
+    message they should receive.
+
+    Returns a :class:`NotificationPlan` (recipients, message, title,
+    event_type, notification_type). ``recipients`` is a list of ``User``
+    objects -- always the exact user(s) responsible for the next action, never
+    a broadcast to all users. An empty plan (no recipients) means "notify no
+    one".
+
+    Business rule (Task 3): if a required recipient is missing due to
+    configuration, we log the issue and return no recipients rather than
+    falling back to notifying everyone -- this avoids leaking order details to
+    unrelated users.
+    """
     creator = order.created_by
     creator_name = _display_user_name(creator)
     actor_name = _display_user_name(actor)
     normalized_status = (status_name or "").strip().lower()
     previous_name = (getattr(previous_status, "name", "") or "").strip().lower()
 
+    _empty = NotificationPlan([], "", "", None, None)
+
+    # --- Forward transitions: notify the users owning the NEXT action --------
     if normalized_status in {"rate approval", "need approval"}:
-        assigned_approvers = _assigned_rate_approvers_for_order(
-            order,
-            status_filter="PENDING",
-            exclude_user=actor,
+        approvers = _assigned_rate_approvers_for_order(
+            order, status_filter="PENDING", exclude_user=actor
         )
-        if assigned_approvers:
-            for approver in assigned_approvers:
-                _create_notification(
-                    approver,
-                    order,
-                    f"Order {order.order_number} from {creator_name} needs your rate approval.",
-                )
-        else:
-            _notify_role(
-                "approver",
-                order,
-                f"Order {order.order_number} from {creator_name} needs rate approval.",
-                exclude_user=actor,
+        if not approvers:
+            logger.warning(
+                "Notification skipped: order %s reached '%s' with no assigned rate "
+                "approver. Not broadcasting to all approvers.",
+                order.order_number,
+                status_name,
             )
-        return
+            return _empty
+        return NotificationPlan(
+            approvers,
+            NotificationTemplates.rate_approval_needed(order.order_number, creator_name),
+            NotificationTemplates.TITLE_RATE_APPROVAL_REQUIRED,
+            NotificationEvents.RATE_APPROVAL_REQUESTED,
+            NotificationTypes.APPROVAL,
+        )
 
     if normalized_status in {"billing", "billing pending", "billing approval"}:
-        for billing_user in _billing_users_for_order(order, exclude_user=actor):
-            _create_notification(
-                billing_user,
-                order,
-                f"Order {order.order_number} from {creator_name} is ready for billing.",
+        billing_users = _billing_users_for_order(order, exclude_user=actor)
+        if not billing_users:
+            logger.warning(
+                "Notification skipped: no eligible billing user resolved for order %s.",
+                order.order_number,
             )
-        return
+            return _empty
+        return NotificationPlan(
+            billing_users,
+            NotificationTemplates.billing_ready(order.order_number, creator_name),
+            NotificationTemplates.TITLE_BILLING_REQUIRED,
+            NotificationEvents.BILLING_REQUESTED,
+            NotificationTypes.BILLING,
+        )
 
     if normalized_status == "auditor approval":
-        _notify_role(
-            "auditor",
-            order,
-            f"Order {order.order_number} from {creator_name} is ready for auditor review.",
-            exclude_user=actor,
+        auditors = _active_users_with_role("auditor", exclude_user=actor)
+        if not auditors:
+            logger.warning(
+                "Notification skipped: no active auditor configured for order %s.",
+                order.order_number,
+            )
+            return _empty
+        return NotificationPlan(
+            auditors,
+            NotificationTemplates.auditor_review(order.order_number, creator_name),
+            NotificationTemplates.TITLE_AUDITOR_REVIEW_REQUIRED,
+            NotificationEvents.AUDITOR_REVIEW_REQUESTED,
+            NotificationTypes.APPROVAL,
         )
-        return
 
-    if normalized_status == "billing rejected":
-        _create_notification(
-            creator,
-            order,
-            f"Order {order.order_number} was rejected by billing ({actor_name}). Please edit and resubmit.",
-        )
-        return
+    # --- Terminal transitions: notify the order creator ----------------------
+    if normalized_status in {"billing rejected", "rejected", "completed", "approved"}:
+        if not creator:
+            logger.warning(
+                "Notification skipped: order %s has no creator to notify for status '%s'.",
+                order.order_number,
+                status_name,
+            )
+            return _empty
 
-    if normalized_status == "rejected":
-        source = "auditor" if "auditor" in previous_name else "approver"
-        _create_notification(
-            creator,
-            order,
-            f"Order {order.order_number} was rejected by {source} ({actor_name}).",
+        if normalized_status == "billing rejected":
+            return NotificationPlan(
+                [creator],
+                NotificationTemplates.billing_rejected(order.order_number, actor_name),
+                NotificationTemplates.TITLE_ORDER_REJECTED,
+                NotificationEvents.ORDER_REJECTED,
+                NotificationTypes.REJECTION,
+            )
+        if normalized_status == "rejected":
+            source = "auditor" if "auditor" in previous_name else "approver"
+            return NotificationPlan(
+                [creator],
+                NotificationTemplates.order_rejected(order.order_number, source, actor_name),
+                NotificationTemplates.TITLE_ORDER_REJECTED,
+                NotificationEvents.ORDER_REJECTED,
+                NotificationTypes.REJECTION,
+            )
+        if normalized_status == "completed":
+            return NotificationPlan(
+                [creator],
+                NotificationTemplates.order_completed(order.order_number, actor_name),
+                NotificationTemplates.TITLE_ORDER_COMPLETED,
+                NotificationEvents.ORDER_COMPLETED,
+                NotificationTypes.COMPLETION,
+            )
+        # approved
+        return NotificationPlan(
+            [creator],
+            NotificationTemplates.order_approved(order.order_number, actor_name),
+            NotificationTemplates.TITLE_ORDER_APPROVED,
+            NotificationEvents.ORDER_APPROVED,
+            NotificationTypes.APPROVAL,
         )
-        return
 
-    if normalized_status == "completed":
-        _create_notification(
-            creator,
-            order,
-            f"Order {order.order_number} has been completed by auditor ({actor_name}).",
-        )
-        return
+    return _empty
 
-    if normalized_status == "approved":
-        _create_notification(
-            creator,
-            order,
-            f"Order {order.order_number} has been approved by {actor_name}.",
-        )
+
+def send_order_notifications(order, status_name, actor=None, previous_status=None):
+    """Route an order status transition to the exact user(s) responsible for
+    the next action.
+
+    Responsibilities are separated:
+      * recipient + message resolution -> ``_resolve_notification_recipients``
+      * persistence + Expo push        -> ``notifications.deliver_notification``
+
+    Recipients and message text are unchanged from Phase 1; the resolver now
+    additionally supplies structured push metadata (title/event_type/
+    notification_type) so mobile can deep-link from the payload (Task 3).
+    """
+    plan = _resolve_notification_recipients(
+        order, status_name, actor, previous_status
+    )
+    if not plan.recipients or not plan.message:
+        return
+    deliver_notification_to_many(
+        plan.recipients,
+        order,
+        plan.message,
+        event_type=plan.event_type,
+        notification_type=plan.notification_type,
+        title=plan.title,
+    )
 
 class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        notifications = Notification.objects.filter(user=request.user).order_by('-created_at')[:50]
+        notifications = (
+            Notification.objects
+            .filter(user=request.user)
+            .select_related('order')
+            .order_by('-created_at')[:50]
+        )
         serializer = NotificationSerializer(notifications, many=True)
         return Response(serializer.data)
 
@@ -3878,6 +3864,133 @@ class PushTokenView(APIView):
             },
         )
         return Response({'success': True, 'message': 'Push token registered'})
+
+    def delete(self, request):
+        """Deactivate the caller's push token (e.g. on logout).
+
+        Optional endpoint -- older app versions that never call it are
+        unaffected. Scoped to ``request.user`` so a client can only disable its
+        own token, and the row is retained (is_active=False) rather than
+        deleted so history/analytics stay intact.
+        """
+        token = (request.data.get('token') or request.data.get('push_token') or '').strip()
+        if not token:
+            return Response({'error': 'Push token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        deactivate_push_token(request.user, token)
+        return Response({'success': True, 'message': 'Push token deactivated'})
+
+
+class WebPushPublicKeyView(APIView):
+    """Expose the VAPID public (application server) key the browser needs to
+    create a Web Push subscription. The public key is not secret."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({'public_key': get_vapid_public_key()})
+
+
+class WebPushSubscriptionView(APIView):
+    """Register or remove a browser Web Push subscription for the caller.
+
+    Reuses the :class:`WebPushSubscription` model. Multiple browsers/devices per
+    user are supported (one row per endpoint). Never touches mobile tokens.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        subscription = request.data.get('subscription') or request.data
+        endpoint = (subscription.get('endpoint') or '').strip()
+        keys = subscription.get('keys') or {}
+        p256dh = (keys.get('p256dh') or '').strip()
+        auth = (keys.get('auth') or '').strip()
+
+        if not endpoint or not p256dh or not auth:
+            return Response(
+                {'error': 'endpoint, keys.p256dh and keys.auth are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_agent = (request.META.get('HTTP_USER_AGENT') or '')[:255]
+
+        # update_or_create on the unique endpoint prevents duplicates and
+        # re-homes an endpoint to the current user if it moved.
+        WebPushSubscription.objects.update_or_create(
+            endpoint=endpoint,
+            defaults={
+                'user': request.user,
+                'p256dh': p256dh,
+                'auth': auth,
+                'user_agent': user_agent,
+                'is_active': True,
+            },
+        )
+        return Response({'success': True, 'message': 'Web push subscription saved'})
+
+    def delete(self, request):
+        subscription = request.data.get('subscription') or request.data
+        endpoint = (subscription.get('endpoint') or '').strip()
+        if not endpoint:
+            return Response(
+                {'error': 'endpoint is required'}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        WebPushSubscription.objects.filter(
+            user=request.user, endpoint=endpoint
+        ).update(is_active=False)
+        return Response({'success': True, 'message': 'Web push subscription removed'})
+
+
+class NotificationHistoryView(APIView):
+    """Paginated notification history (Phase 3, Task 9).
+
+    Unlike the legacy list endpoint (latest 50, used by mobile), this returns
+    the full history with limit/offset pagination and an unread count so the
+    web UI can render Unread / Read / Today / Yesterday / Older groups and
+    infinite scroll. Read-state grouping by date is done client-side from
+    ``created_at``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get('limit', 20))
+        except (TypeError, ValueError):
+            limit = 20
+        try:
+            offset = int(request.query_params.get('offset', 0))
+        except (TypeError, ValueError):
+            offset = 0
+
+        limit = max(1, min(limit, 100))
+        offset = max(0, offset)
+
+        status_filter = (request.query_params.get('filter') or 'all').lower()
+
+        base = Notification.objects.filter(user=request.user).select_related('order')
+        if status_filter == 'unread':
+            base = base.filter(is_read=False)
+        elif status_filter == 'read':
+            base = base.filter(is_read=True)
+
+        total = base.count()
+        unread_count = Notification.objects.filter(
+            user=request.user, is_read=False
+        ).count()
+
+        page = base.order_by('-created_at')[offset:offset + limit]
+        serializer = NotificationSerializer(page, many=True)
+
+        next_offset = offset + limit if (offset + limit) < total else None
+        return Response({
+            'results': serializer.data,
+            'count': total,
+            'unread_count': unread_count,
+            'next_offset': next_offset,
+        })
 
 
 def _stock_check_number(value):
