@@ -601,6 +601,45 @@ class PushSalesQuotationView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
+class PushSalesOrderView(APIView):
+
+    def post(self, request):
+        order_id = request.data.get("order_id")
+
+        if not order_id:
+            return Response(
+                {"error": "order_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            order = Order.objects.get(id=order_id)
+
+            service = SyncService(triggered_by='manual')
+            sap_response = service.create_sales_order(order)
+            
+            return Response(
+                {
+                    "message": "Quotation created successfully",
+                    "sap_response": sap_response
+                },
+                status=status.HTTP_200_OK
+            )
+
+        except Order.DoesNotExist:
+            return Response(
+                {"error": "Order not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+
+            )
+
 class TestSalesQuotation(APIView):
     
     def post(self, request):
@@ -651,3 +690,42 @@ class GetPartyByCategoryView(APIView):
             'success': True,
             'data': serializer.data
         })
+
+
+
+
+class   ApproveSalesOrderAPIView(APIView):
+    """Approve an order and push to SAP"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        order_id = request.data.get('order_id')
+        
+        if not order_id:
+            return Response({
+                'success': False,
+                'message': 'order_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            service = SyncService(triggered_by=request.user.username)
+            order = Order.objects.get(id=order_id)
+            result = service.create_sales_order(order)
+            logger.info("Order %s approval result: %s", order_id, result)
+
+            return Response({
+                'success': True,
+                'message': 'Order approved and pushed to SAP successfully',
+                'data': result,
+                'errors': None
+            })
+        except Order.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Order not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({
+                'success': False,
+                'message': str(e),
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
