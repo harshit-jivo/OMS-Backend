@@ -44,7 +44,7 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240']
+ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
 
 # ALLOWED_HOSTS = ['*']
 # Application definition
@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     'rest_framework',
     # 'rest_framework.authtoken',
     # 'rest_framework.authto
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_apscheduler',
     # Local apps
@@ -156,7 +157,8 @@ SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
 SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
 
-
+# VAPID (Web Push) keys are configured lower down in this file — see the
+# "Web Push (VAPID)" section near the bottom.
 SAP_APPROVER_USER = config('SAP_APPROVER_USER')
 SAP_APPROVER_PASSWORD = config('SAP_APPROVER_PASSWORD') 
 
@@ -227,11 +229,37 @@ REST_FRAMEWORK = {
     ),
 }
 
-# JWT Settings
+# JWT Settings (SimpleJWT). Hardened for production while preserving the
+# existing API contract and token compatibility.
 SIMPLE_JWT = {
+    # Access lifetime kept at 1 day: the current web/mobile clients do NOT run
+    # a refresh flow, so shortening this would log active users out mid-session
+    # (a compatibility break). Shorten once clients adopt the /auth/refresh/
+    # endpoint added in this phase.
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+
+    # Rotation + blacklist: a refresh issues a new refresh token and the old
+    # one is blacklisted so it cannot be replayed.
     'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    # Stamp user.last_login on token issuance.
+    'UPDATE_LAST_LOGIN': True,
+
+    'ALGORITHM': 'HS256',
+    # Defaults to SECRET_KEY (so all EXISTING tokens stay valid). Override with
+    # a dedicated JWT_SIGNING_KEY in production via .env. Rotating this key
+    # invalidates every issued token, so only change it deliberately.
+    'SIGNING_KEY': config('JWT_SIGNING_KEY', default=SECRET_KEY),
+
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    # Small clock-skew tolerance for token exp/nbf validation.
+    'LEEWAY': 10,
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
@@ -297,3 +325,30 @@ EWB = {
     "GSTIN": config('EWB_GSTIN', default=EINV["GSTIN"]),
     "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
 }
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
+# --- Web Push (VAPID) -------------------------------------------------------
+# Keys for browser Web Push (Phase 3), loaded from .env via python-decouple
+# like the rest of this file. Only the WEB client uses these — React Native /
+# Expo push does NOT use VAPID.
+#
+#   VAPID_PUBLIC_KEY   application server key handed to the browser at
+#                      subscribe time (safe to expose; it ships to clients).
+#   VAPID_PRIVATE_KEY  raw base64url private key that signs the VAPID JWT.
+#                      SECRET — never commit the production value.
+#   VAPID_ADMIN_EMAIL  contact address sent to push services (a "mailto:"
+#                      prefix is added automatically if you omit it).
+#
+# The defaults below are DEV-ONLY throwaway keys so the app works out of the
+# box locally. Generate a real pair with `python manage.py generate_vapid_keys`
+# and set all three in .env for staging/production.
+#
+# The trailing `or <default>` also covers a .env that has the key present but
+# BLANK (e.g. `VAPID_PUBLIC_KEY=`), which python-decouple returns as '' — we
+# still fall back to the working dev key rather than a broken empty value.
+_DEV_VAPID_PUBLIC_KEY = "BP2Qud4yZDHMSxq31u0i47Dm0MkDeScBDBBbkEoSFvdrYLk3ZRmYXIgZE0sZQuDBRIeNSdpMN5FAzt1DQJyo80Q"
+_DEV_VAPID_PRIVATE_KEY = "pCo0fEKbYRCaOCEtlZ4CeH7aQaVx10687SzURg8BUo8"
+
+VAPID_PUBLIC_KEY = config("VAPID_PUBLIC_KEY", default="").strip() or _DEV_VAPID_PUBLIC_KEY
+VAPID_PRIVATE_KEY = config("VAPID_PRIVATE_KEY", default="").strip() or _DEV_VAPID_PRIVATE_KEY
+VAPID_ADMIN_EMAIL = config("VAPID_ADMIN_EMAIL", default="").strip() or "admin@oms.local"

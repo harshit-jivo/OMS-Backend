@@ -313,6 +313,14 @@ class Notification(models.Model):
     class Meta:
         db_table = 'notifications'
         ordering = ['-created_at']
+        indexes = [
+            # Notification list is polled frequently and filters by recipient
+            # ordered by recency (NotificationListView).
+            models.Index(fields=['user', '-created_at'], name='notif_user_created_idx'),
+            # Unread-count / mark-as-read queries filter by recipient + is_read.
+            models.Index(fields=['user', 'is_read'], name='notif_user_isread_idx'),
+        ]
+
     def __str__(self):
          return f"Notification for {self.user.username}: {self.message}"
 
@@ -328,9 +336,47 @@ class PushToken(models.Model):
     class Meta:
         db_table = 'push_tokens'
         ordering = ['-updated_at']
+        indexes = [
+            # Push delivery resolves a user's active tokens on every send.
+            models.Index(fields=['user', 'is_active'], name='pushtoken_user_active_idx'),
+        ]
 
     def __str__(self):
         return f"{self.user.username}: {self.platform}"
+
+
+class WebPushSubscription(models.Model):
+    """A browser Web Push subscription (Phase 3).
+
+    Separate from :class:`PushToken` (Expo/mobile) so that web push work never
+    touches the mobile token flow. One user can have many subscriptions (one
+    per browser/device). ``endpoint`` is the unique push-service URL; ``p256dh``
+    and ``auth`` are the encryption keys the browser hands us at subscribe time.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='web_push_subscriptions'
+    )
+    # Push endpoints can be long (FCM/Mozilla/WNS); TextField + unique index.
+    endpoint = models.TextField(unique=True)
+    p256dh = models.CharField(max_length=255)
+    auth = models.CharField(max_length=255)
+    user_agent = models.CharField(max_length=255, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'web_push_subscriptions'
+        ordering = ['-updated_at']
+        indexes = [
+            # Delivery resolves a user's active subscriptions on every send.
+            models.Index(fields=['user', 'is_active'], name='webpush_user_active_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: web ({self.endpoint[:32]}...)"
+
 
 class StaffProductPrice(models.Model):
     product = models.ForeignKey(

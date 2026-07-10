@@ -227,6 +227,15 @@ class User(AbstractUser):
         related_name='users'
     )
 
+    # All categories assigned to the user. The single `category` FK above is kept
+    # as the primary category (always the first selected category) for backward
+    # compatibility; `categories` is the full set used for data scoping.
+    categories = models.ManyToManyField(
+        'orders.Categories',
+        blank=True,
+        related_name='m2m_users'
+    )
+
     # Sub group(s) assigned to the user (comma separated). Used for product
     # scoping and rate-approver matching.
     sub_group = models.TextField(blank=True, null=True)

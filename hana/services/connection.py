@@ -195,13 +195,13 @@ class Queries():
     
        
     @staticmethod
-    def get_quotation_status(doc_entries):
+    def get_quotation_status(doc_entries, company_db=None):
         """Status of one or more Sales Quotations (OQUT) by DocEntry.
 
         Returns DocStatus ('O' = open, 'C' = closed) and CANCELED ('Y'/'N') so
         the caller can decide whether a quotation is still open / cancellable.
         """
-        s = Queries.SCHEMA
+        s = str(company_db or Queries.SCHEMA).strip().replace('"', '""')
         safe_entries = [str(int(entry)) for entry in doc_entries]
         if not safe_entries:
             return None
@@ -511,4 +511,3 @@ class Queries():
     """
 
 
-    
