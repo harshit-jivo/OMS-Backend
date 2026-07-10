@@ -835,6 +835,8 @@ class SyncService:
                         "ItemCode": scheme_item_code,
                         "Quantity": scheme_qty,
                         "UnitPrice": 0.0,
+                        "U_SchemeAgst": sub_group,
+                        "CostingCode" : sub_group
                     
                     }
                     if warehouse_code:
