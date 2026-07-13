@@ -45,12 +45,18 @@ class UserSerializer(serializers.ModelSerializer):
     role = serializers.CharField(source='role.name', read_only=True)
     role_display = serializers.CharField(source='role.display_name', default= None, read_only=True)
     is_active = serializers.BooleanField(read_only=True)
+    # Read-only account flags/timestamps surfaced on the mobile Profile screen.
+    # Kept read_only so they can never be set through this serializer.
+    is_superuser = serializers.BooleanField(read_only=True)
+    is_staff = serializers.BooleanField(read_only=True)
+    last_login = serializers.DateTimeField(read_only=True)
+    date_joined = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'password', 'extra_pages', 'created_at'
+            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'password', 'extra_pages', 'created_at'
         ]
 
     def get_company(self, obj):

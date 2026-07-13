@@ -152,15 +152,30 @@ class OrdersLogSerializer(serializers.ModelSerializer):
         return self._action_name(obj)
 
     def get_remarks(self, obj):
+        raw = self._raw_remarks(obj)
         if self._is_billing_acceptance(obj):
-            return "Accepted by billing"
+            # Preserve a real comment the billing user typed; only fall back to
+            # the generic "Accepted by billing" label when they approved with no
+            # note (otherwise the typed remark is lost and never shown).
+            auto_billing = {
+                "",
+                "approved",
+                "accepted",
+                "billing",
+                "accepted by billing",
+                "approved by billing",
+                "sent to auditor",
+            }
+            if raw.strip().lower() in auto_billing:
+                return "Accepted by billing"
+            return raw
         if (
             self._action_name(obj).lower() == "completed"
             and self._performed_by_role(obj) == "auditor"
-            and not self._raw_remarks(obj)
+            and not raw
         ):
             return "Sales quotation created by auditor"
-        return self._raw_remarks(obj)
+        return raw
    
     class Meta:
         model = OrdersLog
