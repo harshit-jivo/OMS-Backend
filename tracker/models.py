@@ -179,7 +179,7 @@ class Invoice(models.Model):
     # vendor dropdown. Free-text party_name is still allowed if not in SAP.
     party_code = models.CharField(max_length=50, blank=True, default='')   # OCRD CardCode
     party_gstin = models.CharField(max_length=20, blank=True, default='')
-    invoice_number = models.CharField(max_length=100)
+    invoice_number = models.CharField(max_length=100, unique=True)
     taxable_value = models.DecimalField(max_digits=15, decimal_places=2)
     gst_type = models.ForeignKey(GstType, on_delete=models.PROTECT, related_name='invoices')
     gst_rate = models.ForeignKey(GstRate, on_delete=models.PROTECT, related_name='invoices')
@@ -233,6 +233,8 @@ class Invoice(models.Model):
         return (taxable * rate / Decimal('100')).quantize(Decimal('0.01'))
 
     def save(self, *args, **kwargs):
+        # Keep invoice numbers clean so uniqueness isn't defeated by stray spaces.
+        self.invoice_number = (self.invoice_number or '').strip()
         # Invoice value is always derived: taxable + GST amount + additional charge.
         taxable = self.taxable_value or Decimal('0')
         add = self.additional_charge_amount or Decimal('0')
