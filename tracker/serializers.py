@@ -90,6 +90,21 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
     """Only the entry-stage fields are writable. Flow state is engine-managed.
     `invoice_value` is NOT accepted — it is always derived on the server as
     taxable + GST amount + additional charge."""
+    # Declared explicitly so our own (case-insensitive) uniqueness check runs
+    # instead of the default validator.
+    invoice_number = serializers.CharField(max_length=100)
+
+    def validate_invoice_number(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Invoice number is required.')
+        qs = Invoice.objects.filter(invoice_number__iexact=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('This invoice number already exists.')
+        return value
+
     class Meta:
         model = Invoice
         fields = [
