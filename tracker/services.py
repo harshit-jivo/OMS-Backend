@@ -278,7 +278,11 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
     invoice.current_stage = target
     invoice.current_stage_entered_at = now
     if stage.code == 'entry':
-        invoice.is_locked = True  # first handoff locks entry edits forever
+        invoice.is_locked = True   # advancing out of entry locks edits
+    elif target.code == 'entry':
+        # Returned all the way back to the Head Office / entry desk — let the
+        # entry user edit it again before re-submitting.
+        invoice.is_locked = False
     if target.is_terminal:
         # Ensure a payment row exists to fill in at the terminal stage.
         PaymentDetail.objects.get_or_create(invoice=invoice)
