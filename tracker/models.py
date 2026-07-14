@@ -17,6 +17,8 @@ Every timeline figure (days at a stage, ageing, bottleneck reports, the
 `current_stage_entered_at` pointer. No date is ever typed by hand after the
 invoice is created.
 """
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
 
@@ -165,13 +167,28 @@ class Invoice(models.Model):
         IN_PROGRESS = 'IN_PROGRESS', 'In Progress'
         COMPLETED = 'COMPLETED', 'Completed'
 
+    class AdditionalCharge(models.TextChoices):
+        DEMURRAGE = 'DEMURRAGE', 'Demurrage'
+        LABOUR_COST = 'LABOUR_COST', 'Labour Cost'
+        POINT_VALUE = 'POINT_VALUE', 'Point Value'
+
     # --- Entry-stage fields (filled by the creator at Stage 1) ---
     invoice_date = models.DateField()
     party_name = models.CharField(max_length=255)
+    # SAP vendor (business partner) reference, filled when picked from the SAP
+    # vendor dropdown. Free-text party_name is still allowed if not in SAP.
+    party_code = models.CharField(max_length=50, blank=True, default='')   # OCRD CardCode
+    party_gstin = models.CharField(max_length=20, blank=True, default='')
     invoice_number = models.CharField(max_length=100)
     taxable_value = models.DecimalField(max_digits=15, decimal_places=2)
     gst_type = models.ForeignKey(GstType, on_delete=models.PROTECT, related_name='invoices')
     gst_rate = models.ForeignKey(GstRate, on_delete=models.PROTECT, related_name='invoices')
+    # Optional additional charge (one type + amount) added on top of taxable+GST.
+    additional_charge_type = models.CharField(
+        max_length=20, choices=AdditionalCharge.choices, blank=True, default='')
+    additional_charge_amount = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
+    # Always derived on save: taxable + GST amount + additional charge.
     invoice_value = models.DecimalField(max_digits=15, decimal_places=2)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='invoices')
     unit = models.ForeignKey(Unit, on_delete=models.PROTECT, related_name='invoices')
@@ -208,6 +225,20 @@ class Invoice(models.Model):
             models.Index(fields=['party_name']),
         ]
 
+    @property
+    def gst_amount(self):
+        """GST value = taxable × rate%. Derived, not stored."""
+        rate = self.gst_rate.rate if self.gst_rate_id else Decimal('0')
+        taxable = self.taxable_value or Decimal('0')
+        return (taxable * rate / Decimal('100')).quantize(Decimal('0.01'))
+
+    def save(self, *args, **kwargs):
+        # Invoice value is always derived: taxable + GST amount + additional charge.
+        taxable = self.taxable_value or Decimal('0')
+        add = self.additional_charge_amount or Decimal('0')
+        self.invoice_value = (taxable + self.gst_amount + add).quantize(Decimal('0.01'))
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f'{self.invoice_number} — {self.party_name}'
 
@@ -225,6 +256,10 @@ class StageEvent(models.Model):
         ON_TIME = 'ON_TIME', 'On time'
         LATE = 'LATE', 'Late received (After 6 PM)'
 
+    class HoldType(models.TextChoices):
+        FULL = 'FULL', 'Full hold (work on it later)'
+        PARTIAL = 'PARTIAL', 'Partial hold (portion of value)'
+
     invoice = models.ForeignKey(
         Invoice, on_delete=models.CASCADE, related_name='events',
     )
@@ -235,6 +270,13 @@ class StageEvent(models.Model):
     # (e.g. OK / HOLD / DEBIT / RETURN / APPROVED / REJECTED). Blank where the
     # stage has no status list.
     stage_status = models.CharField(max_length=30, blank=True, default='')
+    # For a HOLD: whether it's a full hold (invoice stays) or a partial hold
+    # (a portion of the value is withheld and the invoice advances).
+    hold_type = models.CharField(
+        max_length=10, choices=HoldType.choices, blank=True, default='')
+    # Amount withheld (partial hold) or debited (DEBIT status).
+    amount = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True)
     receiving_note = models.CharField(
         max_length=10, choices=ReceivingNote.choices, blank=True, default='',
     )
