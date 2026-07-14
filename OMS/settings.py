@@ -73,6 +73,8 @@ INSTALLED_APPS = [
     'invoice',
     'legal',
     'audit',
+    # Document (invoice) tracker — self-contained, no FKs into OMS models
+    'tracker',
 ]
 
 MIDDLEWARE = [
