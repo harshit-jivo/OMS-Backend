@@ -2,7 +2,8 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from rest_framework import status as http
 from .permissions import (
-    IsTrackerAlerts, IsTrackerEntry, IsTrackerReports, IsTrackerUser,
+    IsTrackerAdmin, IsTrackerAlerts, IsTrackerEntry, IsTrackerReports,
+    IsTrackerUser,
 )
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,6 +20,22 @@ from .serializers import (
     InvoiceWriteSerializer, PaymentDetailSerializer, StageSerializer,
     StuckAlertSerializer, UnitSerializer,
 )
+
+
+class VendorsView(APIView):
+    """SAP vendors for the entry form's searchable party dropdown (fast,
+    cached, direct HANA query)."""
+    permission_classes = [IsTrackerEntry]
+
+    def get(self, request):
+        from .sap import fetch_vendors
+        force = request.query_params.get('refresh') == '1'
+        try:
+            return Response(fetch_vendors(force_refresh=force))
+        except Exception as exc:
+            return Response(
+                {'detail': f'Could not fetch vendors from SAP: {exc}'},
+                status=http.HTTP_502_BAD_GATEWAY)
 
 
 class LookupsView(APIView):
@@ -237,10 +254,13 @@ class BulkActionView(APIView):
         action = request.data.get('action')            # ADVANCE | RETURN (optional)
         stage_status = request.data.get('stage_status', '')
         remarks = request.data.get('remarks', '')
+        hold_type = request.data.get('hold_type', '')  # FULL | PARTIAL (HOLD only)
+        amount = request.data.get('amount')            # hold / debit amount
         try:
             processed, errors = services.apply_bulk(
                 invoice_ids=ids, user=request.user, action=action,
                 stage_status=stage_status, remarks=remarks,
+                hold_type=hold_type, amount=amount,
             )
         except (ValidationError, PermissionDenied) as exc:
             return Response(
@@ -251,6 +271,58 @@ class BulkActionView(APIView):
             'errors': errors,
             'processed_count': len(processed),
         }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
+
+
+class AdminInvoicesView(APIView):
+    """Master list of EVERY invoice for the tracker admin, with filters.
+
+    Completed invoices and overdue (past-threshold) invoices are flagged so the
+    UI can fade the former and highlight the latter. Supports filters: stage,
+    status, overdue, party, invoice_number, category, branch, unit.
+    """
+    permission_classes = [IsTrackerAdmin]
+
+    def get(self, request):
+        qs = Invoice.objects.select_related(
+            'current_stage', 'gst_type', 'gst_rate', 'category',
+            'unit', 'branch', 'mode', 'created_by',
+        )
+        qs = _apply_filters(qs, request.query_params)
+        data = InvoiceListSerializer(qs, many=True, context={'request': request}).data
+        overdue = request.query_params.get('overdue')
+        if overdue == 'true':
+            data = [d for d in data if d['is_overdue']]
+        elif overdue == 'false':
+            data = [d for d in data if not d['is_overdue']]
+        return Response(data)
+
+
+class AdminInvoicesExportView(APIView):
+    """Excel export of every invoice in the office's original sheet layout,
+    honouring the same filters as the All-Invoices list."""
+    permission_classes = [IsTrackerAdmin]
+
+    def get(self, request):
+        from django.http import HttpResponse
+        from .exports import build_workbook
+        qs = Invoice.objects.select_related(
+            'current_stage', 'gst_type', 'gst_rate', 'category',
+            'unit', 'branch', 'mode', 'payment',
+        ).prefetch_related('events__stage')
+        qs = _apply_filters(qs, request.query_params)
+        invoices = list(qs)
+        overdue = request.query_params.get('overdue')
+        if overdue in ('true', 'false'):
+            want = overdue == 'true'
+            invoices = [i for i in invoices if services.is_overdue(i) == want]
+
+        buf = build_workbook(invoices)
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp['Content-Disposition'] = 'attachment; filename="invoice-register.xlsx"'
+        return resp
 
 
 class ReportsView(APIView):

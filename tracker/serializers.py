@@ -68,8 +68,8 @@ class StageEventSerializer(serializers.ModelSerializer):
         model = StageEvent
         fields = [
             'id', 'stage', 'stage_name', 'stage_code', 'event_type',
-            'stage_status', 'receiving_note', 'remarks', 'acted_by',
-            'acted_by_name', 'entered_at', 'exited_at', 'days_spent',
+            'stage_status', 'hold_type', 'amount', 'receiving_note', 'remarks',
+            'acted_by', 'acted_by_name', 'entered_at', 'exited_at', 'days_spent',
         ]
 
 
@@ -87,13 +87,16 @@ class PaymentDetailSerializer(serializers.ModelSerializer):
 # Invoice — write (entry stage) and read
 # ---------------------------------------------------------------------------
 class InvoiceWriteSerializer(serializers.ModelSerializer):
-    """Only the entry-stage fields are writable. Flow state is engine-managed."""
+    """Only the entry-stage fields are writable. Flow state is engine-managed.
+    `invoice_value` is NOT accepted — it is always derived on the server as
+    taxable + GST amount + additional charge."""
     class Meta:
         model = Invoice
         fields = [
-            'invoice_date', 'party_name', 'invoice_number', 'taxable_value',
-            'gst_type', 'gst_rate', 'invoice_value', 'category', 'unit',
-            'branch', 'mode',
+            'invoice_date', 'party_name', 'party_code', 'party_gstin',
+            'invoice_number', 'taxable_value', 'gst_type', 'gst_rate',
+            'additional_charge_type', 'additional_charge_amount',
+            'category', 'unit', 'branch', 'mode',
         ]
 
 
@@ -107,6 +110,9 @@ class InvoiceListSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     mode_name = serializers.CharField(source='mode.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    additional_charge_type_display = serializers.CharField(
+        source='get_additional_charge_type_display', read_only=True)
+    gst_amount = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
 
     days_at_stage = serializers.SerializerMethodField()
     is_overdue = serializers.SerializerMethodField()
@@ -115,9 +121,12 @@ class InvoiceListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'id', 'invoice_date', 'party_name', 'invoice_number',
+            'id', 'invoice_date', 'party_name', 'party_code', 'party_gstin',
+            'invoice_number',
             'taxable_value', 'gst_type', 'gst_type_name', 'gst_rate',
-            'gst_rate_label', 'invoice_value', 'category', 'category_name',
+            'gst_rate_label', 'gst_amount', 'additional_charge_type',
+            'additional_charge_type_display', 'additional_charge_amount',
+            'invoice_value', 'category', 'category_name',
             'unit', 'unit_name', 'branch', 'branch_name', 'mode', 'mode_name',
             'current_stage', 'current_stage_code', 'current_stage_name',
             'status', 'current_stage_entered_at', 'is_locked',

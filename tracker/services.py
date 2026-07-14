@@ -26,6 +26,12 @@ HOLD_STATUSES = {'HOLD'}
 # Statuses that require a written reason.
 REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 
+# Stages that only apply to certain invoices. Bilty/GRPO is a Transport-only
+# desk — non-Transport invoices skip it and go straight to Pre-Audit.
+TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
+# Category names (normalised) that don't require a hold amount on a partial hold.
+NO_HOLD_AMOUNT_CATEGORIES = {'rm-pm', 'pm-pm', 'pm/pm'}
+
 
 # ---------------------------------------------------------------------------
 # Permission helpers
@@ -74,8 +80,35 @@ def is_overdue(invoice, now=None):
     return days_at_stage(invoice, now) > Decimal(invoice.current_stage.threshold_days)
 
 
-def _adjacent_stage(stage, step):
-    return Stage.objects.filter(order=stage.order + step, is_active=True).first()
+def _category_name(invoice):
+    return (getattr(invoice.category, 'name', '') or '').strip().lower()
+
+
+def _is_transport(invoice):
+    return _category_name(invoice) == 'transport'
+
+
+def stage_route(invoice):
+    """The ordered stages this invoice actually travels through.
+
+    Non-Transport invoices skip the Bilty/GRPO desk and go Entry -> Pre-Audit.
+    """
+    stages = list(Stage.objects.filter(is_active=True).order_by('order'))
+    if _is_transport(invoice):
+        return stages
+    return [s for s in stages if s.code not in TRANSPORT_ONLY_STAGE_CODES]
+
+
+def _route_neighbour(invoice, step):
+    """Next (+1) or previous (-1) stage along this invoice's route."""
+    route = stage_route(invoice)
+    codes = [s.code for s in route]
+    try:
+        idx = codes.index(invoice.current_stage.code)
+    except ValueError:
+        return None
+    nxt = idx + step
+    return route[nxt] if 0 <= nxt < len(route) else None
 
 
 def _open_event(invoice):
@@ -115,9 +148,18 @@ def create_invoice(*, created_by, **fields):
 # ---------------------------------------------------------------------------
 # The single disposition entry point (used for bulk too)
 # ---------------------------------------------------------------------------
-def _validate_disposition(invoice, user, stage_status, remarks):
+def _parse_amount(value):
+    if value in (None, '', 'null'):
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        raise ValidationError('Amount must be a number.')
+
+
+def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amount):
     """Shared validation; raises ValidationError / PermissionDenied. Returns
-    the resolved movement kind: 'ADVANCE' | 'RETURN' | 'HOLD'."""
+    (kind, status, hold_type, amount) where kind is ADVANCE | RETURN | HOLD."""
     stage = invoice.current_stage
 
     if not can_act(user, invoice):
@@ -128,6 +170,7 @@ def _validate_disposition(invoice, user, stage_status, remarks):
         raise ValidationError('Invoice is already completed.')
 
     status = (stage_status or '').strip().upper()
+    hold_type = (hold_type or '').strip().upper()
     if stage.requires_status:
         allowed = {s.upper() for s in stage.status_choices}
         if status not in allowed:
@@ -136,11 +179,27 @@ def _validate_disposition(invoice, user, stage_status, remarks):
                 f'{sorted(stage.status_choices)}.'
             )
 
+    positive = amount is not None and amount > 0
+
     # Resolve what kind of movement this is.
     if status in RETURN_STATUSES:
         kind = 'RETURN'
-    elif status in HOLD_STATUSES:
-        kind = 'HOLD'
+    elif status == 'HOLD':
+        if hold_type == 'PARTIAL':
+            # A portion of the value is withheld and the invoice advances. The
+            # amount is mandatory except for RM-PM style categories.
+            if not positive and _category_name(invoice) not in NO_HOLD_AMOUNT_CATEGORIES:
+                raise ValidationError(
+                    'A partial hold needs a hold amount before it can advance.')
+            kind = 'ADVANCE'
+        else:
+            # Full hold: the invoice stays put until worked on later.
+            hold_type = 'FULL'
+            kind = 'HOLD'
+    elif status == 'DEBIT':
+        if not positive:
+            raise ValidationError('A debit needs an amount before it can advance.')
+        kind = 'ADVANCE'
     else:
         kind = 'ADVANCE'
 
@@ -154,19 +213,24 @@ def _validate_disposition(invoice, user, stage_status, remarks):
     if needs_reason and not (remarks or '').strip():
         raise ValidationError('Remarks are mandatory for this action.')
 
-    return kind, status
+    return kind, status, hold_type, (amount if positive else None)
 
 
 @transaction.atomic
-def apply_action(*, invoice, user, action=None, stage_status='', remarks=''):
+def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
+                 hold_type='', amount=None):
     """Advance / return / hold a single invoice, enforcing all stage rules.
 
     `action` may be given explicitly ('ADVANCE' | 'RETURN') or left blank and
-    inferred from `stage_status` (OK->advance, RETURN/REJECTED->return,
-    HOLD->hold). Returns the (possibly moved) invoice.
+    inferred from `stage_status`. HOLD splits into a full hold (invoice stays)
+    and a partial hold (amount withheld, invoice advances). DEBIT requires an
+    amount and then advances. Returns the (possibly moved) invoice.
     """
-    invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
-    kind, status = _validate_disposition(invoice, user, stage_status, remarks)
+    invoice = Invoice.objects.select_for_update().select_related(
+        'current_stage', 'category').get(pk=invoice.pk)
+    amount = _parse_amount(amount)
+    kind, status, hold_type, amount = _validate_disposition(
+        invoice, user, stage_status, remarks, hold_type, amount)
 
     # An explicit RETURN action overrides an advance-looking status.
     if (action or '').upper() == 'RETURN':
@@ -186,13 +250,13 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks=''):
         StageEvent.objects.create(
             invoice=invoice, stage=stage,
             event_type=StageEvent.EventType.RECEIVE,
-            stage_status=status, remarks=remarks, acted_by=user,
-            entered_at=invoice.current_stage_entered_at,
+            stage_status=status, hold_type=hold_type, remarks=remarks,
+            acted_by=user, entered_at=invoice.current_stage_entered_at,
         )
         return invoice
 
     # ADVANCE or RETURN both close the current visit.
-    target = _adjacent_stage(stage, +1 if kind == 'ADVANCE' else -1)
+    target = _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1)
     if target is None:
         raise ValidationError('No adjacent stage to move to.')
 
@@ -202,6 +266,8 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks=''):
             else StageEvent.EventType.RETURN
         )
         visit.stage_status = status
+        visit.hold_type = hold_type
+        visit.amount = amount
         visit.remarks = remarks
         visit.acted_by = user
         visit.exited_at = now
@@ -230,7 +296,8 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks=''):
     return invoice
 
 
-def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks=''):
+def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',
+               hold_type='', amount=None):
     """Apply the same action to many invoices. All must sit at the same stage.
     Returns (processed, errors) where errors is a list of {id, error}."""
     invoices = list(
@@ -251,6 +318,7 @@ def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks=''):
             apply_action(
                 invoice=inv, user=user, action=action,
                 stage_status=stage_status, remarks=remarks,
+                hold_type=hold_type, amount=amount,
             )
             processed.append(inv.pk)
         except (ValidationError, PermissionDenied) as exc:

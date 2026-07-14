@@ -6,12 +6,12 @@ change who sees what you change a user's role, never page code.
 
 Three tracker sub-roles:
 
-  * tracker_admin  -> all tracker pages EXCEPT Invoice Entry
-  * tracker_entry  -> Invoice Entry + My Stage Queue + Stuck Alerts
-  * tracker_user   -> My Stage Queue + Stuck Alerts
+  * tracker_admin  -> ALL tracker pages (incl. Invoice Entry + Stuck Alerts)
+  * tracker_entry  -> Invoice Entry + My Stage Queue
+  * tracker_user   -> My Stage Queue
 
-Superusers and the OMS 'admin' role see every tracker page. Non-tracker OMS
-users see none of them.
+Stuck Alerts is admin-only. Superusers and the OMS 'admin' role see every
+tracker page. Non-tracker OMS users see none of them.
 """
 from rest_framework.permissions import BasePermission
 
@@ -21,14 +21,18 @@ PAGE_QUEUE = 'Tracker_Queue'
 PAGE_ALERTS = 'Tracker_Alerts'
 PAGE_REPORTS = 'Tracker_Reports'
 PAGE_ADMIN = 'Tracker_Admin'
+PAGE_INVOICES = 'Tracker_Invoices'  # admin master list of every invoice
 
-ALL_TRACKER_PAGES = {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS, PAGE_ADMIN}
+ALL_TRACKER_PAGES = {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS,
+                     PAGE_ADMIN, PAGE_INVOICES}
 
 # The single source of truth: tracker sub-role -> visible pages.
+# Stuck Alerts and the all-invoices list are admin-only.
 ROLE_PAGE_MAP = {
-    'tracker_admin': {PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS, PAGE_ADMIN},
-    'tracker_entry': {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS},
-    'tracker_user': {PAGE_QUEUE, PAGE_ALERTS},
+    'tracker_admin': {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS,
+                      PAGE_ADMIN, PAGE_INVOICES},
+    'tracker_entry': {PAGE_ENTRY, PAGE_QUEUE},
+    'tracker_user': {PAGE_QUEUE},
 }
 
 
