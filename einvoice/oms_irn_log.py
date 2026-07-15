@@ -1,0 +1,130 @@
+"""
+Write IRN-generation data into the HANA OMS_IRN_LOG table — same column shape as
+the SAP add-on's @UTL_MDEXTH (Marketing Extension Header).
+
+One row per IRN attempt: success ('S') or failure ('F'); a cancellation updates
+the row in place. DocEntry is an auto-increment identity, so we never supply it.
+Everything here is best-effort — a failure is logged and never breaks the IRN flow.
+
+Gated by settings.EINV_MIRROR_HANA (the caller checks it). Targets the company DB
+schema (settings.HANA_COMPANY_DB) unless a schema is passed.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+TABLE = "OMS_IRN_LOG"
+OBJECT = "OMS_IRN"        # marker so OMS rows are distinguishable from the add-on's
+CREATOR = "OMS"
+# NIC document type -> SAP object type (as stored in U_UTL_DocType).
+_DOCTYPE = {"INV": "13", "CRN": "14", "DBN": "14"}
+
+
+def _schema(schema):
+    return schema or getattr(settings, "HANA_COMPANY_DB", "")
+
+
+def _int_or_none(v):
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _insert(schema, cols: dict):
+    from hana.services.connection import HANAConnection
+
+    keys = list(cols.keys())
+    collist = ", ".join(f'"{k}"' for k in keys)
+    placeholders = ", ".join(["?"] * len(keys))
+    sql = f'INSERT INTO "{schema}"."{TABLE}" ({collist}) VALUES ({placeholders})'
+    with HANAConnection() as conn:
+        conn.execute(sql, [cols[k] for k in keys])
+
+
+def write_success(record, *, docentry=None, qr_path=None, schema=None) -> bool:
+    """Insert an 'S' (success) row from a generated IrnRecord."""
+    schema = _schema(schema)
+    if not schema:
+        logger.warning("OMS_IRN_LOG skipped: no schema/company DB configured")
+        return False
+    now = datetime.now()
+    cols = {
+        "DocNum": _int_or_none(record.doc_no),
+        "Object": OBJECT,
+        "Canceled": "N",
+        "Status": "O",
+        "CreateDate": now,
+        "CreateTime": now.hour * 100 + now.minute,
+        "Creator": CREATOR,
+        "U_UTL_QRPT": qr_path,
+        "U_UTL_QRST": record.signed_qr_code,
+        "U_UTL_IRN": record.irn,
+        "U_UTL_IST": "S",
+        "U_UTL_IRNGENDT": now,
+        "U_UTL_GenrTime": now.strftime("%H:%M:%S"),
+        "U_UTL_DocType": _DOCTYPE.get((record.doc_type or "").upper()),
+        "U_UTL_BaseEntry": str(docentry) if docentry is not None else None,
+        "U_UTL_AckNo": record.ack_no or None,
+    }
+    try:
+        _insert(schema, cols)
+        logger.info("OMS_IRN_LOG: S row for IRN %s (doc %s)", (record.irn or "")[:12], record.doc_no)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("OMS_IRN_LOG: failed to write S row for doc %s", record.doc_no)
+        return False
+
+
+def write_failure(*, docentry=None, doc_no=None, doc_type=None, error="", schema=None) -> bool:
+    """Insert an 'F' (failed) row for an attempt that did not produce an IRN."""
+    schema = _schema(schema)
+    if not schema:
+        return False
+    now = datetime.now()
+    cols = {
+        "DocNum": _int_or_none(doc_no),
+        "Object": OBJECT,
+        "Canceled": "N",
+        "Status": "O",
+        "CreateDate": now,
+        "CreateTime": now.hour * 100 + now.minute,
+        "Creator": CREATOR,
+        "U_UTL_IST": "F",
+        "U_UTL_RMK": (error or "")[:100000],
+        "U_UTL_IRNGENDT": now,
+        "U_UTL_GenrTime": now.strftime("%H:%M:%S"),
+        "U_UTL_DocType": _DOCTYPE.get((doc_type or "").upper()) if doc_type else None,
+        "U_UTL_BaseEntry": str(docentry) if docentry is not None else None,
+    }
+    try:
+        _insert(schema, cols)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("OMS_IRN_LOG: failed to write F row for doc %s", doc_no)
+        return False
+
+
+def mark_cancelled(irn, *, schema=None) -> bool:
+    """Stamp the row for `irn` as cancelled (Canceled='Y' + cancel date/time)."""
+    from hana.services.connection import HANAConnection
+
+    schema = _schema(schema)
+    if not schema or not irn:
+        return False
+    now = datetime.now()
+    sql = (f'UPDATE "{schema}"."{TABLE}" SET "Canceled" = ?, "UpdateDate" = ?, '
+           f'"U_UTL_CANDT" = ?, "U_UTL_CancelTime" = ? WHERE "U_UTL_IRN" = ?')
+    try:
+        with HANAConnection() as conn:
+            conn.execute(sql, ["Y", now, now, now.strftime("%H:%M:%S"), irn])
+        logger.info("OMS_IRN_LOG: marked cancelled for IRN %s", (irn or "")[:12])
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("OMS_IRN_LOG: failed to mark cancelled for IRN %s", irn)
+        return False
