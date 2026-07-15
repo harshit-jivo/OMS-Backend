@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import services
+from .permissions import PAGE_ENTRY, tracker_pages_for
 from .reports import build_report
 from .models import (
     Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
@@ -56,9 +57,16 @@ class LookupsView(APIView):
         })
 
 
+def _can_use_entry(user):
+    """True for users who work the head-office / entry desk (entry-page role)."""
+    return user.is_superuser or PAGE_ENTRY in tracker_pages_for(user)
+
+
 def _scoped_queryset(user):
-    """Invoices this user is allowed to see: their own creations plus anything
-    parked at a stage they're assigned to. Superusers see all."""
+    """Invoices this user is allowed to see: their own creations, anything
+    parked at a stage they're assigned to, plus — for entry-desk users — every
+    invoice currently at the shared head-office / entry stage (regardless of
+    who created it). Superusers see all."""
     qs = Invoice.objects.select_related(
         'current_stage', 'gst_type', 'gst_rate', 'category',
         'unit', 'branch', 'mode', 'created_by',
@@ -66,7 +74,10 @@ def _scoped_queryset(user):
     if user.is_superuser:
         return qs
     stage_ids = services.accessible_stage_ids(user)
-    return qs.filter(Q(created_by=user) | Q(current_stage_id__in=stage_ids))
+    q = Q(created_by=user) | Q(current_stage_id__in=stage_ids)
+    if _can_use_entry(user):
+        q |= Q(current_stage__code='entry')
+    return qs.filter(q)
 
 
 def _apply_filters(qs, params):
@@ -125,14 +136,15 @@ class InvoiceDetailView(APIView):
         invoice = self._get(request, pk)
         if not invoice:
             return Response(status=http.HTTP_404_NOT_FOUND)
-        # Editable only while unlocked at the entry stage, by its creator.
+        # Editable only while unlocked at the shared entry (head-office) desk;
+        # any entry-desk user may edit, not just the original creator.
         if invoice.is_locked or invoice.current_stage.code != 'entry':
             return Response(
                 {'detail': 'Invoice is locked and can no longer be edited.'},
                 status=http.HTTP_403_FORBIDDEN)
-        if invoice.created_by_id != request.user.id and not request.user.is_superuser:
+        if not _can_use_entry(request.user):
             return Response(
-                {'detail': 'Only the creator may edit this invoice.'},
+                {'detail': 'You are not on the entry desk.'},
                 status=http.HTTP_403_FORBIDDEN)
         serializer = InvoiceWriteSerializer(invoice, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -143,25 +155,27 @@ class InvoiceDetailView(APIView):
 
 class MyQueueView(APIView):
     """The actionable inbox: invoices parked at a stage this user handles.
-    Entry-stage items are restricted to the user's own creations.
 
-    Returns every stage the user is assigned to (so all their desks show as
-    tabs even when empty) alongside the pending invoices.
+    The head-office / entry desk is shared: any entry-desk user sees every
+    invoice at the entry stage (freshly created or returned back), regardless of
+    creator. Returns every stage the user works (so all their desks show as tabs
+    even when empty) alongside the pending invoices.
     """
     permission_classes = [IsTrackerUser]
 
     def get(self, request):
         user = request.user
-        stage_ids = services.accessible_stage_ids(user)
+        stage_ids = set(services.accessible_stage_ids(user))
         entry = Stage.objects.filter(code='entry').first()
+        # Entry-desk users get the shared entry queue even without an explicit
+        # stage assignment.
+        if entry and _can_use_entry(user):
+            stage_ids.add(entry.id)
 
         qs = Invoice.objects.select_related('current_stage').filter(
             current_stage_id__in=stage_ids,
             status=Invoice.Status.IN_PROGRESS,
         )
-        # At the entry desk a user only sees invoices they themselves created.
-        if entry and entry.id in stage_ids and not user.is_superuser:
-            qs = qs.filter(~Q(current_stage_id=entry.id) | Q(created_by=user))
 
         invoices = list(qs)
         counts = {}
@@ -216,7 +230,8 @@ class StageAdvancedView(APIView):
         stage = Stage.objects.filter(code=request.query_params.get('stage')).first()
         if not stage:
             return Response({'detail': 'Unknown stage.'}, status=http.HTTP_400_BAD_REQUEST)
-        if not request.user.is_superuser and \
+        entry_shared = stage.code == 'entry' and _can_use_entry(request.user)
+        if not request.user.is_superuser and not entry_shared and \
                 stage.id not in services.accessible_stage_ids(request.user):
             return Response({'detail': 'You are not assigned to this stage.'},
                             status=http.HTTP_403_FORBIDDEN)
@@ -230,12 +245,11 @@ class StageAdvancedView(APIView):
         ).values('invoice_id', 'exited_at'):
             advanced_at[ev['invoice_id']] = ev['exited_at']
 
-        # Entry desk: only the user's own creations (unless superuser).
+        # The entry desk is shared — show every advanced-from-entry invoice,
+        # regardless of who created it.
         invoices = Invoice.objects.filter(id__in=advanced_at.keys()).select_related(
             'current_stage', 'gst_type', 'gst_rate', 'category',
             'unit', 'branch', 'mode', 'created_by')
-        if stage.code == 'entry' and not request.user.is_superuser:
-            invoices = invoices.filter(created_by=request.user)
 
         rows = InvoiceListSerializer(
             invoices, many=True, context={'request': request}).data
