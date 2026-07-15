@@ -31,6 +31,7 @@ urlpatterns = [
     path('api/ewaybill/', include('ewaybill.urls')),
     path('api/invoice/', include('invoice.urls')),
     path('api/legal/' , include('legal.urls')),
+    path('api/tracker/', include('tracker.urls')),
 ]
 
 
