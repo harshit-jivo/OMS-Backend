@@ -47,7 +47,7 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 DEBUG = True
 
 ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
-
+CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
 # ALLOWED_HOSTS = ['*']
 # Application definition
 
