@@ -160,10 +160,13 @@ class InvoiceListSerializer(serializers.ModelSerializer):
         user = getattr(request, 'user', None)
         if not user:
             return False
+        # Shared head-office / entry desk: any entry-desk user can edit an
+        # unlocked invoice sitting at the entry stage.
+        from .permissions import PAGE_ENTRY, tracker_pages_for
         return (
             not obj.is_locked
             and obj.current_stage.code == 'entry'
-            and (obj.created_by_id == user.id or user.is_superuser)
+            and (user.is_superuser or PAGE_ENTRY in tracker_pages_for(user))
         )
 
 

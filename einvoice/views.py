@@ -169,12 +169,16 @@ def irn_from_invoice(request, docentry):
     try:
         record, result = services.generate_and_store(invoice, order_id=order_id, source=source)
     except services.PayloadInvalid as exc:
+        services.log_failure_to_hana(docentry=docentry, invoice=invoice,
+                                     error="Pre-submit validation failed.", company_db=company_db)
         return Response(
             {"error": "Mapped invoice failed pre-submit validation; fix these before submitting to NIC.",
              "docentry": int(docentry), "invoice": invoice, "validation_errors": exc.errors},
             status=422,
         )
     except EInvoiceError as exc:
+        services.log_failure_to_hana(docentry=docentry, invoice=invoice,
+                                     error=str(exc), company_db=company_db)
         resp = build_error_response(exc)
         resp["invoice"] = invoice
         return Response(resp, status=exc.status_code or 502)
