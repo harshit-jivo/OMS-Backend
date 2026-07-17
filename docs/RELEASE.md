@@ -94,7 +94,7 @@ It is a **serial number, not a count of releases.**
 | App | Where the build number comes from |
 | --- | --- |
 | **Mobile (Android/iOS)** | **EAS servers.** `eas.json` sets `cli.appVersionSource: "remote"` and `build.production.autoIncrement: true`, so EAS stores and increments it for you. **You never type it.** |
-| **Web** | `VITE_BUILD_NUMBER` env var → else `BUILD_NUMBER` → else `GITHUB_RUN_NUMBER` → else the git commit count (`git rev-list --count HEAD`) → else `1`. Computed in `OMS Frontend-web/vite.config.ts`. |
+| **Web** | **`VITE_BUILD_NUMBER` in `OMS Frontend-web/.env.production`** — typed by hand, one line, committed with the release. `vite.config.ts` reads it with Vite's `loadEnv()` and inlines it. There is **no fallback**: if it is missing or not a positive whole number, **the build fails**. |
 
 > **Warning — build numbers are only comparable *within a platform*.**
 > Android build 45 and iOS build 45 are unrelated counters that will drift apart
@@ -191,13 +191,44 @@ flowchart LR
 
 ### Web — exact files
 
+**The two files you edit before every web release — and nothing else:**
+
 | What | Exact path | Current value | Edit by hand? |
 | --- | --- | --- | --- |
-| **Version** | `OMS Frontend-web/package.json` → `version` | `0.0.0` ⚠️ | ✅ **YES — this is the one you bump** |
-| **Build number** | env var, else git commit count | computed | ❌ No — CI supplies it |
-| Injection | `OMS Frontend-web/vite.config.ts` → `define` | `__APP_VERSION__`, `__APP_BUILD_NUMBER__` | Only to change the strategy |
-| TypeScript types | `OMS Frontend-web/src/vite-env.d.ts` | `declare const __APP_VERSION__` | — |
-| Runtime reader | `OMS Frontend-web/src/services/webDeviceService.ts` | `getAppVersion()` / `getBuildNumber()` | — |
+| **Version** | `OMS Frontend-web/package.json` → `version` | `0.0.0` ⚠️ | ✅ **YES — edit before every release** |
+| **Build number** | `OMS Frontend-web/.env.production` → `VITE_BUILD_NUMBER` | `6` | ✅ **YES — edit before every release** |
+
+Everything below is machinery. It is listed so you can find it, not so you can
+edit it:
+
+| What | Exact path | Role |
+| --- | --- | --- |
+| Env loading | `OMS Frontend-web/vite.config.ts` → `loadEnv(mode, process.cwd(), '')` | Reads `.env.production` at build time |
+| Injection | `OMS Frontend-web/vite.config.ts` → `define` | `__APP_VERSION__`, `__APP_BUILD_NUMBER__` |
+| TypeScript types | `OMS Frontend-web/src/vite-env.d.ts` | `declare const __APP_VERSION__` |
+| Runtime reader | `OMS Frontend-web/src/services/webDeviceService.ts` | `getAppVersion()` / `getBuildNumber()` |
+| Local dev only | `OMS Frontend-web/.env` (gitignored) | `VITE_API_BASE_URL`; **not** used for release numbers |
+
+> **`.env.production` is committed — that is deliberate, and `.gitignore` has an
+> explicit exception for it.** A build number is a fact about a release, so it
+> is reviewed in the diff and tracked in git like any other release artifact.
+> Ignoring it would also break every fresh clone and CI machine: with no file
+> and no fallback, `npm run build` stops.
+>
+> ```gitignore
+> .env*              # ignored by default — machine-specific values
+> !.env.example      # ...except the template
+> !.env.production   # ...and the release build number
+> ```
+>
+> **Never put a secret in `.env.production`.** Everything Vite inlines is shipped
+> to the browser, so it is public the moment you deploy — committing it changes
+> nothing about that. Machine-specific and sensitive values belong in `.env`,
+> which stays ignored.
+>
+> `.env` (gitignored, local) is a *different file* for a *different job*. Do not
+> put `VITE_BUILD_NUMBER` there — for a production build `.env.production` wins
+> anyway, and having it in two places is how a stale number ships.
 
 > **Warning — the web version is still `0.0.0`.**
 > It is reported honestly (the app really is `0.0.0`), but that is not a real
@@ -284,44 +315,96 @@ flowchart TD
 
 ## 6. React web release process
 
+**Two files. Both by hand. Every release.**
+
+```mermaid
+flowchart TD
+  A["1 . package.json<br/><b>version</b>: 1.0.2 → 1.0.3"] --> B["2 . .env.production<br/><b>VITE_BUILD_NUMBER</b>: 6 → 7"]
+  B --> C["3 . npm run build"]
+  C --> D["4 . Deploy dist/"]
+  D --> E["5 . Record in Admin Dashboard<br/>System → Version Management"]
+```
+
+No environment variable on the command line. No CI variable. No git magic.
+Edit two files, build, deploy.
+
 ### Steps
 
 ```bash
 cd "OMS Frontend-web"
 ```
 
-**1. Bump the version** in `OMS Frontend-web/package.json`:
+**1. Bump the version** in `OMS Frontend-web/package.json` — the only place a
+version is ever written:
 
-```jsonc
-{
-  "name": "oms-web",
-  "version": "1.0.3",   // ← the ONLY number you edit
-  ...
-}
+```diff
+  {
+    "name": "oms-web",
+-   "version": "1.0.2",
++   "version": "1.0.3",
+  }
 ```
 
-**2. Commit.**
+**2. Bump the build number** in `OMS Frontend-web/.env.production` — the only
+place a build number is ever written:
 
-```bash
-git add package.json
-git commit -m "chore: bump web version to 1.0.3"
+```diff
+- VITE_BUILD_NUMBER=6
++ VITE_BUILD_NUMBER=7
 ```
 
-**3. Build.**
+It must be a **whole number ≥ 1** and must be **higher than the previous
+release's**. Never reuse one, never go backwards: the backend compares build
+numbers as integers to decide who is outdated.
+
+**3. Commit both files together.** They describe one release; splitting them is
+how they drift apart.
 
 ```bash
-# CI should set VITE_BUILD_NUMBER to a monotonic run number:
-VITE_BUILD_NUMBER=43 npm run build
+git add package.json .env.production
+git commit -m "chore: web release 1.0.3 (build 7)"
+```
 
-# Locally, without the variable, the build number falls back to the
-# git commit count — which still only ever increases:
+**4. Build.**
+
+```bash
 npm run build
 ```
 
-**4. Deploy `dist/`** to the web host / reverse proxy as you normally do.
+The build prints exactly what it baked in — check this line before deploying:
 
-**5. Record the release in the Admin Dashboard** (platform `WEB`, app type
-`WEB`) — see [§8](#8-admin-dashboard-workflow).
+```
+[vite] building version 1.0.3, build 7 (VITE_BUILD_NUMBER from .env.production)
+```
+
+**5. Deploy `dist/`** to the web host / reverse proxy as you normally do.
+
+**6. Record the release in the Admin Dashboard** (platform `WEB`, app type
+`WEB`) with the **same** version and build number the line above printed — see
+[§8](#8-admin-dashboard-workflow).
+
+### If the build stops
+
+Missing or malformed build number — this is the guard doing its job, not a bug:
+
+```
+  Build stopped: VITE_BUILD_NUMBER is not set.
+
+  Set it in "OMS Frontend-web/.env.production", then rebuild:
+
+      VITE_BUILD_NUMBER=42
+```
+
+Fix `.env.production` and build again. Do **not** work around it by passing a
+variable on the command line — the number belongs in the file, in the commit,
+in the diff.
+
+> **Note — how the two numbers reach the browser.**
+> `vite.config.ts` reads `package.json` (version) and `.env.production` (build
+> number) at build time and inlines both with Vite's `define`. The published
+> bundle literally contains `function(){return 7}` — there is no runtime lookup
+> to get out of sync, which is why the reported build **always** matches the
+> deployed one.
 
 > **Warning — `npm run build` is currently broken on `main`.**
 > The build script is `tsc -b && vite build`. `tsc -b` currently fails with 7
@@ -333,12 +416,16 @@ npm run build
 > unused imports/variables) so the typechecked build passes — do not work around
 > it by skipping `tsc`.
 
-> **Note — how the version reaches the browser.**
-> `vite.config.ts` reads `package.json` at build time and inlines the value with
-> Vite's `define`. The published bundle literally contains
-> `function(){return 118}` instead of a variable lookup. This is why the
-> reported version **always** matches the deployed build: there is no runtime
-> lookup to get out of sync.
+> **Warning — the web build number restarted at 6.**
+> Builds made before this change derived their number from the git commit count
+> and reported values around **118–131**. Manual numbering restarts at **6**, so
+> the sequence goes *backwards* relative to anything already deployed. Until the
+> manual counter passes the highest number ever shipped, a client running an old
+> git-count build reports a **higher** build than the newest release, and the
+> backend's integer comparison will not see it as outdated. Before relying on
+> the upgrade prompt for web, either bump `VITE_BUILD_NUMBER` above the highest
+> previously deployed value, or confirm no such build is still in the field and
+> clear out stale `WEB` rows in `devices_app_release` / `devices_user_device`.
 
 ---
 
@@ -622,8 +709,25 @@ without `expo-device`. Installing it requires a **native rebuild**.
 
 ### "The web build number never changes"
 
-No CI variable is set, so it falls back to `git rev-list --count HEAD`. It only
-changes when commits are added. Set `VITE_BUILD_NUMBER` in CI.
+Nobody bumped it. It is typed by hand in `OMS Frontend-web/.env.production` →
+`VITE_BUILD_NUMBER` and changes only when you edit that line — see
+[§6](#6-react-web-release-process). Check the `[vite] building version …` line
+the build prints: it states the value and the file it came from.
+
+If that line says `from the environment — overriding .env.production`, a real
+`VITE_BUILD_NUMBER` environment variable is set in your shell or CI and is
+outranking the file (`loadEnv` lets the OS environment win). Unset it:
+
+```bash
+unset VITE_BUILD_NUMBER          # bash
+Remove-Item Env:VITE_BUILD_NUMBER  # PowerShell
+```
+
+### "The web build fails with `Build stopped: VITE_BUILD_NUMBER …`"
+
+Working as designed — there is deliberately no fallback. Set a positive whole
+number in `OMS Frontend-web/.env.production` and rebuild. Note `12abc`, `3.7`,
+`0` and `-5` are all rejected: only a bare integer ≥ 1 is accepted.
 
 ### "`npm run build` fails on the web app"
 
@@ -662,11 +766,15 @@ Copy this into your release ticket.
 - [ ] **Build number recorded** from the EAS output.
 - [ ] Submitted to the store.
 
-**Web**
+**Web** — the two files, both by hand:
 
 - [ ] `OMS Frontend-web/package.json` → `version` bumped (not `0.0.0`).
-- [ ] `VITE_BUILD_NUMBER` set in CI.
+- [ ] `OMS Frontend-web/.env.production` → `VITE_BUILD_NUMBER` bumped, higher
+      than the last release.
+- [ ] Both committed **together**.
 - [ ] `npm run build` passes (including `tsc -b`).
+- [ ] The printed `[vite] building version X, build Y` line matches what you
+      intended to ship.
 - [ ] `dist/` deployed.
 
 **Backend / Admin — do not skip**
@@ -693,7 +801,10 @@ Today every step is manual. This is the intended path, in order of value.
 
 **Phase A — stop typing build numbers (web)**
 
-Set `VITE_BUILD_NUMBER` from the CI run number:
+Today the number is typed by hand in `.env.production`, which is a deliberate
+trade: it is visible in the diff and requires no CI wiring. If you later want CI
+to own it, set `VITE_BUILD_NUMBER` from the run number — `loadEnv` lets a real
+environment variable outrank the file, so this works with no code change:
 
 ```yaml
 # .github/workflows/web-release.yml (illustrative)
@@ -702,6 +813,13 @@ Set `VITE_BUILD_NUMBER` from the CI run number:
     VITE_BUILD_NUMBER: ${{ github.run_number }}
   run: npm ci && npm run build
 ```
+
+> **Warning — do not adopt this half-way.** The moment CI overrides the file,
+> `.env.production` becomes a lie that still looks authoritative in the diff:
+> the committed number is not what shipped. If you go this route, delete
+> `VITE_BUILD_NUMBER` from `.env.production` in the same change so there is
+> exactly one source again, and update [§6](#6-react-web-release-process). The
+> build log names the source it used precisely so this is never ambiguous.
 
 **Phase B — auto-record the release**
 
@@ -1068,66 +1186,53 @@ before remote versioning was enabled** and is not what ships.
 
 ---
 
-### 5. Web version — `.env` does **not** work
+### 5. Web version — which env file is read, and which is not
 
-> **Warning — do not put the version or build number in `.env`. It has no effect.**
-> `OMS Frontend-web/.env` previously contained `VITE_APP_VERSION=1.0.2` and
-> `VITE_BUILD_NUMBER=4`. **Neither had any effect** — builds still reported
-> version `0.0.0` and the git-commit-count build number. Both lines have since
-> been **removed** in the stabilization pass, and `.env` now carries a comment
-> explaining why. If you are tempted to add them back, read on first.
->
-> `.env` still legitimately holds `VITE_API_BASE_URL`, which **is** read — by
-> *client* code via `import.meta.env` (`src/services/api.ts`). That is exactly
-> why the distinction below matters: `.env` reaches client code, but not
-> `vite.config.ts`.
+> **This section previously said the opposite.** Until the `loadEnv()` refactor,
+> `vite.config.ts` read `process.env.VITE_BUILD_NUMBER`, which meant **no env
+> file could set the build number** — edits to `.env` were silently ignored and
+> the build fell back to the git commit count. That is fixed. The build number
+> now comes from an env file, and **only** from an env file. If you find older
+> notes or a stale `.env` comment claiming ".env does not work", they predate
+> this change.
 
-**Where the web version actually comes from:**
+**Where the web version and build number actually come from (verified by
+building and reading the emitted bundle):**
 
-| Value | Real source (verified) |
+| Value | Real source |
 | --- | --- |
 | Version | `OMS Frontend-web/package.json` → `"version"` — currently **`0.0.0`** |
-| Build number | `process.env.VITE_BUILD_NUMBER` → `BUILD_NUMBER` → `GITHUB_RUN_NUMBER` → `git rev-list --count HEAD` → `1` |
+| Build number | `OMS Frontend-web/.env.production` → `VITE_BUILD_NUMBER` (**no fallback — build fails without it**) |
+| Env loading | `OMS Frontend-web/vite.config.ts` → `loadEnv(mode, process.cwd(), '')` |
 | Injection | `OMS Frontend-web/vite.config.ts` → `define` → `__APP_VERSION__`, `__APP_BUILD_NUMBER__` |
 | Type declarations | `OMS Frontend-web/src/vite-env.d.ts` |
 | Runtime reader | `OMS Frontend-web/src/services/webDeviceService.ts` |
 
-**Why `.env` is ignored — two different reasons:**
+**Which file wins.** Vite loads `.env` first, then `.env.<mode>` on top, then a
+real OS/CI environment variable on top of *both*. `npm run build` runs in mode
+`production`:
 
-1. **`VITE_APP_VERSION` is read by nothing.** No code anywhere references it;
-   `vite.config.ts` takes the version from `package.json`. (Vite *would* expose
-   it to client code as `import.meta.env.VITE_APP_VERSION` — but nothing reads
-   it, so it was inert. It has been removed from `.env`.)
-2. **`VITE_BUILD_NUMBER` is read from the wrong place for `.env` to matter.**
-   `vite.config.ts` reads `process.env.VITE_BUILD_NUMBER` at **config time**.
-   Vite loads `.env` into `import.meta.env` for *client* code — it does **not**
-   populate `process.env` inside `vite.config.ts`. So only a **real OS/CI
-   environment variable** is seen.
+| Set where | Effect on `npm run build` |
+| --- | --- |
+| `.env.production` | ✅ **the intended place** — this is the release's build number |
+| `.env` | ⚠️ loaded, but `.env.production` overrides it — do not put it here |
+| OS / CI environment | ⚠️ **overrides `.env.production`** — see the warning below |
 
-**Verified by building three times and reading the emitted bundle:**
+> **Warning — a stray shell variable silently outranks the file.**
+> `loadEnv` gives the real environment the last word, so an old
+> `export VITE_BUILD_NUMBER=4` left in a shell profile will beat
+> `.env.production` and ship the wrong number. The build log names its source
+> for exactly this reason — read it:
+>
+> ```
+> [vite] building version 1.0.3, build 7 (VITE_BUILD_NUMBER from .env.production)
+> [vite] building version 1.0.3, build 4 (VITE_BUILD_NUMBER from the environment — overriding .env.production)
+> ```
+>
+> If you see the second form and did not intend it, unset the variable.
 
-| Setting | Set where | Value injected into `dist/` |
-| --- | --- | --- |
-| `VITE_APP_VERSION=1.0.2` | `.env` | ignored — version stayed `0.0.0` |
-| `VITE_BUILD_NUMBER=4` | `.env` | ignored — build stayed `118` (git count) |
-| `VITE_BUILD_NUMBER=4` | OS environment | **`4`** ✅ works |
-
-**What to do:**
-
-```bash
-# ✅ Correct — a real environment variable (this is what CI does)
-VITE_BUILD_NUMBER=4 npm run build
-
-# ❌ Wrong — putting it in .env does nothing
-```
-
-```powershell
-# Windows PowerShell
-$env:VITE_BUILD_NUMBER = "4"; npm run build
-```
-
-For the **version**, do **not** try to make `VITE_APP_VERSION` work. Bump
-`package.json` instead — that keeps one source of truth per app, exactly as
+**Still true — `VITE_APP_VERSION` is read by nothing.** Do not add it. The
+version comes from `package.json`, which keeps one source of truth per app, as
 [rule 10](#13-rules-and-best-practices) requires:
 
 ```diff
@@ -1136,13 +1241,10 @@ For the **version**, do **not** try to make `VITE_APP_VERSION` work. Bump
 + "version": "1.0.2",
 ```
 
-> **Note — recommended cleanup.**
-> Delete `VITE_APP_VERSION` from `OMS Frontend-web/.env`. Leaving it there
-> creates a phantom second source of truth: it *looks* authoritative, it is
-> ignored, and it will mislead the next developer exactly as it misled the last
-> one. If you truly want `.env` to drive the build number, that requires a code
-> change in `vite.config.ts` (using Vite's `loadEnv()` instead of `process.env`)
-> — a deliberate decision, not something to assume is already wired.
+**What `.env` is still for.** `VITE_API_BASE_URL`, read by *client* code via
+`import.meta.env`. `.env` is gitignored and machine-specific; `.env.production`
+is committed and describes the release. Different files, different jobs — keep
+the build number out of `.env`.
 
 ---
 
@@ -1275,7 +1377,7 @@ Quick version of [§11](#11-release-checklist) — copy into your release ticket
 □ Update mobile version          → OMS-app/app.json → expo.version
 □ Update mobile build            → automatic (EAS remote); record the printed number
 □ Update web version             → OMS Frontend-web/package.json → version
-□ Update web build               → VITE_BUILD_NUMBER as an OS/CI env var (NOT .env)
+□ Update web build               → OMS Frontend-web/.env.production → VITE_BUILD_NUMBER
 □ Build application              → eas build --profile production  /  npm run build
 □ Deploy                         → eas submit  /  publish dist/
 □ Publish release in Admin Dashboard → System → Version Management → Mark as Latest
@@ -1293,8 +1395,8 @@ Quick version of [§11](#11-release-checklist) — copy into your release ticket
 | I want to… | Do this |
 | --- | --- |
 | Release mobile | Bump `OMS-app/app.json` → `expo.version`, `eas build`, record in admin |
-| Release web | Bump `OMS Frontend-web/package.json` → `version`, `npm run build`, deploy, record in admin |
-| Find the build number | Mobile: EAS build output. Web: CI run number / commit count |
+| Release web | Bump `package.json` → `version` **and** `.env.production` → `VITE_BUILD_NUMBER`, `npm run build`, deploy, record in admin |
+| Find the build number | Mobile: EAS build output. Web: `.env.production` → `VITE_BUILD_NUMBER` (the build prints it too) |
 | See who's on what | Admin → **Device Management** |
 | See who's online now | Admin → **Device Activity** |
 | Add a release | Admin → **Version Management → + New Release** |
