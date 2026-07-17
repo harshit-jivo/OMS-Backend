@@ -13,7 +13,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 from pathlib import Path
 from datetime import timedelta
-from decouple import config    
+from corsheaders.defaults import default_headers as cors_default_headers
+from decouple import config
 
 
 def _parse_bool(value, default=False):
@@ -46,7 +47,7 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
+ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.176','*']
 
 # ALLOWED_HOSTS = ['*']
 # Application definition
@@ -79,6 +80,7 @@ INSTALLED_APPS = [
     'invoice',
     'legal',
     'audit',
+    'devices',
 ]
 
 MIDDLEWARE = [
@@ -265,6 +267,25 @@ SIMPLE_JWT = {
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+# CORS_ALLOW_ALL_ORIGINS wildcards the ORIGIN only — it does NOT allow arbitrary
+# request HEADERS. The web client attaches device/version metadata headers to
+# every request (see Frontend-web/src/services/webDeviceService.ts), and those
+# are non-simple headers, so the browser sends a CORS preflight first. Any header
+# missing from this list makes the browser reject the preflight and CANCEL the
+# real request — it never reaches Django, so it looks like the server is down
+# (0 bytes transferred, no response headers) rather than like a CORS error.
+#
+# Only affects browsers: the React Native client is not subject to CORS.
+CORS_ALLOW_HEADERS = (
+    *cors_default_headers,
+    'x-app-version',
+    'x-build-number',
+    'x-platform',
+    'x-app-type',
+    'x-os-version',
+    'x-device-id',
+)
 
 
 # =========================================================================
