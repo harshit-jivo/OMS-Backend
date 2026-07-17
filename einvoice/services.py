@@ -211,6 +211,13 @@ def cancel_and_store(irn: str, reason_code, remarks: str):
             record.save()
     except Exception:
         logger.exception("IRN %s cancelled at NIC but the record update failed", irn)
+
+    if getattr(settings, "EINV_MIRROR_HANA", False):
+        try:
+            from . import oms_irn_log
+            oms_irn_log.mark_cancelled(irn)
+        except Exception:
+            logger.exception("OMS_IRN_LOG cancel-stamp failed for IRN %s", irn)
     return record, result
 
 
@@ -347,16 +354,26 @@ def store_standalone_ewb(result, *, order_id=None, request_payload=None):
 def post_generate_hooks(record, result, *, company_db=None, docentry=None):
     """
     Best-effort side effects after a successful IRN generation, gated by settings:
-      - EINV_MIRROR_HANA   -> mirror the record (incl. QR PNG) into HANA EINVOICE_IRN
+      - EINV_QR_SAVE_DIR   -> write the QR PNG file to the shared folder
+      - EINV_MIRROR_HANA   -> write the row into HANA OMS_IRN_LOG (UDO-shaped)
       - EINV_SAP_WRITEBACK -> write the IRN back onto the SAP invoice (e-Billing)
     Never raises; failures are logged so they can't break the IRN flow.
     """
+    # 1. QR PNG to the shared folder (path is reused for OMS_IRN_LOG.U_UTL_QRPT).
+    qr_path = None
+    if record is not None and getattr(settings, "EINV_QR_SAVE_DIR", ""):
+        try:
+            qr_path = save_qr_to_dir(record, settings.EINV_QR_SAVE_DIR)
+        except Exception:
+            logger.exception("QR file-save hook failed for doc %s", getattr(record, "doc_no", None))
+
+    # 2. Row into HANA OMS_IRN_LOG (mirrors the SAP add-on's @UTL_MDEXTH shape).
     if record is not None and getattr(settings, "EINV_MIRROR_HANA", False):
         try:
-            from . import hana_store
-            hana_store.mirror_record(record, schema=company_db, docentry=docentry)
+            from . import oms_irn_log
+            oms_irn_log.write_success(record, docentry=docentry, qr_path=qr_path, schema=company_db)
         except Exception:
-            logger.exception("HANA mirror hook failed for doc %s", getattr(record, "doc_no", None))
+            logger.exception("OMS_IRN_LOG hook failed for doc %s", getattr(record, "doc_no", None))
 
     if docentry is not None and getattr(settings, "EINV_SAP_WRITEBACK", False) and result.get("Irn"):
         try:
@@ -364,6 +381,90 @@ def post_generate_hooks(record, result, *, company_db=None, docentry=None):
             sap.write_irn_to_invoice(docentry, result, company_db)
         except Exception:
             logger.exception("SAP write-back hook failed for DocEntry %s", docentry)
+
+
+def save_qr_to_dir(record, directory: str):
+    """Write the record's signed QR as a .png into `directory` — which may be a
+    local path, a mapped drive, or a UNC share on another server
+    (e.g. \\\\JIVO-APP\\OMS_Attachments\\Bitmap). Returns the path written or None.
+
+    Writes to a temp name then renames, so a reader never sees a half-written file.
+    Best-effort: the caller wraps this and never lets a failure break IRN generation.
+    """
+    import os
+    from . import qr as qrgen
+
+    if not record.signed_qr_code:
+        logger.warning("QR file-save skipped: no signed QR for doc %s", record.doc_no)
+        return None
+
+    pattern = getattr(settings, "EINV_QR_FILENAME", "{doc_no}.png") or "{doc_no}.png"
+    name = pattern.format(
+        doc_no=record.doc_no or "unknown",
+        irn=record.irn or "unknown",
+        ack_no=record.ack_no or "",
+        env=record.environment or "",
+    )
+    name = os.path.basename(name)                       # never let the pattern escape the dir
+    for ch in '<>:"/\\|?*':
+        name = name.replace(ch, "_")
+
+    png = qrgen.make_qr_png(record.signed_qr_code)
+
+    # If SMB credentials are configured, authenticate to the share explicitly
+    # (the Django process account may not have network access on its own).
+    smb_user = getattr(settings, "EINV_QR_SMB_USERNAME", "") or ""
+    if smb_user:
+        path = _save_png_smb(directory, name, png, smb_user,
+                             getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "")
+    else:
+        os.makedirs(directory, exist_ok=True)           # no-op if the share is already there
+        path = os.path.join(directory, name)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(png)
+        os.replace(tmp, path)                           # atomic swap into place
+    logger.info("Saved IRN QR PNG for doc %s -> %s", record.doc_no, path)
+    return path
+
+
+def _save_png_smb(directory: str, name: str, png: bytes, username: str, password: str) -> str:
+    """Write PNG bytes to a UNC share using explicit SMB credentials
+    (smbprotocol). `directory` is like \\\\JIVO-APP\\OMS_Attachments\\Bitmap.
+    Username may be 'user' or 'DOMAIN\\user'. Temp-write then rename (atomic)."""
+    import ntpath
+    import smbclient
+
+    server = directory.strip("\\/").replace("/", "\\").split("\\")[0]   # JIVO-APP
+    smbclient.register_session(server, username=username, password=password)
+    try:
+        smbclient.makedirs(directory, exist_ok=True)
+    except Exception:  # noqa: BLE001 — dir usually already exists
+        pass
+    path = ntpath.join(directory, name)
+    tmp = f"{path}.tmp"
+    with smbclient.open_file(tmp, mode="wb") as fh:
+        fh.write(png)
+    try:
+        smbclient.remove(path)                          # rename won't overwrite on SMB
+    except Exception:  # noqa: BLE001 — fine if it doesn't exist yet
+        pass
+    smbclient.rename(tmp, path)
+    return path
+
+
+def log_failure_to_hana(*, docentry, invoice, error, company_db=None):
+    """Write an 'F' row into OMS_IRN_LOG for a failed manual/interactive attempt
+    (the auto path writes its own via auto_generate_irn). Gated + best-effort."""
+    if not getattr(settings, "EINV_MIRROR_HANA", False):
+        return
+    try:
+        from . import oms_irn_log
+        doc = (invoice or {}).get("DocDtls") or {}
+        oms_irn_log.write_failure(docentry=docentry, doc_no=doc.get("No"),
+                                  doc_type=doc.get("Typ"), error=error, schema=company_db)
+    except Exception:
+        logger.exception("OMS_IRN_LOG manual F-row write failed for DocEntry %s", docentry)
 
 
 def _first_error(exc):
@@ -420,6 +521,15 @@ def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=N
     attempt_no = IrnGenerationLog.objects.filter(docentry=docentry).count() + 1
 
     def _log(outcome, **fields):
+        # Mirror failures into HANA OMS_IRN_LOG as 'F' rows (successes are written
+        # by post_generate_hooks; SKIPPED/duplicate is not a real attempt row).
+        if outcome == "FAILED" and getattr(settings, "EINV_MIRROR_HANA", False):
+            try:
+                from . import oms_irn_log
+                oms_irn_log.write_failure(docentry=docentry, doc_no=fields.get("doc_no"),
+                                          error=fields.get("error_message") or "", schema=company_db)
+            except Exception:
+                logger.exception("OMS_IRN_LOG F-row write failed for DocEntry %s", docentry)
         try:
             return IrnGenerationLog.objects.create(
                 docentry=int(docentry),

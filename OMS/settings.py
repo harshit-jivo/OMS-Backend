@@ -47,8 +47,8 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.176','*']
-
+ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
+CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
 # ALLOWED_HOSTS = ['*']
 # Application definition
 
@@ -81,6 +81,8 @@ INSTALLED_APPS = [
     'legal',
     'audit',
     'devices',
+    # Document (invoice) tracker — self-contained, no FKs into OMS models
+    'tracker',
 ]
 
 MIDDLEWARE = [
@@ -353,14 +355,27 @@ EINV_CREDENTIALS = {
 # is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
 EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), default=False)
 
-# After a successful IRN generation:
-#  - EINV_MIRROR_HANA: also write the record (incl. QR PNG) into the HANA table
-#    EINVOICE_IRN (run `manage.py setup_hana_irn_table` once per schema first).
+# After an IRN generation attempt:
+#  - EINV_MIRROR_HANA: write the attempt into the HANA table OMS_IRN_LOG
+#    (same column shape as the SAP add-on's @UTL_MDEXTH): 'S' on success,
+#    'F' on failure, and a cancel stamp on cancellation.
 #  - EINV_SAP_WRITEBACK: PATCH the IRN back onto the SAP invoice's e-Billing
 #    protocol so SAP shows it as e-invoiced (validate on sandbox first).
 # Both off by default and best-effort (never break IRN generation).
 EINV_MIRROR_HANA = _parse_bool(config('EINV_MIRROR_HANA', default='false'), default=False)
 EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), default=False)
+
+# Also write the IRN QR as a .png FILE into this directory on every generation.
+# Point it at the Windows share on another server, e.g.
+#   EINV_QR_SAVE_DIR=\\JIVO-APP\OMS_Attachments\Bitmap
+# Blank = disabled. {doc_no}, {irn}, {ack_no}, {env} are substituted into the name.
+EINV_QR_SAVE_DIR = config('EINV_QR_SAVE_DIR', default='')
+EINV_QR_FILENAME = config('EINV_QR_FILENAME', default='{doc_no}.png')
+# Credentials for the share (needed when the Django service account can't reach it
+# on its own). Username may be 'user' or 'DOMAIN\\user'. Blank = write as the
+# process account (no explicit SMB auth). Requires the `smbprotocol` package.
+EINV_QR_SMB_USERNAME = config('EINV_QR_SMB_USERNAME', default='')
+EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
 
 # Company DBs scanned when looking up an invoice by DocNum (the configured
 # HANA_COMPANY_DB is always tried first). Comma-separated in .env.

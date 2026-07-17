@@ -34,6 +34,7 @@ urlpatterns = [
     # Device & app-version management — routes are /api/devices/... and
     # /api/app/version/ (paths declared explicitly inside devices/urls.py).
     path('api/', include('devices.urls')),
+    path('api/tracker/', include('tracker.urls')),
 ]
 
 

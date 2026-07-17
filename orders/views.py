@@ -2368,132 +2368,132 @@ class CreateOrderView(APIView):
             return bool(value)
 
         # ── Edit mode: order_id in payload means update existing order ──────
-        # order_id = request.data.get('order_id')
-        # if order_id:
-        #     order = get_object_or_404(Order, id=int(order_id))
-        #     previous_status = order.status
-        #     serializer = CreateOrderSerializer(data=request.data)
-        #     if not serializer.is_valid():
-        #         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        #     data = serializer.validated_data
-        #     order_type = _normalize_order_type(request.data.get('order_type', order.order_type))
-        #     employee_id = str(data.get('employee_id') or order.employee_id or '').strip()
-        #     items = data.pop('items', [])
-        #     order_remarks = request.data.get('remarks', data.get('remarks', ''))
-        #     if not items:
-        #         return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
-        #     if order_type == 'STAFF' and not employee_id:
-        #         return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
-        #     if order_type == 'PARTY' and not data.get('card_code'):
-        #         return Response({'error': 'card_code is required'}, status=status.HTTP_400_BAD_REQUEST)
+        order_id = request.data.get('order_id')
+        if order_id:
+            order = get_object_or_404(Order, id=int(order_id))
+            previous_status = order.status
+            serializer = CreateOrderSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            data = serializer.validated_data
+            order_type = _normalize_order_type(request.data.get('order_type', order.order_type))
+            employee_id = str(data.get('employee_id') or order.employee_id or '').strip()
+            items = data.pop('items', [])
+            order_remarks = request.data.get('remarks', data.get('remarks', ''))
+            if not items:
+                return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+            if order_type == 'STAFF' and not employee_id:
+                return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
+            if order_type == 'PARTY' and not data.get('card_code'):
+                return Response({'error': 'card_code is required'}, status=status.HTTP_400_BAD_REQUEST)
         
-        #     order.order_type = order_type
-        #     order.employee_id = employee_id if order_type == 'STAFF' else data.get('employee_id', order.employee_id)
-        #     order.card_code = data.get('card_code') or ('STAFF' if order_type == 'STAFF' else order.card_code)
-        #     order.card_name = data.get('card_name') or (employee_id if order_type == 'STAFF' else order.card_name)
-        #     order.bill_to_id = data.get('bill_to_id') or order.bill_to_id
-        #     order.bill_to_address = data.get('bill_to_address', order.bill_to_address)
-        #     order.ship_to_id = data.get('ship_to_id') or order.ship_to_id
-        #     order.ship_to_address = data.get('ship_to_address', order.ship_to_address)
-        #     order.dispatch_from_id = data.get('dispatch_from_id') or order.dispatch_from_id
-        #     order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
-        #     order.company = data.get('company', order.company)
-        #     order.po_number = data.get('po_number', order.po_number)
-        #     order.is_foc = data.get('is_foc', order.is_foc)
-        #     order.delivery_date = data.get('delivery_date') or order.delivery_date
-        #     order.remarks = order_remarks
+            order.order_type = order_type
+            order.employee_id = employee_id if order_type == 'STAFF' else data.get('employee_id', order.employee_id)
+            order.card_code = data.get('card_code') or ('STAFF' if order_type == 'STAFF' else order.card_code)
+            order.card_name = data.get('card_name') or (employee_id if order_type == 'STAFF' else order.card_name)
+            order.bill_to_id = data.get('bill_to_id') or order.bill_to_id
+            order.bill_to_address = data.get('bill_to_address', order.bill_to_address)
+            order.ship_to_id = data.get('ship_to_id') or order.ship_to_id
+            order.ship_to_address = data.get('ship_to_address', order.ship_to_address)
+            order.dispatch_from_id = data.get('dispatch_from_id') or order.dispatch_from_id
+            order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
+            order.company = data.get('company', order.company)
+            order.po_number = data.get('po_number', order.po_number)
+            order.is_foc = data.get('is_foc', order.is_foc)
+            order.delivery_date = data.get('delivery_date') or order.delivery_date
+            order.remarks = order_remarks
 
-        #     order.items.all().delete()
+            order.items.all().delete()
 
-        #     needs_approval = False
-        #     flagged_items = []
-        #     for item in items:
-        #         _create_order_item(order, item, _to_float, _to_bool)
-        #         bp = _to_float(item.get('price_list_basic', 0))
-        #         mp = _to_float(item.get('basic_price', 0))
-        #         rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
-        #         if rate_approval_reason:
-        #             needs_approval = True
-        #             flagged_items.append(rate_approval_reason)
-        #     assign_rate_approvers(order)
+            needs_approval = False
+            flagged_items = []
+            for item in items:
+                _create_order_item(order, item, _to_float, _to_bool)
+                bp = _to_float(item.get('price_list_basic', 0))
+                mp = _to_float(item.get('basic_price', 0))
+                rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+                if rate_approval_reason:
+                    needs_approval = True
+                    flagged_items.append(rate_approval_reason)
+            assign_rate_approvers(order)
 
-        #     order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
-        #     user = request.user if request.user.is_authenticated else None
-        #     if order_type == 'STAFF':
-        #         order.status = previous_status or get_status('Order Created')
-        #         order.save()
-        #         mark_order_notifications_read(order, user)
-        #         log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
-        #         return Response({
-        #             'id': order.id,
-        #             'order_number': order.order_number,
-        #             'total_amount': str(order.total_amount),
-        #             'status': order.status.name if order.status else '',
-        #             'order_type': order.order_type,
-        #             'employee_id': order.employee_id,
-        #             'needs_approval': False,
-        #             'message': 'Staff order updated successfully',
-        #         }, status=status.HTTP_200_OK)
+            order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
+            user = request.user if request.user.is_authenticated else None
+            if order_type == 'STAFF':
+                order.status = previous_status or get_status('Order Created')
+                order.save()
+                mark_order_notifications_read(order, user)
+                log_order_action(order, 'Order Created', user=user, remarks='Staff order updated')
+                return Response({
+                    'id': order.id,
+                    'order_number': order.order_number,
+                    'total_amount': str(order.total_amount),
+                    'status': order.status.name if order.status else '',
+                    'order_type': order.order_type,
+                    'employee_id': order.employee_id,
+                    'needs_approval': False,
+                    'message': 'Staff order updated successfully',
+                }, status=status.HTTP_200_OK)
 
-        #     editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
-        #     is_billing_editor = editor_role == "billing"
-        #     order_flow_type = _get_order_flow_type_for_order(order)
+            editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
+            is_billing_editor = editor_role == "billing"
+            order_flow_type = _get_order_flow_type_for_order(order)
 
-        #     if is_billing_editor:
-        #         next_status = _get_next_order_flow_status(order, previous_status, 'Auditor Approval', flow_type=order_flow_type)
-        #         flow_needs_approval = False
-        #     else:
-        #         next_status, flow_needs_approval = _get_initial_flow_status(
-        #             items,
-        #             _to_float,
-        #             flow_type=order_flow_type,
-        #             force_foc_flow=order.is_foc,
-        #             config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
-        #         )
+            if is_billing_editor:
+                next_status = _get_next_order_flow_status(order, previous_status, 'Auditor Approval', flow_type=order_flow_type)
+                flow_needs_approval = False
+            else:
+                next_status, flow_needs_approval = _get_initial_flow_status(
+                    items,
+                    _to_float,
+                    flow_type=order_flow_type,
+                    force_foc_flow=order.is_foc,
+                    config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
+                )
 
-        #     # If the edit sends the order back into Rate Approval, a fresh approval
-        #     # round begins (a new pending rate-approval log is created below), so any
-        #     # prior approver decisions must be cleared back to PENDING. Otherwise the
-        #     # edit bypasses rate approval and existing decisions are preserved by
-        #     # assign_rate_approvers().
-        #     if next_status and (next_status.name or "").strip().lower() == "rate approval":
-        #         OrderRateApproval.objects.filter(order=order).update(
-        #             status="PENDING",
-        #             approved_at=None,
-        #             remarks="",
-        #         )
-        #     if next_status:
-        #         order.status = next_status
-        #     order.save()
+            # If the edit sends the order back into Rate Approval, a fresh approval
+            # round begins (a new pending rate-approval log is created below), so any
+            # prior approver decisions must be cleared back to PENDING. Otherwise the
+            # edit bypasses rate approval and existing decisions are preserved by
+            # assign_rate_approvers().
+            if next_status and (next_status.name or "").strip().lower() == "rate approval":
+                OrderRateApproval.objects.filter(order=order).update(
+                    status="PENDING",
+                    approved_at=None,
+                    remarks="",
+                )
+            if next_status:
+                order.status = next_status
+            order.save()
 
-        #     mark_order_notifications_read(order, user)
-        #     if next_status:
-        #         send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
+            mark_order_notifications_read(order, user)
+            if next_status:
+                send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
            
 
-        #     log_action = next_status.name if next_status else 'Order Created'
-        #     log_remarks = 'Sent to auditor' if is_billing_editor else _rate_approval_remarks(flagged_items) if flow_needs_approval else ''
-        #     if is_billing_editor:
-        #         _close_or_create_status_log(
-        #             order=order,
-        #             action_status=previous_status,
-        #             user=user,
-        #             remarks="Accepted by billing"
-        #         )
-        #     log_user = _pending_log_user_for_status(next_status, user) if next_status else user
-        #     log_order_action(order, log_action, user=log_user, remarks=log_remarks)
+            log_action = next_status.name if next_status else 'Order Created'
+            log_remarks = 'Sent to auditor' if is_billing_editor else _rate_approval_remarks(flagged_items) if flow_needs_approval else ''
+            if is_billing_editor:
+                _close_or_create_status_log(
+                    order=order,
+                    action_status=previous_status,
+                    user=user,
+                    remarks="Accepted by billing"
+                )
+            log_user = _pending_log_user_for_status(next_status, user) if next_status else user
+            log_order_action(order, log_action, user=log_user, remarks=log_remarks)
 
-        #     # Save every unique order as a template, but skip true duplicates.
-        #     _save_template_if_unique(user, order)
+            # Save every unique order as a template, but skip true duplicates.
+            _save_template_if_unique(user, order)
 
-        #     return Response({
-        #         'id': order.id,
-        #         'order_number': order.order_number,
-        #         'total_amount': str(order.total_amount),
-        #         'status': order.status.name if order.status else '',
-        #         'needs_approval': False if is_billing_editor else flow_needs_approval,
-        #         'message': f"Order updated and sent to {next_status.name.lower()}" if next_status else 'Order updated successfully',
-        #     }, status=status.HTTP_200_OK)
+            return Response({
+                'id': order.id,
+                'order_number': order.order_number,
+                'total_amount': str(order.total_amount),
+                'status': order.status.name if order.status else '',
+                'needs_approval': False if is_billing_editor else flow_needs_approval,
+                'message': f"Order updated and sent to {next_status.name.lower()}" if next_status else 'Order updated successfully',
+            }, status=status.HTTP_200_OK)
 
         serializer = CreateOrderSerializer(data=request.data)
 
