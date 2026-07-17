@@ -10,8 +10,9 @@ Three tracker sub-roles:
   * tracker_entry  -> Invoice Entry + My Stage Queue
   * tracker_user   -> My Stage Queue
 
-Stuck Alerts is admin-only. Superusers and the OMS 'admin' role see every
-tracker page. Non-tracker OMS users see none of them.
+Stuck Alerts is admin-only (tracker_admin). Access is purely role-driven: only
+the three tracker sub-roles see tracker pages. The OMS 'admin' role and other
+non-tracker OMS users see none of them.
 """
 from rest_framework.permissions import BasePermission
 
@@ -42,11 +43,13 @@ def _role_name(user):
 
 
 def tracker_pages_for(user):
-    """The set of tracker page keys this user may access."""
+    """The set of tracker page keys this user may access.
+
+    Purely role-driven — tracker pages are for the three tracker sub-roles only.
+    The OMS 'admin' role and superusers are NOT special-cased here.
+    """
     if not (user and user.is_authenticated):
         return set()
-    if user.is_superuser or _role_name(user) == 'admin':
-        return set(ALL_TRACKER_PAGES)
     return set(ROLE_PAGE_MAP.get(_role_name(user), set()))
 
 
