@@ -1,27 +1,25 @@
-"""API views for device & app-version management (Phase 2).
+"""API views for device tracking.
 
 Endpoints (all under /api/):
 
     POST   /api/devices/register/   IsAuthenticated   upsert the caller's device
     PUT    /api/devices/update/     IsAuthenticated   refresh device telemetry
     GET    /api/devices/me/         IsAuthenticated   list the caller's devices
-    GET    /api/app/version/        AllowAny          version policy for a product
 
 Response envelope matches the rest of the project: ``{success, message, data}``
 on success, ``{success: False, message, errors}`` on validation failure.
 
-Scope note for this phase: registration is NOT wired into the login flow, no
-force-update decision is computed, and no existing endpoint is touched. The
-version endpoint reports policy data only.
+These endpoints only ever RECORD what a client reports about itself. There is
+no version policy to serve: the deployed app is the source of truth for its own
+version and build, so nothing here tells a client what it should be running.
 """
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AppRelease, PLATFORM_WEB
+from .models import PLATFORM_WEB
 from .serializers import (
-    AppVersionQuerySerializer,
     DeviceRegisterSerializer,
     DeviceUpdateSerializer,
     UserDeviceSerializer,
@@ -130,73 +128,5 @@ class CurrentDevicesView(APIView):
                 "success": True,
                 "message": "Devices retrieved",
                 "data": UserDeviceSerializer(devices, many=True).data,
-            }
-        )
-
-
-class AppVersionView(APIView):
-    """GET /api/app/version/ — version policy for a platform + app_type.
-
-    AllowAny by design: the check must work before authentication (a client with
-    an expired token still needs to learn it should update). Reports policy data
-    only — this phase computes NO force-update decision. ``update_available`` is
-    an informational flag (a newer build exists), not an enforcement signal.
-    """
-
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        serializer = AppVersionQuerySerializer(data=request.query_params)
-        if not serializer.is_valid():
-            return Response(
-                {"success": False, "message": "Invalid query", "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        params = serializer.validated_data
-        release = (
-            AppRelease.objects.filter(
-                platform=params["platform"],
-                app_type=params["app_type"],
-                is_latest=True,
-                is_active=True,
-            )
-            .order_by("-build_number")
-            .first()
-        )
-
-        if release is None:
-            # No policy configured yet — a well-formed "nothing to report".
-            return Response(
-                {
-                    "success": True,
-                    "message": "No release configured for this platform/app_type",
-                    "data": None,
-                }
-            )
-
-        client_build = params.get("build_number")
-        update_available = (
-            client_build is not None and client_build < release.build_number
-        )
-
-        return Response(
-            {
-                "success": True,
-                "message": "Latest release",
-                "data": {
-                    "platform": release.platform,
-                    "app_type": release.app_type,
-                    "latest_version": release.version,
-                    "latest_build_number": release.build_number,
-                    "min_supported_version": release.min_supported_version,
-                    "min_supported_build": release.min_supported_build,
-                    "release_notes": release.release_notes,
-                    "store_url": release.store_url,
-                    "released_at": release.released_at,
-                    "update_available": update_available,
-                    # NOTE: no `update_required` / force-update decision here.
-                    # Enforcement is a later phase; this endpoint reports data.
-                },
             }
         )

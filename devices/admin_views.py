@@ -1,28 +1,23 @@
-"""Admin API for Device & Version Management (Phase 5).
+"""Admin API for Device Management.
 
-Endpoints (all admin-only, all NEW — no existing endpoint is modified):
+Endpoints (all admin-only):
 
     GET    /api/admin/devices/            paginated + filtered + searchable list
     GET    /api/admin/devices/analytics/  cards + chart series
     GET    /api/admin/devices/<pk>/       one device + its user
-    GET    /api/admin/releases/           release list (filterable)
-    POST   /api/admin/releases/           create a release
-    GET    /api/admin/releases/<pk>/      release detail + adoption stats
-    PUT    /api/admin/releases/<pk>/      update a release
-    PATCH  /api/admin/releases/<pk>/      partial update (also used to archive)
 
-Reads the existing `devices_user_device` / `devices_app_release` tables — no new
-tables. Follows the project's house style: plain `APIView`, manual query-param
-handling, `{success, message, data}` envelope, aggregation via
-`.values().annotate()` (the same shape as `orders.views.DashboardChartsView`).
+Reads the existing `devices_user_device` table — no new tables. Follows the
+project's house style: plain `APIView`, manual query-param handling,
+`{success, message, data}` envelope, aggregation via `.values().annotate()`
+(the same shape as `orders.views.DashboardChartsView`).
 
-Scope: this phase is read/report + release CRUD only. No force-update decision
-is computed anywhere here — "outdated" counts are analytics, not enforcement.
+Scope: read/report only. Nothing here decides what a client *should* be
+running — there is no release policy to compare against. The tables simply
+report the version and build each client says it is on.
 """
 from datetime import timedelta
 from math import ceil
 
-from django.db import transaction
 from django.db.models import Count, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -35,14 +30,13 @@ from rest_framework.views import APIView
 from .models import (
     APP_TYPE_MOBILE,
     APP_TYPE_TABLET,
-    AppRelease,
     PLATFORM_ANDROID,
     PLATFORM_IOS,
     PLATFORM_WEB,
     UserDevice,
 )
 from .permissions import IsAdminRole
-from .serializers import AdminUserDeviceSerializer, AppReleaseSerializer
+from .serializers import AdminUserDeviceSerializer
 from .status import filter_by_status, status_counts, thresholds
 
 # OS names our UA parser emits for non-mobile machines.
@@ -235,26 +229,6 @@ class AdminDeviceAnalyticsView(APIView):
         total_devices = qs.count()
         active_devices = qs.filter(is_active=True).count()
 
-        # Latest release per product, and how many devices trail it. "Outdated"
-        # here is a REPORT, not an enforcement decision.
-        latest_releases = list(
-            AppRelease.objects.filter(is_latest=True, is_active=True).values(
-                "platform", "app_type", "version", "build_number"
-            )
-        )
-        outdated_devices = 0
-        on_latest_devices = 0
-        for release in latest_releases:
-            product = qs.filter(
-                platform=release["platform"], app_type=release["app_type"]
-            )
-            outdated_devices += product.filter(
-                build_number__lt=release["build_number"]
-            ).count()
-            on_latest_devices += product.filter(
-                build_number=release["build_number"]
-            ).count()
-
         cards = {
             "total_devices": total_devices,
             "active_devices": active_devices,
@@ -269,9 +243,6 @@ class AdminDeviceAnalyticsView(APIView):
                 platform=PLATFORM_WEB, os_name__in=DESKTOP_OS_NAMES
             ).count(),
             "devices_active_today": qs.filter(last_active__date=today).count(),
-            "outdated_devices": outdated_devices,
-            "on_latest_devices": on_latest_devices,
-            "latest_releases": latest_releases,
         }
 
         # Derived activity buckets for the Device Activity summary cards. One
@@ -334,200 +305,3 @@ class AdminDeviceAnalyticsView(APIView):
                 },
             }
         )
-
-
-def _clear_other_latest(platform, app_type, exclude_pk=None):
-    """Demote any other 'latest' release for this product.
-
-    The DB enforces at most one `is_latest` per (platform, app_type) via the
-    partial unique index `apprelease_one_latest_uq`. That constraint REJECTS a
-    second latest rather than swapping, so the publisher must clear the old flag
-    in the same transaction — this is that step.
-    """
-    others = AppRelease.objects.filter(
-        platform=platform, app_type=app_type, is_latest=True
-    )
-    if exclude_pk is not None:
-        others = others.exclude(pk=exclude_pk)
-    others.update(is_latest=False)
-
-
-class AdminReleaseListCreateView(APIView):
-    """GET/POST /api/admin/releases/ — list and create version-policy rows."""
-
-    permission_classes = [IsAuthenticated, IsAdminRole]
-
-    def get(self, request):
-        qs = AppRelease.objects.all()
-        for field in ("platform", "app_type"):
-            value = (request.query_params.get(field) or "").strip()
-            if value:
-                qs = qs.filter(**{field: value})
-        is_active = (request.query_params.get("is_active") or "").strip().lower()
-        if is_active in ("true", "1"):
-            qs = qs.filter(is_active=True)
-        elif is_active in ("false", "0"):
-            qs = qs.filter(is_active=False)
-
-        qs = qs.order_by("platform", "app_type", "-build_number")
-        page_qs, pagination = _paginate(qs, request)
-        return Response(
-            {
-                "success": True,
-                "message": "Releases retrieved",
-                "data": {
-                    "results": AppReleaseSerializer(page_qs, many=True).data,
-                    "pagination": pagination,
-                },
-            }
-        )
-
-    def post(self, request):
-        serializer = AppReleaseSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(
-                {
-                    "success": False,
-                    "message": "Invalid release data",
-                    "errors": serializer.errors,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        data = serializer.validated_data
-        with transaction.atomic():
-            if data.get("is_latest"):
-                _clear_other_latest(data["platform"], data["app_type"])
-            release = serializer.save()
-
-        return Response(
-            {
-                "success": True,
-                "message": "Release created",
-                "data": AppReleaseSerializer(release).data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
-
-
-class AdminReleaseDetailView(APIView):
-    """GET/PUT/PATCH /api/admin/releases/<pk>/.
-
-    PATCH doubles as "archive" (`{"is_active": false}`). There is deliberately
-    no DELETE: releases are history, and a deleted policy row would silently
-    change what clients are told.
-    """
-
-    permission_classes = [IsAuthenticated, IsAdminRole]
-
-    def _get(self, pk):
-        return AppRelease.objects.filter(pk=pk).first()
-
-    def get(self, request, pk):
-        release = self._get(pk)
-        if release is None:
-            return Response(
-                {"success": False, "message": "Release not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # --- adoption for this exact build ----------------------------------
-        product_devices = UserDevice.objects.filter(
-            platform=release.platform, app_type=release.app_type
-        )
-        total_for_product = product_devices.count()
-        on_this_build = product_devices.filter(build_number=release.build_number)
-        device_count = on_this_build.count()
-        user_count = on_this_build.values("user_id").distinct().count()
-        adoption_percent = (
-            round(device_count * 100.0 / total_for_product, 2)
-            if total_for_product
-            else 0.0
-        )
-
-        # --- neighbouring releases (same product, by build number) -----------
-        siblings = AppRelease.objects.filter(
-            platform=release.platform, app_type=release.app_type
-        )
-        previous = (
-            siblings.filter(build_number__lt=release.build_number)
-            .order_by("-build_number")
-            .first()
-        )
-        following = (
-            siblings.filter(build_number__gt=release.build_number)
-            .order_by("build_number")
-            .first()
-        )
-
-        def brief(item):
-            if item is None:
-                return None
-            return {
-                "id": item.id,
-                "version": item.version,
-                "build_number": item.build_number,
-                "released_at": item.released_at,
-            }
-
-        return Response(
-            {
-                "success": True,
-                "message": "Release retrieved",
-                "data": {
-                    "release": AppReleaseSerializer(release).data,
-                    "adoption": {
-                        "device_count": device_count,
-                        "user_count": user_count,
-                        "adoption_percent": adoption_percent,
-                        "total_devices_for_product": total_for_product,
-                    },
-                    "previous_release": brief(previous),
-                    "next_release": brief(following),
-                },
-            }
-        )
-
-    def _update(self, request, pk, partial):
-        release = self._get(pk)
-        if release is None:
-            return Response(
-                {"success": False, "message": "Release not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        serializer = AppReleaseSerializer(release, data=request.data, partial=partial)
-        if not serializer.is_valid():
-            return Response(
-                {
-                    "success": False,
-                    "message": "Invalid release data",
-                    "errors": serializer.errors,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        data = serializer.validated_data
-        with transaction.atomic():
-            wants_latest = data.get("is_latest", release.is_latest)
-            if wants_latest:
-                _clear_other_latest(
-                    data.get("platform", release.platform),
-                    data.get("app_type", release.app_type),
-                    exclude_pk=release.pk,
-                )
-            updated = serializer.save()
-
-        return Response(
-            {
-                "success": True,
-                "message": "Release updated",
-                "data": AppReleaseSerializer(updated).data,
-            }
-        )
-
-    def put(self, request, pk):
-        return self._update(request, pk, partial=False)
-
-    def patch(self, request, pk):
-        return self._update(request, pk, partial=True)

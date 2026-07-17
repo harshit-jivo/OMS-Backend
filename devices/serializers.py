@@ -11,7 +11,6 @@ from rest_framework import serializers
 from .models import (
     APP_TYPE_CHOICES,
     PLATFORM_CHOICES,
-    AppRelease,
     UserDevice,
 )
 from .status import compute_status
@@ -97,15 +96,6 @@ class UserDeviceSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class AppVersionQuerySerializer(serializers.Serializer):
-    """Validate query params for GET /app/version."""
-
-    platform = serializers.ChoiceField(choices=PLATFORM_CHOICES)
-    app_type = serializers.ChoiceField(choices=APP_TYPE_CHOICES)
-    # Optional: when supplied, the response can flag whether a newer build exists.
-    build_number = serializers.IntegerField(min_value=0, required=False)
-
-
 # ---------------------------------------------------------------------------
 # Admin serializers
 # ---------------------------------------------------------------------------
@@ -169,95 +159,3 @@ class AdminUserDeviceSerializer(serializers.ModelSerializer):
         # the same instant (and we don't re-read the clock per row).
         now = self.context.get("now") or timezone.now()
         return compute_status(obj.last_active, now)
-
-
-class AppReleaseSerializer(serializers.ModelSerializer):
-    """Create/update/read an AppRelease (the version-policy table).
-
-    Enforces the safety rules in serializer-space so the admin UI gets clean
-    field errors instead of a database IntegrityError:
-      1. version / min_supported_version must be Major.Minor.Patch (model
-         validators, inherited automatically).
-      2. build_number must be unique per (platform, app_type).
-      3. only one release may be `is_latest` per (platform, app_type) — the
-         swap itself happens atomically in the view/service, this only reports
-         conflicts that validation can catch early.
-    """
-
-    class Meta:
-        model = AppRelease
-        fields = [
-            "id",
-            "platform",
-            "app_type",
-            "version",
-            "build_number",
-            "release_notes",
-            "is_latest",
-            "is_force_update",
-            "min_supported_version",
-            "min_supported_build",
-            "store_url",
-            "released_at",
-            "is_active",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["id", "created_at", "updated_at"]
-        # DRF auto-generates UniqueTogetherValidators from the model's
-        # UniqueConstraints — including the CONDITIONAL one
-        # (`(platform, app_type) WHERE is_latest`). That validator evaluates its
-        # condition via `attrs['is_latest']` and raises KeyError whenever the
-        # field isn't supplied (any create/patch that omits it). Both rules are
-        # enforced deliberately instead:
-        #   • duplicate build_number -> validate() below, as a field error;
-        #   • single latest per product -> atomic demote in the admin view,
-        #     backstopped by the database's partial unique index.
-        # Field-level validators (the semver regex) are unaffected by this.
-        validators = []
-
-    def validate(self, attrs):
-        # Resolve effective values for partial updates.
-        instance = self.instance
-        platform = attrs.get("platform") or getattr(instance, "platform", None)
-        app_type = attrs.get("app_type") or getattr(instance, "app_type", None)
-        build_number = attrs.get("build_number", getattr(instance, "build_number", None))
-
-        # Rule 2 — no duplicate build number for the same product. Mirrors the
-        # DB constraint `apprelease_build_uq`; checked here for a clean message.
-        if platform and app_type and build_number is not None:
-            clash = AppRelease.objects.filter(
-                platform=platform, app_type=app_type, build_number=build_number
-            )
-            if instance is not None:
-                clash = clash.exclude(pk=instance.pk)
-            if clash.exists():
-                raise serializers.ValidationError(
-                    {
-                        "build_number": (
-                            f"Build {build_number} already exists for "
-                            f"{platform}/{app_type}. Build numbers must be unique "
-                            "per platform and app type."
-                        )
-                    }
-                )
-
-        # A minimum supported build can never exceed the build it belongs to —
-        # that would mark the release itself as unsupported.
-        min_supported_build = attrs.get(
-            "min_supported_build", getattr(instance, "min_supported_build", None)
-        )
-        if (
-            min_supported_build is not None
-            and build_number is not None
-            and min_supported_build > build_number
-        ):
-            raise serializers.ValidationError(
-                {
-                    "min_supported_build": (
-                        "Minimum supported build cannot be greater than this "
-                        "release's build number."
-                    )
-                }
-            )
-        return attrs

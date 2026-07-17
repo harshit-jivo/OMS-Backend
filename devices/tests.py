@@ -1,4 +1,4 @@
-"""Tests for device & version management (Phase 2).
+"""Tests for device tracking.
 
 Views are exercised directly via APIRequestFactory + force_authenticate, so the
 tests cover the view/serializer/service stack without depending on middleware or
@@ -6,17 +6,17 @@ the live database (the test runner uses a throwaway DB).
 """
 from datetime import timedelta
 
+from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.test import TestCase
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from .models import AppRelease, UserDevice
+from .models import UserDevice
 from .services import register_device, touch_last_active
 from .utils import is_valid_device_id, parse_browser
 from .views import (
-    AppVersionView,
     CurrentDevicesView,
     DeviceRegisterView,
     DeviceUpdateView,
@@ -139,42 +139,31 @@ class DeviceApiTests(TestCase):
         self.assertFalse(touch_last_active(device))
 
 
-class AppVersionTests(TestCase):
-    def setUp(self):
-        self.factory = APIRequestFactory()
-
-    def test_no_release_returns_null_data(self):
-        req = self.factory.get("/api/app/version/", {"platform": "ANDROID", "app_type": "MOBILE"})
-        resp = AppVersionView.as_view()(req)  # AllowAny -> no auth
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.data["data"])
-
-    def test_latest_and_update_available(self):
-        AppRelease.objects.create(
-            platform="ANDROID", app_type="MOBILE", version="1.2.0", build_number=58,
-            min_supported_version="1.1.0", min_supported_build=50, is_latest=True,
-            released_at=timezone.now(),
-        )
-        req = self.factory.get("/api/app/version/", {"platform": "ANDROID", "app_type": "MOBILE", "build_number": 42})
-        resp = AppVersionView.as_view()(req)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["data"]["latest_build_number"], 58)
-        self.assertTrue(resp.data["data"]["update_available"])
-        # No force-update decision is exposed in this phase.
-        self.assertNotIn("update_required", resp.data["data"])
-
-    def test_invalid_query_400(self):
-        req = self.factory.get("/api/app/version/", {"platform": "ANDROID"})  # missing app_type
-        resp = AppVersionView.as_view()(req)
-        self.assertEqual(resp.status_code, 400)
+class UrlTests(TestCase):
+    """The client-facing device routes stay reachable at their published paths."""
 
     def test_url_reverse(self):
         self.assertTrue(reverse("device-register").endswith("/devices/register/"))
-        self.assertTrue(reverse("app-version").endswith("/app/version/"))
+        self.assertTrue(reverse("device-update").endswith("/devices/update/"))
+        self.assertTrue(reverse("device-me").endswith("/devices/me/"))
+
+    def test_release_routes_are_gone(self):
+        """Release management was removed; these names must not come back.
+
+        Pins the deletion: the app is the source of truth for its own version,
+        so there is no release policy to serve or curate.
+        """
+        for name in ("app-version", "admin-release-list", "admin-release-detail"):
+            with self.assertRaises(NoReverseMatch):
+                reverse(name)
+
+    def test_apprelease_model_is_gone(self):
+        with self.assertRaises(LookupError):
+            apps.get_model("devices", "AppRelease")
 
 
 class AdminApiTests(TestCase):
-    """Admin device/release API (Phase 5)."""
+    """Admin device API."""
 
     def setUp(self):
         from users.models import UserRole
@@ -183,16 +172,12 @@ class AdminApiTests(TestCase):
             AdminDeviceAnalyticsView,
             AdminDeviceDetailView,
             AdminDeviceListView,
-            AdminReleaseDetailView,
-            AdminReleaseListCreateView,
         )
 
         self.views = {
             "list": AdminDeviceListView.as_view(),
             "detail": AdminDeviceDetailView.as_view(),
             "analytics": AdminDeviceAnalyticsView.as_view(),
-            "releases": AdminReleaseListCreateView.as_view(),
-            "release_detail": AdminReleaseDetailView.as_view(),
         }
         self.factory = APIRequestFactory()
 
@@ -218,14 +203,10 @@ class AdminApiTests(TestCase):
             browser_name="Chrome", os_name="Windows", os_version="10.0",
             first_login=now, last_login=now, last_active=now,
         )
-        self.release = AppRelease.objects.create(
-            platform="ANDROID", app_type="MOBILE", version="1.2.0",
-            build_number=58, is_latest=True, released_at=now,
-        )
 
     # --- permissions ------------------------------------------------------
     def test_non_admin_is_forbidden(self):
-        for key in ("list", "analytics", "releases"):
+        for key in ("list", "analytics"):
             request = self.factory.get("/api/admin/x/")
             force_authenticate(request, user=self.plain)
             self.assertEqual(self.views[key](request).status_code, 403, key)
@@ -285,8 +266,10 @@ class AdminApiTests(TestCase):
         self.assertEqual(cards["android_devices"], 1)
         self.assertEqual(cards["web_devices"], 1)
         self.assertEqual(cards["desktop_browsers"], 1)
-        # Android device is on build 40 while latest is 58 -> outdated.
-        self.assertEqual(cards["outdated_devices"], 1)
+        # Nothing here compares against a "latest" — the cards only ever count
+        # what the devices themselves reported.
+        for gone in ("outdated_devices", "on_latest_devices", "latest_releases"):
+            self.assertNotIn(gone, cards)
         charts = response.data["data"]["charts"]
         self.assertEqual(len(charts["devices_by_last_seen"]), 14)
         self.assertTrue(charts["version_distribution"])
@@ -298,84 +281,6 @@ class AdminApiTests(TestCase):
         force_authenticate(request, user=self.admin)
         self.assertEqual(self.views["detail"](request, pk=device.pk).status_code, 200)
         self.assertEqual(self.views["detail"](request, pk=999999).status_code, 404)
-
-    # --- release CRUD + safety rules (Task 8) -----------------------------
-    def test_create_release_demotes_previous_latest(self):
-        request = self.factory.post(
-            "/api/admin/releases/",
-            {
-                "platform": "ANDROID", "app_type": "MOBILE", "version": "1.3.0",
-                "build_number": 59, "is_latest": True,
-                "released_at": timezone.now().isoformat(),
-            },
-            format="json",
-        )
-        force_authenticate(request, user=self.admin)
-        response = self.views["releases"](request)
-        self.assertEqual(response.status_code, 201)
-        self.release.refresh_from_db()
-        # The old latest was demoted in the same transaction, so the partial
-        # unique index still holds: exactly one latest per platform+app_type.
-        self.assertFalse(self.release.is_latest)
-        self.assertEqual(
-            AppRelease.objects.filter(
-                platform="ANDROID", app_type="MOBILE", is_latest=True
-            ).count(),
-            1,
-        )
-
-    def test_duplicate_build_number_rejected(self):
-        request = self.factory.post(
-            "/api/admin/releases/",
-            {
-                "platform": "ANDROID", "app_type": "MOBILE", "version": "9.9.9",
-                "build_number": 58, "released_at": timezone.now().isoformat(),
-            },
-            format="json",
-        )
-        force_authenticate(request, user=self.admin)
-        response = self.views["releases"](request)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("build_number", response.data["errors"])
-
-    def test_invalid_version_format_rejected(self):
-        request = self.factory.post(
-            "/api/admin/releases/",
-            {
-                "platform": "IOS", "app_type": "MOBILE", "version": "v1.2",
-                "build_number": 3, "released_at": timezone.now().isoformat(),
-            },
-            format="json",
-        )
-        force_authenticate(request, user=self.admin)
-        response = self.views["releases"](request)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("version", response.data["errors"])
-
-    def test_min_supported_build_cannot_exceed_build(self):
-        request = self.factory.post(
-            "/api/admin/releases/",
-            {
-                "platform": "IOS", "app_type": "MOBILE", "version": "1.0.0",
-                "build_number": 5, "min_supported_build": 9,
-                "released_at": timezone.now().isoformat(),
-            },
-            format="json",
-        )
-        force_authenticate(request, user=self.admin)
-        self.assertEqual(self.views["releases"](request).status_code, 400)
-
-    def test_release_detail_reports_adoption(self):
-        request = self.factory.get("/api/admin/releases/x/")
-        force_authenticate(request, user=self.admin)
-        response = self.views["release_detail"](request, pk=self.release.pk)
-        self.assertEqual(response.status_code, 200)
-        data = response.data["data"]
-        # One ANDROID/MOBILE device exists and it is on build 40, not 58.
-        self.assertEqual(data["adoption"]["device_count"], 0)
-        self.assertEqual(data["adoption"]["total_devices_for_product"], 1)
-        self.assertEqual(data["adoption"]["adoption_percent"], 0.0)
-        self.assertIsNone(data["next_release"])
 
     # --- derived activity status ------------------------------------------
     def _make_device(self, minutes_ago=None, days_ago=None):
@@ -451,13 +356,3 @@ class AdminApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         names = [row["user_name"] for row in response.data["data"]["results"]]
         self.assertEqual(names, sorted(names))
-
-    def test_archive_via_patch(self):
-        request = self.factory.patch(
-            "/api/admin/releases/x/", {"is_active": False}, format="json"
-        )
-        force_authenticate(request, user=self.admin)
-        response = self.views["release_detail"](request, pk=self.release.pk)
-        self.assertEqual(response.status_code, 200)
-        self.release.refresh_from_db()
-        self.assertFalse(self.release.is_active)
