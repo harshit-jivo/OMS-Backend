@@ -11,23 +11,14 @@ class SAPInvoiceCreateView(APIView):
         
         invoice_payload = request.data
         invoice_url = f"{settings.HANA_SERVICE_LAYER_URL}/Invoices"
-        type = request.query_params.get('type')
-        
-        if not type:
-            return Response({"error" : "Type(DRAFT / INVOICE) is Required"}  , status = status.HTTP_400_BAD_REQUEST)
-        
-        if type == 'DRAFT':
-            user = settings.HANA_USERNAME
-            password = settings.HANA_PASSWORD
-            
-        else:
-            user = settings.SAP_APPROVER_USER
-            password = settings.SAP_APPROVER_PASSWORD
 
-        
+        # Posting a real invoice must run as the approver user: the drafter user sits
+        # under SAP's approval procedure, which would intercept the post into a draft
+        # instead of creating the invoice.
+        user = settings.SAP_APPROVER_USER
+        password = settings.SAP_APPROVER_PASSWORD
+
         try:
-            print(user)
-            print(password)
             session = SAPServiceLayerManager.get_session_for(user , password )
             sap_response = session.post(invoice_url , json = invoice_payload , timeout = 20)
             
@@ -54,16 +45,14 @@ class DraftView(APIView):
         
         drafter_username = settings.HANA_USERNAME
         drafter_password = settings.HANA_PASSWORD
-        
-        print(drafter_username)
-        print(drafter_password)
+
         try:
             session = SAPServiceLayerManager.get_session_for(drafter_username , drafter_password)
             sap_response = session.post(draft_url , json = draft_payload , timeout = 20)
-            
+
             if sap_response.status_code == 401:
                 SAPServiceLayerManager.clear_session()
-                session = SAPServiceLayerManager.get_session(drafter_username , drafter_password)
+                session = SAPServiceLayerManager.get_session_for(drafter_username , drafter_password)
                 sap_response = session.post(draft_url , json = draft_payload , timeout = 20)
                 
             if sap_response.status_code in [200 , 201]:
