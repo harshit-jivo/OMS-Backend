@@ -433,6 +433,54 @@ DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 _DEV_VAPID_PUBLIC_KEY = "BP2Qud4yZDHMSxq31u0i47Dm0MkDeScBDBBbkEoSFvdrYLk3ZRmYXIgZE0sZQuDBRIeNSdpMN5FAzt1DQJyo80Q"
 _DEV_VAPID_PRIVATE_KEY = "pCo0fEKbYRCaOCEtlZ4CeH7aQaVx10687SzURg8BUo8"
 
-VAPID_PUBLIC_KEY = config("VAPID_PUBLIC_KEY", default="").strip() or _DEV_VAPID_PUBLIC_KEY
-VAPID_PRIVATE_KEY = config("VAPID_PRIVATE_KEY", default="").strip() or _DEV_VAPID_PRIVATE_KEY
+VAPID_PUBLIC_KEY = config("VAPID_PUBLIC_KEY", default="").strip()
+VAPID_PRIVATE_KEY = config("VAPID_PRIVATE_KEY", default="").strip()
 VAPID_ADMIN_EMAIL = config("VAPID_ADMIN_EMAIL", default="").strip() or "admin@oms.local"
+
+# A browser subscription is permanently bound to the application server key it
+# was created with. So silently falling back to the throwaway dev pair in a real
+# deployment POISONS every subscription made while the fallback was active: once
+# real keys are set, those rows can never be pushed to again (FCM answers 403,
+# WNS answers 401). Only allow the fallback in DEBUG, and refuse to start
+# otherwise rather than mint subscriptions against keys we're about to discard.
+if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+    if DEBUG:
+        VAPID_PUBLIC_KEY = VAPID_PUBLIC_KEY or _DEV_VAPID_PUBLIC_KEY
+        VAPID_PRIVATE_KEY = VAPID_PRIVATE_KEY or _DEV_VAPID_PRIVATE_KEY
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must both be set in .env when "
+            "DEBUG=False. Generate a pair with `python manage.py generate_vapid_keys`. "
+            "Refusing to fall back to the built-in dev keys, which would silently "
+            "break Web Push for every browser that subscribes."
+        )
+
+# --- Push token cleanup (scheduled) -----------------------------------------
+# `python manage.py prune_push_tokens` deactivates Expo tokens the push service
+# reports as dead. It is meant to run nightly from cron / Task Scheduler --
+# see docs/push-token-cleanup.md.
+#
+#   PUSH_TOKEN_CLEANUP_LOG   append-only run log (every run, success or failure)
+#   PUSH_TOKEN_CLEANUP_LOCK  lock file that stops two runs overlapping
+PUSH_TOKEN_CLEANUP_LOG = config(
+    "PUSH_TOKEN_CLEANUP_LOG",
+    default=str(BASE_DIR / "logs" / "push_token_cleanup.log"),
+)
+PUSH_TOKEN_CLEANUP_LOCK = config(
+    "PUSH_TOKEN_CLEANUP_LOCK",
+    default=str(BASE_DIR / "logs" / "push_token_cleanup.lock"),
+)
+
+# `python manage.py prune_web_push_subscriptions` -- the browser Web Push
+# equivalent of the Expo token cleanup above. Same nightly cron / Task Scheduler
+# model; see docs/web-push-cleanup.md.
+WEB_PUSH_CLEANUP_LOG = config(
+    "WEB_PUSH_CLEANUP_LOG",
+    default=str(BASE_DIR / "logs" / "web_push_cleanup.log"),
+)
+WEB_PUSH_CLEANUP_LOCK = config(
+    "WEB_PUSH_CLEANUP_LOCK",
+    default=str(BASE_DIR / "logs" / "web_push_cleanup.lock"),
+)

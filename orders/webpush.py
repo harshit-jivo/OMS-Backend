@@ -18,7 +18,19 @@ from .models import WebPushSubscription
 logger = logging.getLogger(__name__)
 
 # HTTP statuses a push service returns for a permanently dead subscription.
-_GONE_STATUSES = {404, 410}
+#   404/410 -- the browser unsubscribed / the endpoint no longer exists.
+#   403/401 -- the row was created against a DIFFERENT application server key
+#              (the VAPID pair was rotated, or it predates the real keys and was
+#              made with the dev fallback). A subscription is permanently bound
+#              to the key it was created with, so this can never succeed again.
+#              Services disagree on the code: FCM answers 403 ("the VAPID
+#              credentials ... do not correspond to the credentials used to
+#              create the subscriptions"), while WNS (Edge) answers a bare 401.
+#
+# Deactivating is safe even if a 401 were ever transient (e.g. clock skew on the
+# VAPID JWT): the subscribe endpoint upserts with is_active=True, so a browser
+# that is still healthy simply re-registers and switches the row back on.
+_GONE_STATUSES = {401, 403, 404, 410}
 
 # Lazily-built Vapid signer (cached across calls).
 _vapid_instance = None
@@ -47,12 +59,29 @@ def get_vapid_public_key():
     return settings.VAPID_PUBLIC_KEY
 
 
-def send_web_push(subscription, payload):
-    """Send one encrypted push to a single :class:`WebPushSubscription`.
+# Delivery outcomes for a single subscription.
+DELIVERED = "delivered"  # push accepted by the service
+DEACTIVATED = "deactivated"  # endpoint permanently dead -> row switched off
+ERROR = "error"  # transient failure -> row left active, retried next time
 
-    Returns ``True`` on success. On a permanent failure (404/410 -- the browser
-    unsubscribed) the row is deactivated so we stop targeting it. Transient
-    errors are logged and swallowed so one bad endpoint never breaks a batch.
+# A tiny data-only payload used to *validate* a subscription without showing the
+# user anything. The service worker recognises this type and returns without
+# calling showNotification (see public/service-worker.js).
+KEEPALIVE_PAYLOAD = {"type": "__keepalive__"}
+
+
+def deliver_web_push(subscription, payload):
+    """Send one encrypted push and report the outcome.
+
+    Returns one of :data:`DELIVERED`, :data:`DEACTIVATED`, :data:`ERROR`.
+
+    On a permanent failure (see ``_GONE_STATUSES``: the browser unsubscribed,
+    the endpoint expired, or the row is bound to an old VAPID key) the row is
+    switched off immediately so we never target it again. Transient errors are
+    logged and swallowed so one bad endpoint never breaks a batch.
+
+    This is the single place a dead subscription is retired -- used by live
+    notification sends AND the nightly cleanup, so both behave identically.
     """
     from pywebpush import WebPushException, webpush
 
@@ -69,34 +98,45 @@ def send_web_push(subscription, payload):
             vapid_claims=dict(_vapid_claims()),
             ttl=60,
         )
-        return True
+        return DELIVERED
     except WebPushException as error:
         status_code = getattr(getattr(error, "response", None), "status_code", None)
         if status_code in _GONE_STATUSES:
-            WebPushSubscription.objects.filter(pk=subscription.pk).update(is_active=False)
+            WebPushSubscription.objects.filter(pk=subscription.pk).update(
+                is_active=False
+            )
             logger.info(
-                "Web push subscription deactivated (gone) id=%s status=%s",
+                "Web push subscription deactivated (gone) id=%s user_id=%s status=%s",
                 subscription.pk,
+                subscription.user_id,
                 status_code,
             )
-        else:
-            logger.warning(
-                "Web push failed id=%s status=%s error=%s",
-                subscription.pk,
-                status_code,
-                error,
-            )
-        return False
+            return DEACTIVATED
+        logger.warning(
+            "Web push failed id=%s user_id=%s status=%s error=%s",
+            subscription.pk,
+            subscription.user_id,
+            status_code,
+            error,
+        )
+        return ERROR
     except Exception as error:  # never let push break the request flow
         logger.error("Unexpected web push error id=%s: %s", subscription.pk, error)
-        return False
+        return ERROR
+
+
+def send_web_push(subscription, payload):
+    """Backward-compatible wrapper: ``True`` only when the push was delivered."""
+    return deliver_web_push(subscription, payload) == DELIVERED
 
 
 def send_web_push_to_user(user, payload):
     """Send ``payload`` to every active browser subscription of ``user``.
 
-    Returns the number of successful deliveries. Safe no-op when the user has no
-    web subscriptions (e.g. mobile-only users).
+    Returns the number of successful deliveries. Dead endpoints (404/410, and a
+    stale-key 401/403) are deactivated on the spot and delivery continues to the
+    remaining subscriptions -- the same immediate self-healing the Expo mobile
+    path has. Safe no-op when the user has no web subscriptions.
     """
     if not user:
         return 0
@@ -108,7 +148,21 @@ def send_web_push_to_user(user, payload):
         return 0
 
     delivered = 0
+    removed = 0
     for subscription in subscriptions:
-        if send_web_push(subscription, payload):
+        outcome = deliver_web_push(subscription, payload)
+        if outcome == DELIVERED:
             delivered += 1
+        elif outcome == DEACTIVATED:
+            removed += 1
+
+    if removed:
+        logger.info(
+            "Web push send complete user_id=%s total=%s delivered=%s removed=%s "
+            "(dead endpoints deactivated; delivery continued)",
+            user.id,
+            len(subscriptions),
+            delivered,
+            removed,
+        )
     return delivered

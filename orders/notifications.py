@@ -22,6 +22,8 @@ NOTE (Task 7): the Expo push behaviour is intentionally preserved byte-for-byte
 """
 
 import logging
+import threading
+import time
 from collections import namedtuple
 
 import requests
@@ -32,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 # Expo push service endpoint. Preserved exactly as the previous implementation.
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+# Expo delivery *receipts*. A ticket only means "Expo accepted the message" --
+# the real outcome (notably DeviceNotRegistered, i.e. the app was uninstalled,
+# its data cleared, or the token rotated) is only reported here. Without this
+# check dead tokens are never noticed: the send logs "accepted" and the row
+# stays active forever, so one user accumulates a pile of dead tokens and the
+# push silently goes nowhere.
+EXPO_RECEIPT_URL = "https://exp.host/--/api/v2/push/getReceipts"
+# Receipts aren't ready instantly; give Expo a moment before asking.
+_RECEIPT_DELAY_SECONDS = 10
 # Screen the mobile app should deep-link to when a push is tapped.
 NOTIFICATION_SCREEN = "notifications"
 # Android channel id -- must match the channel the mobile app registers
@@ -174,6 +185,48 @@ def _build_push_data(notification, event_type=None, notification_type=None, titl
     }
 
 
+def _deactivate_dead_tokens(tokens, reason):
+    """Mark tokens the push service reported as permanently dead."""
+    tokens = [t for t in tokens if t]
+    if not tokens:
+        return 0
+    updated = PushToken.objects.filter(token__in=tokens, is_active=True).update(
+        is_active=False
+    )
+    if updated:
+        logger.info(
+            "Expo push tokens deactivated reason=%s count=%s", reason, updated
+        )
+    return updated
+
+
+def _prune_via_receipts(ticket_id_by_token):
+    """Fetch Expo receipts and deactivate tokens reported as DeviceNotRegistered.
+
+    Runs on a daemon thread: receipts aren't ready immediately and the caller is
+    inside a request. Best-effort by design -- if it's missed, the next push
+    simply tries again.
+    """
+    try:
+        time.sleep(_RECEIPT_DELAY_SECONDS)
+        response = requests.post(
+            EXPO_RECEIPT_URL,
+            json={"ids": list(ticket_id_by_token.values())},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=15,
+        )
+        receipts = (response.json() or {}).get("data") or {}
+        dead = [
+            token
+            for token, ticket_id in ticket_id_by_token.items()
+            if ((receipts.get(ticket_id) or {}).get("details") or {}).get("error")
+            == "DeviceNotRegistered"
+        ]
+        _deactivate_dead_tokens(dead, "DeviceNotRegistered (receipt)")
+    except Exception as error:  # never let receipt polling break anything
+        logger.warning("Expo receipt check failed: %s", error)
+
+
 def send_push_notification(
     user, notification, event_type=None, notification_type=None, title=None
 ):
@@ -237,11 +290,12 @@ def send_push_notification(
             )
             return
 
-        ticket_errors = [
-            ticket
-            for ticket in response_data.get("data", [])
-            if ticket.get("status") != "ok"
-        ]
+        # Tickets come back in the same order as the messages we sent, so we can
+        # map each one back to the token it belongs to.
+        sent_tokens = [message["to"] for message in payload]
+        tickets = response_data.get("data", []) or []
+
+        ticket_errors = [t for t in tickets if t.get("status") != "ok"]
         if response_data.get("errors") or ticket_errors:
             logger.error(
                 "Expo push notification ticket errors user_id=%s notification_id=%s errors=%s ticket_errors=%s",
@@ -250,13 +304,36 @@ def send_push_notification(
                 response_data.get("errors", []),
                 ticket_errors,
             )
-            return
+
+        # A token Expo already knows is dead is reported on the ticket itself.
+        _deactivate_dead_tokens(
+            [
+                token
+                for token, ticket in zip(sent_tokens, tickets)
+                if (ticket.get("details") or {}).get("error") == "DeviceNotRegistered"
+            ],
+            "DeviceNotRegistered (ticket)",
+        )
+
+        # Everything Expo accepted still needs its receipt checked: that is the
+        # only place DeviceNotRegistered shows up for a token that looked fine.
+        ticket_id_by_token = {
+            token: ticket["id"]
+            for token, ticket in zip(sent_tokens, tickets)
+            if ticket.get("status") == "ok" and ticket.get("id")
+        }
+        if ticket_id_by_token:
+            threading.Thread(
+                target=_prune_via_receipts,
+                args=(ticket_id_by_token,),
+                daemon=True,
+            ).start()
 
         logger.info(
             "Expo push notification accepted user_id=%s notification_id=%s token_count=%s",
             user.id,
             notification.id,
-            len(tokens),
+            len(ticket_id_by_token),
         )
     except requests.RequestException as error:
         logger.error("Expo push notification error: %s", error)
