@@ -27,14 +27,18 @@ class InvoiceLog(models.Model):
         ('PENDING', 'Pending'),
         ('APPROVED', 'Approved'),
         ('REJECTED', 'Rejected'),
+        ('EDITED' , 'Edited'),
         ('ERROR', 'Error'),
-        ('POSTED_TO_SAP' , 'Posted to SAP')
+        ('POSTED_TO_SAP' , 'Posted to SAP'),
+        ('CL_RAISED' , 'CL Raised')
     ]
     
     so_number = models.CharField(max_length=100)
     party_name = models.CharField(max_length=255)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
-        
+    branch = models.CharField(max_length=25 , blank=True , null=True)
+    warehouse = models.CharField(max_length=25 , blank=True , null=True)
+
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     rejection_reason = models.TextField(blank=True, null=True)
     error_message = models.TextField(blank=True, null=True)
@@ -59,16 +63,6 @@ class InvoiceLog(models.Model):
         is_new = self.pk is None # Optional tracking variable if you only want to know if it's new
         super().save(*args, **kwargs) 
         
-        InvocieHistory.objects.create(
-            invoice_log=self,
-            so_number=self.so_number,
-            party_name=self.party_name,
-            total_amount=self.total_amount,
-            status=self.status,
-            invoice_payload=self.invoice_payload,
-            created_by=self.created_by
-        )
-
 
 class InvoiceRefLogs(models.Model):
     ref_id = models.CharField(max_length=25)
@@ -84,3 +78,14 @@ class InvoiceRefLogs(models.Model):
 
     class Meta:
         db_table = 'invoice_ref_logs'
+
+class CreditLimitLogs(models.Model):
+    invoice_log = models.ForeignKey(InvoiceLog , on_delete=models.SET_NULL, null=True)
+    jsap_doc_id = models.IntegerField()
+    party_name = models.CharField(max_length=255)
+    # credit_raised = models.DecimalField(max_digits=10 , decimal_places=3)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+
+    class Meta:
+        db_table = 'credit_limit_logs'
