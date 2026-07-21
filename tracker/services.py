@@ -58,6 +58,54 @@ def can_act(user, invoice):
     return stage.code == 'entry' and invoice.created_by_id == user.id
 
 
+def stage_recipients(stage):
+    """Active TRACKER users mapped to `stage` who have an email address — the
+    people to notify when an invoice sits there too long.
+
+    Only the three tracker sub-roles (tracker_admin / tracker_entry /
+    tracker_user) are mailed — never plain OMS users or superusers."""
+    from django.contrib.auth import get_user_model
+    from .permissions import ROLE_PAGE_MAP
+    User = get_user_model()
+    tracker_roles = set(ROLE_PAGE_MAP.keys())
+    return list(
+        User.objects
+        .filter(tracker_stage_access__stage=stage,
+                tracker_stage_access__is_active=True,
+                is_active=True,
+                role__name__in=tracker_roles)
+        .exclude(email__isnull=True).exclude(email='')
+        .distinct()
+    )
+
+
+def is_full_hold(invoice):
+    """True if the invoice's CURRENT stage visit carries a FULL hold note.
+
+    A full hold keeps the invoice in place (partial holds advance it), so the
+    presence of a FULL hold event on this visit means it's parked on purpose."""
+    return StageEvent.objects.filter(
+        invoice=invoice,
+        stage=invoice.current_stage,
+        entered_at=invoice.current_stage_entered_at,
+        hold_type=StageEvent.HoldType.FULL,
+    ).exists()
+
+
+def stuck_visits(now=None):
+    """Every in-progress invoice sitting at its stage beyond that stage's
+    threshold. Returns a list of (invoice, stage, days_stuck)."""
+    now = now or timezone.now()
+    out = []
+    for inv in (Invoice.objects
+                .filter(status=Invoice.Status.IN_PROGRESS)
+                .select_related('current_stage')):
+        days = days_at_stage(inv, now)
+        if days > inv.current_stage.threshold_days:
+            out.append((inv, inv.current_stage, days))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Time helpers
 # ---------------------------------------------------------------------------

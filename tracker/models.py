@@ -162,6 +162,13 @@ class UserStageAccess(models.Model):
 # ---------------------------------------------------------------------------
 # The tracked document.
 # ---------------------------------------------------------------------------
+class InvoiceManager(models.Manager):
+    """Default manager — hides soft-deleted invoices from every read path
+    (queue, reports, alerts, scoped lists) so callers never see them."""
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
 class Invoice(models.Model):
     class Status(models.TextChoices):
         IN_PROGRESS = 'IN_PROGRESS', 'In Progress'
@@ -215,6 +222,17 @@ class Invoice(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)   # == "Head Office In"
     updated_at = models.DateTimeField(auto_now=True)
+
+    # --- Soft delete (entry desk only; row is kept, just hidden) ---
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='tracker_invoices_deleted',
+    )
+
+    objects = InvoiceManager()          # default: excludes soft-deleted
+    all_objects = models.Manager()      # includes soft-deleted (restore/uniqueness)
 
     class Meta:
         db_table = 'tracker_invoice'
@@ -389,6 +407,9 @@ class StuckAlert(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    # When the stage's users were last emailed about this stuck visit — drives
+    # the re-notify cooldown so the periodic sweep doesn't spam them.
+    last_notified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'tracker_stuck_alert'
@@ -398,6 +419,39 @@ class StuckAlert(models.Model):
 
     def __str__(self):
         return f'Stuck: {self.invoice_id} @ {self.stage.code} ({self.days_stuck}d)'
+
+
+class AlertNotification(models.Model):
+    """One row per (invoice, stage, user) email actually sent by the stuck-alert
+    sweep — the audit trail of *who was mailed about which invoice, and when*."""
+    alert = models.ForeignKey(
+        StuckAlert, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='notifications',
+    )
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.CASCADE, related_name='alert_notifications',
+    )
+    stage = models.ForeignKey(
+        Stage, on_delete=models.CASCADE, related_name='alert_notifications',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='tracker_alert_notifications',
+    )
+    email = models.EmailField(blank=True, default='')
+    days_stuck = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    sent_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'tracker_alert_notification'
+        ordering = ['-sent_at']
+        indexes = [
+            models.Index(fields=['invoice', 'user']),
+            models.Index(fields=['sent_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} mailed re {self.invoice_id} @ {self.stage_id}'
 
 
 class CashVoucher(models.Model):
