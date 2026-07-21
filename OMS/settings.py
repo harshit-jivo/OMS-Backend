@@ -230,3 +230,28 @@ SIMPLE_JWT = {
 
 CORS_ALLOW_ALL_ORIGINS = True
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
+
+# ---------------------------------------------------------------------------
+# Email (SMTP) — used by the tracker's stuck-invoice alert emails.
+# All from .env; blank host falls back to the console backend so nothing breaks
+# in dev. See `manage.py email_stuck_alerts`.
+# ---------------------------------------------------------------------------
+EMAIL_HOST = config('EMAIL_HOST', default='')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_USE_TLS = _parse_bool(config('EMAIL_USE_TLS', default='true'), default=True)
+EMAIL_USE_SSL = _parse_bool(config('EMAIL_USE_SSL', default='false'), default=False)
+EMAIL_BACKEND = config(
+    'EMAIL_BACKEND',
+    default=('django.core.mail.backends.smtp.EmailBackend' if EMAIL_HOST
+             else 'django.core.mail.backends.console.EmailBackend'),
+)
+DEFAULT_FROM_EMAIL = config(
+    'DEFAULT_FROM_EMAIL', default=(EMAIL_HOST_USER or 'oms-tracker@jivo.com'))
+
+# Re-notify cooldown (hours): how long before the same stuck invoice emails the
+# stage's users again. Prevents the periodic sweep from spamming.
+TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
+    'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)

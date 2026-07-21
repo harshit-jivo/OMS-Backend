@@ -1,9 +1,9 @@
 from django.contrib import admin
 
 from .models import (
-    Branch, CashVoucher, Category, GstRate, GstType, Invoice, InvoiceMode,
-    PaymentDetail, Stage, StageEvent, StuckAlert, TransporterPayment, Unit,
-    UserStageAccess,
+    AlertNotification, Branch, CashVoucher, Category, GstRate, GstType, Invoice,
+    InvoiceMode, PaymentDetail, Stage, StageEvent, StuckAlert, TransporterPayment,
+    Unit, UserStageAccess,
 )
 
 
@@ -46,13 +46,22 @@ class StageEventInline(admin.TabularInline):
     can_delete = False
 
 
+class AlertNotificationInline(admin.TabularInline):
+    """On the Invoice page: who was mailed about this invoice, and when."""
+    model = AlertNotification
+    extra = 0
+    readonly_fields = ('stage', 'user', 'email', 'days_stuck', 'sent_at')
+    can_delete = False
+    ordering = ('-sent_at',)
+
+
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = ('invoice_number', 'party_name', 'invoice_date',
                     'current_stage', 'status', 'is_locked', 'created_by', 'created_at')
     list_filter = ('current_stage', 'status', 'branch', 'unit', 'category')
     search_fields = ('invoice_number', 'party_name')
-    inlines = [StageEventInline]
+    inlines = [StageEventInline, AlertNotificationInline]
     readonly_fields = ('current_stage', 'current_stage_entered_at', 'is_locked',
                        'created_by', 'created_at', 'updated_at')
 
@@ -76,6 +85,19 @@ class StuckAlertAdmin(admin.ModelAdmin):
                     'is_active', 'created_at', 'resolved_at')
     list_filter = ('is_active', 'stage')
     search_fields = ('invoice__invoice_number', 'invoice__party_name')
+
+
+@admin.register(AlertNotification)
+class AlertNotificationAdmin(admin.ModelAdmin):
+    """Audit trail: which user was mailed about which invoice, and when."""
+    list_display = ('sent_at', 'user', 'email', 'invoice', 'stage', 'days_stuck')
+    list_filter = ('stage', 'sent_at')
+    search_fields = ('invoice__invoice_number', 'invoice__party_name',
+                     'user__username', 'email')
+    date_hierarchy = 'sent_at'
+    autocomplete_fields = ('invoice', 'user', 'alert')
+    readonly_fields = ('alert', 'invoice', 'stage', 'user', 'email',
+                       'days_stuck', 'sent_at')
 
 
 @admin.register(CashVoucher)
