@@ -231,7 +231,13 @@ def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amoun
 
     # Resolve what kind of movement this is.
     if status in RETURN_STATUSES:
-        kind = 'RETURN'
+        # SAP/JSAP: a REJECT without remarks is parked as "pending rejection"
+        # (stays at the stage, shows in the Rejected tab) rather than returned.
+        # Supplying remarks (now or later) turns it into a real RETURN.
+        if status == 'REJECTED' and not (remarks or '').strip():
+            kind = 'REJECT_PENDING'
+        else:
+            kind = 'RETURN'
     elif status == 'HOLD':
         if hold_type == 'PARTIAL':
             # A portion of the value is withheld and the invoice advances. The
@@ -256,8 +262,13 @@ def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amoun
     if kind == 'ADVANCE' and stage.is_terminal:
         raise ValidationError(f'"{stage.name}" is the final stage.')
 
-    # Reason enforcement: always on RETURN, plus any reason-required status.
-    needs_reason = kind == 'RETURN' or status in REASON_REQUIRED_STATUSES
+    # Reason enforcement: always on RETURN, plus any reason-required status —
+    # EXCEPT a pending rejection, which is allowed precisely because it has no
+    # remarks yet (they come later, when it is returned).
+    if kind == 'REJECT_PENDING':
+        needs_reason = False
+    else:
+        needs_reason = kind == 'RETURN' or status in REASON_REQUIRED_STATUSES
     if needs_reason and not (remarks or '').strip():
         raise ValidationError('Remarks are mandatory for this action.')
 
@@ -303,6 +314,19 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         )
         return invoice
 
+    if kind == 'REJECT_PENDING':
+        # Rejected but no reason yet: flag it and keep it here (Rejected tab).
+        # An immutable note records the rejection; remarks follow when returned.
+        invoice.rejection_pending = True
+        invoice.save(update_fields=['rejection_pending', 'updated_at'])
+        StageEvent.objects.create(
+            invoice=invoice, stage=stage,
+            event_type=StageEvent.EventType.RECEIVE,
+            stage_status='REJECTED', remarks='',
+            acted_by=user, entered_at=invoice.current_stage_entered_at,
+        )
+        return invoice
+
     # ADVANCE or RETURN both close the current visit.
     target = _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1)
     if target is None:
@@ -325,6 +349,7 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
     # Move the invoice and open the next visit.
     invoice.current_stage = target
     invoice.current_stage_entered_at = now
+    invoice.rejection_pending = False   # any pending rejection is resolved on move
     if stage.code == 'entry':
         invoice.is_locked = True   # advancing out of entry locks edits
     elif target.code == 'entry':
