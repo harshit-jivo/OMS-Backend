@@ -146,7 +146,7 @@ class InvoiceListSerializer(serializers.ModelSerializer):
             'invoice_value', 'category', 'category_name',
             'unit', 'unit_name', 'branch', 'branch_name', 'mode', 'mode_name',
             'current_stage', 'current_stage_code', 'current_stage_name',
-            'status', 'current_stage_entered_at', 'is_locked',
+            'status', 'current_stage_entered_at', 'is_locked', 'rejection_pending',
             'days_at_stage', 'is_overdue', 'editable',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
         ]

@@ -216,6 +216,11 @@ class Invoice(models.Model):
     # user from any further edits.
     is_locked = models.BooleanField(default=False)
 
+    # SAP/JSAP approval: rejected but awaiting a written reason. The invoice
+    # stays at its stage and shows in the "Rejected" tab until remarks are
+    # supplied, at which point it is returned to the previous stage.
+    rejection_pending = models.BooleanField(default=False)
+
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
         related_name='tracker_invoices_created',
