@@ -42,11 +42,13 @@ def _role_name(user):
 
 
 def tracker_pages_for(user):
-    """The set of tracker page keys this user may access."""
+    """The set of tracker page keys this user may access.
+
+    Purely role-driven — tracker pages are for the three tracker sub-roles only.
+    The OMS 'admin' role and superusers are NOT special-cased here.
+    """
     if not (user and user.is_authenticated):
         return set()
-    if user.is_superuser or _role_name(user) == 'admin':
-        return set(ALL_TRACKER_PAGES)
     return set(ROLE_PAGE_MAP.get(_role_name(user), set()))
 
 
