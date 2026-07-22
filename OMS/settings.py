@@ -83,6 +83,8 @@ INSTALLED_APPS = [
     'devices',
     # Document (invoice) tracker — self-contained, no FKs into OMS models
     'tracker',
+    # Dynamic UI labels — admin-editable field labels served to web + mobile
+    'uilabels',
 ]
 
 MIDDLEWARE = [
