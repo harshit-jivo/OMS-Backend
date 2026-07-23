@@ -4,13 +4,23 @@
 --  aliases as "UNE_SP_GST_INVOICE").  Signature unchanged: (IN DOCKEY INT).
 --
 --  ONLY change: "@UTL_MDEXTH" replaced by a ranked UNION of
---      1. OMS_IRN_LOG  (OMS-generated IRNs)  <-- preferred
---      2. @UTL_MDEXTH  (SAP add-on IRNs)     <-- fallback
+--      1. @UTL_MDEXTH  (SAP add-on IRNs)     <-- preferred
+--      2. OMS_IRN_LOG  (OMS-generated IRNs)  <-- fallback (used when the
+--                                               DocEntry is not in @UTL_MDEXTH)
 --  ROW_NUMBER()=1 -> exactly one row per (BaseEntry, DocType).
+--  The "UNE QR Code" path is resolved PER SOURCE so OMS can read the bitmap:
+--    * @UTL_MDEXTH stores "C:\SAP Attachments\Jivo Oil\Bitmaps\<hash>.png"
+--        -> rewritten to "\\JIVO-APP\Jivo Oil\Bitmaps\<hash>.png"
+--    * OMS_IRN_LOG already stores "\\JIVO-APP\OMS_Attachments\Bitmap\<hash>.png"
+--        -> left as-is (OMS's own share).
+--  The rewrite happens inside each UNION branch, so the winning row already
+--  carries the correct network path (no blanket REPLACE on the output).
 --  All original output fields are preserved, incl. "LICENSE FSSAI",
 --  "Customer Fassai No", "UNE QR Code", "UNE IRN No".
 --  Does NOT modify CRYSTAL_AR_INVOICE_ITEMS.
 -- ============================================================================
+
+DROP PROCEDURE "OMS_SP_GST_INVOICE" IF EXISTS;
 
 CREATE PROCEDURE "OMS_SP_GST_INVOICE" (IN DOCKEY INT)
 
@@ -866,16 +876,16 @@ CASE
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
-                           FROM "OMS_IRN_LOG"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
-                            AND IFNULL("U_UTL_QRPT",'') <> ''
+                           FROM "@UTL_MDEXTH"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
                          UNION ALL
                          SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 2 AS "SRC_PRIO"
-                           FROM "@UTL_MDEXTH"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
+                           FROM "OMS_IRN_LOG"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
+                            AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
           WHERE Y."RN" = 1) AA WHERE AA."U_UTL_DocType" = 13 AND AA."U_UTL_BaseEntry" = "OINV"."DocEntry"
 
                     AND AA."U_UTL_IST" = 'S' AND IFNULL(AA."U_UTL_QRPT", '') <> '' AND AA."U_UTL_IRN" IS NOT NULL)
@@ -956,16 +966,16 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
-                           FROM "OMS_IRN_LOG"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
-                            AND IFNULL("U_UTL_QRPT",'') <> ''
+                           FROM "@UTL_MDEXTH"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
                          UNION ALL
                          SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 2 AS "SRC_PRIO"
-                           FROM "@UTL_MDEXTH"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
+                           FROM "OMS_IRN_LOG"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
+                            AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
           WHERE Y."RN" = 1) AA where AA."U_UTL_BaseEntry" = OINV."DocEntry" and AA."U_UTL_IST" ='S' AND IFNULL(AA."U_UTL_QRPT",'')<>''  AND "U_UTL_DocType"=13 group by AA."U_UTL_QRPT") "UNE QR Code"
 
 ,(Select distinct AA."U_UTL_IRN" from (SELECT Y."U_UTL_QRPT", Y."U_UTL_IRN", Y."U_UTL_AckNo", Y."U_UTL_IRNGENDT",
@@ -974,16 +984,16 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
-                           FROM "OMS_IRN_LOG"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
-                            AND IFNULL("U_UTL_QRPT",'') <> ''
+                           FROM "@UTL_MDEXTH"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
                          UNION ALL
                          SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 2 AS "SRC_PRIO"
-                           FROM "@UTL_MDEXTH"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
+                           FROM "OMS_IRN_LOG"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
+                            AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
           WHERE Y."RN" = 1) AA where AA."U_UTL_BaseEntry" = OINV."DocEntry" and AA."U_UTL_IST" ='S' AND IFNULL (AA."U_UTL_QRPT",'')<>''  AND "U_UTL_DocType"=13 group by AA."U_UTL_IRN") "UNE IRN No"
 
 ,(Select Distinct AA."U_UTL_AckNo" from (SELECT Y."U_UTL_QRPT", Y."U_UTL_IRN", Y."U_UTL_AckNo", Y."U_UTL_IRNGENDT",
@@ -992,16 +1002,16 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
-                           FROM "OMS_IRN_LOG"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
-                            AND IFNULL("U_UTL_QRPT",'') <> ''
+                           FROM "@UTL_MDEXTH"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
                          UNION ALL
                          SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 2 AS "SRC_PRIO"
-                           FROM "@UTL_MDEXTH"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
+                           FROM "OMS_IRN_LOG"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
+                            AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
           WHERE Y."RN" = 1) AA where AA."U_UTL_BaseEntry" = OINV."DocEntry" and AA."U_UTL_IST" ='S' AND IFNULL (AA."U_UTL_QRPT",'')<>''   AND "U_UTL_DocType"=13 group by AA."U_UTL_AckNo") "UNE Ack no"
 
 ,(Select Distinct AA."U_UTL_IRNGENDT" from (SELECT Y."U_UTL_QRPT", Y."U_UTL_IRN", Y."U_UTL_AckNo", Y."U_UTL_IRNGENDT",
@@ -1010,16 +1020,16 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
-                           FROM "OMS_IRN_LOG"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
-                            AND IFNULL("U_UTL_QRPT",'') <> ''
+                           FROM "@UTL_MDEXTH"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
                          UNION ALL
                          SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 2 AS "SRC_PRIO"
-                           FROM "@UTL_MDEXTH"
-                          WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
+                           FROM "OMS_IRN_LOG"
+                          WHERE "U_UTL_IST" = 'S' AND IFNULL("Canceled",'N') <> 'Y'
+                            AND IFNULL("U_UTL_QRPT",'') <> '') X) Y
           WHERE Y."RN" = 1) AA where AA."U_UTL_BaseEntry" = OINV."DocEntry" and AA."U_UTL_IST" ='S' AND IFNULL (AA."U_UTL_QRPT",'')<>''  AND "U_UTL_DocType"=13 group by AA."U_UTL_IRNGENDT") "UNE Ack dt"
 
  
