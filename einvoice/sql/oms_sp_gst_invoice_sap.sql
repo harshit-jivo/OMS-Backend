@@ -1,5 +1,5 @@
 -- ============================================================================
---  OMS_SP_GST_INVOICE -- GST A/R invoice print datasource for the OMS Crystal
+--  OMS_SP_GST_INVOICE_SAP -- GST A/R invoice print datasource for the SAP-B1
 --  report.  Derived from CRYSTAL_AR_INVOICE_ITEMS (the procedure the .rpt
 --  aliases as "UNE_SP_GST_INVOICE").  Signature unchanged: (IN DOCKEY INT).
 --
@@ -8,21 +8,19 @@
 --      2. OMS_IRN_LOG  (OMS-generated IRNs)  <-- fallback (used when the
 --                                               DocEntry is not in @UTL_MDEXTH)
 --  ROW_NUMBER()=1 -> exactly one row per (BaseEntry, DocType).
---  The "UNE QR Code" path is resolved PER SOURCE so OMS can read the bitmap:
---    * @UTL_MDEXTH stores "C:\SAP Attachments\Jivo Oil\Bitmaps\<hash>.png"
---        -> rewritten to "\\JIVO-APP\Jivo Oil\Bitmaps\<hash>.png"
---    * OMS_IRN_LOG already stores "\\JIVO-APP\OMS_Attachments\Bitmap\<hash>.png"
---        -> left as-is (OMS's own share).
---  The rewrite happens inside each UNION branch, so the winning row already
---  carries the correct network path (no blanket REPLACE on the output).
+--  QR path is returned RAW (as stored) for BOTH sources, because this proc feeds
+--  the SAP-B1-printed layout (renders where those paths are locally valid):
+--    * @UTL_MDEXTH -> "C:\SAP Attachments\Jivo Oil\Bitmaps\<hash>.png"   (raw)
+--    * OMS_IRN_LOG -> "\\JIVO-APP\OMS_Attachments\Bitmap\<hash>.png"      (raw)
+--  No path rewrite (that is only for the .75 web render service -> OMS_SP_GST_INVOICE).
 --  All original output fields are preserved, incl. "LICENSE FSSAI",
 --  "Customer Fassai No", "UNE QR Code", "UNE IRN No".
 --  Does NOT modify CRYSTAL_AR_INVOICE_ITEMS.
 -- ============================================================================
 
-DROP PROCEDURE "OMS_SP_GST_INVOICE" IF EXISTS;
+DROP PROCEDURE "OMS_SP_GST_INVOICE_SAP" IF EXISTS;
 
-CREATE PROCEDURE "OMS_SP_GST_INVOICE" (IN DOCKEY INT)
+CREATE PROCEDURE "OMS_SP_GST_INVOICE_SAP" (IN DOCKEY INT)
 
 LANGUAGE SQLSCRIPT
 
@@ -876,7 +874,7 @@ CASE
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
                            FROM "@UTL_MDEXTH"
                           WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
@@ -966,7 +964,7 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
                            FROM "@UTL_MDEXTH"
                           WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
@@ -984,7 +982,7 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
                            FROM "@UTL_MDEXTH"
                           WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
@@ -1002,7 +1000,7 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
                            FROM "@UTL_MDEXTH"
                           WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
@@ -1020,7 +1018,7 @@ CASE WHEN "OINV"."BPLId" = 2 AND "INV1"."WhsCode" != 'BH-LR' THEN '1001506400054
                         X."U_UTL_IST", X."U_UTL_BaseEntry", X."U_UTL_DocType",
                         ROW_NUMBER() OVER (PARTITION BY X."U_UTL_BaseEntry", X."U_UTL_DocType"
                                            ORDER BY X."SRC_PRIO", X."U_UTL_IRNGENDT" DESC) AS "RN"
-                   FROM (SELECT REPLACE("U_UTL_QRPT",'C:\SAP Attachments\','\\JIVO-APP\') AS "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
+                   FROM (SELECT "U_UTL_QRPT","U_UTL_IRN","U_UTL_AckNo","U_UTL_IRNGENDT",
                                 "U_UTL_IST","U_UTL_BaseEntry","U_UTL_DocType", 1 AS "SRC_PRIO"
                            FROM "@UTL_MDEXTH"
                           WHERE "U_UTL_IST" = 'S' AND IFNULL("U_UTL_QRPT",'') <> ''
