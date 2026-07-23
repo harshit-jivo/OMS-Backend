@@ -154,7 +154,7 @@ def irn_from_invoice(request, docentry):
     if request.method == "GET":
         return Response({
             "docentry": int(docentry),
-            "company_db": company_db or settings.HANA_COMPANY_DB,
+            "company_db": company_db or settings.HANA_DB_OIL_NAME,
             "doc_no": invoice.get("DocDtls", {}).get("No"),
             "invoice": invoice,
             "valid": not errs,

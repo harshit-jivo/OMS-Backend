@@ -299,7 +299,7 @@ class SyncService:
         return str(value or "").strip().upper()
 
     def resolve_company_db_for_order(self, order):
-        default_company_db = settings.HANA_COMPANY_DB
+        default_company_db = settings.HANA_DB_OIL_NAME
         beverages_company_db = (
             getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or default_company_db
         )
@@ -907,7 +907,7 @@ class SyncService:
         company_db = self.resolve_company_db_for_order(order)
 
         log = SalesQuotationLog.objects.create(
-            order_id=order.id,
+            order_id=order.id, 
             status='STARTED',
             request_data=quotation_payload
         )
