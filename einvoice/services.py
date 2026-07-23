@@ -44,7 +44,7 @@ def current_environment() -> str:
 
 def is_test_company(company_db) -> bool:
     """True if company_db (or the configured default) is a non-production test DB."""
-    db = company_db or settings.HANA_DB_OIL_NAME
+    db = company_db or settings.HANA_OIL_COMPANY_DB
     return db in getattr(settings, "EINV_TEST_COMPANY_DBS", ["TEST_OIL_15122025"])
 
 

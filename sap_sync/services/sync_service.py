@@ -299,7 +299,7 @@ class SyncService:
         return str(value or "").strip().upper()
 
     def resolve_company_db_for_order(self, order):
-        default_company_db = settings.HANA_DB_OIL_NAME
+        default_company_db = settings.HANA_OIL_COMPANY_DB
         beverages_company_db = (
             getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or default_company_db
         )
