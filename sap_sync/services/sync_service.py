@@ -720,15 +720,17 @@ class SyncService:
 
         # ---------------- SAP LOGIN ---------------- #
 
-    def sap_login(self, company_db=None):
+    def sap_login(self, company_db=None, username=None, password=None):
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         print("sap login url:", login_url)
         company_db = company_db or settings.HANA_OIL_COMPANY_DB
+        username = username or settings.HANA_USERNAME
+        password = password or settings.HANA_PASSWORD
 
         payload = {
             "CompanyDB": company_db,
-            "UserName": settings.HANA_USERNAME,
-            "Password": settings.HANA_PASSWORD
+            "UserName": username,
+            "Password": password
         }
 
         print_sap_payload("SAP Login Payload:", payload)
@@ -755,10 +757,11 @@ class SyncService:
 
         login_data = response.json()
         self.sap_company_db = company_db
+        self.sap_username = username
         logger.info(
             "SAP Login success | CompanyDB=%s | User=%s | SessionId=%s",
             company_db,
-            settings.HANA_USERNAME,
+            username,
             login_data.get("SessionId", "N/A"),
         )
         return login_data
@@ -951,9 +954,10 @@ class SyncService:
             if (
                 not hasattr(self, 'sap_session')
                 or getattr(self, 'sap_company_db', None) != company_db
+                or getattr(self, 'sap_username', None) != settings.HANA_USERNAME
             ):
                 self.sap_login(company_db=company_db)
-     
+
             url = f"{settings.HANA_SERVICE_LAYER_URL}/Quotations"
             print(f"SAP quotation URL: {url}")
             logger.warning("SAP quotation URL: %s", url)
@@ -1010,13 +1014,21 @@ class SyncService:
             request_data=quotation_payload
         )
 
+        order_user = settings.SALES_ORDER_USER
+        order_password = settings.SALES_ORDER_PASSWORD
+
         try:
             if (
                 not hasattr(self, 'sap_session')
                 or getattr(self, 'sap_company_db', None) != company_db
+                or getattr(self, 'sap_username', None) != order_user
             ):
-                self.sap_login(company_db=company_db)
-     
+                self.sap_login(
+                    company_db=company_db,
+                    username=order_user,
+                    password=order_password,
+                )
+
             url = f"{settings.HANA_SERVICE_LAYER_URL}/Orders"
             print(f"SAP order URL: {url}")
             logger.warning("SAP order URL: %s", url)
