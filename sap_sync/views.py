@@ -711,12 +711,6 @@ class   ApproveSalesOrderAPIView(APIView):
             service = SyncService(triggered_by=request.user.username)
             order = Order.objects.get(id=order_id)
 
-            print("************************************************")
-            print(order.status)
-            print("************************************************")
-            print(str(order.status).strip() == 'Completed')
-            print("************************************************")
- 
             if str(order.status).strip() == 'Completed':
                 return Response({"error" : "Invoice Already posted"})
 
