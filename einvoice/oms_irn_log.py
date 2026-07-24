@@ -7,7 +7,7 @@ the row in place. DocEntry is an auto-increment identity, so we never supply it.
 Everything here is best-effort — a failure is logged and never breaks the IRN flow.
 
 Gated by settings.EINV_MIRROR_HANA (the caller checks it). Targets the company DB
-schema (settings.HANA_COMPANY_DB) unless a schema is passed.
+schema (settings.HANA_OIL_COMPANY_DB) unless a schema is passed.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ _DOCTYPE = {"INV": "13", "CRN": "14", "DBN": "14"}
 
 
 def _schema(schema):
-    return schema or getattr(settings, "HANA_COMPANY_DB", "")
+    return schema or getattr(settings, "HANA_OIL_COMPANY_DB", "")
 
 
 def _int_or_none(v):

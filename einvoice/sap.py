@@ -45,7 +45,7 @@ def get_session(company_db: str | None = None) -> requests.Session:
     -> a fresh (uncached) login, so callers can target the live company DB
     without disturbing the shared cache.
     """
-    if not company_db or company_db == settings.HANA_COMPANY_DB:
+    if not company_db or company_db == settings.HANA_OIL_COMPANY_DB:
         return SAPServiceLayerManager.get_session()
 
     session = requests.Session()
@@ -75,7 +75,7 @@ def _known_company_dbs() -> list[str]:
     settings.EINV_COMPANY_DBS; the configured default is always tried first."""
     dbs = list(getattr(settings, "EINV_COMPANY_DBS", None)
                or ["JIVO_OIL_HANADB", "JIVO_BEVERAGES_HANADB", "TEST_OIL_15122025"])
-    default = settings.HANA_COMPANY_DB
+    default = settings.HANA_OIL_COMPANY_DB
     if default:
         dbs = [default] + [d for d in dbs if d != default]
     return dbs

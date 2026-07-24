@@ -44,7 +44,7 @@ def current_environment() -> str:
 
 def is_test_company(company_db) -> bool:
     """True if company_db (or the configured default) is a non-production test DB."""
-    db = company_db or settings.HANA_COMPANY_DB
+    db = company_db or settings.HANA_OIL_COMPANY_DB
     return db in getattr(settings, "EINV_TEST_COMPANY_DBS", ["TEST_OIL_15122025"])
 
 
@@ -52,7 +52,7 @@ def test_irn_warning(company_db, irn=None):
     """Warning to CANCEL immediately when an IRN was generated from a test company
     against NIC production (a real live e-invoice for test data). None otherwise."""
     if is_test_company(company_db) and current_environment() == "production":
-        db = company_db or settings.HANA_COMPANY_DB
+        db = company_db or settings.HANA_OIL_COMPANY_DB
         msg = (f"⚠ Generated from TEST company {db} against NIC PRODUCTION — this is a "
                f"REAL, live e-invoice for test data. CANCEL THIS IRN IMMEDIATELY "
                f"(within 24 hours).")

@@ -21,7 +21,7 @@ class Command(BaseCommand):
     help = "Generate IRNs for recent SAP invoices that don't have one yet (polling sweep)."
 
     def add_arguments(self, parser):
-        parser.add_argument("--company-db", default=None, help="SAP company DB (defaults to HANA_COMPANY_DB)")
+        parser.add_argument("--company-db", default=None, help="SAP company DB (defaults to HANA_OIL_COMPANY_DB)")
         parser.add_argument("--limit", type=int, default=25, help="How many recent invoices to scan")
         parser.add_argument("--since", type=int, default=None, help="Only DocEntry greater than this")
         parser.add_argument("--dry-run", action="store_true", help="List what would be processed; don't call NIC")

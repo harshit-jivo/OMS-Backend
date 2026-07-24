@@ -69,7 +69,7 @@ class Queries():
         demand in the stock list but its drill-down (single schema) finds nothing.
         """
         configured = [
-            getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA,
+            getattr(settings, 'HANA_OIL_COMPANY_DB', '') or Queries.SCHEMA,
             getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''),
             getattr(settings, 'HANA_COMPANY_DB_MART', ''),
         ]
@@ -85,7 +85,7 @@ class Queries():
     @staticmethod
     def get_product_stock():
         configured_schemas = [
-            (getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA, 'OIL'),
+            (getattr(settings, 'HANA_OIL_COMPANY_DB', '') or Queries.SCHEMA, 'OIL'),
             (getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''), 'BEVERAGES'),
             (getattr(settings, 'HANA_COMPANY_DB_MART', ''), 'MART'),
         ]

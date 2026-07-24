@@ -143,7 +143,7 @@ DATABASES = {
 HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL')
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
-HANA_COMPANY_DB = config('HANA_COMPANY_DB')
+HANA_OIL_COMPANY_DB = config('HANA_COMPANY_DB')
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
 HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='')
@@ -329,7 +329,7 @@ EINV_QR_SMB_USERNAME = config('EINV_QR_SMB_USERNAME', default='')
 EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
 
 # Company DBs scanned when looking up an invoice by DocNum (the configured
-# HANA_COMPANY_DB is always tried first). Comma-separated in .env.
+# HANA_OIL_COMPANY_DB is always tried first). Comma-separated in .env.
 EINV_COMPANY_DBS = [d.strip() for d in config(
     'EINV_COMPANY_DBS',
     default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,TEST_OIL_15122025',

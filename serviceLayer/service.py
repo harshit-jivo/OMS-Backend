@@ -23,7 +23,7 @@ class SAPServiceLayerManager():
 
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         login_payload = {
-            "CompanyDB": settings.HANA_COMPANY_DB,
+            "CompanyDB": settings.HANA_OIL_COMPANY_DB,
             "UserName": settings.HANA_USERNAME,
             "Password": settings.HANA_PASSWORD
         }
@@ -61,7 +61,7 @@ class SAPServiceLayerManager():
 
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         login_payload = {
-            "CompanyDB": settings.HANA_COMPANY_DB,
+            "CompanyDB": settings.HANA_OIL_COMPANY_DB,
             "UserName": username,
             "Password": password,
         }

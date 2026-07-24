@@ -299,7 +299,7 @@ class SyncService:
         return str(value or "").strip().upper()
 
     def resolve_company_db_for_order(self, order):
-        default_company_db = settings.HANA_COMPANY_DB
+        default_company_db = settings.HANA_OIL_COMPANY_DB
         beverages_company_db = (
             getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or default_company_db
         )
@@ -722,7 +722,7 @@ class SyncService:
     def sap_login(self, company_db=None):
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         print("sap login url:", login_url)
-        company_db = company_db or settings.HANA_COMPANY_DB
+        company_db = company_db or settings.HANA_OIL_COMPANY_DB
 
         payload = {
             "CompanyDB": company_db,
