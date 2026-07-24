@@ -46,7 +46,7 @@ def get_session(company_db: str | None = None) -> requests.Session:
     without disturbing the shared cache.
     """
     if not company_db or company_db == settings.HANA_OIL_COMPANY_DB:
-        return SAPServiceLayerManager.get_session()
+        return SAPServiceLayerManager.get_session('OIL')
 
     session = requests.Session()
     session.verify = _verify()
