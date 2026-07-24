@@ -487,6 +487,25 @@ class Queries():
         """
 
     @staticmethod
+    def get_costing_code(prc_name, branch):
+        """Resolve a Profit Center code (OPRC."PrcCode") from its name.
+
+        SAP document lines expect the numeric ``CostingCode`` (PrcCode), not the
+        human-readable profit-center name. Looks the name up in the correct
+        company DB schema (OIL vs BEVERAGE).
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        safe_prc_name = str(prc_name).replace("'", "''")
+        return f"""
+            SELECT TOP 1 T0."PrcCode"
+            FROM "{s}"."OPRC" AS T0
+            WHERE T0."PrcName" = '{safe_prc_name}'
+        """
+
+    @staticmethod
     def get_series(finYear , BPLId,branch):
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
@@ -540,5 +559,7 @@ class Queries():
         ORDER BY T1."DocDate" DESC
 
     """
+    
+
 
 

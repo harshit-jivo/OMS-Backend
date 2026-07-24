@@ -150,6 +150,11 @@ HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
 
+# Dedicated Service Layer user for Sales Order creation (falls back to the
+# default Service Layer user when not configured).
+SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
+SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
+
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
 HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
 

@@ -14,6 +14,7 @@ from orders.scheme_rules import (
     get_party_product_scheme,
 )
 from users.models import PartyProductAssignment, SchemeProduct
+from hana.services.services import SalesOrderService
 
 logger = logging.getLogger(__name__)
 
@@ -777,8 +778,42 @@ class SyncService:
                     return fallback.isoformat()
             return fallback.isoformat()
 
+        # The order can belong to either JIVO_OIL_HANADB or JIVO_BEVERAGES_HANADB;
+        # resolve which so the OPRC (costing code) lookup hits the right schema.
+        company_db = self.resolve_company_db_for_order(order)
+        beverages_company_db = getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or None
+        branch = "BEVERAGE" if (beverages_company_db and company_db == beverages_company_db) else "OIL"
+
+        sales_service = SalesOrderService()
+        costing_code_cache = {}
+
+        def _resolve_costing_code(prc_name):
+            """Map a profit-center name (sub_group) to its SAP CostingCode (PrcCode).
+
+            Falls back to the raw name if the lookup fails so mapping never crashes.
+            """
+            if not prc_name:
+                return prc_name
+            if prc_name not in costing_code_cache:
+                try:
+                    resolved = sales_service.get_costing_code(prc_name, branch)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to resolve costing code for profit center %r (%s): %s",
+                        prc_name, branch, exc,
+                    )
+                    resolved = None
+                if resolved is None:
+                    logger.warning(
+                        "No PrcCode found in OPRC for profit center %r (%s); "
+                        "sending raw name as CostingCode.",
+                        prc_name, branch,
+                    )
+                costing_code_cache[prc_name] = resolved if resolved is not None else prc_name
+            return costing_code_cache[prc_name]
+
         document_lines = []
-           
+
         for item in order.items.all():
             print("\n============================================\n")
             print(getattr(item, "sub_group"))
@@ -807,7 +842,7 @@ class SyncService:
                     "Quantity": order_qty,
                     "UnitPrice": item_unit_price,
                     "U_SchemeAgst": sub_group,
-                    "CostingCode" : sub_group
+                    "CostingCode" : _resolve_costing_code(sub_group)
                 }
                 if warehouse_code:
                     line["WarehouseCode"] = warehouse_code
@@ -826,18 +861,18 @@ class SyncService:
                         getattr(item, "id", None),
                         raw_scheme_id,
                     )
-
+                    
                 for scheme_item_code in scheme_item_codes:
                     if scheme_item_code == item_code:
                         continue
-
+                    
                     line = {
                         "ItemCode": scheme_item_code,
                         "Quantity": scheme_qty,
                         "UnitPrice": 0.0,
                         "U_SchemeAgst": sub_group,
-                        "CostingCode" : sub_group
-                    
+                        "CostingCode" : _resolve_costing_code(sub_group)
+
                     }
                     if warehouse_code:
                         line["WarehouseCode"] = warehouse_code
@@ -986,6 +1021,7 @@ class SyncService:
             print(f"SAP order URL: {url}")
             logger.warning("SAP order URL: %s", url)
 
+            print(quotation_payload)
             response = self._post_with_ssl_fallback(url, quotation_payload)
             logger.info(
                 "SAP Orders response | status=%s | body=%s",

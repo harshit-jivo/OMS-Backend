@@ -132,6 +132,20 @@ class SalesOrderService():
 
         return result
 
+    def get_costing_code(self, prc_name, branch):
+        """Return the Profit Center code (PrcCode) for a profit-center name.
+
+        Returns the scalar PrcCode, or None if the name is blank / not found.
+        """
+        if not prc_name:
+            return None
+        query = Queries.get_costing_code(prc_name, branch)
+        with HANAConnection() as conn:
+            result = conn.execute(query)
+        if result:
+            return result[0].get("PrcCode")
+        return None
+
     def get_series(self , finYear , groupCode, branch):
         with HANAConnection() as conn:
             query = Queries.get_series(finYear , groupCode, branch)
