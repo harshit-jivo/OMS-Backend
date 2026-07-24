@@ -27,9 +27,16 @@ urlpatterns = [
     path('api/hana/', include('hana.urls')),
     path('api/sku/', include('SKU.urls')),
     path('api/service-layer/' , include('serviceLayer.urls')),
+    path('api/einvoice/', include('einvoice.urls')),
+    path('api/ewaybill/', include('ewaybill.urls')),
     path('api/invoice/', include('invoice.urls')),
     path('api/legal/' , include('legal.urls')),
+    # Device tracking — routes are /api/devices/... and /api/admin/devices/...
+    # (paths declared explicitly inside devices/urls.py).
+    path('api/', include('devices.urls')),
     path('api/tracker/', include('tracker.urls')),
+    # Dynamic UI labels: /api/ui-config/labels/ (public read) + admin CRUD.
+    path('api/ui-config/', include('uilabels.urls')),
 ]
 
 

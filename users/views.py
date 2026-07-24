@@ -1,8 +1,15 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from django.contrib.auth.models import update_last_login
 from .serializers import LoginSerializer, UpdateUserSerializer, UserSerializer,StateSerializer, CompanySerializer,MainGroupSerializer,CreateUserSerializer, CategorySerializer
 from rest_framework.generics import ListAPIView
 from .models import State, Company, MainGroup,UserRole,User, UserPartyAssignment,PartyProductAssignment
@@ -10,6 +17,8 @@ from sap_sync.models import Party, Product, active_product_q
 from orders.models import Categories, RateApproverRule
 from decimal import Decimal
 from django.db.models import Q
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_category(value):
@@ -95,6 +104,36 @@ def _get_user_assignment_category(user):
     return _normalize_category(getattr(category_obj, 'category', None))
 
 
+def _get_user_assignment_categories(user):
+    """All categories assigned to the user (normalized), falling back to the
+    single primary `category` FK for users created before multi-category."""
+    names = []
+    seen = set()
+    manager = getattr(user, 'categories', None)
+    if manager is not None:
+        try:
+            for cat in manager.all():
+                name = _normalize_category(getattr(cat, 'category', cat))
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        except Exception:
+            names = []
+    if names:
+        return names
+    primary = _get_user_assignment_category(user)
+    return [primary] if primary else []
+
+
+def _resolve_requested_category(user, requested):
+    """Category to scope party assignment to. Honor a request-supplied category
+    when it is one of the user's categories; otherwise use the primary."""
+    requested = _normalize_category(requested)
+    if requested and requested in _get_user_assignment_categories(user):
+        return requested
+    return _get_user_assignment_category(user)
+
+
 def _get_category_filtered_assignments(queryset, user_category):
     if not user_category:
         return queryset
@@ -130,7 +169,9 @@ def _serialize_user_party_assignments(assignments, preferred_category=None):
             'card_name': party.card_name,
             'state': party.state,
             'main_group': party.main_group,
-            'category': getattr(party, 'category', None) or normalized_category,
+            # Reflect the assignment's category (not the Party master's), so the
+            # same card_code assigned under OIL and BEVERAGES stays distinct.
+            'category': normalized_category or getattr(party, 'category', None),
             'assigned_at': assignment.assigned_at,
         })
         card_codes.append(assignment.card_code)
@@ -185,7 +226,7 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _get_user_assignment_category(user)
+        user_category = _resolve_requested_category(user, request.query_params.get('category'))
         assignments = _get_category_filtered_assignments(assignments, user_category)
         serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
 
@@ -213,7 +254,10 @@ class AssignPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         all_active_assignments = UserPartyAssignment.objects.filter(user=user, is_active=True)
-        user_category = _get_user_assignment_category(user)
+        # Assign within the requested category (one of the user's categories);
+        # falls back to the primary. Scoping existing rows to this category means
+        # assigning for one category never disturbs parties in another.
+        user_category = _resolve_requested_category(user, request.data.get('category'))
         relevant_existing_qs = _get_category_filtered_assignments(all_active_assignments, user_category)
 
         existing = {
@@ -673,9 +717,17 @@ class UserPartiesView(APIView):
             return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
         assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _get_user_assignment_category(user)
-        assignments = _get_category_filtered_assignments(assignments, user_category)
-        serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
+        requested_category = request.query_params.get('category')
+        # The dashboard needs every assigned party across all of the user's
+        # categories (e.g. the same card_code under both OIL and BEVERAGES). Pass
+        # ?category=all to bypass the single-category scoping used by the
+        # assignment-management screen.
+        if str(requested_category or '').strip().lower() == 'all':
+            serialized = _serialize_user_party_assignments(assignments)
+        else:
+            user_category = _resolve_requested_category(user, requested_category)
+            assignments = _get_category_filtered_assignments(assignments, user_category)
+            serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
 
         return Response({
             'success': True,
@@ -690,28 +742,99 @@ class LoginView(APIView):
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
-        
+
         if serializer.is_valid():
             user = serializer.validated_data['user']
             refresh = RefreshToken.for_user(user)
-                
+            update_last_login(None, user)
+
+            access_lifetime = jwt_settings.ACCESS_TOKEN_LIFETIME
+            logger.info("Login successful user_id=%s", user.id)
+
             return Response({
                 'success': True,
                 'message': 'Login successful',
                 'data': {
                     'user': UserSerializer(user).data,
+                    # Existing fields kept exactly (clients read data.tokens.*);
+                    # token_type + expires_in are additive (Task 4).
                     'tokens': {
                         'access': str(refresh.access_token),
                         'refresh': str(refresh),
-                    }
+                        'token_type': 'Bearer',
+                        'expires_in': int(access_lifetime.total_seconds()),
+                    },
                 }
             })
 
+        logger.warning(
+            "Login failed for username=%s",
+            str(request.data.get('username', ''))[:150],
+        )
         return Response({
             'success': False,
             'message': 'Login failed',
             'errors': serializer.errors
         }, status=status.HTTP_401_UNAUTHORIZED)
+
+
+class ActiveUserTokenRefreshSerializer(TokenRefreshSerializer):
+    """Refresh serializer that also rejects tokens whose user is now missing or
+    inactive (Task 7). The parent already handles expired/invalid tokens and,
+    with BLACKLIST_AFTER_ROTATION, rotates + blacklists the old refresh token.
+    """
+
+    def validate(self, attrs):
+        # Decode/verify the refresh token BEFORE rotation so we can look up the
+        # subject. This raises for expired/invalid/blacklisted tokens.
+        token = RefreshToken(attrs['refresh'])
+        user_id = token.get(jwt_settings.USER_ID_CLAIM)
+        try:
+            user = User.objects.get(**{jwt_settings.USER_ID_FIELD: user_id})
+        except User.DoesNotExist:
+            raise InvalidToken('No active account found for this token')
+        if not user.is_active:
+            raise InvalidToken('User account is disabled')
+
+        return super().validate(attrs)
+
+
+class AuthTokenRefreshView(TokenRefreshView):
+    """POST /api/auth/refresh/ — exchange a refresh token for a new access
+    token, honouring rotation/blacklist settings and blocking inactive users.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = ActiveUserTokenRefreshSerializer
+
+
+class LogoutView(APIView):
+    """POST /api/auth/logout/ — blacklist the refresh token so it cannot be
+    reused (server-side invalidation, not just a client-side clear)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        refresh_token = (
+            request.data.get('refresh')
+            or request.data.get('refresh_token')
+            or ''
+        )
+        if not refresh_token:
+            return Response(
+                {'success': False, 'message': 'Refresh token is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            RefreshToken(refresh_token).blacklist()
+        except TokenError:
+            # Already expired/invalid/blacklisted — logout is idempotent.
+            logger.info("Logout with already-invalid refresh user_id=%s", request.user.id)
+            return Response({'success': True, 'message': 'Logged out'})
+
+        logger.info("Logout success user_id=%s", request.user.id)
+        return Response({'success': True, 'message': 'Logged out'})
     
 class UserListForAssignmentView(APIView):
     permission_classes = [AllowAny]

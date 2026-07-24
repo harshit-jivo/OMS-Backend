@@ -10,9 +10,8 @@ Three tracker sub-roles:
   * tracker_entry  -> Invoice Entry + My Stage Queue
   * tracker_user   -> My Stage Queue
 
-Stuck Alerts is admin-only (tracker_admin). Access is purely role-driven: only
-the three tracker sub-roles see tracker pages. The OMS 'admin' role and other
-non-tracker OMS users see none of them.
+Stuck Alerts is admin-only. Superusers and the OMS 'admin' role see every
+tracker page. Non-tracker OMS users see none of them.
 """
 from rest_framework.permissions import BasePermission
 

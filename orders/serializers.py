@@ -152,15 +152,30 @@ class OrdersLogSerializer(serializers.ModelSerializer):
         return self._action_name(obj)
 
     def get_remarks(self, obj):
+        raw = self._raw_remarks(obj)
         if self._is_billing_acceptance(obj):
-            return "Accepted by billing"
+            # Preserve a real comment the billing user typed; only fall back to
+            # the generic "Accepted by billing" label when they approved with no
+            # note (otherwise the typed remark is lost and never shown).
+            auto_billing = {
+                "",
+                "approved",
+                "accepted",
+                "billing",
+                "accepted by billing",
+                "approved by billing",
+                "sent to auditor",
+            }
+            if raw.strip().lower() in auto_billing:
+                return "Accepted by billing"
+            return raw
         if (
             self._action_name(obj).lower() == "completed"
             and self._performed_by_role(obj) == "auditor"
-            and not self._raw_remarks(obj)
+            and not raw
         ):
             return "Sales quotation created by auditor"
-        return self._raw_remarks(obj)
+        return raw
    
     class Meta:
         model = OrdersLog
@@ -255,25 +270,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
     def get_variety_type(self, obj):
         commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
-        others_list = [
-            "ATTA",
-            "COFFEE",
-            "DRINKS",
-            "DRY FRUITS/NUTS",
-            "FLAKES",
-            "GHEE",
-            "GIFT PACK",
-            "HONEY",
-            "RICE",
-            "SEEDS",
-            "SLICED OLIVE",
-            "SNACKS",
-            "SOYA CHUNK",
-            "SPICES",
-            "TEA",
-            "VITAMINS"
-        ]
-
         premium_list = [
             "BLENDED",
             "CANOLA",
@@ -289,18 +285,18 @@ class OrderItemSerializer(serializers.ModelSerializer):
             "SPICES"
         ]
 
-        sub_group =  SapProduct.objects.filter(item_code=obj.item_code).values_list('sub_group', flat=True).first()
-        
+        sub_group =  SapProduct.objects.filter(item_code=obj.item_code , category=obj.category).values_list('sub_group', flat=True).first()
+        id = SapProduct.objects.filter(item_code=obj.item_code).values_list('id', flat=True).first()
+        category = getattr(obj, 'category', None)
+
         if sub_group in commodity_list:
             variety_type = "COMMODITY"
-        elif sub_group in others_list:
-            variety_type = "OTHERS"
         elif sub_group in premium_list:
             variety_type = "PREMIUM"
         else:
             variety_type = "OTHERS"
 
-        # print(f"{obj.item_name} - {sub_group} - {variety_type}")
+        print(f"{id} - {category} - {obj.item_name} - {sub_group} - {variety_type}")
         return variety_type
     
 
@@ -310,7 +306,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
         current_order = getattr(obj, 'order', None)
         current_order_id = Order.objects.filter(id=current_order.id).values('id').first() if current_order else None
-        print(current_order_id)
+        # print(current_order_id)
 
 
         last_order_id = Order.objects.filter(
@@ -324,8 +320,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
             return None
         else:
             last_purchase_price = OrderItem.objects.filter(order_id=last_order_id['id'], item_code=item_code).values_list('basic_price', flat=True).first()
-            print(last_order_id)        
-            print(f"Last purchase price for card_code: {card_code}, item_code: {item_code} is {last_purchase_price}")
+            # print(last_order_id)0
+            # print(f"Last purchase price for card_code: {card_code}, item_code: {item_code} is {last_purchase_price}")
             return last_purchase_price if last_purchase_price is not None else None
         
 

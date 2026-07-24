@@ -8,7 +8,7 @@ class HANAServiceLayer:
         self.base_url = settings.HANA_SERVICE_LAYER_URL
         self.username = settings.HANA_USERNAME
         self.password = settings.HANA_PASSWORD
-        self.company_db = settings.HANA_COMPANY_DB
+        self.company_db = settings.HANA_OIL_COMPANY_DB
         self.ssl_verify = (
             settings.HANA_SSL_CA_BUNDLE
             if getattr(settings, "HANA_SSL_CA_BUNDLE", "")

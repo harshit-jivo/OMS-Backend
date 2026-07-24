@@ -5,11 +5,11 @@ import urllib3
 from datetime import date, datetime
 from django.db.models import Q
 from django.utils import timezone
-from ..models import Product, Party, PartyAddress, Branch, SyncLog
+from ..models import Product, Party, PartyAddress, Branch, SyncLog 
 from .connection import SAPConnection
 import requests
 from django.conf import settings
-from ..models import SalesQuotationLog
+from ..models import SalesQuotationLog , SalesOrderLog
 from orders.scheme_rules import (
     get_party_product_scheme,
 )
@@ -299,7 +299,7 @@ class SyncService:
         return str(value or "").strip().upper()
 
     def resolve_company_db_for_order(self, order):
-        default_company_db = settings.HANA_COMPANY_DB
+        default_company_db = settings.HANA_OIL_COMPANY_DB
         beverages_company_db = (
             getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or default_company_db
         )
@@ -722,7 +722,7 @@ class SyncService:
     def sap_login(self, company_db=None):
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         print("sap login url:", login_url)
-        company_db = company_db or settings.HANA_COMPANY_DB
+        company_db = company_db or settings.HANA_OIL_COMPANY_DB
 
         payload = {
             "CompanyDB": company_db,
@@ -780,11 +780,16 @@ class SyncService:
         document_lines = []
            
         for item in order.items.all():
-            order_qty = _get_sap_line_quantity(item)
+            print("\n============================================\n")
+            print(getattr(item, "sub_group"))
+            print("\n ============================================\n")
+
+            order_qty = _get_sap_line_quantity(item)  
             item_unit_price = _get_sap_unit_price(item)
             card_code = getattr(order, "card_code", "")
             item_code = getattr(item, "item_code", "")
             category = getattr(item, "category", "")
+            sub_group = getattr(item, "sub_group", "")
             warehouse_code = self.resolve_warehouse_code_for_category(category)
             scheme_entries = _get_order_item_scheme_entries(
                 item,
@@ -801,6 +806,8 @@ class SyncService:
                     "ItemCode": item_code,
                     "Quantity": order_qty,
                     "UnitPrice": item_unit_price,
+                    "U_SchemeAgst": sub_group,
+                    "CostingCode" : sub_group
                 }
                 if warehouse_code:
                     line["WarehouseCode"] = warehouse_code
@@ -828,6 +835,9 @@ class SyncService:
                         "ItemCode": scheme_item_code,
                         "Quantity": scheme_qty,
                         "UnitPrice": 0.0,
+                        "U_SchemeAgst": sub_group,
+                        "CostingCode" : sub_group
+                    
                     }
                     if warehouse_code:
                         line["WarehouseCode"] = warehouse_code
@@ -845,6 +855,14 @@ class SyncService:
             "Comments": " ",
             "ShipToCode": order.ship_to_address,
             "PayToCode": order.bill_to_address,
+            #=-===============================================================================
+            # CHANGE AND MAP THE SALES PERSON
+            #=-===============================================================================
+
+
+            "U_SALES_PERSON" : "PUNJAB GT" ,
+            
+            #=================================================================================
             "BPL_IDAssignedToInvoice": order.dispatch_from_id,
             "DocumentLines": document_lines,
         }
@@ -889,7 +907,7 @@ class SyncService:
         company_db = self.resolve_company_db_for_order(order)
 
         log = SalesQuotationLog.objects.create(
-            order_id=order.id,
+            order_id=order.id, 
             status='STARTED',
             request_data=quotation_payload
         )
@@ -908,6 +926,69 @@ class SyncService:
             response = self._post_with_ssl_fallback(url, quotation_payload)
             logger.info(
                 "SAP Quotations response | status=%s | body=%s",
+                response.status_code,
+                response.text[:500],
+            )
+            if response.status_code == 201:
+                response_data = response.json()
+
+                # order.status = 6
+                order.save(update_fields=['status'])  
+               
+                order.sap_created = True
+                order.save(update_fields=['sap_created'])
+
+                log.status = 'SUCCESS'
+                log.response_data = response_data
+                log.sap_doc_entry = response_data.get("DocEntry")
+                log.sap_doc_num = response_data.get("DocNum")
+                log.completed_at = timezone.now()
+                log.save()
+
+                return response_data
+
+            else:
+                log.status = 'FAILED'
+                log.response_data = response.text
+                log.error_message = response.text
+                log.completed_at = timezone.now()
+                log.save()
+
+                raise Exception(response.text)
+
+        except Exception as e:
+            log.status = 'FAILED'
+            log.error_message = str(e)
+            log.completed_at = timezone.now()
+            log.save()
+            raise
+
+
+    def create_sales_order(self, order):
+       
+        quotation_payload = self.map_order_to_sap(order)
+        company_db = self.resolve_company_db_for_order(order)
+
+        log = SalesOrderLog.objects.create(
+            order_id=order.id,
+            status='STARTED',
+            request_data=quotation_payload
+        )
+
+        try:
+            if (
+                not hasattr(self, 'sap_session')
+                or getattr(self, 'sap_company_db', None) != company_db
+            ):
+                self.sap_login(company_db=company_db)
+     
+            url = f"{settings.HANA_SERVICE_LAYER_URL}/Orders"
+            print(f"SAP order URL: {url}")
+            logger.warning("SAP order URL: %s", url)
+
+            response = self._post_with_ssl_fallback(url, quotation_payload)
+            logger.info(
+                "SAP Orders response | status=%s | body=%s",
                 response.status_code,
                 response.text[:500],
             )

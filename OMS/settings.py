@@ -13,7 +13,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 from pathlib import Path
 from datetime import timedelta
-from decouple import config    
+from corsheaders.defaults import default_headers as cors_default_headers
+from decouple import config
 
 
 def _parse_bool(value, default=False):
@@ -22,7 +23,9 @@ def _parse_bool(value, default=False):
     if isinstance(value, bool):
         return value
 
-    normalized = str(value).strip().lower()
+    # Tolerate an inline "# comment" after the value — python-decouple does NOT
+    # strip these, so "true   # note" would otherwise parse as neither true nor false.
+    normalized = str(value).split('#', 1)[0].strip().lower()
     if normalized in {'1', 'true', 'yes', 'on'}:
         return True
     if normalized in {'0', 'false', 'no', 'off', '', 'release'}:
@@ -44,8 +47,8 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240']
-
+ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
+CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
 # ALLOWED_HOSTS = ['*']
 # Application definition
 
@@ -61,6 +64,7 @@ INSTALLED_APPS = [
     'rest_framework',
     # 'rest_framework.authtoken',
     # 'rest_framework.authto
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_apscheduler',
     # Local apps
@@ -70,11 +74,17 @@ INSTALLED_APPS = [
     'hana',
     'SKU',
     'serviceLayer',
+    # NIC e-Invoice (IRN) + e-Way Bill (ported from the standalone IRN project)
+    'einvoice',
+    'ewaybill',
     'invoice',
     'legal',
     'audit',
+    'devices',
     # Document (invoice) tracker — self-contained, no FKs into OMS models
     'tracker',
+    # Dynamic UI labels — admin-editable field labels served to web + mobile
+    'uilabels',
 ]
 
 MIDDLEWARE = [
@@ -126,7 +136,8 @@ DATABASES = {
         'ENGINE': 'django.db.backends.dummy', 
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
-        'SCHEMA': config('HANA_DB_NAME'),
+        'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
+        'BEVERAGE_SCHEMA': config('HANA_DB_BEVERAGE_NAME'),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     }
@@ -138,7 +149,11 @@ DATABASES = {
 HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL')
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
-HANA_COMPANY_DB = config('HANA_COMPANY_DB')
+
+HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
+HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+
+
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
 HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='')
@@ -148,6 +163,11 @@ HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
 
+# DSR credit-limit service (external project; proxied because it has no CORS)
+DSR_API_BASE = config('JSAP_API_BASE')
+# Fixed OMS user id stamped as createdBy on DSR credit-limit requests.
+OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
+
 # SAP SQL Server (source for sync)
 SAP_DB_HOST = config('SAP_DB_HOST', default='103.89.45.75')
 SAP_DB_PORT = config('SAP_DB_PORT', default=1433, cast=int)
@@ -155,7 +175,8 @@ SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
 SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
 
-
+# VAPID (Web Push) keys are configured lower down in this file — see the
+# "Web Push (VAPID)" section near the bottom.
 SAP_APPROVER_USER = config('SAP_APPROVER_USER')
 SAP_APPROVER_PASSWORD = config('SAP_APPROVER_PASSWORD') 
 
@@ -194,6 +215,11 @@ USE_TZ = True
 
 AUTH_USER_MODEL = 'users.User'
 
+# Existing tables use 32-bit integer primary keys, so keep AutoField as the
+# project-wide default (this also silences models.W042). Apps that need 64-bit
+# ids (e.g. einvoice) opt in via default_auto_field = BigAutoField in apps.py.
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
@@ -221,16 +247,40 @@ REST_FRAMEWORK = {
     ),
 }
 
-# JWT Settings
+# JWT Settings (SimpleJWT). Hardened for production while preserving the
+# existing API contract and token compatibility.
 SIMPLE_JWT = {
+    # Access lifetime kept at 1 day: the current web/mobile clients do NOT run
+    # a refresh flow, so shortening this would log active users out mid-session
+    # (a compatibility break). Shorten once clients adopt the /auth/refresh/
+    # endpoint added in this phase.
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+
+    # Rotation + blacklist: a refresh issues a new refresh token and the old
+    # one is blacklisted so it cannot be replayed.
     'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    # Stamp user.last_login on token issuance.
+    'UPDATE_LAST_LOGIN': True,
+
+    'ALGORITHM': 'HS256',
+    # Defaults to SECRET_KEY (so all EXISTING tokens stay valid). Override with
+    # a dedicated JWT_SIGNING_KEY in production via .env. Rotating this key
+    # invalidates every issued token, so only change it deliberately.
+    'SIGNING_KEY': config('JWT_SIGNING_KEY', default=SECRET_KEY),
+
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    # Small clock-skew tolerance for token exp/nbf validation.
+    'LEEWAY': 10,
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
-DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
-
 
 # ---------------------------------------------------------------------------
 # Email (SMTP) — used by the tracker's stuck-invoice alert emails.
@@ -255,3 +305,218 @@ DEFAULT_FROM_EMAIL = config(
 # stage's users again. Prevents the periodic sweep from spamming.
 TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
     'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)
+
+
+# CORS_ALLOW_ALL_ORIGINS wildcards the ORIGIN only — it does NOT allow arbitrary
+# request HEADERS. The web client attaches device/version metadata headers to
+# every request (see Frontend-web/src/services/webDeviceService.ts), and those
+# are non-simple headers, so the browser sends a CORS preflight first. Any header
+# missing from this list makes the browser reject the preflight and CANCEL the
+# real request — it never reaches Django, so it looks like the server is down
+# (0 bytes transferred, no response headers) rather than like a CORS error.
+#
+# Only affects browsers: the React Native client is not subject to CORS.
+CORS_ALLOW_HEADERS = (
+    *cors_default_headers,
+    'x-app-version',
+    'x-build-number',
+    'x-platform',
+    'x-app-type',
+    'x-os-version',
+    'x-device-id',
+)
+
+
+# =========================================================================
+# NIC e-Invoice (IRN) + e-Way Bill configuration
+# Ported from the standalone IRN project. The einvoice/ewaybill apps read
+# these two dicts off `settings`. Values come from .env (python-decouple).
+#
+# Sandbox (test) and production credentials both live in .env under the same
+# variable names — comment/uncomment the appropriate block per server. So
+# switching environments is a .env edit only; no code or setting changes here.
+#
+# The session AuthToken + SEK are cached in Django's default (LocMemCache)
+# cache; switch CACHES to Redis for multi-process/Gunicorn deployments.
+# =========================================================================
+def _split_urls(raw, fallback=''):
+    return [u.strip().rstrip('/') for u in (raw or fallback).split(',') if u.strip()]
+
+
+# ---- NIC e-Invoice ----
+EINV = {
+    "BASE_URL": config('EINV_BASE_URL', default='https://einv1api.gstsandbox.nic.in'),
+    # Failover hosts (NIC runs a load-balanced pair); comma-separated in .env.
+    "BASE_URLS": _split_urls(
+        config('EINV_BASE_URLS', default=''),
+        'https://einv1api.gstsandbox.nic.in,https://einv2api.gstsandbox.nic.in',
+    ),
+    "AUTH_PATH": config('EINV_AUTH_PATH', default='/eivital/v1.04/auth'),
+    "IRN_PATH": config('EINV_IRN_PATH', default='/eicore/v1.03/Invoice'),
+    "CANCEL_PATH": config('EINV_CANCEL_PATH', default='/eicore/v1.03/Invoice/Cancel'),
+    "MASTER_GSTIN_PATH": config('EINV_MASTER_GSTIN_PATH', default='/eivital/v1.04/Master/gstin'),
+    "SYNC_GSTIN_PATH": config('EINV_SYNC_GSTIN_PATH', default='/eivital/v1.04/Master/syncgstin'),
+    "EWB_PATH": config('EINV_EWB_PATH', default='/eiewb/v1.03/ewaybill'),
+    "HEARTBEAT_PATH": config('EINV_HEARTBEAT_PATH', default='/eivital/v1.04/heartbeat/ping'),
+    "CLIENT_ID": config('EINV_CLIENT_ID', default=''),
+    "CLIENT_SECRET": config('EINV_CLIENT_SECRET', default=''),
+    "USERNAME": config('EINV_USERNAME', default=''),
+    "PASSWORD": config('EINV_PASSWORD', default=''),
+    "GSTIN": config('EINV_GSTIN', default=''),
+    "PUBLIC_KEY_PATH": config(
+        'EINV_PUBLIC_KEY_PATH',
+        default=str(BASE_DIR / 'secrets' / 'PublicKey' / 'einv_sandbox.pem'),
+    ),
+}
+
+# ---- Multi-GSTIN NIC credentials (same PAN, different state GSTINs) ----
+# client-id/secret are reusable across GSTINs of one PAN; the API username/password
+# are per-GSTIN (created on the e-invoice portal under each GSTIN). List the GSTINs
+# in EINV_GSTINS, then add per-GSTIN vars (see .env). The generate/cancel flow picks
+# the credential set that matches each invoice's seller GSTIN.
+EINV_GSTINS = [g.strip() for g in config('EINV_GSTINS', default='').split(',') if g.strip()]
+EINV_CREDENTIALS = {
+    g: {
+        "GSTIN": g,
+        "USERNAME": config(f'EINV_{g}_USERNAME', default=''),
+        "PASSWORD": config(f'EINV_{g}_PASSWORD', default=''),
+        "CLIENT_ID": config(f'EINV_{g}_CLIENT_ID', default=EINV["CLIENT_ID"]),
+        "CLIENT_SECRET": config(f'EINV_{g}_CLIENT_SECRET', default=EINV["CLIENT_SECRET"]),
+        "PUBLIC_KEY_PATH": config(f'EINV_{g}_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
+    }
+    for g in EINV_GSTINS
+}
+
+# When true, creating a real invoice (serviceLayer.SAPInvoiceCreateView, type=INVOICE)
+# fires automatic IRN generation for that DocEntry in the background. Every attempt
+# is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
+EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), default=False)
+
+# After an IRN generation attempt:
+#  - EINV_MIRROR_HANA: write the attempt into the HANA table OMS_IRN_LOG
+#    (same column shape as the SAP add-on's @UTL_MDEXTH): 'S' on success,
+#    'F' on failure, and a cancel stamp on cancellation.
+#  - EINV_SAP_WRITEBACK: PATCH the IRN back onto the SAP invoice's e-Billing
+#    protocol so SAP shows it as e-invoiced (validate on sandbox first).
+# Both off by default and best-effort (never break IRN generation).
+EINV_MIRROR_HANA = _parse_bool(config('EINV_MIRROR_HANA', default='false'), default=False)
+EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), default=False)
+
+# Also write the IRN QR as a .png FILE into this directory on every generation.
+# Point it at the Windows share on another server, e.g.
+#   EINV_QR_SAVE_DIR=\\JIVO-APP\OMS_Attachments\Bitmap
+# Blank = disabled. {doc_no}, {irn}, {ack_no}, {env} are substituted into the name.
+EINV_QR_SAVE_DIR = config('EINV_QR_SAVE_DIR', default='')
+EINV_QR_FILENAME = config('EINV_QR_FILENAME', default='{doc_no}.png')
+# Credentials for the share (needed when the Django service account can't reach it
+# on its own). Username may be 'user' or 'DOMAIN\\user'. Blank = write as the
+# process account (no explicit SMB auth). Requires the `smbprotocol` package.
+EINV_QR_SMB_USERNAME = config('EINV_QR_SMB_USERNAME', default='')
+EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
+
+# Company DBs scanned when looking up an invoice by DocNum (the configured
+# HANA_COMPANY_DB is always tried first). Comma-separated in .env.
+EINV_COMPANY_DBS = [d.strip() for d in config(
+    'EINV_COMPANY_DBS',
+    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,TEST_OIL_15122025',
+).split(',') if d.strip()]
+
+# Non-production (test) company DBs. Generating an IRN from one of these while the
+# NIC target is PRODUCTION still works, but produces a real live e-invoice for test
+# data — so a loud "cancel it immediately" warning is attached to the result.
+EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
+    'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
+).split(',') if d.strip()]
+
+# ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
+# Defaults reuse the e-Invoice credentials/public key (same PAN); override the
+# EWB_* vars in .env only if the e-Way Bill portal issued different ones.
+EWB = {
+    "BASE_URLS": _split_urls(
+        config('EWB_BASE_URLS', default=''),
+        'https://ewb1api.gstsandbox.nic.in/ewaybillapi/v1.03,'
+        'https://ewb2api.gstsandbox.nic.in/ewaybillapi/v1.03',
+    ),
+    "AUTH_PATH": config('EWB_AUTH_PATH', default='/Auth'),
+    "API_PATH": config('EWB_API_PATH', default='/ewayapi'),
+    "CLIENT_ID": config('EWB_CLIENT_ID', default=EINV["CLIENT_ID"]),
+    "CLIENT_SECRET": config('EWB_CLIENT_SECRET', default=EINV["CLIENT_SECRET"]),
+    "USERNAME": config('EWB_USERNAME', default=EINV["USERNAME"]),
+    "PASSWORD": config('EWB_PASSWORD', default=EINV["PASSWORD"]),
+    "GSTIN": config('EWB_GSTIN', default=EINV["GSTIN"]),
+    "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
+}
+
+# --- Web Push (VAPID) -------------------------------------------------------
+# Keys for browser Web Push (Phase 3), loaded from .env via python-decouple
+# like the rest of this file. Only the WEB client uses these — React Native /
+# Expo push does NOT use VAPID.
+#
+#   VAPID_PUBLIC_KEY   application server key handed to the browser at
+#                      subscribe time (safe to expose; it ships to clients).
+#   VAPID_PRIVATE_KEY  raw base64url private key that signs the VAPID JWT.
+#                      SECRET — never commit the production value.
+#   VAPID_ADMIN_EMAIL  contact address sent to push services (a "mailto:"
+#                      prefix is added automatically if you omit it).
+#
+# The defaults below are DEV-ONLY throwaway keys so the app works out of the
+# box locally. Generate a real pair with `python manage.py generate_vapid_keys`
+# and set all three in .env for staging/production.
+#
+# The trailing `or <default>` also covers a .env that has the key present but
+# BLANK (e.g. `VAPID_PUBLIC_KEY=`), which python-decouple returns as '' — we
+# still fall back to the working dev key rather than a broken empty value.
+_DEV_VAPID_PUBLIC_KEY = "BP2Qud4yZDHMSxq31u0i47Dm0MkDeScBDBBbkEoSFvdrYLk3ZRmYXIgZE0sZQuDBRIeNSdpMN5FAzt1DQJyo80Q"
+_DEV_VAPID_PRIVATE_KEY = "pCo0fEKbYRCaOCEtlZ4CeH7aQaVx10687SzURg8BUo8"
+
+VAPID_PUBLIC_KEY = config("VAPID_PUBLIC_KEY", default="").strip()
+VAPID_PRIVATE_KEY = config("VAPID_PRIVATE_KEY", default="").strip()
+VAPID_ADMIN_EMAIL = config("VAPID_ADMIN_EMAIL", default="").strip() or "admin@oms.local"
+
+# A browser subscription is permanently bound to the application server key it
+# was created with. So silently falling back to the throwaway dev pair in a real
+# deployment POISONS every subscription made while the fallback was active: once
+# real keys are set, those rows can never be pushed to again (FCM answers 403,
+# WNS answers 401). Only allow the fallback in DEBUG, and refuse to start
+# otherwise rather than mint subscriptions against keys we're about to discard.
+if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+    if DEBUG:
+        VAPID_PUBLIC_KEY = VAPID_PUBLIC_KEY or _DEV_VAPID_PUBLIC_KEY
+        VAPID_PRIVATE_KEY = VAPID_PRIVATE_KEY or _DEV_VAPID_PRIVATE_KEY
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must both be set in .env when "
+            "DEBUG=False. Generate a pair with `python manage.py generate_vapid_keys`. "
+            "Refusing to fall back to the built-in dev keys, which would silently "
+            "break Web Push for every browser that subscribes."
+        )
+
+# --- Push token cleanup (scheduled) -----------------------------------------
+# `python manage.py prune_push_tokens` deactivates Expo tokens the push service
+# reports as dead. It is meant to run nightly from cron / Task Scheduler --
+# see docs/push-token-cleanup.md.
+#
+#   PUSH_TOKEN_CLEANUP_LOG   append-only run log (every run, success or failure)
+#   PUSH_TOKEN_CLEANUP_LOCK  lock file that stops two runs overlapping
+PUSH_TOKEN_CLEANUP_LOG = config(
+    "PUSH_TOKEN_CLEANUP_LOG",
+    default=str(BASE_DIR / "logs" / "push_token_cleanup.log"),
+)
+PUSH_TOKEN_CLEANUP_LOCK = config(
+    "PUSH_TOKEN_CLEANUP_LOCK",
+    default=str(BASE_DIR / "logs" / "push_token_cleanup.lock"),
+)
+
+# `python manage.py prune_web_push_subscriptions` -- the browser Web Push
+# equivalent of the Expo token cleanup above. Same nightly cron / Task Scheduler
+# model; see docs/web-push-cleanup.md.
+WEB_PUSH_CLEANUP_LOG = config(
+    "WEB_PUSH_CLEANUP_LOG",
+    default=str(BASE_DIR / "logs" / "web_push_cleanup.log"),
+)
+WEB_PUSH_CLEANUP_LOCK = config(
+    "WEB_PUSH_CLEANUP_LOCK",
+    default=str(BASE_DIR / "logs" / "web_push_cleanup.lock"),
+)
