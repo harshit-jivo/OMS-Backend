@@ -346,6 +346,15 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         visit.days_spent = _days_between(visit.entered_at, now)
         visit.save()
 
+    # A DEBIT disposition withholds part of the value permanently — preserve it
+    # on the invoice so every later stage and the payment maths use the net value.
+    if kind == 'ADVANCE' and status == 'DEBIT' and amount:
+        invoice.debit_amount = (invoice.debit_amount or Decimal('0')) + amount
+    # A PARTIAL hold advances the invoice but holds a portion back — preserve the
+    # held amount for the payment stage (subtracted unless released there).
+    if kind == 'ADVANCE' and status == 'HOLD' and hold_type == 'PARTIAL' and amount:
+        invoice.hold_amount = (invoice.hold_amount or Decimal('0')) + amount
+
     # Move the invoice and open the next visit.
     invoice.current_stage = target
     invoice.current_stage_entered_at = now
@@ -371,6 +380,119 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         acted_by=user, entered_at=now,
     )
     return invoice
+
+
+# ---------------------------------------------------------------------------
+# Payment (terminal stage)
+# ---------------------------------------------------------------------------
+def _q2(value):
+    """Round to 2 decimals (bankers' half-up), tolerant of None."""
+    return Decimal(value or 0).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def compute_payment(invoice, *, discount_pct, tds_pct, paid_amount, hold_added_back=False):
+    """Derive every payment figure from the two percentages + the paid amount.
+
+    Discount base = net invoice value (invoice_value - debit) — this INCLUDES any
+    held-back portion, so discount is unaffected by a hold. TDS% applies to the
+    taxable value (pre-GST).
+
+    Two different figures come out of the hold:
+      * net_payable  — what may be PAID this round. Subtracts the hold amount
+        UNLESS `hold_added_back` releases it. This is the cap on the paid amount.
+      * total_owed   — the full obligation, which ALWAYS includes the hold (it is
+        part of net invoice value). The open balance is measured against this, so
+        a withheld hold keeps the invoice open (balance never drops below the
+        hold) until it is released and paid.
+
+    `paid_amount=None` defaults to the full net payable. Raises ValidationError
+    if paid is negative or exceeds net payable.
+    """
+    net_invoice = invoice.net_invoice_value            # invoice_value - debit
+    hold = invoice.hold_amount or Decimal('0')
+    payable_base = net_invoice if hold_added_back else _q2(net_invoice - hold)
+    if payable_base < 0:
+        payable_base = Decimal('0.00')
+
+    # Discount is on the FULL net invoice value (i.e. incl. the held portion).
+    discount_amount = _q2(net_invoice * (discount_pct or 0) / Decimal('100'))
+    tds_amount = _q2((invoice.taxable_value or 0) * (tds_pct or 0) / Decimal('100'))
+
+    net_payable = _q2(payable_base - discount_amount - tds_amount)   # cap this round
+    if net_payable < 0:
+        net_payable = Decimal('0.00')
+    total_owed = _q2(net_invoice - discount_amount - tds_amount)     # full obligation (incl. hold)
+    if total_owed < 0:
+        total_owed = Decimal('0.00')
+
+    paid = net_payable if paid_amount is None else _q2(paid_amount)
+    if paid < 0:
+        raise ValidationError('Paid amount cannot be negative.')
+    if paid > net_payable:
+        raise ValidationError(
+            f'Paid amount (₹{paid}) cannot exceed the net payable (₹{net_payable}).')
+
+    # Open balance is against the full obligation, so any un-released hold stays
+    # outstanding here even after this round's payable is fully paid.
+    open_balance = _q2(total_owed - paid)
+    return {
+        'discount_amount': discount_amount,
+        'tds_amount': tds_amount,
+        'net_payable': net_payable,
+        'total_owed': total_owed,
+        'paid_amount': paid,
+        'open_balance': open_balance,
+    }
+
+
+@transaction.atomic
+def apply_payment(*, invoice, user, discount_pct=0, tds_pct=0, paid_amount=None,
+                  hold_added_back=False):
+    """Record/update a payment at the terminal stage.
+
+    Percentages drive the discount/TDS amounts; the paid amount is capped at the
+    net payable. A zero open balance marks the invoice PAID and COMPLETED (it
+    leaves the queue); any positive balance keeps it OPEN and IN_PROGRESS so it
+    stays on the payment desk (Partial tab) for further part-payments.
+    """
+    invoice = Invoice.objects.select_for_update().select_related('current_stage').get(pk=invoice.pk)
+    if not invoice.current_stage.is_terminal:
+        raise ValidationError('Invoice is not at the payment stage.')
+
+    dpct = _parse_amount(discount_pct) or Decimal('0')
+    tpct = _parse_amount(tds_pct) or Decimal('0')
+    for pct, name in ((dpct, 'Discount'), (tpct, 'TDS')):
+        if pct < 0 or pct > 100:
+            raise ValidationError(f'{name} % must be between 0 and 100.')
+
+    hold_back = bool(hold_added_back)
+    calc = compute_payment(
+        invoice, discount_pct=dpct, tds_pct=tpct,
+        paid_amount=_parse_amount(paid_amount), hold_added_back=hold_back)
+
+    payment, _ = PaymentDetail.objects.get_or_create(invoice=invoice)
+    payment.discount_pct = dpct
+    payment.tds_pct = tpct
+    payment.hold_added_back = hold_back
+    payment.discount_amount = calc['discount_amount']
+    payment.tds_amount = calc['tds_amount']
+    payment.paid_amount = calc['paid_amount']
+    payment.open_balance = calc['open_balance']
+    payment.status = (PaymentDetail.Status.PAID if calc['open_balance'] <= 0
+                      else PaymentDetail.Status.OPEN)
+    payment.updated_by = user
+    payment.save()
+
+    if payment.status == PaymentDetail.Status.PAID:
+        if invoice.status != Invoice.Status.COMPLETED:
+            invoice.status = Invoice.Status.COMPLETED
+            invoice.save(update_fields=['status', 'updated_at'])
+    elif invoice.status != Invoice.Status.IN_PROGRESS:
+        # A previously-completed invoice being re-opened (paid amount lowered).
+        invoice.status = Invoice.Status.IN_PROGRESS
+        invoice.save(update_fields=['status', 'updated_at'])
+
+    return invoice, payment
 
 
 def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',
