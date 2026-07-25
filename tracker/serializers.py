@@ -94,6 +94,13 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
     # instead of the default validator.
     invoice_number = serializers.CharField(max_length=100)
 
+    def validate_invoice_date(self, value):
+        # An invoice can't be dated in the future.
+        from django.utils import timezone
+        if value and value > timezone.localdate():
+            raise serializers.ValidationError('Invoice date cannot be in the future.')
+        return value
+
     def validate_invoice_number(self, value):
         value = (value or '').strip()
         if not value:
@@ -110,9 +117,9 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'invoice_date', 'party_name', 'party_code', 'party_gstin',
-            'invoice_number', 'taxable_value', 'gst_type', 'gst_rate',
-            'additional_charge_type', 'additional_charge_amount',
+            'invoice_date', 'effective_month', 'party_name', 'party_code',
+            'party_gstin', 'invoice_number', 'taxable_value', 'gst_type',
+            'gst_rate', 'additional_charge_type', 'additional_charge_amount',
             'category', 'unit', 'branch', 'mode',
         ]
 
@@ -138,8 +145,8 @@ class InvoiceListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'id', 'invoice_date', 'party_name', 'party_code', 'party_gstin',
-            'invoice_number',
+            'id', 'invoice_date', 'effective_month', 'party_name', 'party_code',
+            'party_gstin', 'invoice_number',
             'taxable_value', 'gst_type', 'gst_type_name', 'gst_rate',
             'gst_rate_label', 'gst_amount', 'additional_charge_type',
             'additional_charge_type_display', 'additional_charge_amount',

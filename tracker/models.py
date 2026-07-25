@@ -181,6 +181,9 @@ class Invoice(models.Model):
 
     # --- Entry-stage fields (filled by the creator at Stage 1) ---
     invoice_date = models.DateField()
+    # Accounting period the invoice is booked to (stored as the first day of the
+    # chosen month). Mandatory — captured on the entry form as a month picker.
+    effective_month = models.DateField()
     party_name = models.CharField(max_length=255)
     # SAP vendor (business partner) reference, filled when picked from the SAP
     # vendor dropdown. Free-text party_name is still allowed if not in SAP.
