@@ -200,6 +200,14 @@ class Invoice(models.Model):
         max_digits=15, decimal_places=2, default=0)
     # Always derived on save: taxable + GST amount + additional charge.
     invoice_value = models.DecimalField(max_digits=15, decimal_places=2)
+    # Total amount debited at Pre-Audit (DEBIT disposition). Preserved here so
+    # every downstream stage — and the payment maths — works off the net value
+    # (invoice_value - debit_amount). Accumulates if debited more than once.
+    debit_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    # Total amount withheld via a PARTIAL hold (the invoice advanced but a portion
+    # was held back). Surfaced at the payment stage, where it is subtracted from
+    # the payable unless the handler chooses to release (add back) the hold.
+    hold_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='invoices')
     unit = models.ForeignKey(Unit, on_delete=models.PROTECT, related_name='invoices')
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='invoices')
@@ -257,6 +265,13 @@ class Invoice(models.Model):
         rate = self.gst_rate.rate if self.gst_rate_id else Decimal('0')
         taxable = self.taxable_value or Decimal('0')
         return (taxable * rate / Decimal('100')).quantize(Decimal('0.01'))
+
+    @property
+    def net_invoice_value(self):
+        """Invoice value payable after any Pre-Audit debit is subtracted.
+        This is the base every later stage and the payment maths work from."""
+        return ((self.invoice_value or Decimal('0'))
+                - (self.debit_amount or Decimal('0'))).quantize(Decimal('0.01'))
 
     def save(self, *args, **kwargs):
         # Keep invoice numbers clean so uniqueness isn't defeated by stray spaces.
@@ -345,8 +360,17 @@ class PaymentDetail(models.Model):
     invoice = models.OneToOneField(
         Invoice, on_delete=models.CASCADE, related_name='payment',
     )
+    # User enters the percentages; the amounts below are always derived server-side.
+    # discount% is applied to the NET invoice value (invoice_value - debit);
+    # tds% is applied to the taxable value (before GST / additional charges).
+    discount_pct = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    tds_pct = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     discount_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     tds_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    # When True, the held-back amount is released and added to the payable
+    # (handler ticked "add hold amount back" at the payment desk).
+    hold_added_back = models.BooleanField(default=False)
+    # Cumulative amount paid so far. open_balance = net_payable - paid_amount.
     paid_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     open_balance = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)

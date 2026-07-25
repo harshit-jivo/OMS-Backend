@@ -77,10 +77,16 @@ class PaymentDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentDetail
         fields = [
-            'discount_amount', 'tds_amount', 'paid_amount',
-            'open_balance', 'status', 'updated_at',
+            'discount_pct', 'tds_pct', 'hold_added_back',
+            'discount_amount', 'tds_amount',
+            'paid_amount', 'open_balance', 'status', 'updated_at',
         ]
-        read_only_fields = ['updated_at']
+        # Amounts/balance/status are always derived server-side from the
+        # percentages, the hold-release flag and the paid amount; only those
+        # inputs are writable.
+        read_only_fields = [
+            'discount_amount', 'tds_amount', 'open_balance', 'status', 'updated_at',
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +143,17 @@ class InvoiceListSerializer(serializers.ModelSerializer):
     additional_charge_type_display = serializers.CharField(
         source='get_additional_charge_type_display', read_only=True)
     gst_amount = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    net_invoice_value = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
 
     days_at_stage = serializers.SerializerMethodField()
     is_overdue = serializers.SerializerMethodField()
     editable = serializers.SerializerMethodField()
+    # Lightweight payment summary so the queue can flag partial payments and show
+    # balances without fetching each invoice's full detail.
+    payment_status = serializers.SerializerMethodField()
+    paid_amount = serializers.SerializerMethodField()
+    open_balance = serializers.SerializerMethodField()
+    is_partially_paid = serializers.SerializerMethodField()
 
     class Meta:
         model = Invoice
@@ -150,13 +163,40 @@ class InvoiceListSerializer(serializers.ModelSerializer):
             'taxable_value', 'gst_type', 'gst_type_name', 'gst_rate',
             'gst_rate_label', 'gst_amount', 'additional_charge_type',
             'additional_charge_type_display', 'additional_charge_amount',
-            'invoice_value', 'category', 'category_name',
+            'invoice_value', 'debit_amount', 'hold_amount', 'net_invoice_value',
+            'category', 'category_name',
             'unit', 'unit_name', 'branch', 'branch_name', 'mode', 'mode_name',
             'current_stage', 'current_stage_code', 'current_stage_name',
             'status', 'current_stage_entered_at', 'is_locked', 'rejection_pending',
             'days_at_stage', 'is_overdue', 'editable',
+            'payment_status', 'paid_amount', 'open_balance', 'is_partially_paid',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
         ]
+
+    def _payment(self, obj):
+        # Reverse one-to-one: a missing row raises DoesNotExist, not AttributeError.
+        try:
+            return obj.payment
+        except PaymentDetail.DoesNotExist:
+            return None
+
+    def get_payment_status(self, obj):
+        p = self._payment(obj)
+        return p.status if p else None
+
+    def get_paid_amount(self, obj):
+        p = self._payment(obj)
+        return str(p.paid_amount) if p else None
+
+    def get_open_balance(self, obj):
+        p = self._payment(obj)
+        return str(p.open_balance) if p else None
+
+    def get_is_partially_paid(self, obj):
+        """OPEN with something already paid but a balance remaining."""
+        p = self._payment(obj)
+        return bool(p and p.status == PaymentDetail.Status.OPEN
+                    and p.paid_amount and p.open_balance and p.open_balance > 0)
 
     def get_days_at_stage(self, obj):
         return services.days_at_stage(obj)

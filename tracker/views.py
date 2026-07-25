@@ -79,7 +79,7 @@ def _scoped_queryset(user):
     who created it). Superusers see all."""
     qs = Invoice.objects.select_related(
         'current_stage', 'gst_type', 'gst_rate', 'category',
-        'unit', 'branch', 'mode', 'created_by',
+        'unit', 'branch', 'mode', 'created_by', 'payment',
     )
     if user.is_superuser:
         return qs
@@ -228,7 +228,10 @@ class MyQueueView(APIView):
         if entry and _can_use_entry(user):
             stage_ids.add(entry.id)
 
-        qs = Invoice.objects.select_related('current_stage').filter(
+        qs = Invoice.objects.select_related(
+            'current_stage', 'gst_type', 'gst_rate', 'category',
+            'unit', 'branch', 'mode', 'created_by', 'payment',
+        ).filter(
             current_stage_id__in=stage_ids,
             status=Invoice.Status.IN_PROGRESS,
         )
@@ -355,7 +358,7 @@ class AdminInvoicesView(APIView):
     def get(self, request):
         qs = Invoice.objects.select_related(
             'current_stage', 'gst_type', 'gst_rate', 'category',
-            'unit', 'branch', 'mode', 'created_by',
+            'unit', 'branch', 'mode', 'created_by', 'payment',
         )
         qs = _apply_filters(qs, request.query_params)
         data = InvoiceListSerializer(qs, many=True, context={'request': request}).data
@@ -435,12 +438,20 @@ class PaymentDetailView(APIView):
                 {'detail': 'You are not assigned to the payment stage.'},
                 status=http.HTTP_403_FORBIDDEN)
 
-        payment, _ = PaymentDetail.objects.get_or_create(invoice=invoice)
-        serializer = PaymentDetailSerializer(payment, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(updated_by=request.user)
-        if payment.status == PaymentDetail.Status.PAID:
-            invoice.status = Invoice.Status.COMPLETED
-            invoice.save(update_fields=['status'])
+        # The client sends the inputs (discount %, TDS %, paid amount); the
+        # engine derives the amounts, open balance and status, caps the paid
+        # amount at the net payable, and completes the invoice when fully paid.
+        try:
+            invoice, _payment = services.apply_payment(
+                invoice=invoice, user=request.user,
+                discount_pct=request.data.get('discount_pct', 0),
+                tds_pct=request.data.get('tds_pct', 0),
+                paid_amount=request.data.get('paid_amount'),
+                hold_added_back=request.data.get('hold_added_back', False),
+            )
+        except ValidationError as exc:
+            return Response(
+                {'detail': str(getattr(exc, 'message', exc))},
+                status=http.HTTP_400_BAD_REQUEST)
         return Response(
             InvoiceDetailSerializer(invoice, context={'request': request}).data)
