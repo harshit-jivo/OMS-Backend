@@ -70,15 +70,23 @@ class InvoicelogStatusUpdateView(APIView):
     
 class InvoiceLogListView(APIView):
     
-    def get(self , request):
-        status = request.query_params.get('status')
-        if status:
-            invoice_logs = InvoiceLog.objects.filter(status=status)
-        else:
-            invoice_logs = InvoiceLog.objects.all()
+  def get(self, request):
+    inv_status = request.query_params.get('status')
+    warehouse = request.query_params.get('whs')
+    if not warehouse:
+        return Response(
+            {'error': 'Warehouse Code is a required parameter.'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    invoice_logs = InvoiceLog.objects.filter(warehouse=warehouse)
+    
+    if inv_status:
+        print("1 hai - filtering by status")
+        invoice_logs = invoice_logs.filter(status=inv_status) 
+        print("2 hai - no status provided")
 
-        serializer = InvoiceLogSerializer(invoice_logs, many=True)
-        return Response(serializer.data)
+    serializer = InvoiceLogSerializer(invoice_logs, many=True)
+    return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
     
