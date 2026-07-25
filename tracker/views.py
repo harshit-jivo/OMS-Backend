@@ -97,6 +97,14 @@ def _apply_filters(qs, params):
     inv_no = params.get('invoice_number')
     if inv_no:
         qs = qs.filter(invoice_number__icontains=inv_no)
+    # Effective month filter — value is "YYYY-MM"; match that accounting period.
+    eff = params.get('effective_month')
+    if eff:
+        try:
+            y, m = str(eff).split('-')[:2]
+            qs = qs.filter(effective_month__year=int(y), effective_month__month=int(m))
+        except (ValueError, TypeError):
+            pass
     for field in ('category', 'branch', 'unit', 'status'):
         val = params.get(field)
         if val:
