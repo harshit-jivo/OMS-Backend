@@ -13,8 +13,10 @@ from rest_framework.permissions import IsAuthenticated , AllowAny
 from rest_framework import status
 from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
+from django.http import HttpResponse
 
 from hana.services.services import SalesOrderService
+
 
 
 class InvoiceLogCreateView(APIView):
@@ -337,3 +339,35 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         except ValueError:
             return Response({'error':'Invalid JSON received from DSR API'}, status=status.HTTP_502_BAD_GATEWAY)
+        
+class GetPrintReport(APIView):
+    def get(self, request):
+        docNum = request.query_params.get('docNum')
+        if not docNum:
+            return Response({"error": "docNum is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        docEntry = SalesOrderService().get_docEntry(docNum)
+        if not docEntry:
+            return Response({"error": f"No invoice found for docNum {docNum}"},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        url = f"{settings.CRYSTAL_URL}/api/billprint/{docEntry[0]['DocEntry']}"
+        try:
+            crystal_response = requests.get(url, timeout=60, verify=False)
+        except requests.RequestException as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        if not crystal_response.ok:
+            return Response({'error': 'Failed to generate print report',
+                             'details': crystal_response.text},
+                            status=crystal_response.status_code)
+
+        resp = HttpResponse(
+            crystal_response.content,
+            status=crystal_response.status_code,
+            content_type=crystal_response.headers.get('Content-Type', 'application/pdf'),
+        )
+        resp['Content-Disposition'] = f'inline; filename="invoice_{docNum}.pdf"'
+       
+        resp.xframe_options_exempt = True
+        return resp

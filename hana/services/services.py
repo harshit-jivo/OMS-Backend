@@ -166,3 +166,10 @@ class SalesOrderService():
             result = conn.execute(query)
 
         return result
+    
+    def get_docEntry(self , docNum):
+        with HANAConnection() as conn:
+            query = Queries.get_docEntry(docNum)
+            result = conn.execute(query)
+            
+        return result

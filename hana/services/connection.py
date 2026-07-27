@@ -559,6 +559,14 @@ class Queries():
         ORDER BY T1."DocDate" DESC
 
     """
+    @staticmethod
+    def get_docEntry(docNum):
+        return f"""
+            SELECT 
+                "DocEntry"
+            FROM "JIVO_OIL_HANADB"."OINV"
+            WHERE "DocNum" = '{docNum}'
+        """
     
 
 

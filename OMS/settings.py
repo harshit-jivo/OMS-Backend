@@ -149,6 +149,7 @@ DATABASES = {
 HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL')
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
+CRYSTAL_URL = config('CRYSTAL_URL')
 
 # Dedicated Service Layer user for Sales Order creation (falls back to the
 # default Service Layer user when not configured).
