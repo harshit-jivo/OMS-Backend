@@ -85,9 +85,7 @@ class InvoiceLogListView(APIView):
     invoice_logs = InvoiceLog.objects.filter(warehouse=warehouse)
     
     if inv_status:
-        print("1 hai - filtering by status")
         invoice_logs = invoice_logs.filter(status=inv_status) 
-        print("2 hai - no status provided")
 
     serializer = InvoiceLogSerializer(invoice_logs, many=True)
     return Response(serializer.data)
@@ -371,3 +369,16 @@ class GetPrintReport(APIView):
        
         resp.xframe_options_exempt = True
         return resp
+
+  
+class InvoiceLogListwoWhsView(APIView):
+    
+  def get(self, request):
+    inv_status = request.query_params.get('status')
+    if inv_status:
+        invoice_logs = InvoiceLog.objects.filter(status=inv_status) 
+    else:
+        invoice_logs = InvoiceLog.objects.all()
+        
+    serializer = InvoiceLogSerializer(invoice_logs, many=True)
+    return Response(serializer.data)

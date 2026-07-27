@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView , InvoiceRefLogCreateView ,UpdateInvoiceLogView , CreditLimitCardsView , CreditLimitRequestView ,GetCreditLimitJSAPFlow ,GetPrintReport
+from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView , InvoiceRefLogCreateView ,UpdateInvoiceLogView , CreditLimitCardsView , CreditLimitRequestView ,GetCreditLimitJSAPFlow ,GetPrintReport , InvoiceLogListwoWhsView
 
 urlpatterns = [
     path('pending/', InvoiceLogCreateView.as_view(), name='invoice-log-pending'),
@@ -11,6 +11,7 @@ urlpatterns = [
     path('credit-limit/cards/', CreditLimitCardsView.as_view(), name='credit-limit-cards'),
     path('credit-limit/request/', CreditLimitRequestView.as_view(), name='credit-limit-request'),
     path('credit-limit/flow/' , GetCreditLimitJSAPFlow.as_view()),
-    path('crystal/' , GetPrintReport.as_view())
+    path('crystal/' , GetPrintReport.as_view()),
+    path('logs/all/' , InvoiceLogListwoWhsView.as_view())
 
 ]
