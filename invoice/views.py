@@ -111,7 +111,12 @@ class InvoicelogStatusUpdateView(APIView):
             return Response({'error': 'Rejection reason is required when status is REJECTED'}, status=status.HTTP_400_BAD_REQUEST)
         if new_status == 'REJECTED':
             invoice_log.rejection_reason = request.data.get('rejection_reason')
-        if new_status == 'ERROR' and request.data.get('error_message'):
+        # Record a supplied error message whatever the target status. A failed SAP
+        # repost is worth logging even when the status does not become ERROR — a
+        # credit-limit rejection on an invoice that already has a request in
+        # flight stays CL_RAISED, but the reviewer still needs to see what SAP
+        # said on the latest attempt.
+        if request.data.get('error_message'):
             invoice_log.error_message = request.data.get('error_message')
 
         invoice_log.status = new_status
@@ -374,10 +379,11 @@ class GetCreditLimitJSAPFlow(APIView):
             
             # Safely fetch data using .get() to avoid KeyError
             data = body.get("data", [])
-            
+            # print(data)
             # 2. Extract flow_id safely
             flow_id = None  
             for rec in data:
+                print(rec)
                 if rec.get("id") == doc_id:
                     flow_id = rec.get("flowId")
                     break
@@ -407,11 +413,11 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response(flow_body, status=status.HTTP_200_OK)
 
         except requests.exceptions.Timeout:
-            return Response({'error': 'DSR API timeout'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
+            return Response({'error': 'JSAP API timeout'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
         except requests.exceptions.RequestException as exc:
             return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         except ValueError:
-            return Response({'error':'Invalid JSON received from DSR API'}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({'error':'Invalid JSON received from JSAP API'}, status=status.HTTP_502_BAD_GATEWAY)
         
 class GetPrintReport(APIView):
     def get(self, request):
