@@ -2,6 +2,7 @@ import json
 import requests
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from django.shortcuts import render
 from rest_framework.views import APIView
@@ -21,21 +22,78 @@ from hana.services.services import SalesOrderService
 
 class InvoiceLogCreateView(APIView):
     def post(self, request):
-        serializer = InvoiceLogSerializer(data=request.data)
+        # A resubmit from the "Edit" action on a rejected invoice carries the id of
+        # the log it replaces. It is not a model field, so keep it out of the
+        # serializer and act on it only once the replacement has been saved.
+        data = request.data.copy()
+        edited_from = data.pop('edited_from', None)
+        if isinstance(edited_from, (list, tuple)):
+            edited_from = edited_from[0] if edited_from else None
+
+        serializer = InvoiceLogSerializer(data=data)
         if serializer.is_valid():
-            invoice_log_instance = serializer.save(created_by=request.user)
-            InvocieHistory.objects.create(
-                invoice_log=invoice_log_instance,
-                so_number=invoice_log_instance.so_number,
-                party_name=invoice_log_instance.party_name,
-                total_amount=invoice_log_instance.total_amount,
-                status=invoice_log_instance.status,
-                invoice_payload=invoice_log_instance.invoice_payload,
-                created_by=request.user 
+            with transaction.atomic():
+                invoice_log_instance = serializer.save(created_by=request.user)
+                InvocieHistory.objects.create(
+                    invoice_log=invoice_log_instance,
+                    so_number=invoice_log_instance.so_number,
+                    party_name=invoice_log_instance.party_name,
+                    total_amount=invoice_log_instance.total_amount,
+                    status=invoice_log_instance.status,
+                    rejection_reason=invoice_log_instance.rejection_reason,
+                    error_message=invoice_log_instance.error_message,
+                    invoice_payload=invoice_log_instance.invoice_payload,
+                    created_by=request.user
+                )
+                source = self._close_edited_source(edited_from, request.user)
+                if source is not None:
+                    # Link the replacement to the version it grew out of, so the
+                    # approver of this log can see (and trace) the rejection
+                    # behind it.
+                    invoice_log_instance.supersedes = source
+                    invoice_log_instance.save(update_fields=['supersedes'])
+            return Response(
+                InvoiceLogSerializer(invoice_log_instance).data,
+                status=status.HTTP_201_CREATED,
             )
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
+    def _close_edited_source(self, edited_from, user):
+        """Retire the rejected log this submission replaces, and return it.
+
+        Only runs once the replacement exists, so an edit that is started and then
+        abandoned leaves the original REJECTED and visible to reviewers. The
+        rejection_reason is deliberately left on the row — it is the record of why
+        the invoice was reworked. Returns None when there is nothing to retire, in
+        which case the new log carries no lineage.
+        """
+        if edited_from in (None, ''):
+            return None
+        try:
+            source = InvoiceLog.objects.select_for_update().get(pk=edited_from)
+        except (InvoiceLog.DoesNotExist, ValueError, TypeError):
+            return None
+        # Only a rejected invoice can be reworked; anything else (approved, already
+        # posted to SAP) must not be moved by a resubmission.
+        if source.status != 'REJECTED':
+            return None
+
+        source.status = 'EDITED'
+        source.save()
+        InvocieHistory.objects.create(
+            invoice_log=source,
+            so_number=source.so_number,
+            party_name=source.party_name,
+            total_amount=source.total_amount,
+            status=source.status,
+            rejection_reason=source.rejection_reason,
+            error_message=source.error_message,
+            invoice_payload=source.invoice_payload,
+            created_by=user,
+        )
+        return source
+
+
 class InvoicelogStatusUpdateView(APIView):
 
     def patch(self, request, pk):
@@ -63,6 +121,8 @@ class InvoicelogStatusUpdateView(APIView):
                     party_name=invoice_log.party_name,
                     total_amount=invoice_log.total_amount,
                     status=invoice_log.status,
+                    rejection_reason=invoice_log.rejection_reason,
+                    error_message=invoice_log.error_message,
                     invoice_payload=invoice_log.invoice_payload,
                     created_by=user
         )
@@ -82,23 +142,36 @@ class InvoiceLogListView(APIView):
             {'error': 'Warehouse Code is a required parameter.'}, 
             status=status.HTTP_400_BAD_REQUEST
         )
-    invoice_logs = InvoiceLog.objects.filter(warehouse=warehouse)
-    
+    invoice_logs = (
+        InvoiceLog.objects
+        .select_related('supersedes')
+        .prefetch_related('superseded_by')
+        .filter(warehouse=warehouse)
+    )
+
     if inv_status:
-        invoice_logs = invoice_logs.filter(status=inv_status) 
+        invoice_logs = invoice_logs.filter(status=inv_status)
 
     serializer = InvoiceLogSerializer(invoice_logs, many=True)
     return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
-    
+
     def get(self ,  request , pk):
         try:
             invoice_log = InvoiceLog.objects.get(pk=pk)
         except InvoiceLog.DoesNotExist:
             return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        history = invoice_log.history.all()
+        # A reworked invoice is a chain of logs, not one row. Return the history of
+        # every earlier version too, so the reviewer sees one continuous timeline
+        # ending at this log instead of a stump that starts after the rejection.
+        chain_ids = [log.pk for log in invoice_log.revision_chain()]
+        history = (
+            InvocieHistory.objects
+            .filter(invoice_log_id__in=chain_ids)
+            .order_by('created_at', 'id')
+        )
         serializer = InvoiveHistorySerializer(history, many=True)
         return Response(serializer.data)
 
@@ -173,6 +246,8 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
             party_name=invoice_log_instance.party_name,
             total_amount=invoice_log_instance.total_amount,
             status=invoice_log_instance.status,
+            rejection_reason=invoice_log_instance.rejection_reason,
+            error_message=invoice_log_instance.error_message,
             invoice_payload=invoice_log_instance.invoice_payload,
             created_by=self.request.user
         )
@@ -375,10 +450,12 @@ class InvoiceLogListwoWhsView(APIView):
     
   def get(self, request):
     inv_status = request.query_params.get('status')
+    # select_related/prefetch_related keep the lineage fields on the serializer
+    # from costing a query per row.
+    invoice_logs = InvoiceLog.objects.select_related('supersedes').prefetch_related('superseded_by')
     if inv_status:
-        invoice_logs = InvoiceLog.objects.filter(status=inv_status) 
-    else:
-        invoice_logs = InvoiceLog.objects.all()
-        
+        invoice_logs = invoice_logs.filter(status=inv_status)
+
+
     serializer = InvoiceLogSerializer(invoice_logs, many=True)
     return Response(serializer.data)
