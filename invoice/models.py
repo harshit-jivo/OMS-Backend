@@ -11,7 +11,7 @@ class InvocieHistory(models.Model):
     status = models.CharField(max_length=20)
     invoice_payload = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='invoice_history')
+    created_by = models.CharField(max_length=125 , null=True , blank=True)
     
     class Meta:
         db_table = 'invoice_history'

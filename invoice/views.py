@@ -43,6 +43,8 @@ class InvoicelogStatusUpdateView(APIView):
             return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
 
         new_status = request.data.get('status')
+        user = request.data.get('user')
+        
         if new_status not in dict(InvoiceLog.STATUS_CHOICES):
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
         if new_status == 'REJECTED' and not request.data.get('rejection_reason'):
@@ -60,7 +62,7 @@ class InvoicelogStatusUpdateView(APIView):
                     total_amount=invoice_log.total_amount,
                     status=invoice_log.status,
                     invoice_payload=invoice_log.invoice_payload,
-                    created_by=request.user 
+                    created_by=user
         )
         print(f"Creator{invoice_log.created_by}")
         print(f"Approver{request.user}")
