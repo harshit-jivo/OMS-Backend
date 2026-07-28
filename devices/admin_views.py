@@ -34,10 +34,12 @@ from .models import (
     PLATFORM_IOS,
     PLATFORM_WEB,
     UserDevice,
+    VersionPolicy,
 )
 from .permissions import IsAdminRole
-from .serializers import AdminUserDeviceSerializer
+from .serializers import AdminUserDeviceSerializer, VersionPolicySerializer
 from .status import filter_by_status, status_counts, thresholds
+from .version_policy import active_policies, clear_policy_cache
 
 # OS names our UA parser emits for non-mobile machines.
 DESKTOP_OS_NAMES = ["Windows", "macOS", "Linux"]
@@ -176,7 +178,9 @@ class AdminDeviceListView(APIView):
                 "message": "Devices retrieved",
                 "data": {
                     "results": AdminUserDeviceSerializer(
-                        page_qs, many=True, context={"now": timezone.now()}
+                        page_qs,
+                        many=True,
+                        context={"now": timezone.now(), "policies": active_policies()},
                     ).data,
                     "pagination": pagination,
                 },
@@ -210,7 +214,8 @@ class AdminDeviceDetailView(APIView):
                 "success": True,
                 "message": "Device retrieved",
                 "data": AdminUserDeviceSerializer(
-                    device, context={"now": timezone.now()}
+                    device,
+                    context={"now": timezone.now(), "policies": active_policies()},
                 ).data,
             }
         )
@@ -251,6 +256,37 @@ class AdminDeviceAnalyticsView(APIView):
         cards["status_counts"] = status_counts(qs, now)
         cards["status_thresholds"] = thresholds()
 
+        # --- version policy: latest vs old per mobile platform --------------
+        # "Latest" = on the required build for that platform; "old" = a real
+        # device below it. Only devices with a matching active policy are
+        # classified, so platforms without a policy contribute zero to both
+        # (and the web is never counted here). This feeds the four analytics
+        # cards and drives the per-row Update Status column.
+        policies = active_policies()
+        version_policy_stats = {}
+        for platform in (PLATFORM_ANDROID, PLATFORM_IOS):
+            policy = policies.get(platform)
+            plat_qs = qs.filter(platform=platform)
+            total = plat_qs.count()
+            if policy:
+                required_build = policy["required_build"]
+                latest = plat_qs.filter(build_number=required_build).count()
+                # Anything not on the required build is "old" (older or, oddly,
+                # newer). Kept simple to match the strict-equality policy rule.
+                old = total - latest
+            else:
+                required_build = None
+                latest = 0
+                old = 0
+            version_policy_stats[platform] = {
+                "required_build": required_build,
+                "required_version": policy["required_version"] if policy else None,
+                "total": total,
+                "latest": latest,
+                "old": old,
+            }
+        cards["version_policy"] = version_policy_stats
+
         def distribution(*fields, limit=None):
             rows = (
                 qs.values(*fields)
@@ -258,6 +294,34 @@ class AdminDeviceAnalyticsView(APIView):
                 .order_by("-count")
             )
             return list(rows[:limit] if limit else rows)
+
+        # --- version adoption: build -> device count, per mobile platform ---
+        # For the "Build 5 / 12 users" chart. Ordered by build descending so the
+        # newest build reads first. `required_build` is echoed so the client can
+        # colour the required bar. Distinct user count so multi-device users
+        # aren't double-counted in the "users" figure.
+        def adoption_for(platform):
+            rows = (
+                qs.filter(platform=platform)
+                .values("build_number")
+                .annotate(
+                    devices=Count("id"),
+                    users=Count("user_id", distinct=True),
+                )
+                .order_by("-build_number")
+            )
+            policy = policies.get(platform)
+            return {
+                "required_build": policy["required_build"] if policy else None,
+                "builds": [
+                    {
+                        "build_number": row["build_number"],
+                        "devices": row["devices"],
+                        "users": row["users"],
+                    }
+                    for row in rows
+                ],
+            }
 
         # Devices grouped by the DAY THEY WERE LAST SEEN, for the trend window.
         #
@@ -301,7 +365,83 @@ class AdminDeviceAnalyticsView(APIView):
                         "browser_distribution": distribution("browser_name"),
                         "os_distribution": distribution("os_name"),
                         "devices_by_last_seen": devices_by_last_seen,
+                        "version_adoption": {
+                            PLATFORM_ANDROID: adoption_for(PLATFORM_ANDROID),
+                            PLATFORM_IOS: adoption_for(PLATFORM_IOS),
+                        },
                     },
                 },
+            }
+        )
+
+
+class AdminVersionPolicyView(APIView):
+    """GET/PUT /api/admin/version-policy/ — the mobile version policies.
+
+    GET returns both platforms as ``{ANDROID: {...}|null, IOS: {...}|null}`` so
+    the admin form can load existing values in one call. PUT upserts ONE
+    platform's active policy (there is at most one active row per platform).
+
+    There is intentionally no list/history and no DELETE: this is a policy, not
+    a release log. Editing a platform overwrites its single active row.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        existing = {
+            p.platform: VersionPolicySerializer(p).data
+            for p in VersionPolicy.objects.filter(
+                is_active=True, platform__in=(PLATFORM_ANDROID, PLATFORM_IOS)
+            )
+        }
+        return Response(
+            {
+                "success": True,
+                "message": "Version policies retrieved",
+                "data": {
+                    PLATFORM_ANDROID: existing.get(PLATFORM_ANDROID),
+                    PLATFORM_IOS: existing.get(PLATFORM_IOS),
+                },
+            }
+        )
+
+    def put(self, request):
+        platform = str(request.data.get("platform") or "").strip().upper()
+        if platform not in (PLATFORM_ANDROID, PLATFORM_IOS):
+            return Response(
+                {
+                    "success": False,
+                    "message": "platform must be ANDROID or IOS",
+                    "errors": {"platform": ["Only ANDROID and IOS can be gated."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Upsert the single active row for this platform.
+        instance = VersionPolicy.objects.filter(
+            platform=platform, is_active=True
+        ).first()
+        payload = {**request.data, "platform": platform, "is_active": True}
+        serializer = VersionPolicySerializer(instance, data=payload)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "success": False,
+                    "message": "Invalid version policy",
+                    "errors": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        policy = serializer.save()
+        # The middleware caches active policies; drop it so the change takes
+        # effect immediately rather than after the short TTL.
+        clear_policy_cache()
+        return Response(
+            {
+                "success": True,
+                "message": "Version policy saved",
+                "data": VersionPolicySerializer(policy).data,
             }
         )

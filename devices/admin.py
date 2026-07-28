@@ -6,7 +6,8 @@ for an admin to curate: each client reports its own version and build.
 """
 from django.contrib import admin
 
-from .models import UserDevice
+from .models import UserDevice, VersionPolicy
+from .version_policy import clear_policy_cache
 
 
 @admin.register(UserDevice)
@@ -50,3 +51,28 @@ class UserDeviceAdmin(admin.ModelAdmin):
         # Allow deletion so admins can prune obviously-bogus rows; the scheduled
         # retention job (a later phase) handles routine cleanup.
         return True
+
+
+@admin.register(VersionPolicy)
+class VersionPolicyAdmin(admin.ModelAdmin):
+    """The mobile version policy is admin-curated (unlike UserDevice). Editable
+    here as well as via the web admin API; both invalidate the middleware cache
+    so a change applies immediately."""
+
+    list_display = [
+        "platform",
+        "required_version",
+        "required_build",
+        "is_active",
+        "updated_at",
+    ]
+    list_filter = ["platform", "is_active"]
+    readonly_fields = ["created_at", "updated_at"]
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        clear_policy_cache()
+
+    def delete_model(self, request, obj):
+        super().delete_model(request, obj)
+        clear_policy_cache()

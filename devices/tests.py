@@ -4,6 +4,7 @@ Views are exercised directly via APIRequestFactory + force_authenticate, so the
 tests cover the view/serializer/service stack without depending on middleware or
 the live database (the test runner uses a throwaway DB).
 """
+import json
 from datetime import timedelta
 
 from django.apps import apps
@@ -356,3 +357,169 @@ class AdminApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         names = [row["user_name"] for row in response.data["data"]["results"]]
         self.assertEqual(names, sorted(names))
+
+
+class VersionPolicyTests(TestCase):
+    """Mobile Version Policy: model, evaluate(), middleware, admin CRUD."""
+
+    def setUp(self):
+        from users.models import UserRole
+        from .admin_views import AdminVersionPolicyView
+        from .models import VersionPolicy
+        from .version_policy import clear_policy_cache
+
+        self.VersionPolicy = VersionPolicy
+        self.policy_view = AdminVersionPolicyView.as_view()
+        self.factory = APIRequestFactory()
+        clear_policy_cache()
+
+        admin_role = UserRole.objects.create(name="admin", display_name="Admin")
+        staff_role = UserRole.objects.create(name="staff", display_name="Staff")
+        self.admin = User.objects.create_user(username="a", password="x", role=admin_role)
+        self.plain = User.objects.create_user(username="b", password="x", role=staff_role)
+
+    def tearDown(self):
+        from .version_policy import clear_policy_cache
+        clear_policy_cache()
+
+    # --- evaluate() -------------------------------------------------------
+    def test_evaluate_web_never_gated(self):
+        from .version_policy import evaluate
+        policies = {"ANDROID": {"required_build": 5, "required_version": "1.0.5", "store_url": "x"}}
+        self.assertIsNone(evaluate("WEB", 1, "0.0.1", policies))
+
+    def test_evaluate_no_policy_allows(self):
+        from .version_policy import evaluate
+        self.assertIsNone(evaluate("ANDROID", 1, "0.0.1", {}))
+
+    def test_evaluate_exact_match_allows(self):
+        from .version_policy import evaluate
+        policies = {"IOS": {"required_build": 5, "required_version": "1.0.5", "store_url": "s"}}
+        self.assertIsNone(evaluate("IOS", 5, "1.0.5", policies))
+
+    def test_evaluate_old_build_blocks(self):
+        from .version_policy import evaluate
+        policies = {"ANDROID": {"required_build": 5, "required_version": "1.0.5", "store_url": "s"}}
+        payload = evaluate("ANDROID", 4, "1.0.4", policies)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["code"], "APP_UPDATE_REQUIRED")
+        self.assertEqual(payload["required_build"], 5)
+        self.assertEqual(payload["store_url"], "s")
+
+    def test_evaluate_version_mismatch_blocks(self):
+        from .version_policy import evaluate
+        policies = {"ANDROID": {"required_build": 5, "required_version": "1.0.5", "store_url": ""}}
+        self.assertIsNotNone(evaluate("ANDROID", 5, "9.9.9", policies))
+
+    # --- middleware --------------------------------------------------------
+    def test_middleware_blocks_old_android_with_426(self):
+        from .version_policy import VersionPolicyMiddleware
+        self.VersionPolicy.objects.create(
+            platform="ANDROID", required_version="1.0.5", required_build=5,
+            store_url="https://play.google.com/x", is_active=True,
+        )
+        sentinel = object()
+        mw = VersionPolicyMiddleware(lambda req: sentinel)
+        req = self.factory.get(
+            "/api/orders/", HTTP_X_PLATFORM="ANDROID",
+            HTTP_X_BUILD_NUMBER="4", HTTP_X_APP_VERSION="1.0.4",
+        )
+        resp = mw(req)
+        self.assertIsNot(resp, sentinel)
+        self.assertEqual(resp.status_code, 426)
+        body = json.loads(resp.content)
+        self.assertEqual(body["code"], "APP_UPDATE_REQUIRED")
+
+    def test_middleware_passes_current_android(self):
+        from .version_policy import VersionPolicyMiddleware
+        self.VersionPolicy.objects.create(
+            platform="ANDROID", required_version="1.0.5", required_build=5, is_active=True,
+        )
+        sentinel = object()
+        mw = VersionPolicyMiddleware(lambda req: sentinel)
+        req = self.factory.get(
+            "/x/", HTTP_X_PLATFORM="ANDROID",
+            HTTP_X_BUILD_NUMBER="5", HTTP_X_APP_VERSION="1.0.5",
+        )
+        self.assertIs(mw(req), sentinel)
+
+    def test_middleware_never_touches_web(self):
+        from .version_policy import VersionPolicyMiddleware
+        self.VersionPolicy.objects.create(
+            platform="ANDROID", required_version="1.0.5", required_build=5, is_active=True,
+        )
+        sentinel = object()
+        mw = VersionPolicyMiddleware(lambda req: sentinel)
+        req = self.factory.get("/x/", HTTP_X_PLATFORM="WEB", HTTP_X_BUILD_NUMBER="1")
+        self.assertIs(mw(req), sentinel)
+
+    def test_middleware_ignores_request_without_platform(self):
+        from .version_policy import VersionPolicyMiddleware
+        self.VersionPolicy.objects.create(
+            platform="ANDROID", required_version="1.0.5", required_build=5, is_active=True,
+        )
+        sentinel = object()
+        mw = VersionPolicyMiddleware(lambda req: sentinel)
+        self.assertIs(mw(self.factory.get("/x/")), sentinel)
+
+    # --- admin CRUD --------------------------------------------------------
+    def test_get_policies_loads_both_platforms(self):
+        self.VersionPolicy.objects.create(
+            platform="ANDROID", required_version="1.0.5", required_build=5, is_active=True,
+        )
+        req = self.factory.get("/api/admin/version-policy/")
+        force_authenticate(req, user=self.admin)
+        resp = self.policy_view(req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["data"]["ANDROID"]["required_build"], 5)
+        self.assertIsNone(resp.data["data"]["IOS"])
+
+    def test_put_upserts_single_active_row(self):
+        for build in (5, 6):
+            req = self.factory.put(
+                "/api/admin/version-policy/",
+                {"platform": "ANDROID", "required_version": "1.0." + str(build),
+                 "required_build": build, "store_url": "https://play.google.com/store"},
+                format="json",
+            )
+            force_authenticate(req, user=self.admin)
+            self.assertEqual(self.policy_view(req).status_code, 200)
+        active = self.VersionPolicy.objects.filter(platform="ANDROID", is_active=True)
+        self.assertEqual(active.count(), 1)
+        self.assertEqual(active.first().required_build, 6)
+
+    def test_put_rejects_web_platform(self):
+        req = self.factory.put(
+            "/api/admin/version-policy/",
+            {"platform": "WEB", "required_version": "1.0.0", "required_build": 1},
+            format="json",
+        )
+        force_authenticate(req, user=self.admin)
+        self.assertEqual(self.policy_view(req).status_code, 400)
+
+    def test_policy_endpoint_is_admin_only(self):
+        req = self.factory.get("/api/admin/version-policy/")
+        force_authenticate(req, user=self.plain)
+        self.assertEqual(self.policy_view(req).status_code, 403)
+
+    def test_update_status_on_device_serializer(self):
+        from .serializers import AdminUserDeviceSerializer
+        now = timezone.now()
+        latest = UserDevice.objects.create(
+            user=self.plain, device_id="d-latest-0001-0001-000000000001",
+            platform="ANDROID", app_type="MOBILE", app_version="1.0.5", build_number=5,
+            first_login=now, last_login=now, last_active=now,
+        )
+        old = UserDevice.objects.create(
+            user=self.plain, device_id="d-old-0002-0002-000000000002",
+            platform="ANDROID", app_type="MOBILE", app_version="1.0.4", build_number=4,
+            first_login=now, last_login=now, last_active=now,
+        )
+        policies = {"ANDROID": {"required_build": 5, "required_version": "1.0.5", "store_url": ""}}
+        ctx = {"now": now, "policies": policies}
+        self.assertEqual(AdminUserDeviceSerializer(latest, context=ctx).data["update_status"], "latest")
+        self.assertEqual(AdminUserDeviceSerializer(old, context=ctx).data["update_status"], "old")
+        self.assertEqual(
+            AdminUserDeviceSerializer(latest, context={"now": now, "policies": {}}).data["update_status"],
+            "unknown",
+        )

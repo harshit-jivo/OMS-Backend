@@ -98,6 +98,11 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'audit.middleware.AuditMiddleware',
+    # Mobile Version Policy: blocks out-of-date ANDROID/IOS clients with HTTP
+    # 426. Placed AFTER CorsMiddleware so it never interferes with the browser
+    # preflight, and only ever acts on requests carrying a mobile X-Platform
+    # header — the web is never gated.
+    'devices.version_policy.VersionPolicyMiddleware',
 ]
 
 ROOT_URLCONF = 'OMS.urls'

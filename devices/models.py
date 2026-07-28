@@ -139,3 +139,56 @@ class UserDevice(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.platform}/{self.app_type} v{self.app_version} ({self.device_id[:8]})"
+
+
+# Only native mobile platforms are ever version-gated. The web is a live deploy
+# — a browser always loads the current bundle — so it must never be validated.
+MOBILE_PLATFORM_CHOICES = (
+    (PLATFORM_ANDROID, "Android"),
+    (PLATFORM_IOS, "iOS"),
+)
+
+
+class VersionPolicy(models.Model):
+    """The minimum acceptable app version for one mobile platform.
+
+    A tiny policy table — NOT a release history. At most one ACTIVE row per
+    platform (enforced by the partial unique index below), and normally only two
+    rows exist in total: one ANDROID, one IOS. The web is never represented here
+    and is never validated.
+
+    ``required_build`` (an integer) is the value the middleware actually
+    compares; ``required_version`` is the human-readable label shown to users.
+    The rule is deliberately strict EQUALITY (build == required, version ==
+    required), per the feature spec: anything not on the exact required build is
+    told to update.
+    """
+
+    platform = models.CharField(max_length=20, choices=MOBILE_PLATFORM_CHOICES)
+    required_version = models.CharField(max_length=20)
+    required_build = models.PositiveIntegerField()
+    store_url = models.URLField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "devices_version_policy"
+        verbose_name = "Version Policy"
+        verbose_name_plural = "Version Policies"
+        ordering = ["platform"]
+        constraints = [
+            # At most ONE active policy per platform. A partial unique index
+            # (PostgreSQL) makes a second active row for the same platform
+            # impossible at the database level, so the middleware's "the active
+            # policy" lookup can never be ambiguous.
+            models.UniqueConstraint(
+                fields=["platform"],
+                condition=models.Q(is_active=True),
+                name="versionpolicy_one_active_per_platform_uq",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.platform} requires v{self.required_version} (build {self.required_build})"
