@@ -112,7 +112,7 @@ class InvoiceRefLogs(models.Model):
         db_table = 'invoice_ref_logs'
 
 class CreditLimitLogs(models.Model):
-    invoice_log = models.ForeignKey(InvoiceLog , on_delete=models.SET_NULL, null=True)
+    invoice_log = models.ForeignKey(InvoiceLog , on_delete=models.CASCADE,  primary_key=True)
     jsap_doc_id = models.IntegerField()
     party_name = models.CharField(max_length=255)
     # credit_raised = models.DecimalField(max_digits=10 , decimal_places=3)

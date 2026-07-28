@@ -5,7 +5,7 @@ import pymssql
 import requests
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -292,6 +292,40 @@ class CreditLimitRequestView(APIView):
                 {'error': 'documentData and attachment are required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not invoice_log_id:
+            return Response(
+                {'error': 'invoice_log_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            invoice_log = InvoiceLog.objects.get(id=invoice_log_id)
+        except InvoiceLog.DoesNotExist:
+            return Response(
+                {'error': f'No invoice log found with id {invoice_log_id}.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # credit_limit_logs is keyed by invoice_log_id (one request per invoice).
+        # Check BEFORE calling DSR — otherwise a duplicate attempt creates a second
+        # CL document in JSAP and only then fails on the insert.
+        existing = CreditLimitLogs.objects.filter(invoice_log_id=invoice_log.id).first()
+        if existing:
+            return Response(
+                {
+                    'error': 'A credit-limit request has already been raised for this invoice.',
+                    'detail': (
+                        f'Credit-limit document #{existing.jsap_doc_id} was raised for this '
+                        f'invoice on {existing.created_at:%d %b %Y %H:%M}. '
+                        'Track that request instead of raising a new one.'
+                    ),
+                    'jsap_doc_id': existing.jsap_doc_id,
+                    'created_at': existing.created_at,
+                    'invoice_log_id': invoice_log.id,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         try:
             parsed = json.loads(document_data)
             parsed['createdBy'] = settings.OMS_JSAP_USER_ID
@@ -316,14 +350,36 @@ class CreditLimitRequestView(APIView):
             except ValueError:
                 body = {'message': dsr_response.text}
 
-            invoice_log = InvoiceLog.objects.get(id=invoice_log_id)
-            CreditLimitLogs.objects.create(
-                invoice_log = invoice_log,
-                jsap_doc_id = body["creditDocumentId"],
-                party_name=invoice_log.party_name,
-                created_by = request.user
-            )
+            credit_document_id = body.get("creditDocumentId") if isinstance(body, dict) else None
+            if credit_document_id is None:
+                logger.error("CL request for invoice %s returned no creditDocumentId: %s", invoice_log.id, body)
+                return Response(
+                    {
+                        'error': 'The credit-limit service did not return a document id.',
+                        'details': body,
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
 
+            try:
+                CreditLimitLogs.objects.create(
+                    invoice_log=invoice_log,
+                    jsap_doc_id=credit_document_id,
+                    party_name=invoice_log.party_name,
+                    created_by=request.user,
+                )
+            except IntegrityError:
+                # Lost a race with a concurrent request. The CL document exists in
+                # JSAP either way, so report it as the same conflict rather than a 500.
+                logger.warning("Duplicate credit-limit request for invoice %s", invoice_log.id)
+                return Response(
+                    {
+                        'error': 'A credit-limit request has already been raised for this invoice.',
+                        'jsap_doc_id': credit_document_id,
+                        'invoice_log_id': invoice_log.id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             return Response(body, status=dsr_response.status_code)
         except requests.RequestException as exc:

@@ -2,7 +2,10 @@ import logging
 import json
 import re
 import urllib3
+from contextlib import contextmanager
 from datetime import date, datetime
+from functools import wraps
+from django.db import connection as default_connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 from ..models import Product, Party, PartyAddress, Branch, SyncLog 
@@ -260,7 +263,38 @@ def get_party_item_unit_price(card_code, item_code, category=None, default=0.0):
     return float(default)
 
 
+def serialized_sync(sync_type):
+    """Refuse to start a sync while another run of the same type is in flight.
+
+    Before the tables had unique constraints, two overlapping runs quietly
+    inserted duplicate rows — that is how ~2952 duplicates accumulated in
+    sap_party_addresses. Now the same race raises IntegrityError inside
+    _bulk_upsert's atomic block and rolls the entire sync back, so the second
+    run has to be turned away at the door rather than left to collide.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            with self._sync_lock(sync_type) as acquired:
+                if not acquired:
+                    return self._already_running(sync_type)
+                return func(self, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
 class SyncService:
+    # Namespace for this app's Postgres advisory locks, so the ids below can't
+    # collide with a lock taken anywhere else in the project.
+    _SYNC_LOCK_NAMESPACE = 19740
+    _SYNC_LOCK_IDS = {
+        'ALL': 1,
+        'PRODUCT': 2,
+        'PARTY': 3,
+        'PARTY_ADDRESS': 4,
+        'BRANCH': 5,
+    }
+
     def __init__(self, triggered_by='manual'):
         self.triggered_by = triggered_by
         self.connection = SAPConnection()
@@ -288,12 +322,107 @@ class SyncService:
                 timeout=self.sap_timeout,
             )
 
+    @contextmanager
+    def _sync_lock(self, sync_type):
+        """Hold a Postgres session advisory lock for the duration of a sync.
+
+        Session-scoped rather than transaction-scoped, because a sync spends
+        most of its time querying SAP outside any transaction. Yields True when
+        the lock was taken, False when another run already holds it. If the
+        process dies the lock dies with its connection, so nothing gets wedged.
+
+        Note: this relies on the connection being a real session. Behind a
+        transaction-pooling proxy such as pgbouncer, session advisory locks do
+        not behave as expected.
+        """
+        lock_id = self._SYNC_LOCK_IDS[sync_type]
+        args = [self._SYNC_LOCK_NAMESPACE, lock_id]
+        with default_connection.cursor() as cursor:
+            cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", args)
+            acquired = bool(cursor.fetchone()[0])
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with default_connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_unlock(%s, %s)", args)
+
+    @staticmethod
+    def _already_running(sync_type):
+        message = (
+            f"A {sync_type} sync is already running; this run was skipped."
+        )
+        logger.warning(message)
+        return {
+            'success': False,
+            'skipped': True,
+            'processed': 0,
+            'created': 0,
+            'updated': 0,
+            'error': message,
+        }
+
     @staticmethod
     def _as_trimmed(value, max_len=None):
         text = '' if value is None else str(value).strip()
         if max_len and len(text) > max_len:
             return text[:max_len]
         return text
+
+    @staticmethod
+    def _chunked(items, size):
+        items = list(items)
+        for start in range(0, len(items), size):
+            yield items[start:start + size]
+
+    def _bulk_upsert(self, model, key_fields, incoming, touch_field=None, batch_size=1000):
+        """Upsert `incoming` in bulk instead of one update_or_create per row.
+
+        `incoming` maps a key tuple (aligned with `key_fields`) to the dict of
+        non-key fields to write. Existing rows are loaded with a handful of
+        `key_fields[0] __in` queries rather than one SELECT per row, and the
+        writes go out as batched INSERT/UPDATE inside a single transaction.
+
+        Returns (created_count, updated_count).
+        """
+        if not incoming:
+            return 0, 0
+
+        now = timezone.now()
+        lead_field = key_fields[0]
+        lead_values = {key[0] for key in incoming}
+
+        existing = {}
+        for chunk in self._chunked(sorted(lead_values, key=lambda v: (v is None, v)), 500):
+            for obj in model.objects.filter(**{f'{lead_field}__in': chunk}):
+                existing[tuple(getattr(obj, f) for f in key_fields)] = obj
+
+        update_fields = sorted({field for data in incoming.values() for field in data})
+        if touch_field:
+            update_fields.append(touch_field)
+
+        to_create = []
+        to_update = []
+        for key, data in incoming.items():
+            obj = existing.get(key)
+            if obj is None:
+                init = dict(zip(key_fields, key))
+                init.update(data)
+                if touch_field:
+                    init[touch_field] = now
+                to_create.append(model(**init))
+            else:
+                for field, value in data.items():
+                    setattr(obj, field, value)
+                if touch_field:
+                    setattr(obj, touch_field, now)
+                to_update.append(obj)
+
+        with transaction.atomic():
+            model.objects.bulk_create(to_create, batch_size=batch_size)
+            model.objects.bulk_update(to_update, update_fields, batch_size=batch_size)
+
+        return len(to_create), len(to_update)
 
     @staticmethod
     def _normalize_order_category(value):
@@ -342,6 +471,7 @@ class SyncService:
 
         return default_warehouse_code
    
+    @serialized_sync('ALL')
     def sync_all(self):
         log = SyncLog.objects.create(
             sync_type='ALL',
@@ -410,6 +540,7 @@ class SyncService:
             log.save()
             raise
    
+    @serialized_sync('PRODUCT')
     def sync_products(self):
         log = SyncLog.objects.create(
             sync_type='PRODUCT',
@@ -426,16 +557,19 @@ class SyncService:
                 query = SAPConnection.get_products_query()
                 results = conn.execute_query(query)
                
+                # Collapse to one payload per (item_code, category) so duplicate
+                # source rows don't turn into conflicting writes.
+                incoming = {}
                 for row in results:
                     processed_count += 1
                     item_code = row.get('ItemCode')
                     category = row.get('Category')  # OIL, BEVERAGES, or MART
-                   
+
                     if not item_code:
                         continue
-                   
+
                     # Data to update (excluding lookup fields)
-                    product_data = {
+                    incoming[(item_code, category)] = {
                         'item_name': row.get('ItemName'),
                         'sal_factor2': row.get('SalFactor2'),
                         'tax_rate': row.get('U_Rev_tax_Rate'),
@@ -449,19 +583,15 @@ class SyncService:
                         'on_hand': row.get('OnHand'),
                         'is_active': row.get('validFor'),
                     }
-                   
-                    # Lookup by BOTH item_code AND category
-                    product, created = Product.objects.update_or_create(
-                        item_code=item_code,
-                        category=category,
-                        defaults=product_data
-                    )
-                   
-                    if created:
-                        created_count += 1
-                    else:
-                        updated_count += 1
-           
+
+                # Lookup by BOTH item_code AND category
+                created_count, updated_count = self._bulk_upsert(
+                    Product,
+                    ['item_code', 'category'],
+                    incoming,
+                    touch_field='synced_at',
+                )
+
             log.status = 'SUCCESS'
             log.records_processed = processed_count
             log.records_created = created_count
@@ -490,6 +620,7 @@ class SyncService:
                 'error': str(e)
             }
    
+    @serialized_sync('PARTY')
     def sync_parties(self):
         log = SyncLog.objects.create(
             sync_type='PARTY',
@@ -506,35 +637,33 @@ class SyncService:
                 query = SAPConnection.get_parties_query()
                 results = conn.execute_query(query)
 
+                # Collapse to one payload per (card_code, category) so duplicate
+                # source rows don't turn into conflicting writes.
+                incoming = {}
                 for row in results:
                     processed_count += 1
                     card_code = row.get('CardCode')
-                    category = row.get('Category')  # ✅ OIL/BEVERAGES/MART
+                    category = row.get('Category') or ''  # ✅ OIL/BEVERAGES/MART
 
                     if not card_code:
                         continue
 
-                    party_data = {
+                    incoming[(card_code, category)] = {
                         'card_name': row.get('CardName') or '',
                         'address': row.get('Address') or '',
                         'state': row.get('State1') or '',
                         'main_group': row.get('U_Main_Group') or '',
                         'chain': row.get('U_Chain') or '',
                         'country': row.get('Country') or '',
-                        'card_type': row.get('CardType') or 'C',                        
-                        'category': category or '',                    
+                        'card_type': row.get('CardType') or 'C',
                     }
 
-                    party, created = Party.objects.update_or_create(
-                        card_code=card_code,
-                        category=category,  # ✅ Lookup by both
-                        defaults=party_data
-                    )
-
-                    if created:
-                        created_count += 1
-                    else:
-                        updated_count += 1
+                created_count, updated_count = self._bulk_upsert(
+                    Party,
+                    ['card_code', 'category'],  # ✅ Lookup by both
+                    incoming,
+                    touch_field='synced_at',
+                )
 
             log.status = 'SUCCESS'
             log.records_processed = processed_count
@@ -564,6 +693,7 @@ class SyncService:
                 'error': str(e)
             }
 
+    @serialized_sync('PARTY_ADDRESS')
     def sync_party_addresses(self):
         log = SyncLog.objects.create(
             sync_type='PARTY_ADDRESS',
@@ -580,43 +710,46 @@ class SyncService:
             with self.connection as conn:
                 query = SAPConnection.get_party_addresses_query()
                 results = conn.execute_query(query)
-
+                
+                # print("\n================================================================================\n")
+                # print(json.dumps(results, indent=4))
+                # print("\n================================================================================\n")
+                
+                # Collapse the SAP rows into one payload per unique key first, so
+                # duplicates in the source don't turn into conflicting writes.
+                incoming = {}
                 for row in results:
                     processed_count += 1
                     card_code = self._as_trimmed(row.get('CardCode'), 50)
                     address_name = self._as_trimmed(row.get('Address'), 100)
                     category = self._as_trimmed(row.get('Category'), 20)
+                    # Part of the key: CRD1 holds a B and an S row per Address,
+                    # each carrying its own GSTRegnNo.
+                    address_type = self._as_trimmed(row.get('AdresType') or 'B', 1) or 'B'
 
                     if not card_code:
                         continue
 
                     try:
-                        address_data = {
-                            'address_type': self._as_trimmed(row.get('AdresType') or 'B', 1) or 'B',
+                        incoming[(card_code, address_name, category, address_type)] = {
                             'gst_number': self._as_trimmed(row.get('GSTRegnNo'), 50),
                             'state': self._as_trimmed(row.get('State'), 100),
                             'city': self._as_trimmed(row.get('City'), 100),
                             'zip_code': self._as_trimmed(row.get('ZipCode'), 20),
                             'country': self._as_trimmed(row.get('Country'), 50),
                             'full_address': self._as_trimmed(row.get('MainAddress')),
-                            'category': category,
                         }
-
-                        _, created = PartyAddress.objects.update_or_create(
-                            card_code=card_code,
-                            address_name=address_name,
-                            category=category,
-                            defaults=address_data
-                        )
-
-                        if created:
-                            created_count += 1
-                        else:
-                            updated_count += 1
                     except Exception as row_error:
                         row_errors.append(
                             f"{card_code}/{address_name or '-'}: {str(row_error)}"
                         )
+
+                created_count, updated_count = self._bulk_upsert(
+                    PartyAddress,
+                    ['card_code', 'address_name', 'category', 'address_type'],
+                    incoming,
+                    touch_field='synced_at',
+                )
 
             log.status = 'SUCCESS'
             log.records_processed = processed_count
@@ -626,6 +759,15 @@ class SyncService:
                 log.error_message = '\n'.join(row_errors[:25])
             log.completed_at = timezone.now()
             log.save()
+            
+            print(f"""
+                            'success': {True},
+                            'processed': {processed_count},
+                            'created': {created_count},
+                            'updated': {updated_count},
+                            'warnings': {row_errors[:25]}
+                        
+            """)
 
             return {
                 'success': True,
@@ -640,7 +782,15 @@ class SyncService:
             log.error_message = str(e)
             log.completed_at = timezone.now()
             log.save()
-
+            
+            print(f"""
+                                        'success': {False},
+                                        'processed': {processed_count},
+                                        'created': {created_count},
+                                        'updated': {updated_count},
+                                        'error': {str(e)}
+                                    
+                        """)
             return {
                 'success': False,
                 'processed': processed_count,
@@ -649,6 +799,7 @@ class SyncService:
                 'error': str(e)
             }
 
+    @serialized_sync('BRANCH')
     def sync_branches(self):
         """Sync branches from SAP OBPL table"""
         log = SyncLog.objects.create(
@@ -666,30 +817,27 @@ class SyncService:
                 query = SAPConnection.get_branches_query()
                 results = conn.execute_query(query)
                
+                incoming = {}
                 for row in results:
                     processed_count += 1
                     bpl_id = row.get('BPLId')
                     category = row.get('Category')  # OIL, BEVERAGES, or MART
-                   
+
                     if bpl_id is None:
                         continue
-                   
-                    branch_data = {
+
+                    incoming[(bpl_id, category)] = {
                         'bpl_name': row.get('BPLName'),
                     }
-                   
-                    # Lookup by BOTH bpl_id AND category (same item can exist in multiple DBs)
-                    branch, created = Branch.objects.update_or_create(
-                        bpl_id=bpl_id,
-                        category=category,
-                        defaults=branch_data
-                    )
-                   
-                    if created:
-                        created_count += 1
-                    else:
-                        updated_count += 1
-           
+
+                # Lookup by BOTH bpl_id AND category (same item can exist in multiple DBs)
+                created_count, updated_count = self._bulk_upsert(
+                    Branch,
+                    ['bpl_id', 'category'],
+                    incoming,
+                    touch_field='updated_at',
+                )
+
             log.status = 'SUCCESS'
             log.records_processed = processed_count
             log.records_created = created_count
