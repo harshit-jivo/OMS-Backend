@@ -5,6 +5,7 @@ from . import views
 urlpatterns = [
     # config + auth
     path("health/", views.health, name="einvoice-health"),
+    path("companies/", views.list_companies, name="einvoice-companies"),
     path("token/", views.get_token, name="einvoice-get-token"),
     path("heartbeat/", views.heartbeat, name="einvoice-heartbeat"),
 

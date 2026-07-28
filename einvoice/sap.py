@@ -41,12 +41,19 @@ def _timeout():
 def get_session(company_db: str | None = None) -> requests.Session:
     """Return a logged-in Service Layer session for `company_db`.
 
-    None / the app default -> the cached shared session. A non-default company_db
-    -> a fresh (uncached) login, so callers can target the live company DB
-    without disturbing the shared cache.
+    Known company DBs (OIL / BEVERAGE) go through SAPServiceLayerManager, whose
+    session cache is keyed PER COMPANY — so an OIL session is never handed to a
+    BEVERAGE caller. Any other company DB gets a dedicated, uncached login.
     """
-    if not company_db or company_db == settings.HANA_OIL_COMPANY_DB:
-        return SAPServiceLayerManager.get_session('OIL')
+    known = {
+        settings.HANA_OIL_COMPANY_DB: "OIL",
+        getattr(settings, "HANA_BEVERAGE_COMPANY_DB", None): "BEVERAGE",
+    }
+    known.pop(None, None)
+    if not company_db:
+        return SAPServiceLayerManager.get_session("OIL")
+    if company_db in known:
+        return SAPServiceLayerManager.get_session(known[company_db])
 
     session = requests.Session()
     session.verify = _verify()
@@ -70,11 +77,28 @@ def get_session(company_db: str | None = None) -> requests.Session:
     return session
 
 
+def company_choices() -> list[dict]:
+    """Selectable companies: [{label, company_db}] — the OIL/BEVERAGE company DBs
+    actually configured in settings. Drives the UI's company picker so the user
+    can choose which DB an IRN is generated against and mirrored into."""
+    pairs = [
+        ("OIL", getattr(settings, "HANA_OIL_COMPANY_DB", "")),
+        ("BEVERAGE", getattr(settings, "HANA_BEVERAGE_COMPANY_DB", "")),
+    ]
+    out, seen = [], set()
+    for label, db in pairs:
+        db = (db or "").strip()
+        if db and db not in seen:
+            seen.add(db)
+            out.append({"label": label, "company_db": db})
+    return out
+
+
 def _known_company_dbs() -> list[str]:
     """The company DBs a DocNum search may scan. Configurable via
     settings.EINV_COMPANY_DBS; the configured default is always tried first."""
     dbs = list(getattr(settings, "EINV_COMPANY_DBS", None)
-               or ["JIVO_OIL_HANADB", "JIVO_BEVERAGES_HANADB", "TEST_OIL_15122025"])
+               or [c["company_db"] for c in company_choices()])
     default = settings.HANA_OIL_COMPANY_DB
     if default:
         dbs = [default] + [d for d in dbs if d != default]

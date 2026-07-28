@@ -39,6 +39,21 @@ def health(request):
     })
 
 
+@api_view(["GET"])
+def list_companies(request):
+    """Companies (SAP company DBs) an IRN can be generated against.
+
+    Drives the UI's company picker: the chosen `company_db` decides BOTH which
+    company's Service Layer the invoice is read from AND which schema's
+    OMS_IRN_LOG the IRN is mirrored into.
+    """
+    choices = sap.company_choices()
+    return Response({
+        "results": choices,
+        "default": settings.HANA_OIL_COMPANY_DB,
+    })
+
+
 @api_view(["GET", "POST"])
 def get_token(request):
     """

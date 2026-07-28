@@ -27,6 +27,18 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="List what would be processed; don't call NIC")
 
     def handle(self, *args, **opts):
+        # No --company-db -> sweep EVERY configured company, so beverage/oil
+        # invoices each get their IRN generated against (and mirrored into) their
+        # own company DB instead of everything defaulting to OIL.
+        if not opts["company_db"]:
+            for choice in sap.company_choices():
+                self.stdout.write(self.style.MIGRATE_HEADING(
+                    f"\n=== {choice['label']} ({choice['company_db']}) ==="))
+                self._sweep(dict(opts, company_db=choice["company_db"]))
+            return
+        self._sweep(opts)
+
+    def _sweep(self, opts):
         company_db = opts["company_db"]
         base = settings.HANA_SERVICE_LAYER_URL.rstrip("/")
         session = sap.get_session(company_db)

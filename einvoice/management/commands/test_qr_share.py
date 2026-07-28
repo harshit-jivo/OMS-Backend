@@ -14,14 +14,32 @@ from einvoice import qr as qrgen
 
 
 class Command(BaseCommand):
-    help = "Write + read-back + delete a probe PNG in EINV_QR_SAVE_DIR to test access."
+    help = "Write + read-back + delete a probe PNG in every company's QR folder to test access."
 
     def handle(self, *args, **opts):
-        directory = getattr(settings, "EINV_QR_SAVE_DIR", "")
-        if not directory:
-            self.stderr.write("EINV_QR_SAVE_DIR is empty — nothing to test.")
-            return
+        # One folder per company (OIL / BEVERAGE / MART), plus the legacy single
+        # folder when no per-company mapping is configured.
+        targets = dict(getattr(settings, "EINV_QR_SAVE_DIRS", None) or {})
+        if not targets:
+            legacy = getattr(settings, "EINV_QR_SAVE_DIR", "")
+            if not legacy:
+                self.stderr.write("No QR folders configured — nothing to test.")
+                return
+            targets = {"(default)": legacy}
 
+        failures = 0
+        for company_db, directory in targets.items():
+            self.stdout.write(self.style.MIGRATE_HEADING(f"\n=== {company_db} ==="))
+            if not self._probe(directory):
+                failures += 1
+
+        self.stdout.write("")
+        if failures:
+            self.stderr.write(self.style.ERROR(f"{failures} of {len(targets)} folder(s) FAILED."))
+        else:
+            self.stdout.write(self.style.SUCCESS(f"All {len(targets)} QR folder(s) reachable and writable."))
+
+    def _probe(self, directory):
         user = getattr(settings, "EINV_QR_SMB_USERNAME", "") or ""
         name = "__qr_share_probe__.png"
         png = qrgen.make_qr_png("QR-SHARE-CONNECTIVITY-TEST")
@@ -53,7 +71,8 @@ class Command(BaseCommand):
         except Exception as exc:  # noqa: BLE001
             self.stderr.write(self.style.ERROR(f"FAILED: {type(exc).__name__}: {exc}"))
             self.stderr.write("Check: share path, username/password, and that the account has WRITE on the folder.")
-            return
+            return False
 
         self.stdout.write(self.style.SUCCESS(
             f"OK — wrote, read back ({size} bytes), and deleted the probe. The share is reachable and writable."))
+        return True
