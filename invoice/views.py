@@ -1,9 +1,11 @@
 import json
+import logging
+
+import pymssql
 import requests
 
 from django.conf import settings
 from django.db import transaction
-from django.utils import timezone
 from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -17,6 +19,9 @@ from rest_framework.generics import CreateAPIView, ListAPIView
 from django.http import HttpResponse
 
 from hana.services.services import SalesOrderService
+from .services.jsap_db import get_credit_flow_id
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -329,16 +334,16 @@ class CreditLimitRequestView(APIView):
 class GetCreditLimitJSAPFlow(APIView):
     def get(self, request):
         invoice_id = request.query_params.get('invoice_id')
-        company_id = request.query_params.get('company')
-
-        if not invoice_id or not company_id:
+        # `company` is still accepted (callers send it) but no longer used: the
+        # flow is now found by document id, which is unique across companies.
+        if not invoice_id:
             return Response(
-                {'error': 'Both invoice_id and company parameters are required.'}, 
+                {'error': 'invoice_id is a required parameter.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         jsap_doc = CreditLimitLogs.objects.filter(invoice_log_id=invoice_id).first()
-
+  
         if not jsap_doc:
             return Response(
                 {'error': 'No CreditLimitLogs entry found for the given invoice_id.'}, 
@@ -346,61 +351,36 @@ class GetCreditLimitJSAPFlow(APIView):
             )
 
         doc_id = jsap_doc.jsap_doc_id
-        formatted_month = timezone.now().strftime('%m-%Y') 
 
-        request_payload = {
-            "userId": settings.OMS_JSAP_USER_ID,
-            "companyId": company_id,
-            "month": formatted_month
-        }
-
-        url = f"{settings.DSR_API_BASE}/api/CreditLimit/GetAllDocuments"
-        
-        # TODO: Verify if this should be a different endpoint! 
-        # In your original code, it was identical to the GetAllDocuments url.
-        flow_url = f"{settings.DSR_API_BASE}/api/CreditLimit/GetApprovalFlow/" 
-        
+        # Resolve the flow id straight from the JSAP database. The previous route
+        # — POST GetAllDocuments for the *current* month and scan it for this
+        # document — silently failed for any request raised in an earlier month,
+        # which is exactly when a reviewer wants to check a pending approval.
         try:
-            # 1. Fetch All Documents
-            dsr_response = requests.post(
-                url,
-                json=request_payload,
-                timeout=30,
-                verify=False,
+            flow_id = get_credit_flow_id(doc_id)
+        except (ConnectionError, pymssql.Error) as exc:
+            logger.exception("JSAP flow lookup failed for credit document %s", doc_id)
+            return Response(
+                {'error': 'Unable to reach the JSAP database', 'details': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
-            
-            if not dsr_response.ok:
-                return Response(
-                    {'error': 'Upstream DSR API error', 'details': dsr_response.text}, 
-                    status=dsr_response.status_code
-                )
 
-            body = dsr_response.json()
-            
-            # Safely fetch data using .get() to avoid KeyError
-            data = body.get("data", [])
-            # print(data)
-            # 2. Extract flow_id safely
-            flow_id = None  
-            for rec in data:
-                print(rec)
-                if rec.get("id") == doc_id:
-                    flow_id = rec.get("flowId")
-                    break
+        if flow_id is None:
+            return Response(
+                {'error': 'No approval flow has been created for this credit-limit request yet.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-            if flow_id is None:
-                return Response(
-                    {'error': 'No flowId Associated found'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
+        flow_url = f"{settings.DSR_API_BASE}/api/CreditLimit/GetApprovalFlow/"
+
+        try:
             flow_response = requests.get(
-                flow_url, # Using flow_url here instead of url
-                params={'flowId': flow_id}, 
-                timeout=20, 
+                flow_url,
+                params={'flowId': flow_id},
+                timeout=20,
                 verify=False
             )
-            
+
 
             if not flow_response.ok:
                 return Response(

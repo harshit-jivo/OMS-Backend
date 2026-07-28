@@ -181,6 +181,15 @@ SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
 SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
 
+# JSAP SQL Server — the DSR/JSAP application's own database. Read-only here; used
+# to resolve a credit-limit document to its approval flow id without paging the
+# DSR document-list API. Same host as the SAP box, different database.
+JSAP_DB_HOST = config('JSAP_DB_HOST', default='103.89.45.75')
+JSAP_DB_PORT = config('JSAP_DB_PORT', default=1433, cast=int)
+JSAP_DB_NAME = config('JSAP_DB_NAME', default='jsaplive3')
+JSAP_DB_USER = config('JSAP_DB_USER', default='ab')
+JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='Jivo@!@#$')
+
 # VAPID (Web Push) keys are configured lower down in this file — see the
 # "Web Push (VAPID)" section near the bottom.
 SAP_APPROVER_USER = config('SAP_APPROVER_USER')
