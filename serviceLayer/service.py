@@ -7,9 +7,18 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class SAPServiceLayerManager():
-    
+
     @classmethod
-    def get_session(cls):
+    def _schema_for(cls, branch):
+        """Company DB for a branch code. Accepts both 'BEVERAGE' and 'BEVERAGES'
+        (both spellings are used across the codebase); anything else -> OIL, so a
+        missing/unknown branch can never leave the schema undefined."""
+        if str(branch or '').upper().startswith('BEVERAGE'):
+            return settings.HANA_BEVERAGE_COMPANY_DB
+        return settings.HANA_OIL_COMPANY_DB
+
+    @classmethod
+    def get_session(cls , branch):
         session = requests.Session()
         session.verify = False
         b1_session = cache.get('b1_session')
@@ -20,10 +29,12 @@ class SAPServiceLayerManager():
             session.cookies.set('ROUTEID', route_id)
 
             return session
+        
+        schema = cls._schema_for(branch)
 
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         login_payload = {
-            "CompanyDB": settings.HANA_OIL_COMPANY_DB,
+            "CompanyDB": schema,
             "UserName": settings.HANA_USERNAME,
             "Password": settings.HANA_PASSWORD
         }
@@ -49,22 +60,20 @@ class SAPServiceLayerManager():
         
         
     @classmethod
-    def get_session_for(cls, username, password):
-        """Log in to Service Layer as a specific user and return that session.
-
-        Used for actions (e.g. approvals) where SAP checks permissions against
-        the logged-in user, not against credentials passed in the payload.
-        This session is NOT cached under the shared key.
-        """
+    def get_session_for(cls, username, password , branch):
         session = requests.Session()
         session.verify = False
 
+        schema = cls._schema_for(branch)
+
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         login_payload = {
-            "CompanyDB": settings.HANA_OIL_COMPANY_DB,
+            "CompanyDB": schema,
             "UserName": username,
             "Password": password,
         }
+
+        print(login_payload)
 
         try:
             response = requests.post(login_url, json=login_payload, verify=False, timeout=10)

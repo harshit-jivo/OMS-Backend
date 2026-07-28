@@ -5,15 +5,16 @@ import urllib3
 from datetime import date, datetime
 from django.db.models import Q
 from django.utils import timezone
-from ..models import Product, Party, PartyAddress, Branch, SyncLog
+from ..models import Product, Party, PartyAddress, Branch, SyncLog 
 from .connection import SAPConnection
 import requests
 from django.conf import settings
-from ..models import SalesQuotationLog
+from ..models import SalesQuotationLog , SalesOrderLog
 from orders.scheme_rules import (
     get_party_product_scheme,
 )
 from users.models import PartyProductAssignment, SchemeProduct
+from hana.services.services import SalesOrderService
 
 logger = logging.getLogger(__name__)
 
@@ -719,15 +720,17 @@ class SyncService:
 
         # ---------------- SAP LOGIN ---------------- #
 
-    def sap_login(self, company_db=None):
+    def sap_login(self, company_db=None, username=None, password=None):
         login_url = f"{settings.HANA_SERVICE_LAYER_URL}/Login"
         print("sap login url:", login_url)
         company_db = company_db or settings.HANA_OIL_COMPANY_DB
+        username = username or settings.HANA_USERNAME
+        password = password or settings.HANA_PASSWORD
 
         payload = {
             "CompanyDB": company_db,
-            "UserName": settings.HANA_USERNAME,
-            "Password": settings.HANA_PASSWORD
+            "UserName": username,
+            "Password": password
         }
 
         print_sap_payload("SAP Login Payload:", payload)
@@ -754,10 +757,11 @@ class SyncService:
 
         login_data = response.json()
         self.sap_company_db = company_db
+        self.sap_username = username
         logger.info(
             "SAP Login success | CompanyDB=%s | User=%s | SessionId=%s",
             company_db,
-            settings.HANA_USERNAME,
+            username,
             login_data.get("SessionId", "N/A"),
         )
         return login_data
@@ -777,14 +781,53 @@ class SyncService:
                     return fallback.isoformat()
             return fallback.isoformat()
 
+        # The order can belong to either JIVO_OIL_HANADB or JIVO_BEVERAGES_HANADB;
+        # resolve which so the OPRC (costing code) lookup hits the right schema.
+        company_db = self.resolve_company_db_for_order(order)
+        beverages_company_db = getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or None
+        branch = "BEVERAGE" if (beverages_company_db and company_db == beverages_company_db) else "OIL"
+
+        sales_service = SalesOrderService()
+        costing_code_cache = {}
+
+        def _resolve_costing_code(prc_name):
+            """Map a profit-center name (sub_group) to its SAP CostingCode (PrcCode).
+
+            Falls back to the raw name if the lookup fails so mapping never crashes.
+            """
+            if not prc_name:
+                return prc_name
+            if prc_name not in costing_code_cache:
+                try:
+                    resolved = sales_service.get_costing_code(prc_name, branch)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to resolve costing code for profit center %r (%s): %s",
+                        prc_name, branch, exc,
+                    )
+                    resolved = None
+                if resolved is None:
+                    logger.warning(
+                        "No PrcCode found in OPRC for profit center %r (%s); "
+                        "sending raw name as CostingCode.",
+                        prc_name, branch,
+                    )
+                costing_code_cache[prc_name] = resolved if resolved is not None else prc_name
+            return costing_code_cache[prc_name]
+
         document_lines = []
-           
+
         for item in order.items.all():
-            order_qty = _get_sap_line_quantity(item)
+            print("\n============================================\n")
+            print(getattr(item, "sub_group"))
+            print("\n ============================================\n")
+
+            order_qty = _get_sap_line_quantity(item)  
             item_unit_price = _get_sap_unit_price(item)
             card_code = getattr(order, "card_code", "")
             item_code = getattr(item, "item_code", "")
             category = getattr(item, "category", "")
+            sub_group = getattr(item, "sub_group", "")
             warehouse_code = self.resolve_warehouse_code_for_category(category)
             scheme_entries = _get_order_item_scheme_entries(
                 item,
@@ -801,6 +844,8 @@ class SyncService:
                     "ItemCode": item_code,
                     "Quantity": order_qty,
                     "UnitPrice": item_unit_price,
+                    "U_SchemeAgst": sub_group,
+                    "CostingCode" : _resolve_costing_code(sub_group)
                 }
                 if warehouse_code:
                     line["WarehouseCode"] = warehouse_code
@@ -819,15 +864,18 @@ class SyncService:
                         getattr(item, "id", None),
                         raw_scheme_id,
                     )
-
+                    
                 for scheme_item_code in scheme_item_codes:
                     if scheme_item_code == item_code:
                         continue
-
+                    
                     line = {
                         "ItemCode": scheme_item_code,
                         "Quantity": scheme_qty,
                         "UnitPrice": 0.0,
+                        "U_SchemeAgst": sub_group,
+                        "CostingCode" : _resolve_costing_code(sub_group)
+
                     }
                     if warehouse_code:
                         line["WarehouseCode"] = warehouse_code
@@ -845,6 +893,11 @@ class SyncService:
             "Comments": " ",
             "ShipToCode": order.ship_to_address,
             "PayToCode": order.bill_to_address,
+            #=-===============================================================================
+            # CHANGE AND MAP THE SALES PERSON
+            #=-===============================================================================
+            
+            #=================================================================================
             "BPL_IDAssignedToInvoice": order.dispatch_from_id,
             "DocumentLines": document_lines,
         }
@@ -889,7 +942,7 @@ class SyncService:
         company_db = self.resolve_company_db_for_order(order)
 
         log = SalesQuotationLog.objects.create(
-            order_id=order.id,
+            order_id=order.id, 
             status='STARTED',
             request_data=quotation_payload
         )
@@ -898,9 +951,10 @@ class SyncService:
             if (
                 not hasattr(self, 'sap_session')
                 or getattr(self, 'sap_company_db', None) != company_db
+                or getattr(self, 'sap_username', None) != settings.HANA_USERNAME
             ):
                 self.sap_login(company_db=company_db)
-     
+
             url = f"{settings.HANA_SERVICE_LAYER_URL}/Quotations"
             print(f"SAP quotation URL: {url}")
             logger.warning("SAP quotation URL: %s", url)
@@ -908,6 +962,78 @@ class SyncService:
             response = self._post_with_ssl_fallback(url, quotation_payload)
             logger.info(
                 "SAP Quotations response | status=%s | body=%s",
+                response.status_code,
+                response.text[:500],
+            )
+            if response.status_code == 201:
+                response_data = response.json()
+
+                # order.status = 6
+                order.save(update_fields=['status'])  
+               
+                order.sap_created = True
+                order.save(update_fields=['sap_created'])
+
+                log.status = 'SUCCESS'
+                log.response_data = response_data
+                log.sap_doc_entry = response_data.get("DocEntry")
+                log.sap_doc_num = response_data.get("DocNum")
+                log.completed_at = timezone.now()
+                log.save()
+
+                return response_data
+
+            else:
+                log.status = 'FAILED'
+                log.response_data = response.text
+                log.error_message = response.text
+                log.completed_at = timezone.now()
+                log.save()
+
+                raise Exception(response.text)
+
+        except Exception as e:
+            log.status = 'FAILED'
+            log.error_message = str(e)
+            log.completed_at = timezone.now()
+            log.save()
+            raise
+
+
+    def create_sales_order(self, order):
+       
+        quotation_payload = self.map_order_to_sap(order)
+        company_db = self.resolve_company_db_for_order(order)
+
+        log = SalesOrderLog.objects.create(
+            order_id=order.id,
+            status='STARTED',
+            request_data=quotation_payload
+        )
+
+        order_user = settings.SALES_ORDER_USER
+        order_password = settings.SALES_ORDER_PASSWORD
+
+        try:
+            if (
+                not hasattr(self, 'sap_session')
+                or getattr(self, 'sap_company_db', None) != company_db
+                or getattr(self, 'sap_username', None) != order_user
+            ):
+                self.sap_login(
+                    company_db=company_db,
+                    username=order_user,
+                    password=order_password,
+                )
+
+            url = f"{settings.HANA_SERVICE_LAYER_URL}/Orders"
+            print(f"SAP order URL: {url}")
+            logger.warning("SAP order URL: %s", url)
+
+            print(quotation_payload)
+            response = self._post_with_ssl_fallback(url, quotation_payload)
+            logger.info(
+                "SAP Orders response | status=%s | body=%s",
                 response.status_code,
                 response.text[:500],
             )

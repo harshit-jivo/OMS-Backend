@@ -152,15 +152,30 @@ class OrdersLogSerializer(serializers.ModelSerializer):
         return self._action_name(obj)
 
     def get_remarks(self, obj):
+        raw = self._raw_remarks(obj)
         if self._is_billing_acceptance(obj):
-            return "Accepted by billing"
+            # Preserve a real comment the billing user typed; only fall back to
+            # the generic "Accepted by billing" label when they approved with no
+            # note (otherwise the typed remark is lost and never shown).
+            auto_billing = {
+                "",
+                "approved",
+                "accepted",
+                "billing",
+                "accepted by billing",
+                "approved by billing",
+                "sent to auditor",
+            }
+            if raw.strip().lower() in auto_billing:
+                return "Accepted by billing"
+            return raw
         if (
             self._action_name(obj).lower() == "completed"
             and self._performed_by_role(obj) == "auditor"
-            and not self._raw_remarks(obj)
+            and not raw
         ):
             return "Sales quotation created by auditor"
-        return self._raw_remarks(obj)
+        return raw
    
     class Meta:
         model = OrdersLog
@@ -210,6 +225,9 @@ class OrderItemSerializer(serializers.ModelSerializer):
     # Backward-compat: the column was renamed variety -> sub_group. Keep exposing
     # `variety` (read-only) so existing clients reading item.variety keep working.
     variety = serializers.CharField(source='sub_group', read_only=True)
+    variety_type = serializers.SerializerMethodField()
+    last_purchase_price = serializers.SerializerMethodField()
+
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
@@ -248,6 +266,68 @@ class OrderItemSerializer(serializers.ModelSerializer):
             for mapping in mappings
             if mapping.approver_id
         ]
+
+
+    def get_variety_type(self, obj):
+        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
+        premium_list = [
+            "BLENDED",
+            "CANOLA",
+            "COCONUT",
+            "DRY FRUITS/NUTS",
+            "EXTRA VIRGIN",
+            "GHEE",
+            "GIFT PACK",
+            "GROUNDNUT",
+            "MUSTARD",
+            "OLIVE",
+            "SESAME",
+            "SPICES"
+        ]
+
+        sub_group =  SapProduct.objects.filter(item_code=obj.item_code , category=obj.category).values_list('sub_group', flat=True).first()
+        id = SapProduct.objects.filter(item_code=obj.item_code).values_list('id', flat=True).first()
+        category = getattr(obj, 'category', None)
+
+        if sub_group in commodity_list:
+            variety_type = "COMMODITY"
+        elif sub_group in premium_list:
+            variety_type = "PREMIUM"
+        else:
+            variety_type = "OTHERS"
+
+        print(f"{id} - {category} - {obj.item_name} - {sub_group} - {variety_type}")
+        return variety_type
+    
+
+    def get_last_purchase_price(self, obj):
+        card_code = getattr(obj.order, 'card_code', None)
+        item_code = getattr(obj, 'item_code', None)
+
+        current_order = getattr(obj, 'order', None)
+        current_order_id = Order.objects.filter(id=current_order.id).values('id').first() if current_order else None
+        # print(current_order_id)
+
+
+        last_order_id = Order.objects.filter(
+            card_code=card_code, 
+            items__item_code=item_code,
+            id__lt=current_order_id['id'] if current_order_id else None
+
+        ).values('id').order_by('-created_at').first()
+        
+        if not last_order_id:
+            return None
+        else:
+            last_purchase_price = OrderItem.objects.filter(order_id=last_order_id['id'], item_code=item_code).values_list('basic_price', flat=True).first()
+            # print(last_order_id)0
+            # print(f"Last purchase price for card_code: {card_code}, item_code: {item_code} is {last_purchase_price}")
+            return last_purchase_price if last_purchase_price is not None else None
+        
+
+        
+
+
 
     class Meta:
         model = OrderItem

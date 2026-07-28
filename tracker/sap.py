@@ -21,7 +21,7 @@ VENDOR_CACHE_TTL = 600  # seconds (10 min)
 
 
 def _vendor_query():
-    schema = settings.DATABASES['hana']['SCHEMA']
+    schema = settings.DATABASES['hana']['OIL_SCHEMA']
     return f'''
         SELECT
             T0."CardCode"   AS "card_code",

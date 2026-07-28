@@ -7,7 +7,7 @@ from .views import (
     BranchListView, SyncLogListView, SyncScheduleListView,
     SyncScheduleDetailView, ToggleScheduleView, SyncStatusView,
     PushSalesQuotationView, TestSalesQuotation, ApproveOrderAPIView, SalesQuotationLogByOrderView,
-    GetPartyByCategoryView
+    GetPartyByCategoryView ,PushSalesOrderView , ApproveSalesOrderAPIView
 )
  
 urlpatterns = [
@@ -48,14 +48,17 @@ urlpatterns = [
     # ============ Status ============
     path('status/', SyncStatusView.as_view(), name='sync-status'),
     path('push-quotation/', PushSalesQuotationView.as_view(), name='push-quotation'),
-
+    path('push-order/', PushSalesOrderView.as_view(), name='push-order'),
     path('test-quotation/', TestSalesQuotation.as_view()),
 
     path('test-quotation/<int:pk>/', TestSalesQuotation.as_view()),
     path("approve-order/", ApproveOrderAPIView.as_view(), name="approve-order"),
+
+    path('approve-sales-order/', ApproveSalesOrderAPIView.as_view(), name='approve-sales-order'),
     
     path('parties/category/', GetPartyByCategoryView.as_view(), name='party-by-category'),
     
     
     
 ]
+

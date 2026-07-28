@@ -194,3 +194,33 @@ class SalesQuotationLog(models.Model):
 
     def __str__(self):
         return f"{self.order_id} - {self.status}"
+
+
+
+
+class SalesOrderLog(models.Model):
+    STATUS_CHOICES = [
+        ('STARTED', 'Started'),
+        ('SUCCESS', 'Success'),
+        ('FAILED', 'Failed'),
+    ]
+    
+    order_id = models.CharField(max_length=100, blank=True, null=True)
+    sap_doc_entry = models.IntegerField(blank=True, null=True)
+    sap_doc_num = models.IntegerField(blank=True, null=True)
+
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='STARTED')
+
+    request_data = models.JSONField(blank=True, null=True)
+    response_data = models.JSONField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'sales_orders_logs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.order_id} - {self.status}"

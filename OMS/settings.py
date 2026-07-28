@@ -13,7 +13,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 from pathlib import Path
 from datetime import timedelta
-from decouple import config    
+from corsheaders.defaults import default_headers as cors_default_headers
+from decouple import config
 
 
 def _parse_bool(value, default=False):
@@ -46,8 +47,8 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240']
-
+ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
+CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
 # ALLOWED_HOSTS = ['*']
 # Application definition
 
@@ -63,6 +64,7 @@ INSTALLED_APPS = [
     'rest_framework',
     # 'rest_framework.authtoken',
     # 'rest_framework.authto
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_apscheduler',
     # Local apps
@@ -78,8 +80,11 @@ INSTALLED_APPS = [
     'invoice',
     'legal',
     'audit',
+    'devices',
     # Document (invoice) tracker — self-contained, no FKs into OMS models
     'tracker',
+    # Dynamic UI labels — admin-editable field labels served to web + mobile
+    'uilabels',
 ]
 
 MIDDLEWARE = [
@@ -131,7 +136,8 @@ DATABASES = {
         'ENGINE': 'django.db.backends.dummy', 
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
-        'SCHEMA': config('HANA_DB_NAME'),
+        'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
+        'BEVERAGE_SCHEMA': config('HANA_DB_BEVERAGE_NAME'),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     }
@@ -143,7 +149,16 @@ DATABASES = {
 HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL')
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
-HANA_OIL_COMPANY_DB = config('HANA_COMPANY_DB')
+
+# Dedicated Service Layer user for Sales Order creation (falls back to the
+# default Service Layer user when not configured).
+SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
+SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
+
+HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
+HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+
+
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
 HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='')
@@ -153,6 +168,11 @@ HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
 
+# DSR credit-limit service (external project; proxied because it has no CORS)
+DSR_API_BASE = config('JSAP_API_BASE')
+# Fixed OMS user id stamped as createdBy on DSR credit-limit requests.
+OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
+
 # SAP SQL Server (source for sync)
 SAP_DB_HOST = config('SAP_DB_HOST', default='103.89.45.75')
 SAP_DB_PORT = config('SAP_DB_PORT', default=1433, cast=int)
@@ -160,7 +180,8 @@ SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
 SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
 
-
+# VAPID (Web Push) keys are configured lower down in this file — see the
+# "Web Push (VAPID)" section near the bottom.
 SAP_APPROVER_USER = config('SAP_APPROVER_USER')
 SAP_APPROVER_PASSWORD = config('SAP_APPROVER_PASSWORD') 
 
@@ -231,14 +252,84 @@ REST_FRAMEWORK = {
     ),
 }
 
-# JWT Settings
+# JWT Settings (SimpleJWT). Hardened for production while preserving the
+# existing API contract and token compatibility.
 SIMPLE_JWT = {
+    # Access lifetime kept at 1 day: the current web/mobile clients do NOT run
+    # a refresh flow, so shortening this would log active users out mid-session
+    # (a compatibility break). Shorten once clients adopt the /auth/refresh/
+    # endpoint added in this phase.
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+
+    # Rotation + blacklist: a refresh issues a new refresh token and the old
+    # one is blacklisted so it cannot be replayed.
     'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    # Stamp user.last_login on token issuance.
+    'UPDATE_LAST_LOGIN': True,
+
+    'ALGORITHM': 'HS256',
+    # Defaults to SECRET_KEY (so all EXISTING tokens stay valid). Override with
+    # a dedicated JWT_SIGNING_KEY in production via .env. Rotating this key
+    # invalidates every issued token, so only change it deliberately.
+    'SIGNING_KEY': config('JWT_SIGNING_KEY', default=SECRET_KEY),
+
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    # Small clock-skew tolerance for token exp/nbf validation.
+    'LEEWAY': 10,
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+# ---------------------------------------------------------------------------
+# Email (SMTP) — used by the tracker's stuck-invoice alert emails.
+# All from .env; blank host falls back to the console backend so nothing breaks
+# in dev. See `manage.py email_stuck_alerts`.
+# ---------------------------------------------------------------------------
+EMAIL_HOST = config('EMAIL_HOST', default='')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_USE_TLS = _parse_bool(config('EMAIL_USE_TLS', default='true'), default=True)
+EMAIL_USE_SSL = _parse_bool(config('EMAIL_USE_SSL', default='false'), default=False)
+EMAIL_BACKEND = config(
+    'EMAIL_BACKEND',
+    default=('django.core.mail.backends.smtp.EmailBackend' if EMAIL_HOST
+             else 'django.core.mail.backends.console.EmailBackend'),
+)
+DEFAULT_FROM_EMAIL = config(
+    'DEFAULT_FROM_EMAIL', default=(EMAIL_HOST_USER or 'oms-tracker@jivo.com'))
+
+# Re-notify cooldown (hours): how long before the same stuck invoice emails the
+# stage's users again. Prevents the periodic sweep from spamming.
+TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
+    'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)
+
+
+# CORS_ALLOW_ALL_ORIGINS wildcards the ORIGIN only — it does NOT allow arbitrary
+# request HEADERS. The web client attaches device/version metadata headers to
+# every request (see Frontend-web/src/services/webDeviceService.ts), and those
+# are non-simple headers, so the browser sends a CORS preflight first. Any header
+# missing from this list makes the browser reject the preflight and CANCEL the
+# real request — it never reaches Django, so it looks like the server is down
+# (0 bytes transferred, no response headers) rather than like a CORS error.
+#
+# Only affects browsers: the React Native client is not subject to CORS.
+CORS_ALLOW_HEADERS = (
+    *cors_default_headers,
+    'x-app-version',
+    'x-build-number',
+    'x-platform',
+    'x-app-type',
+    'x-os-version',
+    'x-device-id',
+)
 
 
 # =========================================================================
@@ -361,27 +452,76 @@ EWB = {
     "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
 }
 
+# --- Web Push (VAPID) -------------------------------------------------------
+# Keys for browser Web Push (Phase 3), loaded from .env via python-decouple
+# like the rest of this file. Only the WEB client uses these — React Native /
+# Expo push does NOT use VAPID.
+#
+#   VAPID_PUBLIC_KEY   application server key handed to the browser at
+#                      subscribe time (safe to expose; it ships to clients).
+#   VAPID_PRIVATE_KEY  raw base64url private key that signs the VAPID JWT.
+#                      SECRET — never commit the production value.
+#   VAPID_ADMIN_EMAIL  contact address sent to push services (a "mailto:"
+#                      prefix is added automatically if you omit it).
+#
+# The defaults below are DEV-ONLY throwaway keys so the app works out of the
+# box locally. Generate a real pair with `python manage.py generate_vapid_keys`
+# and set all three in .env for staging/production.
+#
+# The trailing `or <default>` also covers a .env that has the key present but
+# BLANK (e.g. `VAPID_PUBLIC_KEY=`), which python-decouple returns as '' — we
+# still fall back to the working dev key rather than a broken empty value.
+_DEV_VAPID_PUBLIC_KEY = "BP2Qud4yZDHMSxq31u0i47Dm0MkDeScBDBBbkEoSFvdrYLk3ZRmYXIgZE0sZQuDBRIeNSdpMN5FAzt1DQJyo80Q"
+_DEV_VAPID_PRIVATE_KEY = "pCo0fEKbYRCaOCEtlZ4CeH7aQaVx10687SzURg8BUo8"
 
-# ---------------------------------------------------------------------------
-# Email (SMTP) — used by the tracker's stuck-invoice alert emails.
-# All from .env; blank host falls back to the console backend so nothing breaks
-# in dev. See `manage.py email_stuck_alerts`.
-# ---------------------------------------------------------------------------
-EMAIL_HOST = config('EMAIL_HOST', default='')
-EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
-EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
-EMAIL_USE_TLS = _parse_bool(config('EMAIL_USE_TLS', default='true'), default=True)
-EMAIL_USE_SSL = _parse_bool(config('EMAIL_USE_SSL', default='false'), default=False)
-EMAIL_BACKEND = config(
-    'EMAIL_BACKEND',
-    default=('django.core.mail.backends.smtp.EmailBackend' if EMAIL_HOST
-             else 'django.core.mail.backends.console.EmailBackend'),
+VAPID_PUBLIC_KEY = config("VAPID_PUBLIC_KEY", default="").strip()
+VAPID_PRIVATE_KEY = config("VAPID_PRIVATE_KEY", default="").strip()
+VAPID_ADMIN_EMAIL = config("VAPID_ADMIN_EMAIL", default="").strip() or "admin@oms.local"
+
+# A browser subscription is permanently bound to the application server key it
+# was created with. So silently falling back to the throwaway dev pair in a real
+# deployment POISONS every subscription made while the fallback was active: once
+# real keys are set, those rows can never be pushed to again (FCM answers 403,
+# WNS answers 401). Only allow the fallback in DEBUG, and refuse to start
+# otherwise rather than mint subscriptions against keys we're about to discard.
+if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+    if DEBUG:
+        VAPID_PUBLIC_KEY = VAPID_PUBLIC_KEY or _DEV_VAPID_PUBLIC_KEY
+        VAPID_PRIVATE_KEY = VAPID_PRIVATE_KEY or _DEV_VAPID_PRIVATE_KEY
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must both be set in .env when "
+            "DEBUG=False. Generate a pair with `python manage.py generate_vapid_keys`. "
+            "Refusing to fall back to the built-in dev keys, which would silently "
+            "break Web Push for every browser that subscribes."
+        )
+
+# --- Push token cleanup (scheduled) -----------------------------------------
+# `python manage.py prune_push_tokens` deactivates Expo tokens the push service
+# reports as dead. It is meant to run nightly from cron / Task Scheduler --
+# see docs/push-token-cleanup.md.
+#
+#   PUSH_TOKEN_CLEANUP_LOG   append-only run log (every run, success or failure)
+#   PUSH_TOKEN_CLEANUP_LOCK  lock file that stops two runs overlapping
+PUSH_TOKEN_CLEANUP_LOG = config(
+    "PUSH_TOKEN_CLEANUP_LOG",
+    default=str(BASE_DIR / "logs" / "push_token_cleanup.log"),
 )
-DEFAULT_FROM_EMAIL = config(
-    'DEFAULT_FROM_EMAIL', default=(EMAIL_HOST_USER or 'oms-tracker@jivo.com'))
+PUSH_TOKEN_CLEANUP_LOCK = config(
+    "PUSH_TOKEN_CLEANUP_LOCK",
+    default=str(BASE_DIR / "logs" / "push_token_cleanup.lock"),
+)
 
-# Re-notify cooldown (hours): how long before the same stuck invoice emails the
-# stage's users again. Prevents the periodic sweep from spamming.
-TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
-    'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)
+# `python manage.py prune_web_push_subscriptions` -- the browser Web Push
+# equivalent of the Expo token cleanup above. Same nightly cron / Task Scheduler
+# model; see docs/web-push-cleanup.md.
+WEB_PUSH_CLEANUP_LOG = config(
+    "WEB_PUSH_CLEANUP_LOG",
+    default=str(BASE_DIR / "logs" / "web_push_cleanup.log"),
+)
+WEB_PUSH_CLEANUP_LOCK = config(
+    "WEB_PUSH_CLEANUP_LOCK",
+    default=str(BASE_DIR / "logs" / "web_push_cleanup.lock"),
+)

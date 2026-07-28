@@ -41,15 +41,22 @@ class UserSerializer(serializers.ModelSerializer):
     state = serializers.SerializerMethodField()
     states = serializers.SerializerMethodField()
     category = serializers.SerializerMethodField()
+    categories = serializers.SerializerMethodField()
     role = serializers.CharField(source='role.name', read_only=True)
     role_display = serializers.CharField(source='role.display_name', default= None, read_only=True)
     is_active = serializers.BooleanField(read_only=True)
+    # Read-only account flags/timestamps surfaced on the mobile Profile screen.
+    # Kept read_only so they can never be set through this serializer.
+    is_superuser = serializers.BooleanField(read_only=True)
+    is_staff = serializers.BooleanField(read_only=True)
+    last_login = serializers.DateTimeField(read_only=True)
+    date_joined = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'sub_group', 'is_active', 'password', 'extra_pages'
+            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'password', 'extra_pages', 'created_at'
         ]
 
     def get_company(self, obj):
@@ -106,6 +113,14 @@ class UserSerializer(serializers.ModelSerializer):
             return None
         return CategorySerializer(obj.category).data
 
+    def get_categories(self, obj):
+        categories = obj.categories.all()
+        if not categories.exists():
+            if obj.category:
+                return [CategorySerializer(obj.category).data]
+            return []
+        return CategorySerializer(categories, many=True).data
+
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField(write_only=True)
@@ -137,6 +152,7 @@ class CreateUserSerializer(serializers.Serializer):
     main_groups = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, allow_null=True, many=True)
     states = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, allow_null=True, many=True)
     category = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, allow_null=True)
+    categories = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, allow_null=True, many=True)
     sub_group = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
@@ -154,11 +170,15 @@ class CreateUserSerializer(serializers.Serializer):
         password = validated_data.pop('password')
         main_groups = validated_data.pop('main_groups', [])
         states_list = validated_data.pop('states', [])
+        categories_list = validated_data.pop('categories', [])
 
         if main_groups and not validated_data.get('main_group'):
             validated_data['main_group'] = main_groups[0]
         if states_list and not validated_data.get('state'):
             validated_data['state'] = states_list[0]
+        # Keep the single `category` FK as the primary (first selected) category.
+        if categories_list and not validated_data.get('category'):
+            validated_data['category'] = categories_list[0]
 
         user = User.objects.create(**validated_data)
         user.set_password(password)
@@ -169,6 +189,9 @@ class CreateUserSerializer(serializers.Serializer):
 
         if states_list:
             user.states.set(states_list)
+
+        if categories_list:
+            user.categories.set(categories_list)
 
         return user
     
@@ -188,11 +211,13 @@ class UpdateUserSerializer(serializers.Serializer):
     main_groups = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, many=True)
     states = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, many=True)
     category = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, allow_null=True)
+    categories = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, many=True)
     sub_group = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def update(self, instance, validated_data):
         main_groups = validated_data.pop('main_groups', None)
         states_list = validated_data.pop('states', None)
+        categories_list = validated_data.pop('categories', None)
 
         instance.name = validated_data.get('name', instance.name)
       
@@ -228,6 +253,11 @@ class UpdateUserSerializer(serializers.Serializer):
             instance.states.set(states_list)
             if states_list:
                 instance.state = states_list[0]
+
+        if categories_list is not None:
+            instance.categories.set(categories_list)
+            # Keep the single `category` FK in sync with the first selected one.
+            instance.category = categories_list[0] if categories_list else None
 
         # Agar nawa password ditta gaya hai taan hi update karo
         password = validated_data.get('password')
