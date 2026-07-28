@@ -351,21 +351,38 @@ def store_standalone_ewb(result, *, order_id=None, request_payload=None):
 
 # ---- automatic IRN generation from a SAP invoice (with audit log) ---------
 
+def qr_dir_for_company(company_db=None) -> str:
+    """QR folder for a company DB.
+
+    Each company writes its bitmaps into its own folder (OIL_ATTACHMENTS /
+    BEVERAGE_ATTACHMENTS / MART_ATTACHMENTS), configured in
+    settings.EINV_QR_SAVE_DIRS. Falls back to the single EINV_QR_SAVE_DIR when
+    the company has no folder of its own (or is unknown).
+    """
+    per_company = getattr(settings, "EINV_QR_SAVE_DIRS", None) or {}
+    default_db = getattr(settings, "HANA_OIL_COMPANY_DB", "")
+    return (per_company.get(company_db or default_db)
+            or getattr(settings, "EINV_QR_SAVE_DIR", "") or "")
+
+
 def post_generate_hooks(record, result, *, company_db=None, docentry=None):
     """
     Best-effort side effects after a successful IRN generation, gated by settings:
-      - EINV_QR_SAVE_DIR   -> write the QR PNG file to the shared folder
+      - EINV_QR_SAVE_DIRS  -> write the QR PNG into THIS company's folder
       - EINV_MIRROR_HANA   -> write the row into HANA OMS_IRN_LOG (UDO-shaped)
       - EINV_SAP_WRITEBACK -> write the IRN back onto the SAP invoice (e-Billing)
     Never raises; failures are logged so they can't break the IRN flow.
     """
-    # 1. QR PNG to the shared folder (path is reused for OMS_IRN_LOG.U_UTL_QRPT).
+    # 1. QR PNG into the company's own folder. The path written here is what gets
+    #    stored in OMS_IRN_LOG.U_UTL_QRPT, so the report reads the same location.
     qr_path = None
-    if record is not None and getattr(settings, "EINV_QR_SAVE_DIR", ""):
+    qr_dir = qr_dir_for_company(company_db)
+    if record is not None and qr_dir:
         try:
-            qr_path = save_qr_to_dir(record, settings.EINV_QR_SAVE_DIR)
+            qr_path = save_qr_to_dir(record, qr_dir)
         except Exception:
-            logger.exception("QR file-save hook failed for doc %s", getattr(record, "doc_no", None))
+            logger.exception("QR file-save hook failed for doc %s (dir %s)",
+                             getattr(record, "doc_no", None), qr_dir)
 
     # 2. Row into HANA OMS_IRN_LOG (mirrors the SAP add-on's @UTL_MDEXTH shape).
     if record is not None and getattr(settings, "EINV_MIRROR_HANA", False):

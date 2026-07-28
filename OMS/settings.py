@@ -158,6 +158,8 @@ SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
 
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
 HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+# Third company (Mart). Blank disables everything Mart-specific.
+HANA_MART_COMPANY_DB = config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB')
 
 
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
@@ -423,6 +425,24 @@ EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), 
 # Blank = disabled. {doc_no}, {irn}, {ack_no}, {env} are substituted into the name.
 EINV_QR_SAVE_DIR = config('EINV_QR_SAVE_DIR', default='')
 EINV_QR_FILENAME = config('EINV_QR_FILENAME', default='{doc_no}.png')
+
+# Per-company QR folders. The IRN's QR PNG is written into the folder of the
+# company DB the invoice belongs to, so each company's bitmaps stay separate:
+#   \\JIVO-APP\OMS_Attachments\OIL_ATTACHMENTS\Bitmap
+#   \\JIVO-APP\OMS_Attachments\BEVERAGE_ATTACHMENTS\Bitmap
+#   \\JIVO-APP\OMS_Attachments\MART_ATTACHMENTS\Bitmap
+# A blank entry falls back to EINV_QR_SAVE_DIR.
+_EINV_QR_ROOT = config('EINV_QR_ROOT', default=r'\\JIVO-APP\OMS_Attachments')
+EINV_QR_SAVE_DIRS = {
+    HANA_OIL_COMPANY_DB: config(
+        'EINV_QR_SAVE_DIR_OIL', default=rf'{_EINV_QR_ROOT}\OIL_ATTACHMENTS\Bitmap'),
+    HANA_BEVERAGE_COMPANY_DB: config(
+        'EINV_QR_SAVE_DIR_BEVERAGE', default=rf'{_EINV_QR_ROOT}\BEVERAGE_ATTACHMENTS\Bitmap'),
+    HANA_MART_COMPANY_DB: config(
+        'EINV_QR_SAVE_DIR_MART', default=rf'{_EINV_QR_ROOT}\MART_ATTACHMENTS\Bitmap'),
+}
+# Drop unconfigured company DBs (blank key) so lookups can't match by accident.
+EINV_QR_SAVE_DIRS = {k: v for k, v in EINV_QR_SAVE_DIRS.items() if k and v}
 # Credentials for the share (needed when the Django service account can't reach it
 # on its own). Username may be 'user' or 'DOMAIN\\user'. Blank = write as the
 # process account (no explicit SMB auth). Requires the `smbprotocol` package.
