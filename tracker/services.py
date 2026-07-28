@@ -58,6 +58,54 @@ def can_act(user, invoice):
     return stage.code == 'entry' and invoice.created_by_id == user.id
 
 
+def stage_recipients(stage):
+    """Active TRACKER users mapped to `stage` who have an email address — the
+    people to notify when an invoice sits there too long.
+
+    Only the three tracker sub-roles (tracker_admin / tracker_entry /
+    tracker_user) are mailed — never plain OMS users or superusers."""
+    from django.contrib.auth import get_user_model
+    from .permissions import ROLE_PAGE_MAP
+    User = get_user_model()
+    tracker_roles = set(ROLE_PAGE_MAP.keys())
+    return list(
+        User.objects
+        .filter(tracker_stage_access__stage=stage,
+                tracker_stage_access__is_active=True,
+                is_active=True,
+                role__name__in=tracker_roles)
+        .exclude(email__isnull=True).exclude(email='')
+        .distinct()
+    )
+
+
+def is_full_hold(invoice):
+    """True if the invoice's CURRENT stage visit carries a FULL hold note.
+
+    A full hold keeps the invoice in place (partial holds advance it), so the
+    presence of a FULL hold event on this visit means it's parked on purpose."""
+    return StageEvent.objects.filter(
+        invoice=invoice,
+        stage=invoice.current_stage,
+        entered_at=invoice.current_stage_entered_at,
+        hold_type=StageEvent.HoldType.FULL,
+    ).exists()
+
+
+def stuck_visits(now=None):
+    """Every in-progress invoice sitting at its stage beyond that stage's
+    threshold. Returns a list of (invoice, stage, days_stuck)."""
+    now = now or timezone.now()
+    out = []
+    for inv in (Invoice.objects
+                .filter(status=Invoice.Status.IN_PROGRESS)
+                .select_related('current_stage')):
+        days = days_at_stage(inv, now)
+        if days > inv.current_stage.threshold_days:
+            out.append((inv, inv.current_stage, days))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Time helpers
 # ---------------------------------------------------------------------------
@@ -183,7 +231,13 @@ def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amoun
 
     # Resolve what kind of movement this is.
     if status in RETURN_STATUSES:
-        kind = 'RETURN'
+        # SAP/JSAP: a REJECT without remarks is parked as "pending rejection"
+        # (stays at the stage, shows in the Rejected tab) rather than returned.
+        # Supplying remarks (now or later) turns it into a real RETURN.
+        if status == 'REJECTED' and not (remarks or '').strip():
+            kind = 'REJECT_PENDING'
+        else:
+            kind = 'RETURN'
     elif status == 'HOLD':
         if hold_type == 'PARTIAL':
             # A portion of the value is withheld and the invoice advances. The
@@ -208,8 +262,13 @@ def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amoun
     if kind == 'ADVANCE' and stage.is_terminal:
         raise ValidationError(f'"{stage.name}" is the final stage.')
 
-    # Reason enforcement: always on RETURN, plus any reason-required status.
-    needs_reason = kind == 'RETURN' or status in REASON_REQUIRED_STATUSES
+    # Reason enforcement: always on RETURN, plus any reason-required status —
+    # EXCEPT a pending rejection, which is allowed precisely because it has no
+    # remarks yet (they come later, when it is returned).
+    if kind == 'REJECT_PENDING':
+        needs_reason = False
+    else:
+        needs_reason = kind == 'RETURN' or status in REASON_REQUIRED_STATUSES
     if needs_reason and not (remarks or '').strip():
         raise ValidationError('Remarks are mandatory for this action.')
 
@@ -255,6 +314,19 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         )
         return invoice
 
+    if kind == 'REJECT_PENDING':
+        # Rejected but no reason yet: flag it and keep it here (Rejected tab).
+        # An immutable note records the rejection; remarks follow when returned.
+        invoice.rejection_pending = True
+        invoice.save(update_fields=['rejection_pending', 'updated_at'])
+        StageEvent.objects.create(
+            invoice=invoice, stage=stage,
+            event_type=StageEvent.EventType.RECEIVE,
+            stage_status='REJECTED', remarks='',
+            acted_by=user, entered_at=invoice.current_stage_entered_at,
+        )
+        return invoice
+
     # ADVANCE or RETURN both close the current visit.
     target = _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1)
     if target is None:
@@ -277,6 +349,7 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
     # Move the invoice and open the next visit.
     invoice.current_stage = target
     invoice.current_stage_entered_at = now
+    invoice.rejection_pending = False   # any pending rejection is resolved on move
     if stage.code == 'entry':
         invoice.is_locked = True   # advancing out of entry locks edits
     elif target.code == 'entry':

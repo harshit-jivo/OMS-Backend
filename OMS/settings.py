@@ -141,7 +141,8 @@ DATABASES = {
         'ENGINE': 'django.db.backends.dummy', 
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
-        'SCHEMA': config('HANA_DB_NAME'),
+        'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
+        'BEVERAGE_SCHEMA': config('HANA_DB_BEVERAGE_NAME'),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     }
@@ -153,7 +154,11 @@ DATABASES = {
 HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL')
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
-HANA_COMPANY_DB = config('HANA_COMPANY_DB')
+
+HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
+HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+
+
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
 HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='')
@@ -162,6 +167,11 @@ HANA_SSL_VERIFY = config('HANA_SSL_VERIFY', default=not DEBUG, cast=bool)
 HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
+
+# DSR credit-limit service (external project; proxied because it has no CORS)
+DSR_API_BASE = config('JSAP_API_BASE')
+# Fixed OMS user id stamped as createdBy on DSR credit-limit requests.
+OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
 
 # SAP SQL Server (source for sync)
 SAP_DB_HOST = config('SAP_DB_HOST', default='103.89.45.75')

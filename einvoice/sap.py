@@ -45,7 +45,7 @@ def get_session(company_db: str | None = None) -> requests.Session:
     -> a fresh (uncached) login, so callers can target the live company DB
     without disturbing the shared cache.
     """
-    if not company_db or company_db == settings.HANA_COMPANY_DB:
+    if not company_db or company_db == settings.HANA_OIL_COMPANY_DB:
         return SAPServiceLayerManager.get_session()
 
     session = requests.Session()

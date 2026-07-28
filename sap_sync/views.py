@@ -700,7 +700,7 @@ class   ApproveSalesOrderAPIView(APIView):
     
     def post(self, request):
         order_id = request.data.get('order_id')
-        
+    
         if not order_id:
             return Response({
                 'success': False,
@@ -710,6 +710,13 @@ class   ApproveSalesOrderAPIView(APIView):
         try:
             service = SyncService(triggered_by=request.user.username)
             order = Order.objects.get(id=order_id)
+
+            if str(order.status).strip() == 'Completed':
+                return Response({"error" : "Invoice Already posted"})
+
+
+
+
             result = service.create_sales_order(order)
             logger.info("Order %s approval result: %s", order_id, result)
 

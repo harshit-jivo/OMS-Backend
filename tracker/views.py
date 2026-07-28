@@ -1,5 +1,6 @@
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import status as http
 from .permissions import (
     IsTrackerAdmin, IsTrackerAlerts, IsTrackerEntry, IsTrackerReports,
@@ -9,7 +10,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import services
-from .permissions import PAGE_ENTRY, tracker_pages_for
+from .permissions import PAGE_ADMIN, PAGE_ENTRY, tracker_pages_for
+
+# A tracker admin may delete an invoice up to this stage order (inclusive).
+# Stage 5 == "SAP / JSAP Approval"; nothing at Save-in-SAP or Payment can be deleted.
+DELETE_ADMIN_MAX_ORDER = 5
 from .reports import build_report
 from .models import (
     Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
@@ -60,6 +65,11 @@ class LookupsView(APIView):
 def _can_use_entry(user):
     """True for users who work the head-office / entry desk (entry-page role)."""
     return user.is_superuser or PAGE_ENTRY in tracker_pages_for(user)
+
+
+def _is_tracker_admin(user):
+    """True for a tracker admin (holds the Tracker_Admin page) or a superuser."""
+    return user.is_superuser or PAGE_ADMIN in tracker_pages_for(user)
 
 
 def _scoped_queryset(user):
@@ -151,6 +161,44 @@ class InvoiceDetailView(APIView):
         serializer.save()
         return Response(
             InvoiceDetailSerializer(invoice, context={'request': request}).data)
+
+    def delete(self, request, pk):
+        """Soft-delete an invoice (row kept, hidden everywhere).
+
+        Two paths:
+          * Tracker admin  -> may delete an invoice up to stage 5 (order <= 5),
+            regardless of lock state or stage-assignment scope.
+          * Entry-desk user -> may delete only while it is still unlocked at the
+            entry (head-office) stage.
+        """
+        user = request.user
+        admin = _is_tracker_admin(user)
+        # Admins can reach any invoice; entry users are limited to their scope.
+        invoice = (Invoice.objects.filter(pk=pk).first() if admin
+                   else self._get(request, pk))
+        if not invoice:
+            return Response(status=http.HTTP_404_NOT_FOUND)
+
+        stage = invoice.current_stage
+        if admin:
+            if stage.order > DELETE_ADMIN_MAX_ORDER:
+                return Response(
+                    {'detail': f'This invoice is at "{stage.name}" (stage {stage.order}). '
+                               f'Tracker admins can delete only up to stage '
+                               f'{DELETE_ADMIN_MAX_ORDER}.'},
+                    status=http.HTTP_403_FORBIDDEN)
+        elif _can_use_entry(user) and not invoice.is_locked and stage.code == 'entry':
+            pass  # entry desk deleting a fresh entry-stage invoice
+        else:
+            return Response(
+                {'detail': 'You do not have permission to delete this invoice.'},
+                status=http.HTTP_403_FORBIDDEN)
+
+        invoice.is_deleted = True
+        invoice.deleted_at = timezone.now()
+        invoice.deleted_by = request.user
+        invoice.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'updated_at'])
+        return Response(status=http.HTTP_204_NO_CONTENT)
 
 
 class MyQueueView(APIView):
@@ -354,7 +402,7 @@ class AlertsView(APIView):
 
     def get(self, request):
         qs = StuckAlert.objects.filter(is_active=True).select_related(
-            'invoice', 'stage')
+            'invoice', 'stage').prefetch_related('notifications__user')
         if not request.user.is_superuser:
             stage_ids = services.accessible_stage_ids(request.user)
             qs = qs.filter(stage_id__in=stage_ids)

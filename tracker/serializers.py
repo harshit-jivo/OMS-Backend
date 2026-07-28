@@ -98,7 +98,9 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
         value = (value or '').strip()
         if not value:
             raise serializers.ValidationError('Invoice number is required.')
-        qs = Invoice.objects.filter(invoice_number__iexact=value)
+        # all_objects: a soft-deleted invoice still reserves its number (the DB
+        # unique constraint covers deleted rows too), so check against every row.
+        qs = Invoice.all_objects.filter(invoice_number__iexact=value)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
@@ -144,7 +146,7 @@ class InvoiceListSerializer(serializers.ModelSerializer):
             'invoice_value', 'category', 'category_name',
             'unit', 'unit_name', 'branch', 'branch_name', 'mode', 'mode_name',
             'current_stage', 'current_stage_code', 'current_stage_name',
-            'status', 'current_stage_entered_at', 'is_locked',
+            'status', 'current_stage_entered_at', 'is_locked', 'rejection_pending',
             'days_at_stage', 'is_overdue', 'editable',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
         ]
@@ -178,6 +180,7 @@ class StuckAlertSerializer(serializers.ModelSerializer):
     stage_name = serializers.CharField(source='stage.name', read_only=True)
     stage_code = serializers.CharField(source='stage.code', read_only=True)
     over_by = serializers.SerializerMethodField()
+    notified = serializers.SerializerMethodField()
 
     class Meta:
         model = StuckAlert
@@ -185,11 +188,23 @@ class StuckAlertSerializer(serializers.ModelSerializer):
             'id', 'invoice', 'invoice_number', 'party_name', 'invoice_value',
             'stage', 'stage_name', 'stage_code', 'stage_entered_at',
             'days_stuck', 'threshold_days', 'over_by', 'is_active',
+            'last_notified_at', 'notified',
             'created_at', 'updated_at',
         ]
 
     def get_over_by(self, obj):
         return float(obj.days_stuck) - obj.threshold_days
+
+    def get_notified(self, obj):
+        """Distinct users mailed about this alert, each with their latest send."""
+        latest = {}
+        for n in obj.notifications.select_related('user').all():
+            name = (getattr(n.user, 'name', '') or getattr(n.user, 'username', '')
+                    or n.email) if n.user_id else n.email
+            cur = latest.get(n.user_id)
+            if cur is None or n.sent_at > cur['sent_at']:
+                latest[n.user_id] = {'user': name, 'email': n.email, 'sent_at': n.sent_at}
+        return sorted(latest.values(), key=lambda x: x['sent_at'], reverse=True)
 
 
 class InvoiceDetailSerializer(InvoiceListSerializer):
