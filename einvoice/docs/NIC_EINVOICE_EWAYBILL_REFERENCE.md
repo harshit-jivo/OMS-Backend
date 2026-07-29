@@ -433,8 +433,17 @@ Maps a SAP Business One Service Layer **`Invoices`** (OINV) document straight to
 - **POST** — the above, then **generate the IRN at NIC and persist** (`IrnRecord`). Returns
   `{ docentry, result, record_id }`. If pre-submit validation fails it returns **422** with the
   errors and the mapped `invoice` (no NIC call).
-- Query params: `?company_db=JIVO_OIL_HANADB` (defaults to `HANA_COMPANY_DB`; a non-default DB
-  triggers a fresh, uncached Service Layer login) · `?order_id=<id>&source=<label>` (stamped on POST).
+- Query params: `?company_db=JIVO_OIL_HANADB` (defaults to `HANA_OIL_COMPANY_DB`)
+  · `?id_type=docentry|docnum` · `?order_id=<id>&source=<label>` (stamped on POST).
+
+> **`company_db` is the company switch.** `DocEntry` is a *per-company* sequence — the
+> same number exists in OIL, BEVERAGE and MART and means a **different invoice** in
+> each. `company_db` decides which company's Service Layer is read, which schema's
+> `OMS_IRN_LOG` the IRN is mirrored into, and which per-company folder the QR PNG is
+> written to. Pick it from **`GET /api/einvoice/companies/`**
+> (`[{label, company_db}]` + default), which is what the UI's company dropdown uses.
+> Auto-IRN derives it from the invoice's `branch` at creation time. Full routing
+> details: [runbook §4](./INVOICE_PRINTING_AND_QR_RUNBOOK.md#4-multi-company-routing-oil--beverage--mart).
 
 ### 12.2 Field mapping (SAP → IRN)
 | IRN path | SAP source |
@@ -529,5 +538,44 @@ EWB stays consistent with the e-Invoice. Code: `ewaybill/mapping.py` +
 - **EWB-by-IRN — OK:** invoice 76029 → IRN → EWB **`EwbNo 391010809803`**, valid till next day.
 - **Standalone GENEWAYBILL:** payload maps + validates cleanly, **but the NIC standalone EWB API
   rejects auth with error 107** — the e-Invoice sandbox credentials are not valid for the separate
-  e-Way Bill system. Provision EWB API access on the NIC EWB portal (`EWB_USERNAME`/`EWB_PASSWORD`,
-  possibly a distinct client-id) to enable this path. EWB-by-IRN needs no extra credentials.
+  e-Way Bill system. EWB-by-IRN needs no extra credentials. **See §13.4 — standalone EWB API is
+  not obtainable for us.**
+
+### 13.4 Standalone e-Way Bill API — BLOCKED (decided 2026-07-29)
+
+Re-tested `POST {ewb1api.gstsandbox.nic.in}/Auth` with the configured client-id/secret:
+
+| Attempt | Result |
+|---|---|
+| `EINV_USERNAME` (`Jivo`) + e-Invoice password | HTTP 200, `status:"failed"`, **errorCodes `107`** |
+| GSTIN `06AACCJ4223F1Z0` as username, 2 password variants | HTTP 200, **`107`** both times |
+
+**`107` = invalid username/password, NOT `108` (invalid client-id/secret).** So the
+**client-id/secret and the whole crypto envelope are accepted** — NIC decrypts the RSA
+payload and processes the request. Only the *username/password* is rejected, because
+the standalone EWB system is a **separate registration** from e-Invoice.
+
+**Why we cannot get those credentials:** on `ewaybillgst.gov.in` → *Registration → API
+Registration*, the portal replies that we are **not shortlisted — direct API access
+requires ~25,000 invoices/month**. Measured actual volume (OINV, live company DBs):
+
+| Month | Oil | Mart | Beverages | Combined |
+|---|--:|--:|--:|--:|
+| 2026-06 | 474 | 1,331 | 444 | **2,249** |
+| 2026-05 | 692 | 1,033 | 406 | **2,131** |
+| 2026-01 | 973 | 1,035 | 119 | **2,127** |
+
+Peak ≈ **2,250/month — roughly 9 % of the 25,000 threshold.** We will not qualify.
+
+**Therefore:**
+- ✅ **Use EWB-by-IRN** for anything with an IRN — already implemented
+  (`einvoice/client.py::generate_ewb_by_irn`), uses e-Invoice credentials, no
+  shortlisting, no GSP.
+- For genuinely non-IRN movements (B2C, exempt, delivery challans, stock transfers):
+  manual entry on the portal, the NIC **Bulk Generation Tool**, or a **GSP** — a GSP is
+  the only route to API automation below the threshold.
+- Don't spend more time on the `107` error; it is a registration gate, not a bug.
+
+> Portals: sandbox/API credentials `einv-apisandbox.nic.in` (covers e-Invoice **and**
+> EWB APIs; NIC now supports cross-portal use of the same client-id/secret);
+> EWB API docs `docs.ewaybillgst.gov.in/apidocs/`; production `ewaybillgst.gov.in`.
