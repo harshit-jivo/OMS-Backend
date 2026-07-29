@@ -29,6 +29,9 @@ REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 # Stages that only apply to certain invoices. Bilty/GRPO is a Transport-only
 # desk — non-Transport invoices skip it and go straight to Pre-Audit.
 TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
+# The JSAP desk mirrors a decision taken in the JSAP system. Mart invoices are
+# not budget-approved there at all, so they skip the desk entirely.
+JSAP_STAGE_CODE = 'jsap_approval'
 # Category names (normalised) that don't require a hold amount on a partial hold.
 NO_HOLD_AMOUNT_CATEGORIES = {'rm-pm', 'pm-pm', 'pm/pm'}
 
@@ -49,7 +52,14 @@ def accessible_stage_ids(user):
 
 def can_act(user, invoice):
     """A user may act on an invoice if it sits at a stage they're mapped to,
-    or (for the entry stage) they created it."""
+    or (for the entry stage) they created it.
+
+    `user=None` means the system itself is acting (the JSAP sync mirroring a
+    decision made in JSAP), which is always allowed — there is no person to
+    map to a stage, and the event is logged with acted_by=NULL.
+    """
+    if user is None:
+        return True
     if user.is_superuser:
         return True
     stage = invoice.current_stage
@@ -493,6 +503,96 @@ def apply_payment(*, invoice, user, discount_pct=0, tds_pct=0, paid_amount=None,
         invoice.save(update_fields=['status', 'updated_at'])
 
     return invoice, payment
+
+
+# ---------------------------------------------------------------------------
+# JSAP desk — mirrors the budget decision made in the JSAP system
+# ---------------------------------------------------------------------------
+def sync_jsap(invoice, *, user=None):
+    """Reconcile one invoice at the JSAP desk with JSAP's own decision.
+
+    JSAP is the system of record for the budget approval; this desk only
+    reflects it, so nothing is ever written back to JSAP. Behaviour:
+
+        Approved -> advance to the next stage
+        Rejected -> return to SAP Approval, carrying JSAP's own reason
+        Pending / not found -> leave it here (the desk shows why)
+
+    Returns {'changed': bool, 'action': ADVANCE|RETURN|None, 'status': {...}}.
+    Safe to call on any invoice: one not at the JSAP desk is a no-op.
+    """
+    from . import jsap
+
+    result = {'changed': False, 'action': None, 'status': None}
+    if invoice.current_stage.code != JSAP_STAGE_CODE:
+        return result
+    if invoice.status == Invoice.Status.COMPLETED:
+        return result
+    # A handler rejected this by hand and is still writing the reason. Their
+    # decision outranks the mirror — otherwise the next sweep could quietly
+    # advance an invoice someone had deliberately parked.
+    if invoice.rejection_pending:
+        result['status'] = {'available': False, 'reason': 'rejection_pending',
+                            'detail': 'Manually rejected here — awaiting remarks.'}
+        return result
+
+    status = jsap.status_for_invoice(invoice)
+    result['status'] = status
+    if not status.get('available'):
+        # Mart is never budget-approved in JSAP — it would otherwise sit here
+        # forever, so let it straight through.
+        if status.get('reason') == 'not_in_jsap':
+            apply_action(invoice=invoice, user=user, action='ADVANCE',
+                         stage_status='APPROVED',
+                         remarks='Not applicable in JSAP — passed through.')
+            result.update(changed=True, action='ADVANCE')
+        return result
+
+    if status['status'] == jsap.STATUS_APPROVED:
+        apply_action(invoice=invoice, user=user, action='ADVANCE',
+                     stage_status='APPROVED',
+                     remarks=(status.get('description')
+                              or f"Approved in JSAP (draft {status['doc_entry']})."))
+        result.update(changed=True, action='ADVANCE')
+    elif status['status'] == jsap.STATUS_REJECTED:
+        # Remarks are mandatory on a return, and JSAP's description is the
+        # approver's actual reason — fall back only if it was left blank.
+        apply_action(invoice=invoice, user=user, action='RETURN',
+                     stage_status='REJECTED',
+                     remarks=(status.get('description')
+                              or f"Rejected in JSAP (draft {status['doc_entry']})."))
+        result.update(changed=True, action='RETURN')
+    return result
+
+
+def sync_jsap_all(*, user=None, limit=None):
+    """Run sync_jsap over every invoice parked at the JSAP desk.
+
+    Used by the `sync_jsap` management command and the manual refresh button.
+    One invoice's failure never stops the sweep.
+    """
+    qs = (Invoice.objects
+          .filter(current_stage__code=JSAP_STAGE_CODE,
+                  status=Invoice.Status.IN_PROGRESS)
+          .select_related('current_stage', 'category', 'unit', 'branch'))
+    if limit:
+        qs = qs[:limit]
+
+    advanced, returned, waiting, errors = [], [], [], []
+    for inv in qs:
+        try:
+            res = sync_jsap(inv, user=user)
+        except (ValidationError, PermissionDenied) as exc:
+            errors.append({'id': inv.pk, 'error': str(getattr(exc, 'message', exc))})
+            continue
+        if res['action'] == 'ADVANCE':
+            advanced.append(inv.pk)
+        elif res['action'] == 'RETURN':
+            returned.append(inv.pk)
+        else:
+            waiting.append(inv.pk)
+    return {'advanced': advanced, 'returned': returned,
+            'waiting': waiting, 'errors': errors}
 
 
 def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',

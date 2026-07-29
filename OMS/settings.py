@@ -161,6 +161,15 @@ HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
 # Third company (Mart). Blank disables everything Mart-specific.
 HANA_MART_COMPANY_DB = config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB')
 
+# --- JSAP (budget approval) SQL Server -------------------------------------
+# Read-only source for budget-approval status of a SAP *draft* document.
+# Blank host disables every JSAP lookup (the tracker degrades to "unknown").
+JSAP_DB_HOST = config('JSAP_DB_HOST', default='')
+JSAP_DB_PORT = config('JSAP_DB_PORT', default=1433, cast=int)
+JSAP_DB_NAME = config('JSAP_DB_NAME', default='')
+JSAP_DB_USER = config('JSAP_DB_USER', default='')
+JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='')
+
 
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
