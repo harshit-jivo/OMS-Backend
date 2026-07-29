@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import InvocieHistory, InvoiceLog , InvoiceRefLogs , CreditLimitLogs
+from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, fg_stock_for_log
 
 class InvoiveHistorySerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
@@ -16,6 +17,9 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
     supersedes_status = serializers.SerializerMethodField()
     supersedes_rejection_reason = serializers.SerializerMethodField()
     superseded_by_id = serializers.SerializerMethodField()
+    # Live HANA on-hand stock for every FG line in invoice_payload, so a reviewer
+    # can see whether the warehouse can actually cover the invoice.
+    fg_stock = serializers.SerializerMethodField()
 
     class Meta:
         model = InvoiceLog
@@ -36,6 +40,9 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
     def get_superseded_by_id(self, obj):
         replacement = obj.superseded_by.first()
         return replacement.pk if replacement else None
+
+    def get_fg_stock(self, obj):
+        return fg_stock_for_log(obj, self.context.get(FG_STOCK_CONTEXT_KEY))
 
 class InvoiceRefLogsSerializer(serializers.ModelSerializer):
     class Meta:

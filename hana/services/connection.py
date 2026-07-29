@@ -429,6 +429,49 @@ class Queries():
         ORDER BY "TotalQty" DESC
         """
     @staticmethod
+    def get_fg_warehouse_stock(branch, item_codes=None, whs_code=None):
+        """Per-warehouse on-hand stock for FG items.
+
+        `item_codes` / `whs_code` narrow the result to the items and warehouse
+        actually on an invoice — without them the whole FG catalogue across every
+        warehouse comes back (a few thousand rows).
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+
+        filters = ['T0."ItemCode" LIKE \'FG%\'']
+        if item_codes:
+            safe_codes = ",".join(
+                "'" + str(code).replace("'", "''") + "'" for code in item_codes
+            )
+            filters.append(f'T0."ItemCode" IN ({safe_codes})')
+
+        # Driven off OITM, not OITW: an item with no stock row for the warehouse
+        # must still come back — with its name and a NULL OnHand — rather than
+        # vanishing from the result.
+        whs_join = ""
+        if whs_code:
+            safe_whs = str(whs_code).replace("'", "''")
+            whs_join = f"""AND T1."WhsCode" = '{safe_whs}'"""
+        where = " AND ".join(filters)
+
+        return f"""
+            SELECT
+                T0."ItemCode",
+                T0."ItemName",
+                T1."WhsCode",
+                T1."OnHand"
+            FROM "{s}"."OITM" AS T0
+            LEFT JOIN "{s}"."OITW" AS T1
+                ON T1."ItemCode" = T0."ItemCode"
+                {whs_join}
+            WHERE {where}
+            ORDER BY T1."OnHand" DESC, T1."WhsCode"
+        """
+
+    @staticmethod
     def get_batch_details(item_code, whs_code,branch):
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA

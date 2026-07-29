@@ -102,6 +102,13 @@ class SalesOrderService():
 
         return result
     
+    def get_fg_warehouse_stock(self, branch, item_codes=None, whs_code=None):
+        with HANAConnection() as conn:
+            query = Queries.get_fg_warehouse_stock(branch, item_codes, whs_code)
+            result = conn.execute(query)
+
+        return result
+
     def get_batch_details(self , itemCode , WhsCode, branch):
         with HANAConnection() as conn:
             query = Queries.get_batch_details(itemCode , WhsCode, branch)

@@ -20,6 +20,7 @@ from django.http import HttpResponse
 
 from hana.services.services import SalesOrderService
 from .services.jsap_db import get_credit_flow_id
+from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,14 @@ class InvoiceLogListView(APIView):
     if inv_status:
         invoice_logs = invoice_logs.filter(status=inv_status)
 
-    serializer = InvoiceLogSerializer(invoice_logs, many=True)
+    # Resolve the queryset once so the FG stock lookup and the serializer work
+    # off the same rows (one HANA query for the whole page, not one per line).
+    invoice_logs = list(invoice_logs)
+    serializer = InvoiceLogSerializer(
+        invoice_logs,
+        many=True,
+        context={FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs)},
+    )
     return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
@@ -498,6 +506,10 @@ class InvoiceLogListwoWhsView(APIView):
     if inv_status:
         invoice_logs = invoice_logs.filter(status=inv_status)
 
-
-    serializer = InvoiceLogSerializer(invoice_logs, many=True)
+    invoice_logs = list(invoice_logs)
+    serializer = InvoiceLogSerializer(
+        invoice_logs,
+        many=True,
+        context={FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs)},
+    )
     return Response(serializer.data)
