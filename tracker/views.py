@@ -13,8 +13,9 @@ from . import services
 from .permissions import PAGE_ADMIN, PAGE_ENTRY, tracker_pages_for
 
 # A tracker admin may delete an invoice up to this stage order (inclusive).
-# Stage 5 == "SAP / JSAP Approval"; nothing at Save-in-SAP or Payment can be deleted.
-DELETE_ADMIN_MAX_ORDER = 5
+# Stage 6 == "JSAP Approval"; nothing at Save-in-SAP or Payment can be deleted.
+# (Was 5 when SAP and JSAP shared one desk — the split moved the cut-off down.)
+DELETE_ADMIN_MAX_ORDER = 6
 from .reports import build_report
 from .models import (
     Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
@@ -42,6 +43,57 @@ class VendorsView(APIView):
             return Response(
                 {'detail': f'Could not fetch vendors from SAP: {exc}'},
                 status=http.HTTP_502_BAD_GATEWAY)
+
+
+class JsapStatusView(APIView):
+    """Budget-approval status of one invoice, straight from JSAP.
+
+    Read-only: JSAP owns the decision, this only reports it. Always 200 —
+    "we could not link this invoice to SAP" is an answer the desk needs to
+    show, not an error.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def get(self, request, pk):
+        from . import jsap
+        invoice = Invoice.objects.filter(pk=pk).select_related(
+            'unit', 'branch', 'category').first()
+        if not invoice:
+            return Response(status=http.HTTP_404_NOT_FOUND)
+        return Response(jsap.status_for_invoice(invoice))
+
+
+class JsapSyncView(APIView):
+    """Manual "refresh from JSAP" for the JSAP desk.
+
+    Same engine as the scheduled `sync_jsap` command: approved invoices
+    advance, rejected ones return to SAP Approval with JSAP's own reason,
+    pending ones stay. POST with {"invoice_id": n} to sync one invoice, or no
+    body to sweep the whole desk.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def post(self, request):
+        from . import jsap
+        if not jsap.is_configured():
+            return Response({'detail': 'JSAP database is not configured.'},
+                            status=http.HTTP_503_SERVICE_UNAVAILABLE)
+
+        invoice_id = request.data.get('invoice_id')
+        try:
+            if invoice_id:
+                invoice = Invoice.objects.filter(pk=invoice_id).select_related(
+                    'current_stage', 'unit', 'branch', 'category').first()
+                if not invoice:
+                    return Response(status=http.HTTP_404_NOT_FOUND)
+                if not services.can_act(request.user, invoice):
+                    return Response({'detail': 'You are not assigned to this stage.'},
+                                    status=http.HTTP_403_FORBIDDEN)
+                return Response(services.sync_jsap(invoice, user=request.user))
+            return Response(services.sync_jsap_all(user=request.user))
+        except (ValidationError, PermissionDenied) as exc:
+            return Response({'detail': str(getattr(exc, 'message', exc))},
+                            status=http.HTTP_400_BAD_REQUEST)
 
 
 class LookupsView(APIView):
