@@ -415,33 +415,63 @@ def save_qr_to_dir(record, directory: str):
         logger.warning("QR file-save skipped: no signed QR for doc %s", record.doc_no)
         return None
 
+    path = save_signed_qr(
+        record.signed_qr_code, directory,
+        doc_no=record.doc_no, irn=record.irn, ack_no=record.ack_no,
+        environment=record.environment,
+    )
+    logger.info("Saved IRN QR PNG for doc %s -> %s", record.doc_no, path)
+    return path
+
+
+def qr_file_name(*, doc_no=None, irn=None, ack_no=None, environment=None) -> str:
+    """Bare filename for a QR PNG, per settings.EINV_QR_FILENAME."""
+    import os
+
     pattern = getattr(settings, "EINV_QR_FILENAME", "{doc_no}.png") or "{doc_no}.png"
     name = pattern.format(
-        doc_no=record.doc_no or "unknown",
-        irn=record.irn or "unknown",
-        ack_no=record.ack_no or "",
-        env=record.environment or "",
+        doc_no=doc_no or "unknown",
+        irn=irn or "unknown",
+        ack_no=ack_no or "",
+        env=environment or "",
     )
     name = os.path.basename(name)                       # never let the pattern escape the dir
     for ch in '<>:"/\\|?*':
         name = name.replace(ch, "_")
+    return name
 
-    png = qrgen.make_qr_png(record.signed_qr_code)
+
+def save_signed_qr(signed_qr: str, directory: str, *, doc_no=None, irn=None,
+                   ack_no=None, environment=None) -> str:
+    """Render a signed-QR string to PNG and write it into `directory`.
+
+    Split out from save_qr_to_dir so it can also be driven from a stored
+    U_UTL_QRST value (the backfill command) without an IrnRecord in hand.
+    Returns the path written.
+    """
+    import os
+    from . import qr as qrgen
+
+    name = qr_file_name(doc_no=doc_no, irn=irn, ack_no=ack_no, environment=environment)
+    png = qrgen.make_qr_png(signed_qr)
 
     # If SMB credentials are configured, authenticate to the share explicitly
     # (the Django process account may not have network access on its own).
-    smb_user = getattr(settings, "EINV_QR_SMB_USERNAME", "") or ""
-    if smb_user:
-        path = _save_png_smb(directory, name, png, smb_user,
-                             getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "")
-    else:
-        os.makedirs(directory, exist_ok=True)           # no-op if the share is already there
-        path = os.path.join(directory, name)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(png)
-        os.replace(tmp, path)                           # atomic swap into place
-    logger.info("Saved IRN QR PNG for doc %s -> %s", record.doc_no, path)
+    # Only for a real UNC path — a local/mapped-drive target has no server to
+    # authenticate to, and passing "C:\..." to smbclient makes it try to
+    # connect to a host called "C:".
+    smb_user = (getattr(settings, "EINV_QR_SMB_USERNAME", "") or "").strip()
+    is_unc = directory.replace("/", "\\").startswith("\\\\")
+    if smb_user and is_unc:
+        return _save_png_smb(directory, name, png, smb_user,
+                             (getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "").strip())
+
+    os.makedirs(directory, exist_ok=True)               # no-op if the share is already there
+    path = os.path.join(directory, name)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(png)
+    os.replace(tmp, path)                               # atomic swap into place
     return path
 
 
