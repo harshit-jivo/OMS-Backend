@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+from urllib.parse import quote
 
 import pymssql
 import requests
@@ -472,6 +474,22 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response({'error':'Invalid JSON received from JSAP API'}, status=status.HTTP_502_BAD_GATEWAY)
         
 class GetPrintReport(APIView):
+    # Characters Windows/macOS refuse in a filename, plus control chars.
+    _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+    @classmethod
+    def _download_name(cls, doc_num, party_name):
+        """'<DocNum> <Party Name>.pdf', scrubbed so it is a legal filename.
+
+        The party name is whatever the caller passed, so it is sanitised rather
+        than trusted: illegal characters out, whitespace collapsed, and the
+        length capped well inside the 255-byte filesystem limit.
+        """
+        party = cls._BAD_FILENAME_CHARS.sub(' ', str(party_name or ''))
+        party = ' '.join(party.split())[:120].strip(' .')
+        stem = f"{doc_num} {party}".strip() if party else str(doc_num)
+        return f"{stem}.pdf"
+
     def get(self, request):
         docNum = request.query_params.get('docNum')
         # The caller may already know the internal OINV key (the review screen
@@ -505,8 +523,19 @@ class GetPrintReport(APIView):
             status=crystal_response.status_code,
             content_type=crystal_response.headers.get('Content-Type', 'application/pdf'),
         )
-        resp['Content-Disposition'] = f'inline; filename="invoice_{docNum or doc_entry}.pdf"'
-       
+        # Shown inline in the browser's PDF viewer, but this is also the name the
+        # viewer's Download button uses: "<DocNum> <Party Name>.pdf". The RFC 5987
+        # filename* carries names with non-ASCII characters; the plain filename is
+        # the ASCII fallback for older clients.
+        download_name = self._download_name(docNum or doc_entry,
+                                            request.query_params.get('party'))
+        ascii_name = download_name.encode('ascii', 'ignore').decode() or 'invoice.pdf'
+        resp['Content-Disposition'] = (
+            f'inline; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(download_name)}"
+        )
+
+
         resp.xframe_options_exempt = True
         return resp
 
