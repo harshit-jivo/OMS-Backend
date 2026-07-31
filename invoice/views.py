@@ -125,6 +125,14 @@ class InvoicelogStatusUpdateView(APIView):
         if request.data.get('error_message'):
             invoice_log.error_message = request.data.get('error_message')
 
+        # SAP identifiers of the document that was just created. Sent by the
+        # review screen alongside POSTED_TO_SAP so the row can offer a bill
+        # print without anyone having to look the number up in SAP first.
+        if request.data.get('sap_doc_num'):
+            invoice_log.sap_doc_num = str(request.data.get('sap_doc_num'))[:50]
+        if request.data.get('sap_doc_entry'):
+            invoice_log.sap_doc_entry = str(request.data.get('sap_doc_entry'))[:50]
+
         invoice_log.status = new_status
         InvocieHistory.objects.create(
                     invoice_log=invoice_log,
@@ -466,15 +474,22 @@ class GetCreditLimitJSAPFlow(APIView):
 class GetPrintReport(APIView):
     def get(self, request):
         docNum = request.query_params.get('docNum')
-        if not docNum:
-            return Response({"error": "docNum is required"}, status=status.HTTP_400_BAD_REQUEST)
+        # The caller may already know the internal OINV key (the review screen
+        # keeps it from the SAP post response). Using it skips the DocNum ->
+        # DocEntry lookup, which is what the Crystal service wants anyway.
+        doc_entry = (request.query_params.get('docEntry') or '').strip()
 
-        docEntry = SalesOrderService().get_docEntry(docNum)
-        if not docEntry:
-            return Response({"error": f"No invoice found for docNum {docNum}"},
-                            status=status.HTTP_404_NOT_FOUND)
+        if not doc_entry:
+            if not docNum:
+                return Response({"error": "docNum is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        url = f"{settings.CRYSTAL_URL}/api/billprint/{docEntry[0]['DocEntry']}"
+            docEntry = SalesOrderService().get_docEntry(docNum)
+            if not docEntry:
+                return Response({"error": f"No invoice found for docNum {docNum}"},
+                                status=status.HTTP_404_NOT_FOUND)
+            doc_entry = docEntry[0]['DocEntry']
+
+        url = f"{settings.CRYSTAL_URL}/api/billprint/{doc_entry}"
         try:
             crystal_response = requests.get(url, timeout=60, verify=False)
         except requests.RequestException as exc:
@@ -490,7 +505,7 @@ class GetPrintReport(APIView):
             status=crystal_response.status_code,
             content_type=crystal_response.headers.get('Content-Type', 'application/pdf'),
         )
-        resp['Content-Disposition'] = f'inline; filename="invoice_{docNum}.pdf"'
+        resp['Content-Disposition'] = f'inline; filename="invoice_{docNum or doc_entry}.pdf"'
        
         resp.xframe_options_exempt = True
         return resp

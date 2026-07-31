@@ -48,6 +48,13 @@ class InvoiceLog(models.Model):
     error_message = models.TextField(blank=True, null=True)
     invoice_payload = models.JSONField()
 
+    # SAP identifiers of the invoice this log created, captured on a successful
+    # post. `sap_doc_num` is the visible invoice number; `sap_doc_entry` is the
+    # internal OINV key the Crystal bill print is actually rendered from. Kept as
+    # text because SAP only guarantees them to be printable, not numeric.
+    sap_doc_num = models.CharField(max_length=50, blank=True, null=True)
+    sap_doc_entry = models.CharField(max_length=50, blank=True, null=True)
+
     # The rejected log this one replaces, set when a reviewer reworks an invoice
     # through the Edit action. Gives the approver of the replacement the history
     # of why the previous attempt was turned down.
