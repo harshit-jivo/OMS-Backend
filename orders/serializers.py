@@ -18,7 +18,9 @@ def get_scheme_item_code_raw(scheme_id):
     )
 
 class SchemeProductSerializer(serializers.ModelSerializer):
-    state_name = serializers.CharField(source='state.name', read_only=True)
+    # SchemeProduct has no `state` FK — migration 0010 replaced it with the plain
+    # `state_code` column — so state_name is resolved from State by code.
+    state_name = serializers.SerializerMethodField()
     product_id = serializers.SerializerMethodField()
     item_name = serializers.SerializerMethodField()
     sal_factor2 = serializers.SerializerMethodField()
@@ -45,14 +47,28 @@ class SchemeProductSerializer(serializers.ModelSerializer):
     def get_sal_pack_unit(self, obj):
         product = self._get_product(obj)
         return product.sal_pack_unit if product else None
-   
+
+    def get_state_name(self, obj):
+        code = (getattr(obj, 'state_code', '') or '').strip()
+        if not code:
+            return None
+        # Cached on the serializer so a many=True render costs one query, not one
+        # per row.
+        if not hasattr(self, '_state_name_map'):
+            self._state_name_map = {
+                str(row['code']).strip().upper(): row['name']
+                for row in State.objects.values('code', 'name')
+                if row.get('code')
+            }
+        return self._state_name_map.get(code.upper(), code)
+
     class Meta:
         model = SchemeProduct
         fields = [
             'scheme_id',
             'scheme_name',
             'is_active',
-            'state',
+            'state_name',
             'state_code',
             'product_id',
             'item_code',
@@ -523,6 +539,51 @@ class CreateSchemeSerializer(serializers.ModelSerializer):
         model = SchemeProduct
         fields = ["scheme_name", "item_code", "state_code"]
         extra_kwargs = {"state_code": {"required": False, "allow_blank": True, "allow_null": True}}
+
+
+class SchemeWriteSerializer(serializers.ModelSerializer):
+    """Create or update one scheme_product row.
+
+    Rejects an exact duplicate of (scheme_name, state_code, item_code). Those rows
+    are indistinguishable in every picker, and the table has no unique constraint
+    to stop them — only PRIMARY KEY (scheme_id).
+    """
+
+    class Meta:
+        model = SchemeProduct
+        fields = ["scheme_id", "scheme_name", "item_code", "state_code", "is_active"]
+        read_only_fields = ["scheme_id"]
+        extra_kwargs = {
+            "state_code": {"required": False, "allow_blank": True, "allow_null": True},
+            "is_active": {"required": False},
+        }
+
+    def validate(self, attrs):
+        instance = self.instance
+
+        def resolved(field):
+            if field in attrs:
+                return attrs[field]
+            return getattr(instance, field, None)
+
+        duplicates = SchemeProduct.objects.filter(
+            scheme_name=resolved("scheme_name"),
+            item_code=resolved("item_code"),
+            state_code=resolved("state_code"),
+            is_active=True,
+        )
+        if instance is not None:
+            duplicates = duplicates.exclude(scheme_id=instance.scheme_id)
+
+        if duplicates.exists():
+            raise serializers.ValidationError({
+                "scheme_name": (
+                    "An active scheme with this name, state and item already exists "
+                    f"(scheme_id {duplicates.first().scheme_id})."
+                )
+            })
+        return attrs
+
 
 class NotificationSerializer(serializers.ModelSerializer):
     order_id = serializers.IntegerField(source='order.id', read_only=True)

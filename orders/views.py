@@ -1,7 +1,7 @@
 from urllib import request
 from django.shortcuts import render
 import re
-from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
+from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,SchemeWriteSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -3574,7 +3574,7 @@ class CreateSchemeView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        serializer = CreateSchemeSerializer(data=request.data)
+        serializer = SchemeWriteSerializer(data=request.data)
 
         if serializer.is_valid():
             serializer.save()
@@ -3589,8 +3589,130 @@ class CreateSchemeView(APIView):
             'message': 'Failed to create scheme',
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
-    
+
+
+class SchemeManageListView(APIView):
+    """Full scheme rows for the Add Scheme management table.
+
+    `SchemeListView` (/orders/schemes/) is deliberately left alone — it feeds the
+    Add Sales picker and returns only scheme_id/scheme_name/state_code. Managing
+    schemes needs item_code and is_active as well.
+    """
+
     permission_classes = [AllowAny]
+
+    def get(self, request):
+        queryset = SchemeProduct.objects.all()
+
+        include_inactive = str(
+            request.query_params.get('include_inactive') or ''
+        ).strip().lower() in {'1', 'true', 'yes'}
+        if not include_inactive:
+            queryset = queryset.filter(is_active=True)
+
+        state_code = (request.query_params.get('state_code') or '').strip()
+        if state_code:
+            queryset = queryset.filter(state_code__iexact=state_code)
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(scheme_name__icontains=search) | Q(item_code__icontains=search)
+            )
+
+        serializer = SchemeProductSerializer(
+            queryset.order_by('scheme_name', 'state_code', 'scheme_id'), many=True
+        )
+        return Response({
+            'success': True,
+            'data': serializer.data,
+            'total': len(serializer.data),
+        })
+
+
+class SchemeDetailView(APIView):
+    """Read / update / delete a single scheme."""
+
+    permission_classes = [AllowAny]
+
+    def _get_object(self, scheme_id):
+        return SchemeProduct.objects.filter(scheme_id=scheme_id).first()
+
+    def get(self, request, scheme_id):
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': True, 'data': SchemeProductSerializer(scheme).data})
+
+    def put(self, request, scheme_id):
+        return self._update(request, scheme_id, partial=False)
+
+    def patch(self, request, scheme_id):
+        return self._update(request, scheme_id, partial=True)
+
+    def _update(self, request, scheme_id, partial):
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        serializer = SchemeWriteSerializer(scheme, data=request.data, partial=partial)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                'success': True,
+                'message': 'Scheme updated successfully',
+                'data': SchemeProductSerializer(scheme).data,
+            })
+
+        return Response({
+            'success': False,
+            'message': 'Failed to update scheme',
+            'errors': serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, scheme_id):
+        """Deactivate by default.
+
+        OrderItem.scheme and OrderItemScheme.scheme are FKs with on_delete=SET_NULL,
+        so a row deletion would blank the scheme on every historical order that used
+        it — losing the record of what was given away. Every read path already
+        filters is_active=True (the pickers, and the SAP free-line fan-out), so
+        deactivating removes the scheme everywhere it matters and stays reversible.
+        Pass ?hard=true to actually delete the row.
+        """
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        hard = str(request.query_params.get('hard') or '').strip().lower() in {'1', 'true', 'yes'}
+
+        used_by_orders = OrderItemScheme.objects.filter(scheme_id=scheme_id).count()
+
+        if hard:
+            if used_by_orders:
+                return Response({
+                    'success': False,
+                    'message': (
+                        f'Cannot hard-delete: {used_by_orders} order line(s) reference '
+                        'this scheme. Deactivate it instead.'
+                    ),
+                }, status=status.HTTP_409_CONFLICT)
+            scheme.delete()
+            return Response({'success': True, 'message': 'Scheme deleted', 'deactivated': False})
+
+        scheme.is_active = False
+        scheme.save(update_fields=['is_active'])
+        return Response({
+            'success': True,
+            'message': 'Scheme deactivated',
+            'deactivated': True,
+            'used_by_order_lines': used_by_orders,
+        })
+
+
 class TemplatePartyListView(APIView):
     permission_classes = [IsAuthenticated]
     
