@@ -603,11 +603,20 @@ class Queries():
 
     """
     @staticmethod
-    def get_docEntry(docNum):
+    def get_docEntry(docNum, branch='OIL'):
+        """Resolve an invoice's internal key (OINV."DocEntry") from its DocNum.
+
+        DocNum is only unique within a company database, so the branch decides
+        which schema is searched (OIL vs BEVERAGE).
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
-            SELECT 
+            SELECT
                 "DocEntry"
-            FROM "JIVO_OIL_HANADB"."OINV"
+            FROM "{s}"."OINV"
             WHERE "DocNum" = '{docNum}'
         """
     

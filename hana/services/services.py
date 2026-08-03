@@ -174,9 +174,9 @@ class SalesOrderService():
 
         return result
     
-    def get_docEntry(self , docNum):
+    def get_docEntry(self , docNum, branch='OIL'):
         with HANAConnection() as conn:
-            query = Queries.get_docEntry(docNum)
+            query = Queries.get_docEntry(docNum, branch)
             result = conn.execute(query)
             
         return result
