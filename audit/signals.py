@@ -22,6 +22,18 @@ AUDITED_MODELS = [
     'orders.OrderFlowConfig',
     'orders.PartyOrderFlowConfig',
     'sap_sync.SyncLog',
+    # Payments config masters. The transactional tables (PaymentReceipt,
+    # BankDeposit) are deliberately NOT here — they have their own
+    # purpose-built logs (PaymentStatusHistory, ApprovalAction, SapCallLog)
+    # which also capture IP and user agent, and routing high-volume financial
+    # writes through the per-field signal handler would only add write
+    # amplification for strictly worse data.
+    'payments.SapCompanyMap',
+    'payments.CollectionPerson',
+    'payments.BankAccount',
+    'approvals.ApprovalWorkflow',
+    'approvals.ApprovalLevel',
+    'approvals.ApprovalLevelApprover',
 ]
 
 # Many-to-many relations to audit, as (owner model label, field name).

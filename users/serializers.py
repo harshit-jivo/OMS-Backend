@@ -44,6 +44,11 @@ class UserSerializer(serializers.ModelSerializer):
     categories = serializers.SerializerMethodField()
     role = serializers.CharField(source='role.name', read_only=True)
     role_display = serializers.CharField(source='role.display_name', default= None, read_only=True)
+    # Additional roles (e.g. payment_approver) held alongside the primary one.
+    # `roles` is the union of both — clients should check that rather than
+    # `role` alone, or a user granted a function role looks like they hold none.
+    extra_roles = serializers.SerializerMethodField()
+    roles = serializers.SerializerMethodField()
     is_active = serializers.BooleanField(read_only=True)
     # Read-only account flags/timestamps surfaced on the mobile Profile screen.
     # Kept read_only so they can never be set through this serializer.
@@ -56,8 +61,18 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'password', 'extra_pages', 'created_at'
+            'role','role_display', 'extra_roles', 'roles', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'password', 'extra_pages', 'created_at'
         ]
+
+    def get_extra_roles(self, obj):
+        return [
+            {'id': r.id, 'name': r.name, 'display_name': r.display_name}
+            for r in obj.extra_roles.all()
+        ]
+
+    def get_roles(self, obj):
+        """Every role name the user holds — primary plus extras."""
+        return sorted(obj.all_role_names())
 
     def get_company(self, obj):
         if not obj.company:
@@ -146,6 +161,9 @@ class CreateUserSerializer(serializers.Serializer):
 
     # Accept integer IDs for foreign keys
     role = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, allow_null=True)
+    # Additional function roles (payment_approver, deposit_creator, …) held
+    # alongside `role`, which stays the user's primary.
+    extra_roles = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, many=True)
     company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.all(), required=False, allow_null=True)
     main_group = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, allow_null=True)
     state = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, allow_null=True)
@@ -171,6 +189,8 @@ class CreateUserSerializer(serializers.Serializer):
         main_groups = validated_data.pop('main_groups', [])
         states_list = validated_data.pop('states', [])
         categories_list = validated_data.pop('categories', [])
+        # M2M — must be popped before create() and set once the row exists.
+        extra_roles = validated_data.pop('extra_roles', [])
 
         if main_groups and not validated_data.get('main_group'):
             validated_data['main_group'] = main_groups[0]
@@ -193,8 +213,11 @@ class CreateUserSerializer(serializers.Serializer):
         if categories_list:
             user.categories.set(categories_list)
 
+        if extra_roles:
+            user.extra_roles.set(extra_roles)
+
         return user
-    
+
 
 class UpdateUserSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=150, required=False)
@@ -205,6 +228,7 @@ class UpdateUserSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(required=False)
 
     role = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, allow_null=True)
+    extra_roles = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, many=True)
     company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.all(), required=False, allow_null=True)
     main_group = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, allow_null=True)
     state = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, allow_null=True)
@@ -218,6 +242,8 @@ class UpdateUserSerializer(serializers.Serializer):
         main_groups = validated_data.pop('main_groups', None)
         states_list = validated_data.pop('states', None)
         categories_list = validated_data.pop('categories', None)
+        # None = key absent (leave as-is); [] = explicitly clear all extras.
+        extra_roles = validated_data.pop('extra_roles', None)
 
         instance.name = validated_data.get('name', instance.name)
       
@@ -241,6 +267,9 @@ class UpdateUserSerializer(serializers.Serializer):
         for field in ['role', 'company', 'main_group', 'state', 'category', 'sub_group', 'is_active']:
             if field in validated_data:
                 setattr(instance, field, validated_data.get(field))
+
+        if extra_roles is not None:
+            instance.extra_roles.set(extra_roles)
 
         if main_groups is not None:
             instance.main_groups.set(main_groups)

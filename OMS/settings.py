@@ -85,6 +85,14 @@ INSTALLED_APPS = [
     'tracker',
     # Dynamic UI labels — admin-editable field labels served to web + mobile
     'uilabels',
+    # Receive Payment / Bank Deposit. `core` holds the shared base model and
+    # document-number generator; `approvals` is the generic multi-level engine
+    # (usable by any document type); `attachments` stores files on the existing
+    # shared network folders.
+    'core',
+    'approvals',
+    'attachments',
+    'payments',
 ]
 
 MIDDLEWARE = [
@@ -138,13 +146,25 @@ DATABASES = {
         'PORT': config('DB_PORT'),
     },
     'hana': {
-        'ENGINE': 'django.db.backends.dummy', 
+        'ENGINE': 'django.db.backends.dummy',
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
-        'SCHEMA': config('HANA_DB_NAME'),
+        # Default HANA schema / company DB used by raw queries
+        # (hana/services/connection.py:60, tracker/sap.py:21).
+        # `.env` has historically defined this as HANA_DB_OIL_NAME, so accept
+        # that (and HANA_COMPANY_DB, which holds the same value) rather than
+        # requiring a duplicate HANA_DB_NAME key. Explicit HANA_DB_NAME still
+        # wins if it is set.
+        'SCHEMA': config(
+            'HANA_DB_NAME',
+            default=config(
+                'HANA_DB_OIL_NAME',
+                default=config('HANA_COMPANY_DB', default=''),
+            ),
+        ),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
-    }
+    },
     
     
 }
@@ -383,6 +403,23 @@ EINV_QR_FILENAME = config('EINV_QR_FILENAME', default='{doc_no}.png')
 # process account (no explicit SMB auth). Requires the `smbprotocol` package.
 EINV_QR_SMB_USERNAME = config('EINV_QR_SMB_USERNAME', default='')
 EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
+
+# ---------------------------------------------------------------------------
+# Payment attachment storage
+# ---------------------------------------------------------------------------
+# Same shared-folder strategy as EINV_QR_SAVE_DIR above — files are written
+# FLAT into these directories under a generated UUID name. No MEDIA_ROOT, no
+# year/month/company sub-folders.
+#   PAYMENTS_IMAGES=\\JIVO-APP\Payments\Receive_Payments
+#   DEPOSIT_PAYMENTS_IMAGES=\\JIVO-APP\Payments\Deposit_Payments
+PAYMENTS_IMAGES = config('PAYMENTS_IMAGES', default='')
+DEPOSIT_PAYMENTS_IMAGES = config('DEPOSIT_PAYMENTS_IMAGES', default='')
+# Credentials for the share, as with EINV_QR_SMB_*. Blank = write as the
+# process account with no explicit SMB auth.
+PAYMENTS_SMB_USERNAME = config(
+    'PAYMENTS_SMB_USERNAME', default=config('EINV_QR_SMB_USERNAME', default=''))
+PAYMENTS_SMB_PASSWORD = config(
+    'PAYMENTS_SMB_PASSWORD', default=config('EINV_QR_SMB_PASSWORD', default=''))
 
 # Company DBs scanned when looking up an invoice by DocNum (the configured
 # HANA_COMPANY_DB is always tried first). Comma-separated in .env.
