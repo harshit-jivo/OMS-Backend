@@ -29,6 +29,9 @@ REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 # Stages that only apply to certain invoices. Bilty/GRPO is a Transport-only
 # desk — non-Transport invoices skip it and go straight to Pre-Audit.
 TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
+# The JSAP desk mirrors a decision taken in the JSAP system. Mart invoices are
+# not budget-approved there at all, so they skip the desk entirely.
+JSAP_STAGE_CODE = 'jsap_approval'
 # Category names (normalised) that don't require a hold amount on a partial hold.
 NO_HOLD_AMOUNT_CATEGORIES = {'rm-pm', 'pm-pm', 'pm/pm'}
 
@@ -49,7 +52,14 @@ def accessible_stage_ids(user):
 
 def can_act(user, invoice):
     """A user may act on an invoice if it sits at a stage they're mapped to,
-    or (for the entry stage) they created it."""
+    or (for the entry stage) they created it.
+
+    `user=None` means the system itself is acting (the JSAP sync mirroring a
+    decision made in JSAP), which is always allowed — there is no person to
+    map to a stage, and the event is logged with acted_by=NULL.
+    """
+    if user is None:
+        return True
     if user.is_superuser:
         return True
     stage = invoice.current_stage
@@ -346,6 +356,15 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         visit.days_spent = _days_between(visit.entered_at, now)
         visit.save()
 
+    # A DEBIT disposition withholds part of the value permanently — preserve it
+    # on the invoice so every later stage and the payment maths use the net value.
+    if kind == 'ADVANCE' and status == 'DEBIT' and amount:
+        invoice.debit_amount = (invoice.debit_amount or Decimal('0')) + amount
+    # A PARTIAL hold advances the invoice but holds a portion back — preserve the
+    # held amount for the payment stage (subtracted unless released there).
+    if kind == 'ADVANCE' and status == 'HOLD' and hold_type == 'PARTIAL' and amount:
+        invoice.hold_amount = (invoice.hold_amount or Decimal('0')) + amount
+
     # Move the invoice and open the next visit.
     invoice.current_stage = target
     invoice.current_stage_entered_at = now
@@ -371,6 +390,209 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         acted_by=user, entered_at=now,
     )
     return invoice
+
+
+# ---------------------------------------------------------------------------
+# Payment (terminal stage)
+# ---------------------------------------------------------------------------
+def _q2(value):
+    """Round to 2 decimals (bankers' half-up), tolerant of None."""
+    return Decimal(value or 0).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def compute_payment(invoice, *, discount_pct, tds_pct, paid_amount, hold_added_back=False):
+    """Derive every payment figure from the two percentages + the paid amount.
+
+    Discount base = net invoice value (invoice_value - debit) — this INCLUDES any
+    held-back portion, so discount is unaffected by a hold. TDS% applies to the
+    taxable value (pre-GST).
+
+    Two different figures come out of the hold:
+      * net_payable  — what may be PAID this round. Subtracts the hold amount
+        UNLESS `hold_added_back` releases it. This is the cap on the paid amount.
+      * total_owed   — the full obligation, which ALWAYS includes the hold (it is
+        part of net invoice value). The open balance is measured against this, so
+        a withheld hold keeps the invoice open (balance never drops below the
+        hold) until it is released and paid.
+
+    `paid_amount=None` defaults to the full net payable. Raises ValidationError
+    if paid is negative or exceeds net payable.
+    """
+    net_invoice = invoice.net_invoice_value            # invoice_value - debit
+    hold = invoice.hold_amount or Decimal('0')
+    payable_base = net_invoice if hold_added_back else _q2(net_invoice - hold)
+    if payable_base < 0:
+        payable_base = Decimal('0.00')
+
+    # Discount is on the FULL net invoice value (i.e. incl. the held portion).
+    discount_amount = _q2(net_invoice * (discount_pct or 0) / Decimal('100'))
+    tds_amount = _q2((invoice.taxable_value or 0) * (tds_pct or 0) / Decimal('100'))
+
+    net_payable = _q2(payable_base - discount_amount - tds_amount)   # cap this round
+    if net_payable < 0:
+        net_payable = Decimal('0.00')
+    total_owed = _q2(net_invoice - discount_amount - tds_amount)     # full obligation (incl. hold)
+    if total_owed < 0:
+        total_owed = Decimal('0.00')
+
+    paid = net_payable if paid_amount is None else _q2(paid_amount)
+    if paid < 0:
+        raise ValidationError('Paid amount cannot be negative.')
+    if paid > net_payable:
+        raise ValidationError(
+            f'Paid amount (₹{paid}) cannot exceed the net payable (₹{net_payable}).')
+
+    # Open balance is against the full obligation, so any un-released hold stays
+    # outstanding here even after this round's payable is fully paid.
+    open_balance = _q2(total_owed - paid)
+    return {
+        'discount_amount': discount_amount,
+        'tds_amount': tds_amount,
+        'net_payable': net_payable,
+        'total_owed': total_owed,
+        'paid_amount': paid,
+        'open_balance': open_balance,
+    }
+
+
+@transaction.atomic
+def apply_payment(*, invoice, user, discount_pct=0, tds_pct=0, paid_amount=None,
+                  hold_added_back=False):
+    """Record/update a payment at the terminal stage.
+
+    Percentages drive the discount/TDS amounts; the paid amount is capped at the
+    net payable. A zero open balance marks the invoice PAID and COMPLETED (it
+    leaves the queue); any positive balance keeps it OPEN and IN_PROGRESS so it
+    stays on the payment desk (Partial tab) for further part-payments.
+    """
+    invoice = Invoice.objects.select_for_update().select_related('current_stage').get(pk=invoice.pk)
+    if not invoice.current_stage.is_terminal:
+        raise ValidationError('Invoice is not at the payment stage.')
+
+    dpct = _parse_amount(discount_pct) or Decimal('0')
+    tpct = _parse_amount(tds_pct) or Decimal('0')
+    for pct, name in ((dpct, 'Discount'), (tpct, 'TDS')):
+        if pct < 0 or pct > 100:
+            raise ValidationError(f'{name} % must be between 0 and 100.')
+
+    hold_back = bool(hold_added_back)
+    calc = compute_payment(
+        invoice, discount_pct=dpct, tds_pct=tpct,
+        paid_amount=_parse_amount(paid_amount), hold_added_back=hold_back)
+
+    payment, _ = PaymentDetail.objects.get_or_create(invoice=invoice)
+    payment.discount_pct = dpct
+    payment.tds_pct = tpct
+    payment.hold_added_back = hold_back
+    payment.discount_amount = calc['discount_amount']
+    payment.tds_amount = calc['tds_amount']
+    payment.paid_amount = calc['paid_amount']
+    payment.open_balance = calc['open_balance']
+    payment.status = (PaymentDetail.Status.PAID if calc['open_balance'] <= 0
+                      else PaymentDetail.Status.OPEN)
+    payment.updated_by = user
+    payment.save()
+
+    if payment.status == PaymentDetail.Status.PAID:
+        if invoice.status != Invoice.Status.COMPLETED:
+            invoice.status = Invoice.Status.COMPLETED
+            invoice.save(update_fields=['status', 'updated_at'])
+    elif invoice.status != Invoice.Status.IN_PROGRESS:
+        # A previously-completed invoice being re-opened (paid amount lowered).
+        invoice.status = Invoice.Status.IN_PROGRESS
+        invoice.save(update_fields=['status', 'updated_at'])
+
+    return invoice, payment
+
+
+# ---------------------------------------------------------------------------
+# JSAP desk — mirrors the budget decision made in the JSAP system
+# ---------------------------------------------------------------------------
+def sync_jsap(invoice, *, user=None):
+    """Reconcile one invoice at the JSAP desk with JSAP's own decision.
+
+    JSAP is the system of record for the budget approval; this desk only
+    reflects it, so nothing is ever written back to JSAP. Behaviour:
+
+        Approved -> advance to the next stage
+        Rejected -> return to SAP Approval, carrying JSAP's own reason
+        Pending / not found -> leave it here (the desk shows why)
+
+    Returns {'changed': bool, 'action': ADVANCE|RETURN|None, 'status': {...}}.
+    Safe to call on any invoice: one not at the JSAP desk is a no-op.
+    """
+    from . import jsap
+
+    result = {'changed': False, 'action': None, 'status': None}
+    if invoice.current_stage.code != JSAP_STAGE_CODE:
+        return result
+    if invoice.status == Invoice.Status.COMPLETED:
+        return result
+    # A handler rejected this by hand and is still writing the reason. Their
+    # decision outranks the mirror — otherwise the next sweep could quietly
+    # advance an invoice someone had deliberately parked.
+    if invoice.rejection_pending:
+        result['status'] = {'available': False, 'reason': 'rejection_pending',
+                            'detail': 'Manually rejected here — awaiting remarks.'}
+        return result
+
+    status = jsap.status_for_invoice(invoice)
+    result['status'] = status
+    if not status.get('available'):
+        # Mart is never budget-approved in JSAP — it would otherwise sit here
+        # forever, so let it straight through.
+        if status.get('reason') == 'not_in_jsap':
+            apply_action(invoice=invoice, user=user, action='ADVANCE',
+                         stage_status='APPROVED',
+                         remarks='Not applicable in JSAP — passed through.')
+            result.update(changed=True, action='ADVANCE')
+        return result
+
+    if status['status'] == jsap.STATUS_APPROVED:
+        apply_action(invoice=invoice, user=user, action='ADVANCE',
+                     stage_status='APPROVED',
+                     remarks=(status.get('description')
+                              or f"Approved in JSAP (draft {status['doc_entry']})."))
+        result.update(changed=True, action='ADVANCE')
+    elif status['status'] == jsap.STATUS_REJECTED:
+        # Remarks are mandatory on a return, and JSAP's description is the
+        # approver's actual reason — fall back only if it was left blank.
+        apply_action(invoice=invoice, user=user, action='RETURN',
+                     stage_status='REJECTED',
+                     remarks=(status.get('description')
+                              or f"Rejected in JSAP (draft {status['doc_entry']})."))
+        result.update(changed=True, action='RETURN')
+    return result
+
+
+def sync_jsap_all(*, user=None, limit=None):
+    """Run sync_jsap over every invoice parked at the JSAP desk.
+
+    Used by the `sync_jsap` management command and the manual refresh button.
+    One invoice's failure never stops the sweep.
+    """
+    qs = (Invoice.objects
+          .filter(current_stage__code=JSAP_STAGE_CODE,
+                  status=Invoice.Status.IN_PROGRESS)
+          .select_related('current_stage', 'category', 'unit', 'branch'))
+    if limit:
+        qs = qs[:limit]
+
+    advanced, returned, waiting, errors = [], [], [], []
+    for inv in qs:
+        try:
+            res = sync_jsap(inv, user=user)
+        except (ValidationError, PermissionDenied) as exc:
+            errors.append({'id': inv.pk, 'error': str(getattr(exc, 'message', exc))})
+            continue
+        if res['action'] == 'ADVANCE':
+            advanced.append(inv.pk)
+        elif res['action'] == 'RETURN':
+            returned.append(inv.pk)
+        else:
+            waiting.append(inv.pk)
+    return {'advanced': advanced, 'returned': returned,
+            'waiting': waiting, 'errors': errors}
 
 
 def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',

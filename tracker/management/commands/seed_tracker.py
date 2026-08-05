@@ -26,13 +26,19 @@ STAGES = [
     dict(code='data_entry',   name='Data Entry',         order=4,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=2),
-    dict(code='sap_approval', name='SAP / JSAP Approval', order=5,
+    # SAP and JSAP are two separate desks. SAP approval is a person clicking
+    # Approve/Reject here; JSAP approval is the budget decision made in the
+    # JSAP system, which this stage only mirrors (see tracker/jsap.py).
+    dict(code='sap_approval', name='SAP Approval',       order=5,
          status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    dict(code='save_in_sap',  name='Save in SAP',        order=6,
+    dict(code='jsap_approval', name='JSAP Approval',     order=6,
+         status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
+         can_return=True,  is_terminal=False, threshold_days=3),
+    dict(code='save_in_sap',  name='Save in SAP',        order=7,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=2),
-    dict(code='payment',      name='Payment',            order=7,
+    dict(code='payment',      name='Payment',            order=8,
          status_choices=[],                                   requires_status=False,
          can_return=False, is_terminal=True,  threshold_days=5),
 ]
@@ -54,6 +60,11 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        # Stage.order is unique, so re-seeding an existing flow whose positions
+        # shifted (e.g. the SAP/JSAP split pushing later stages down one) would
+        # collide mid-loop. Park every current order out of range first.
+        for offset, stage in enumerate(Stage.objects.order_by('-order')):
+            Stage.objects.filter(pk=stage.pk).update(order=1000 + offset)
         for s in STAGES:
             Stage.objects.update_or_create(code=s['code'], defaults=s)
 

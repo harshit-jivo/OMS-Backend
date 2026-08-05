@@ -429,6 +429,49 @@ class Queries():
         ORDER BY "TotalQty" DESC
         """
     @staticmethod
+    def get_fg_warehouse_stock(branch, item_codes=None, whs_code=None):
+        """Per-warehouse on-hand stock for FG items.
+
+        `item_codes` / `whs_code` narrow the result to the items and warehouse
+        actually on an invoice — without them the whole FG catalogue across every
+        warehouse comes back (a few thousand rows).
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+
+        filters = ['T0."ItemCode" LIKE \'FG%\'']
+        if item_codes:
+            safe_codes = ",".join(
+                "'" + str(code).replace("'", "''") + "'" for code in item_codes
+            )
+            filters.append(f'T0."ItemCode" IN ({safe_codes})')
+
+        # Driven off OITM, not OITW: an item with no stock row for the warehouse
+        # must still come back — with its name and a NULL OnHand — rather than
+        # vanishing from the result.
+        whs_join = ""
+        if whs_code:
+            safe_whs = str(whs_code).replace("'", "''")
+            whs_join = f"""AND T1."WhsCode" = '{safe_whs}'"""
+        where = " AND ".join(filters)
+
+        return f"""
+            SELECT
+                T0."ItemCode",
+                T0."ItemName",
+                T1."WhsCode",
+                T1."OnHand"
+            FROM "{s}"."OITM" AS T0
+            LEFT JOIN "{s}"."OITW" AS T1
+                ON T1."ItemCode" = T0."ItemCode"
+                {whs_join}
+            WHERE {where}
+            ORDER BY T1."OnHand" DESC, T1."WhsCode"
+        """
+
+    @staticmethod
     def get_batch_details(item_code, whs_code,branch):
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
@@ -487,6 +530,25 @@ class Queries():
         """
 
     @staticmethod
+    def get_costing_code(prc_name, branch):
+        """Resolve a Profit Center code (OPRC."PrcCode") from its name.
+
+        SAP document lines expect the numeric ``CostingCode`` (PrcCode), not the
+        human-readable profit-center name. Looks the name up in the correct
+        company DB schema (OIL vs BEVERAGE).
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        safe_prc_name = str(prc_name).replace("'", "''")
+        return f"""
+            SELECT TOP 1 T0."PrcCode"
+            FROM "{s}"."OPRC" AS T0
+            WHERE T0."PrcName" = '{safe_prc_name}'
+        """
+
+    @staticmethod
     def get_series(finYear , BPLId,branch):
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
@@ -540,5 +602,24 @@ class Queries():
         ORDER BY T1."DocDate" DESC
 
     """
+    @staticmethod
+    def get_docEntry(docNum, branch='OIL'):
+        """Resolve an invoice's internal key (OINV."DocEntry") from its DocNum.
+
+        DocNum is only unique within a company database, so the branch decides
+        which schema is searched (OIL vs BEVERAGE).
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        return f"""
+            SELECT
+                "DocEntry"
+            FROM "{s}"."OINV"
+            WHERE "DocNum" = '{docNum}'
+        """
+    
+
 
 

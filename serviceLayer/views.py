@@ -53,11 +53,15 @@ class SAPInvoiceCreateView(APIView):
                 
             if sap_response.status_code in [200 , 201]:
                 data = sap_response.json()
-                # Fire-and-forget auto IRN generation for real invoices (not drafts).
-                # Never blocks or fails the invoice response; skips are logged.
-                if type != 'DRAFT':
-                    _maybe_auto_irn(data.get('DocEntry'), trigger='invoice_create',
-                                    context=f"invoice DocNum {data.get('DocNum')}")
+                # Fire-and-forget auto IRN generation. This view only ever posts real
+                # invoices (drafts go through DraftView), so it always applies.
+                # The IRN MUST be generated against — and mirrored into — the same
+                # company DB the invoice was created in, so resolve it from `branch`.
+                _maybe_auto_irn(
+                    data.get('DocEntry'), trigger='invoice_create',
+                    company_db=SAPServiceLayerManager.schema_for(branch),
+                    context=f"invoice DocNum {data.get('DocNum')} (branch={branch or 'OIL'})",
+                )
                 return Response(data, status=status.HTTP_201_CREATED)
 
             return Response({"error": "SAP Error", "details": sap_response.json()}, status=sap_response.status_code)

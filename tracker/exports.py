@@ -22,7 +22,8 @@ HEADERS = [
     'Pre Audit (In)', 'Audit receiving', 'status', 'Remarks under Audit',
     'Days taken in audit',
     'Data entry', 'Receiving', 'Days taken in entry',
-    'Sap/Jsap approval', 'Sap approval remarks', 'Days taken in sap approval',
+    'Sap approval', 'Sap approval remarks', 'Days taken in sap approval',
+    'Jsap approval', 'Jsap approval remarks', 'Days taken in jsap approval',
     'For save in sap', 'Remarks under AP',
     'Discount amt', 'Tds amount', 'Paid Amt', 'Open Invoice', 'Status',
     'Current Stage',
@@ -67,6 +68,7 @@ def build_rows(invoices):
         entry, bilty = ev.get('entry'), ev.get('bilty_grpo')
         pa, de = ev.get('pre_audit'), ev.get('data_entry')
         sap, sis = ev.get('sap_approval'), ev.get('save_in_sap')
+        jsp = ev.get('jsap_approval')
         pay = getattr(inv, 'payment', None)
 
         rows.append([
@@ -103,10 +105,14 @@ def build_rows(invoices):
             _fmt_date(de.entered_at) if de else '',
             _recv(de.receiving_note) if de else '',
             _fmt_days(de.days_spent) if de else '',
-            # SAP / JSAP Approval
+            # SAP Approval
             _fmt_date(sap.entered_at) if sap else '',
             (sap.stage_status.title() if sap and sap.stage_status else (sap.remarks if sap else '')),
             _fmt_days(sap.days_spent) if sap else '',
+            # JSAP Approval — remarks carry JSAP's own reason on a rejection
+            _fmt_date(jsp.entered_at) if jsp else '',
+            (jsp.remarks or (jsp.stage_status.title() if jsp.stage_status else '')) if jsp else '',
+            _fmt_days(jsp.days_spent) if jsp else '',
             # Save in SAP
             _fmt_date(sis.entered_at) if sis else '',
             (sis.remarks or sis.stage_status) if sis else '',

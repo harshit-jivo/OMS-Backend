@@ -39,6 +39,21 @@ def health(request):
     })
 
 
+@api_view(["GET"])
+def list_companies(request):
+    """Companies (SAP company DBs) an IRN can be generated against.
+
+    Drives the UI's company picker: the chosen `company_db` decides BOTH which
+    company's Service Layer the invoice is read from AND which schema's
+    OMS_IRN_LOG the IRN is mirrored into.
+    """
+    choices = sap.company_choices()
+    return Response({
+        "results": choices,
+        "default": settings.HANA_OIL_COMPANY_DB,
+    })
+
+
 @api_view(["GET", "POST"])
 def get_token(request):
     """
@@ -133,7 +148,7 @@ def irn_from_invoice(request, docentry):
 
     Optional query params:
       ?company_db=JIVO_OIL_HANADB   pick a specific company DB (defaults to the
-                                    configured HANA_COMPANY_DB). For a DocNum this
+                                    configured HANA_OIL_COMPANY_DB). For a DocNum this
                                     is only a preference — if not found there, the
                                     other known company DBs are searched.
       ?id_type=docentry|docnum      how to interpret the path value (default docentry).
@@ -188,7 +203,7 @@ def irn_from_invoice(request, docentry):
     # Best-effort HANA mirror (+ QR PNG) and SAP write-back, if enabled.
     services.post_generate_hooks(record, result, company_db=company_db, docentry=int(docentry))
 
-    resp = {"docentry": int(docentry), "company_db": company_db or settings.HANA_COMPANY_DB,
+    resp = {"docentry": int(docentry), "company_db": company_db or settings.HANA_OIL_COMPANY_DB,
             "result": result}
     warning = services.test_irn_warning(company_db, (result or {}).get("Irn"))
     if warning:
@@ -257,7 +272,7 @@ def list_invoices(request):
     # such invoices don't wrongly show as "not generated".
     from . import oms_irn_log
     hana_irn = oms_irn_log.irn_status_by_docentry(
-        docentries, schema=company_db or settings.HANA_COMPANY_DB)
+        docentries, schema=company_db or settings.HANA_OIL_COMPANY_DB)
 
     out = []
     for r in rows:
@@ -279,7 +294,7 @@ def list_invoices(request):
         if len(out) >= limit:
             break
     return Response({
-        "company_db": company_db or settings.HANA_COMPANY_DB,
+        "company_db": company_db or settings.HANA_OIL_COMPANY_DB,
         "results": out,
         "scanned": len(rows),          # how many recent invoices were examined
         "pending_shown": len(out),

@@ -9,9 +9,13 @@ class InvocieHistory(models.Model):
     party_name = models.CharField(max_length=255)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20)
+    # Archived alongside the status so a reviewer's reason survives even after the
+    # live log's rejection_reason / error_message is cleared or overwritten.
+    rejection_reason = models.TextField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
     invoice_payload = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='invoice_history')
+    created_by = models.CharField(max_length=125 , null=True , blank=True)
     
     class Meta:
         db_table = 'invoice_history'
@@ -44,14 +48,49 @@ class InvoiceLog(models.Model):
     error_message = models.TextField(blank=True, null=True)
     invoice_payload = models.JSONField()
 
+    # SAP identifiers of the invoice this log created, captured on a successful
+    # post. `sap_doc_num` is the visible invoice number; `sap_doc_entry` is the
+    # internal OINV key the Crystal bill print is actually rendered from. Kept as
+    # text because SAP only guarantees them to be printable, not numeric.
+    sap_doc_num = models.CharField(max_length=50, blank=True, null=True)
+    sap_doc_entry = models.CharField(max_length=50, blank=True, null=True)
+
+    # The rejected log this one replaces, set when a reviewer reworks an invoice
+    # through the Edit action. Gives the approver of the replacement the history
+    # of why the previous attempt was turned down.
+    supersedes = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='superseded_by',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='invoice_logs')
-    
+
     class Meta:
         db_table = 'invoice_log'
-        
+
     def __str__(self):
         return f"InvoiceLog {self.so_number} - {self.status}"
+
+    def revision_chain(self):
+        """This log and every earlier version it descends from, oldest first.
+
+        Guarded against a cycle: `supersedes` is only ever set to a pre-existing
+        row so a loop should be impossible, but a bad backfill must not hang a
+        request.
+        """
+        chain = []
+        seen = set()
+        node = self
+        while node is not None and node.pk not in seen:
+            seen.add(node.pk)
+            chain.append(node)
+            node = node.supersedes
+        chain.reverse()
+        return chain
     
     def save(self, *args, **kwargs):
         if self.status == 'REJECTED' and not self.rejection_reason:
@@ -80,7 +119,7 @@ class InvoiceRefLogs(models.Model):
         db_table = 'invoice_ref_logs'
 
 class CreditLimitLogs(models.Model):
-    invoice_log = models.ForeignKey(InvoiceLog , on_delete=models.SET_NULL, null=True)
+    invoice_log = models.ForeignKey(InvoiceLog , on_delete=models.CASCADE,  primary_key=True)
     jsap_doc_id = models.IntegerField()
     party_name = models.CharField(max_length=255)
     # credit_raised = models.DecimalField(max_digits=10 , decimal_places=3)
