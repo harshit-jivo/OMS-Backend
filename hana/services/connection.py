@@ -533,9 +533,17 @@ class Queries():
     def get_costing_code(prc_name, branch):
         """Resolve a Profit Center code (OPRC."PrcCode") from its name.
 
-        SAP document lines expect the numeric ``CostingCode`` (PrcCode), not the
-        human-readable profit-center name. Looks the name up in the correct
-        company DB schema (OIL vs BEVERAGE).
+        SAP document lines expect the short ``CostingCode`` (PrcCode, max 8
+        chars), not the human-readable profit-center name -- e.g. the variety
+        "SUNFLOWER" is PrcCode "SUNFLOWR". Sending the name works only for the
+        varieties where the two happen to be identical; anything longer than 8
+        chars is rejected by SAP with "Value too long in property 'CostingCode'".
+
+        Scoped to dimension 1 and active rows: PrcName is NOT unique across
+        dimensions (e.g. "KARNATAKA" exists twice under DimCode 5, one of them
+        inactive), so an unscoped TOP 1 can return another dimension's code --
+        which SAP accepts and books to the wrong profit center. Product
+        varieties always live in dimension 1.
         """
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
@@ -546,6 +554,8 @@ class Queries():
             SELECT TOP 1 T0."PrcCode"
             FROM "{s}"."OPRC" AS T0
             WHERE T0."PrcName" = '{safe_prc_name}'
+              AND T0."DimCode" = 1
+              AND T0."Active" = 'Y'
         """
 
     @staticmethod

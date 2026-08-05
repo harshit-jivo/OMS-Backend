@@ -953,10 +953,16 @@ class SyncService:
         def _resolve_costing_code(prc_name):
             """Map a profit-center name (sub_group) to its SAP CostingCode (PrcCode).
 
-            Falls back to the raw name if the lookup fails so mapping never crashes.
+            Returns None when the name cannot be resolved, and the caller then
+            OMITS CostingCode from the line. Falling back to the raw name (as
+            this used to) is worse than sending nothing: a name over 8 chars is
+            rejected outright by SAP ("Value too long in property 'CostingCode'",
+            e.g. SUNFLOWER), and one *under* 8 chars is accepted and books the
+            line to a profit center that may not be the intended one. Never
+            raises -- an unresolvable name must not fail the whole mapping.
             """
             if not prc_name:
-                return prc_name
+                return None
             if prc_name not in costing_code_cache:
                 try:
                     resolved = sales_service.get_costing_code(prc_name, branch)
@@ -968,11 +974,11 @@ class SyncService:
                     resolved = None
                 if resolved is None:
                     logger.warning(
-                        "No PrcCode found in OPRC for profit center %r (%s); "
-                        "sending raw name as CostingCode.",
+                        "No active PrcCode found in OPRC dimension 1 for profit "
+                        "center %r (%s); sending the line with NO CostingCode.",
                         prc_name, branch,
                     )
-                costing_code_cache[prc_name] = resolved if resolved is not None else prc_name
+                costing_code_cache[prc_name] = resolved
             return costing_code_cache[prc_name]
 
         document_lines = []
@@ -1005,8 +1011,11 @@ class SyncService:
                     "Quantity": order_qty,
                     "UnitPrice": item_unit_price,
                     "U_SchemeAgst": sub_group,
-                    "CostingCode" : _resolve_costing_code(sub_group)
                 }
+                # Omitted entirely when unresolved — see _resolve_costing_code.
+                costing_code = _resolve_costing_code(sub_group)
+                if costing_code:
+                    line["CostingCode"] = costing_code
                 if warehouse_code:
                     line["WarehouseCode"] = warehouse_code
                 document_lines.append(line)
