@@ -256,7 +256,7 @@ class SapPostingHistorySerializer(serializers.ModelSerializer):
         model = SapPostingHistory
         fields = ['id', 'attempt_number', 'action', 'action_display',
                   'status', 'status_display', 'sap_doc_entry', 'sap_doc_num',
-                  'sap_response', 'created_by_username', 'created_at']
+                  'sap_response', 'sap_raw_error', 'sap_raw_error_code', 'created_by_username', 'created_at']
         read_only_fields = fields
 
 
@@ -291,7 +291,7 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
                   'unallocated_amount', 'currency', 'remarks',
                   'status', 'status_display',
                   'sap_doc_entry', 'sap_doc_num', 'sap_posted_at',
-                  'sap_response',
+                  'sap_response', 'sap_raw_error', 'sap_raw_error_code',
                   'methods', 'allocations', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
                   'created_at', 'updated_at']
@@ -527,7 +527,7 @@ class BankDepositSerializer(serializers.ModelSerializer):
                   'shortfall_reason', 'bank_charge', 'currency',
                   'slip_number', 'remarks', 'status', 'status_display',
                   'sap_doc_entry', 'sap_doc_num', 'sap_posted_at',
-                  'sap_response',
+                  'sap_response', 'sap_raw_error', 'sap_raw_error_code',
                   'lines', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
                   'created_at', 'updated_at']

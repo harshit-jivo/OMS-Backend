@@ -218,6 +218,12 @@ def post_document(document, payload, *, user=None):
         # committed it. That is NOT the same as SAP rejecting the document.
         ambiguous = exc.status_code is None
         message = _error_text(exc)
+        # SAP's own words, kept apart from the message we compose for the
+        # person holding the document. A SAP administrator needs the literal
+        # string to search their notes and logs against; handing them a
+        # rewritten one sends them looking for text SAP never produced.
+        raw_error = str(exc).strip()
+        raw_code = str(exc.sap_code or '').strip()
 
         with transaction.atomic():
             fresh.refresh_from_db()
@@ -230,7 +236,10 @@ def post_document(document, payload, *, user=None):
             else:
                 fresh.status = fresh.__class__.Status.PENDING_ERROR
                 fresh.sap_response = message[:4000]
-            fresh.save(update_fields=['status', 'sap_response', 'updated_at'])
+            fresh.sap_raw_error = raw_error[:4000]
+            fresh.sap_raw_error_code = raw_code[:20]
+            fresh.save(update_fields=['status', 'sap_response', 'sap_raw_error',
+                                      'sap_raw_error_code', 'updated_at'])
             log_status(fresh, to_status=fresh.status, user=user,
                        actor_kind='SAP', reason=message[:500])
             if ambiguous:
@@ -292,9 +301,14 @@ def post_document(document, payload, *, user=None):
         fresh.sap_doc_num = doc_num
         fresh.sap_posted_at = timezone.now()
         fresh.sap_response = _success_text(doc_entry, doc_num)
+        # Clear the previous attempt's error. A posted document showing an old
+        # SAP error would read as though it had failed.
+        fresh.sap_raw_error = ''
+        fresh.sap_raw_error_code = ''
         fresh.status = fresh.__class__.Status.POSTED
         fresh.save(update_fields=['sap_doc_entry', 'sap_doc_num',
                                   'sap_posted_at', 'sap_response', 'status',
+                                  'sap_raw_error', 'sap_raw_error_code',
                                   'updated_at'])
 
         # Capture CheckKey per cheque so those cheques can later be deposited.
