@@ -17,6 +17,8 @@ import logging
 
 from django.core.exceptions import ValidationError
 
+from django.core.cache import cache
+
 from hana.services.connection import HANAConnection
 
 from .models import SapCompanyMap
@@ -88,6 +90,48 @@ def fetch_open_invoices(*, company, card_code, search='', min_balance=0.01,
     return rows
 
 
+def parties_with_open_invoices_sql(schema):
+    """Card codes that currently owe money, with their totals.
+
+    The WHERE clause is deliberately IDENTICAL to open_invoices_sql — if the two
+    ever drift, a party appears in the picker and then shows an empty invoice
+    list (or disappears while genuinely owing). Keep them in step.
+    """
+    return f'''
+        SELECT
+            T0."CardCode"                                   AS "card_code",
+            COUNT(*)                                        AS "open_count",
+            SUM(T0."DocTotal" - IFNULL(T0."PaidToDate", 0)) AS "balance_due"
+        FROM "{schema}"."OINV" AS T0
+        WHERE T0."DocStatus" = 'O'
+          AND T0."CANCELED"  = 'N'
+          AND T0."DocType"   = 'I'
+          AND T0."DocTotal" - IFNULL(T0."PaidToDate", 0) > ?
+        GROUP BY T0."CardCode"
+    '''
+
+
+def fetch_parties_with_open_invoices(*, company, min_balance=0.01):
+    """{card_code: {open_count, balance_due}} for every party that owes money.
+
+    ONE aggregate query for the whole company, not one per party: the picker
+    needs the entire set to filter against, and 500+ round trips would make it
+    unusable. ~500 rows for OIL, so the payload is small.
+    """
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(parties_with_open_invoices_sql(schema),
+                            [float(min_balance)])
+    return {
+        (row['card_code'] or '').strip(): {
+            'open_count': int(row['open_count'] or 0),
+            'balance_due': row['balance_due'] or 0,
+        }
+        for row in rows
+        if (row.get('card_code') or '').strip()
+    }
+
+
 def invoice_balance_sql(schema):
     return f'''
         SELECT
@@ -111,3 +155,68 @@ def fetch_invoice_balance(*, company, doc_entry):
     with HANAConnection() as conn:
         rows = conn.execute(invoice_balance_sql(schema), [int(doc_entry)])
     return rows[0] if rows else None
+
+
+def company_banks_sql(schema):
+    """Every House Bank ACCOUNT in this company, with its bank's display name.
+
+    DSC1 is the account table and is the source of truth: a bank present in the
+    ODSC master but absent here has no account to pay into or out of, and SAP
+    refuses the document. ODSC is joined only for a readable name.
+
+    Note DSC1 holds one row per ACCOUNT, so a bank with three accounts appears
+    three times — the GL account, not the bank code, is what identifies a row.
+    """
+    return f'''
+        SELECT
+            T0."BankCode"                        AS "bank_code",
+            IFNULL(T1."BankName", T0."BankCode") AS "bank_name",
+            T0."GLAccount"                       AS "gl_account",
+            IFNULL(T0."Account", \'\')             AS "account_number",
+            IFNULL(T0."Branch", \'\')              AS "branch",
+            IFNULL(T0."ControlKey", \'\')          AS "control_key",
+            IFNULL(T0."IBAN", \'\')                AS "iban",
+            IFNULL(T1."SwiftNum", \'\')            AS "swift"
+        FROM "{schema}"."DSC1" AS T0
+        LEFT JOIN "{schema}"."ODSC" AS T1 ON T1."BankCode" = T0."BankCode"
+        WHERE T0."GLAccount" IS NOT NULL AND T0."GLAccount" <> \'\'
+        ORDER BY T0."BankCode", T0."GLAccount"
+    '''
+
+
+def fetch_company_banks(*, company):
+    """Live read of every House Bank Account. Raises if SAP is unreachable.
+
+    Deliberately uncached: caching, and what to do when this raises, belong to
+    the service layer that knows whether a stale answer is acceptable.
+    """
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(company_banks_sql(schema))
+
+    out = []
+    for row in rows:
+        gl = str(row.get('gl_account') or '').strip()
+        code = str(row.get('bank_code') or '').strip()
+        if not gl or not code:
+            continue
+        name = str(row.get('bank_name') or code).strip()
+        # SAP has no dedicated IFSC column; Indian localisations keep it in
+        # ControlKey, falling back to SWIFT. Blank when neither is filled in —
+        # never invented.
+        ifsc = (str(row.get('control_key') or '').strip()
+                or str(row.get('swift') or '').strip())
+        account = str(row.get('account_number') or '').strip()
+        out.append({
+            'bank_code': code,
+            'display_name': name,
+            'gl_account': gl,
+            'account_number': account,
+            'branch': str(row.get('branch') or '').strip(),
+            'ifsc': ifsc,
+            # Unique per ACCOUNT, because one bank can hold several. This is
+            # what a dropdown selects and what a payload resolves from.
+            'key': f'{code}:{gl}',
+            'label': (f'{name} — {account}' if account else name),
+        })
+    return out

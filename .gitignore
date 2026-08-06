@@ -11,6 +11,7 @@ ENV/
 *.pyc
 *.pyo
 *.pyd
+images/*
 
 # Test / tooling caches & logs
 *.log

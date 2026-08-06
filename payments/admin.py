@@ -1,7 +1,6 @@
 from django.contrib import admin
 
 from .models import (
-    BankAccount,
     BankDeposit,
     BankDepositLine,
     CashDenomination,
@@ -28,13 +27,6 @@ class CollectionPersonAdmin(admin.ModelAdmin):
     list_display = ('name', 'code', 'company', 'phone', 'is_active')
     list_filter = ('company', 'is_active')
     search_fields = ('name', 'code')
-
-
-@admin.register(BankAccount)
-class BankAccountAdmin(admin.ModelAdmin):
-    list_display = ('name', 'company', 'account_type', 'sap_gl_account',
-                    'masked_number', 'is_active')
-    list_filter = ('company', 'account_type', 'is_active')
 
 
 class PaymentMethodEntryInline(admin.TabularInline):
@@ -73,7 +65,7 @@ class BankDepositLineInline(admin.TabularInline):
 
 @admin.register(BankDeposit)
 class BankDepositAdmin(admin.ModelAdmin):
-    list_display = ('deposit_no', 'company', 'deposit_date', 'bank_account',
+    list_display = ('deposit_no', 'company', 'deposit_date', 'bank_display_name',
                     'collected_amount', 'deposit_amount', 'status', 'sap_doc_num')
     list_filter = ('company', 'status', 'deposit_type', 'deposit_date')
     search_fields = ('deposit_no', 'slip_number')

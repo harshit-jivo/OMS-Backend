@@ -43,7 +43,14 @@ class DocumentCounter(models.Model):
 
     doc_type = models.CharField(max_length=20)          # RECEIPT | DEPOSIT
     company = models.CharField(max_length=20)           # OIL | BEVERAGES | MART
-    fiscal_year = models.CharField(max_length=9)        # '2026-27' (Indian FY)
+    # The period the sequence resets on. Now a DAY ('20260805'); previously an
+    # Indian fiscal year ('2026-27'). The column keeps its name so the existing
+    # rows — and their unique constraint — survive the change: an old row simply
+    # holds an old-format scope that is never matched again.
+    #
+    # Widened from 9: 'YYYYMMDD' is 8 and fitted only by luck, leaving no room
+    # for a future scope (e.g. an hourly or per-branch one).
+    fiscal_year = models.CharField(max_length=20)
     prefix = models.CharField(max_length=20)            # RCP | DEP
     last_number = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
@@ -62,10 +69,19 @@ class DocumentCounter(models.Model):
 
 
 def fiscal_year_for(when):
-    """Indian FY label for a date — April to March, e.g. '2026-27'."""
+    """Indian FY label for a date — April to March, e.g. '2026-27'.
+
+    No longer used for numbering (see `date_scope_for`), but kept because it is
+    the correct FY rule and other reporting may want it.
+    """
     year = when.year
     start = year if when.month >= 4 else year - 1
     return f'{start}-{str(start + 1)[-2:]}'
+
+
+def date_scope_for(when):
+    """The period a document number resets on — one day, as 'YYYYMMDD'."""
+    return when.strftime('%Y%m%d')
 
 
 @transaction.atomic
@@ -76,15 +92,20 @@ def next_document_number(*, doc_type, company, prefix, when):
     that uses it commit together — otherwise a rolled-back create burns a
     number and leaves a visible gap in a financial sequence.
 
-    Returns e.g. 'RCP-OIL-2026-27-000123'.
+    Returns e.g. 'RCP-OIL-20260805-000001'.
+
+    The sequence resets DAILY, per (doc_type, company, day). `when` is the
+    document's own date, not today's: a receipt back-dated to a previous day
+    draws from that day's counter, so its number stays consistent with the date
+    printed on it.
     """
-    fy = fiscal_year_for(when)
+    scope = date_scope_for(when)
     counter, _ = DocumentCounter.objects.select_for_update().get_or_create(
         doc_type=doc_type,
         company=company,
-        fiscal_year=fy,
+        fiscal_year=scope,
         defaults={'prefix': prefix},
     )
     counter.last_number += 1
     counter.save(update_fields=['last_number', 'updated_at'])
-    return f'{prefix}-{company}-{fy}-{counter.last_number:06d}'
+    return f'{prefix}-{company}-{scope}-{counter.last_number:06d}'

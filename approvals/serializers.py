@@ -206,9 +206,39 @@ class ApprovalRequestSerializer(serializers.ModelSerializer):
 
 class ApprovalRequestDetailSerializer(ApprovalRequestSerializer):
     actions = ApprovalActionSerializer(many=True, read_only=True)
+    levels = serializers.SerializerMethodField()
 
     class Meta(ApprovalRequestSerializer.Meta):
-        fields = ApprovalRequestSerializer.Meta.fields + ['actions']
+        fields = ApprovalRequestSerializer.Meta.fields + ['actions', 'levels']
+
+    def get_levels(self, obj):
+        """The whole ladder, in order, with who may act at each rung.
+
+        `actions` alone only describes what has ALREADY happened, so a progress
+        timeline could not show the rungs still ahead. Returning the ladder lets
+        a client render future stages greyed out instead of stopping the
+        timeline at the current position.
+
+        `position` (1-based) is what `current_level` counts, NOT `sequence` —
+        the two differ whenever a workflow's sequence numbers do not start at 1.
+        """
+        rungs = []
+        levels = obj.workflow.levels.filter(is_active=True).order_by('sequence')
+        for position, level in enumerate(levels, start=1):
+            approvers = [
+                grant.user.get_username()
+                for grant in level.approvers.select_related('user')
+                                            .filter(is_active=True)
+                if grant.user_id
+            ]
+            rungs.append({
+                'position': position,
+                'sequence': level.sequence,
+                'name': level.name,
+                'role': getattr(level.role, 'name', '') or '',
+                'approvers': approvers,
+            })
+        return rungs
 
 
 class ApprovalDecisionSerializer(serializers.Serializer):

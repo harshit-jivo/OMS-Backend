@@ -144,6 +144,17 @@ DATABASES = {
         'PASSWORD': config('DB_PASSWORD'),
         'HOST': config('DB_HOST'),
         'PORT': config('DB_PORT'),
+        'OPTIONS': {
+            # The payments module owns its own PostgreSQL schema, so its 19
+            # tables group together in pgAdmin instead of being scattered
+            # through `public` alongside orders, users and Django's own.
+            #
+            # `payments` comes FIRST so unqualified names resolve there, and
+            # `public` stays on the path because everything else — users_user,
+            # django_content_type, the FKs those tables point at — still lives
+            # there. Dropping public would break every cross-schema join.
+            'options': '-c search_path=payments,public',
+        },
     },
     'hana': {
         'ENGINE': 'django.db.backends.dummy',

@@ -6,15 +6,17 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.contenttypes.models import ContentType
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
 from approvals import services as approval_services
 
+from . import bank_master, hana_queries
 from .models import (
-    BankAccount,
     BankDeposit,
+    PaymentMethodEntry,
     PaymentReceipt,
     PaymentStatusHistory,
     SapCompanyMap,
@@ -153,31 +155,31 @@ def validate_receipt(receipt):
 
 
 def _validate_gl_accounts(company, methods_used):
-    """Every method on the document must have a SAP GL account configured.
+    """Every method on the document must resolve to a SAP account.
 
     Without this the payload builder simply OMITS the account field and SAP
     rejects the document — after it has been fully approved, which is the worst
     possible moment to discover a configuration gap. Failing at submit puts the
     error in front of someone who can act on it.
+
+    Also catches a mapping whose account has since been removed from SAP, so a
+    payment can never post to a ledger that no longer exists.
     """
     accounts = _bank_accounts_for(company)
     missing = sorted({m for m in methods_used if not accounts.get(m)})
     if not missing:
         return
 
-    # CASH needs a cash-type account; UPI and CHEQUE both draw on the bank one.
-    needs_cash = 'CASH' in missing
-    needs_bank = bool({'UPI', 'CHEQUE'} & set(missing))
-    wanted = []
-    if needs_cash:
-        wanted.append('a CASH account')
-    if needs_bank:
-        wanted.append('a BANK account')
-
+    labels = dict(PaymentMethodEntry.Method.choices)
+    names = ', '.join(labels.get(m, m) for m in missing)
+    if missing == ['CASH']:
+        where = ('Set the cash G/L account for this company under '
+                 'Payments > Configuration > Company mapping.')
+    else:
+        where = ('Map each of them to a SAP bank account under '
+                 'Payments > Configuration > Payment Method Mapping.')
     raise ValidationError(
-        f'No SAP GL account is configured for {", ".join(missing)} in {company}. '
-        f'Ask an administrator to add {" and ".join(wanted)} with a SAP GL '
-        f'account under Approval Management > Masters > Bank accounts.')
+        f'No SAP account is configured for {names} in {company}. {where}')
 
 
 @transaction.atomic
@@ -192,6 +194,20 @@ def submit_receipt(receipt, user, ctx=None):
         raise ValidationError(
             f'{receipt.receipt_no} is already posted to SAP as DocEntry '
             f'{receipt.sap_doc_entry}. It cannot be submitted again.')
+
+    # A SAP failure sends the approval back to its final rung rather than
+    # closing it (see approvals.services.reopen_final_level), so the chain is
+    # still open and the approver retries from their own queue. Without this the
+    # creator would hit the raw "already has an open approval request" from the
+    # engine, which does not explain who now holds the document.
+    open_approval = receipt.approvals.filter(
+        status__in=['DRAFT', 'PENDING']).first()
+    if open_approval is not None:
+        raise ValidationError(
+            f'{receipt.receipt_no} is still with its approver '
+            f'({open_approval.level_label}). They can retry the SAP posting '
+            f'from their pending list once the problem is fixed — it does not '
+            f'need resubmitting.')
     if receipt.status not in (PaymentReceipt.Status.DRAFT,
                               PaymentReceipt.Status.REJECTED,
                               PaymentReceipt.Status.PENDING_ERROR):
@@ -232,16 +248,38 @@ def submit_receipt(receipt, user, ctx=None):
     return receipt
 
 
-def _bank_accounts_for(company):
-    """method -> SAP GL account, for payload building."""
-    accounts = BankAccount.objects.filter(company=company, is_active=True)
-    cash = accounts.filter(account_type=BankAccount.AccountType.CASH).first()
-    bank = accounts.filter(account_type=BankAccount.AccountType.BANK).first()
-    return {
-        'CASH': cash.sap_gl_account if cash else '',
-        'UPI': bank.sap_gl_account if bank else '',
-        'CHEQUE': bank.sap_gl_account if bank else '',
-    }
+def _bank_accounts_for(company, receipt=None):
+    """method -> SAP G/L account, for payload building.
+
+    Every G/L comes from SAP's own House Bank Accounts, chosen by the
+    administrator's payment-method mapping. No user ever types or picks a G/L:
+    they choose a tender, and the account follows from configuration.
+
+        CASH   -> SapCompanyMap.cash_gl_account (a drawer is not a house bank)
+        UPI    -> the account mapped for UPI
+        CHEQUE -> the account mapped for cheques; the payer's bank is a
+                  separate field on the line and is sent as BankCode
+
+    Raises BankMasterUnavailable when SAP cannot be reached and nothing is
+    cached, and ValidationError when a mapping points at an account SAP no
+    longer has — posting to a stale ledger is worse than failing loudly.
+    """
+    resolver = bank_master.PaymentAccountResolver(company)
+    accounts = {'CASH': resolver.cash_gl()}
+
+    methods = None
+    if receipt is not None:
+        methods = {m.method for m in receipt.methods.all()}
+
+    for method in PaymentMethodEntry.Method.values:
+        if method == PaymentMethodEntry.Method.CASH:
+            continue
+        if methods is not None and method not in methods:
+            continue
+        found = resolver.resolve(method)
+        accounts[method] = found['gl_account'] if found else ''
+
+    return accounts
 
 
 def post_receipt_to_sap(receipt, user=None):
@@ -263,7 +301,7 @@ def post_receipt_to_sap(receipt, user=None):
 
     payload = build_incoming_payment(
         receipt,
-        bank_accounts=_bank_accounts_for(receipt.company),
+        bank_accounts=_bank_accounts_for(receipt.company, receipt),
         bpl_id=resolve_bpl_id(receipt.company),
     )
     return post_document(receipt, payload, user=user)
@@ -314,6 +352,26 @@ def submit_deposit(deposit, user, ctx=None):
             f'A {deposit.get_status_display().lower()} deposit cannot be submitted.')
 
     validate_deposit(deposit)
+
+    # Re-verify the bank against SAP at the LAST point before the approval
+    # chain opens. SAP configuration can change between saving a draft and
+    # submitting it, and an unverifiable bank must never enter the workflow.
+    try:
+        bank = bank_master.find_bank(deposit.company,
+                                     deposit.bank_key or deposit.bank_gl_account)
+    except bank_master.BankMasterUnavailable as exc:
+        raise ValidationError(str(exc)) from exc
+    if bank is None:
+        raise ValidationError(
+            'Select the bank this deposit was paid into before submitting.')
+    # Re-snapshot: SAP may have renamed or re-pointed the account since.
+    deposit.bank_key = bank['key']
+    deposit.bank_code = bank['bank_code']
+    deposit.bank_gl_account = bank['gl_account']
+    deposit.bank_display_name = bank['label']
+    deposit.save(update_fields=['bank_key', 'bank_code', 'bank_gl_account',
+                                'bank_display_name', 'updated_at'])
+
     previous = deposit.status
 
     approval_services.submit(

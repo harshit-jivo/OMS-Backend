@@ -7,6 +7,9 @@ as null — but quantises money to 2dp instead of passing raw floats through
 """
 from decimal import ROUND_HALF_UP, Decimal
 
+# UPI reaches SAP as a bank transfer (TransferSum / TransferAccount).
+TRANSFER_METHODS = ('UPI',)
+
 
 def money(value):
     """2dp Decimal -> float for JSON. Quantised BEFORE conversion so the float
@@ -57,6 +60,7 @@ def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None):
 
     cash_total = Decimal('0')
     transfer_total = Decimal('0')
+    transfer_account = ''
     checks = []
     transfer_ref = ''
     transfer_date = None
@@ -64,14 +68,25 @@ def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None):
     for entry in receipt.methods.all():
         if entry.method == 'CASH':
             cash_total += entry.amount
-        elif entry.method == 'UPI':
+
+        elif entry.method in TRANSFER_METHODS:
+            # UPI, bank transfer, NEFT and RTGS are ONE tender to SAP — it has
+            # a single TransferSum/TransferAccount pair. They are separate here
+            # only so each can map to its own account, so they are summed and
+            # the first resolved account wins. Mapping two transfer methods to
+            # different accounts on one receipt cannot be expressed in SAP.
             transfer_total += entry.amount
+            transfer_account = transfer_account or bank_accounts.get(
+                entry.method, '')
             transfer_ref = transfer_ref or entry.upi_reference
             transfer_date = transfer_date or receipt.payment_date
+
         elif entry.method == 'CHEQUE':
             check = {
                 'CheckNumber': int(entry.cheque_number) if str(
                     entry.cheque_number).isdigit() else 0,
+                # The bank the PAYER's cheque is drawn on, chosen on the form —
+                # not a mapped account.
                 'BankCode': (entry.bank_name or '')[:20],
                 'CheckSum': money(entry.amount),
                 'DueDate': _iso(entry.cheque_date),
@@ -88,9 +103,8 @@ def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None):
         payload['CashSum'] = money(cash_total)
 
     if transfer_total > 0:
-        account = bank_accounts.get('UPI')
-        if account:
-            payload['TransferAccount'] = account
+        if transfer_account:
+            payload['TransferAccount'] = transfer_account
         payload['TransferSum'] = money(transfer_total)
         payload['TransferDate'] = _iso(transfer_date or receipt.payment_date)
         if transfer_ref:
@@ -131,7 +145,7 @@ def build_deposit(deposit, *, bpl_id=None):
     payload = {
         'DepositType': type_map.get(deposit.deposit_type, 'dt_Cash'),
         'DepositDate': _iso(deposit.deposit_date),
-        'BankAccount': deposit.bank_account.sap_gl_account,
+        'BankAccount': deposit.bank_gl_account,
         'DepositCurrency': deposit.currency or 'INR',
         'BankChargeAmount': money(deposit.bank_charge),
         'Remarks': (deposit.remarks or f'OMS {deposit.deposit_no}')[:254],

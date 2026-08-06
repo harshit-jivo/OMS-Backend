@@ -46,6 +46,10 @@ class SapCompanyMap(models.Model):
     company_db = models.CharField(max_length=100)
     hana_schema = models.CharField(max_length=100)
     default_bpl_id = models.IntegerField(null=True, blank=True)
+    # SAP G/L for cash receipts. NOT from DSC1: a cash drawer is not a house
+    # bank account, so SAP has no row for it and it must be named here. Every
+    # other G/L is resolved live from the bank the user selected.
+    cash_gl_account = models.CharField(max_length=50, blank=True, default='')
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveSmallIntegerField(default=0)
 
@@ -90,41 +94,51 @@ class CollectionPerson(TimeStampedModel):
         return self.name
 
 
-class BankAccount(models.Model):
-    """Our own bank / cash accounts, and their SAP GL codes."""
+class PaymentMethodMapping(models.Model):
+    """Which SAP House Bank Account each payment method posts to.
 
-    class AccountType(models.TextChoices):
-        BANK = 'BANK', 'Bank'
-        CASH = 'CASH', 'Cash'
+    NOT a bank master — SAP owns that (see payments.bank_master). This table
+    holds only business configuration: one bank can expose several G/L accounts
+    and OMS cannot guess which one a tender should use, so an administrator
+    says it once here and no user ever sees a G/L number again.
 
-    name = models.CharField(max_length=150)          # 'HDFC Bank — ****4821'
-    company = models.CharField(max_length=20, choices=CATEGORY_CHOICES, db_index=True)
-    account_type = models.CharField(
-        max_length=10, choices=AccountType.choices, default=AccountType.BANK)
+    `bank_key` is SAP's "BANKCODE:GLACCOUNT" and is stored as plain text on
+    purpose: SAP is the master, so a foreign key is impossible, and resolution
+    happens against the live cache every time it is used.
 
-    # SAP posting targets.
-    sap_gl_account = models.CharField(max_length=50)
+    CASH has no row — a cash drawer is not a house bank, so it draws on
+    SapCompanyMap.cash_gl_account instead.
+    """
 
-    masked_number = models.CharField(max_length=50, blank=True, default='')
-    ifsc = models.CharField(max_length=20, blank=True, default='')
-    branch_name = models.CharField(max_length=150, blank=True, default='')
+    company = models.CharField(max_length=20, choices=CATEGORY_CHOICES,
+                               db_index=True)
+    payment_method = models.CharField(max_length=20)
+    bank_key = models.CharField(max_length=80)
+    # Reserved for future fallback ordering; the unique constraint below means
+    # exactly one active mapping per (company, method) today.
+    priority = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'payment_bank_account'
-        ordering = ['company', 'name']
+        db_table = 'payment_method_mapping'
+        ordering = ['company', 'payment_method', 'priority']
         constraints = [
-            models.UniqueConstraint(fields=['company', 'sap_gl_account'],
-                                    name='payment_bank_gl_per_company_uq'),
+            # "Exactly one active mapping per method" enforced in the DATABASE,
+            # not just the serializer — a second active row would make the
+            # posting account ambiguous, and any other write path would bypass
+            # a Python-only check. Partial, so deactivated rows can pile up as
+            # history without colliding.
+            models.UniqueConstraint(
+                fields=['company', 'payment_method'],
+                condition=Q(is_active=True),
+                name='payment_method_mapping_one_active'),
         ]
 
     def __str__(self):
-        return f'{self.name} ({self.company})'
+        return f'{self.company} {self.payment_method} -> {self.bank_key}'
 
-
-# ---------------------------------------------------------------------------
-# Receive Payment
-# ---------------------------------------------------------------------------
 
 class PaymentReceipt(TimeStampedModel):
     """A payment received from a party (SAP: IncomingPayments / ORCT)."""
@@ -191,6 +205,15 @@ class PaymentReceipt(TimeStampedModel):
     # confirmation or the rejection reason. Shown verbatim in the UI so a user
     # can act on it without database access or developer help.
     sap_response = models.TextField(blank=True, default='')
+    # SAP's own words, stored exactly as returned and NEVER rewritten.
+    #
+    # `sap_response` above is written for the person holding the document and
+    # adds a plain-language summary plus a "what to do" line. That is right for
+    # a collector and useless for a SAP administrator, who needs the literal
+    # string to search notes and logs against. Keeping both means neither
+    # audience is served a translation of the other's message.
+    sap_raw_error = models.TextField(blank=True, default='')
+    sap_raw_error_code = models.CharField(max_length=20, blank=True, default='')
 
     # The receipt -> deposit link lives ONLY on BankDepositLine, which carries
     # the UniqueConstraint that stops a receipt being banked twice. A second FK
@@ -251,9 +274,15 @@ class PaymentMethodEntry(models.Model):
         UPI = 'UPI', 'UPI'
         CHEQUE = 'CHEQUE', 'Cheque'
 
+    # UPI posts to SAP as a bank TRANSFER (TransferSum / TransferAccount).
+    # Kept as a tuple rather than inlined because the payload builder groups
+    # on it, and BANK_TRANSFER / NEFT / RTGS were removed from here once the
+    # business confirmed only these three tenders are collected.
+    TRANSFER_METHODS = ('UPI',)
+
     receipt = models.ForeignKey(
         PaymentReceipt, on_delete=models.CASCADE, related_name='methods')
-    method = models.CharField(max_length=10, choices=Method.choices)
+    method = models.CharField(max_length=20, choices=Method.choices)
     amount = models.DecimalField(max_digits=15, decimal_places=2)
 
     # UPI
@@ -393,8 +422,13 @@ class BankDeposit(TimeStampedModel):
     deposited_by = models.ForeignKey(
         CollectionPerson, on_delete=models.PROTECT,
         null=True, blank=True, related_name='deposits')
-    bank_account = models.ForeignKey(
-        BankAccount, on_delete=models.PROTECT, related_name='deposits')
+    # The SAP house bank this was paid into. Stored as plain values rather than
+    # a FK to a local bank table: SAP is the master, and a snapshot here keeps
+    # a posted deposit readable even if the account is later removed there.
+    bank_key = models.CharField(max_length=80, blank=True, default='')
+    bank_code = models.CharField(max_length=30, blank=True, default='')
+    bank_gl_account = models.CharField(max_length=50, blank=True, default='')
+    bank_display_name = models.CharField(max_length=150, blank=True, default='')
     deposit_type = models.CharField(
         max_length=10, choices=DepositType.choices, default=DepositType.CASH)
 
@@ -418,6 +452,15 @@ class BankDeposit(TimeStampedModel):
     # confirmation or the rejection reason. Shown verbatim in the UI so a user
     # can act on it without database access or developer help.
     sap_response = models.TextField(blank=True, default='')
+    # SAP's own words, stored exactly as returned and NEVER rewritten.
+    #
+    # `sap_response` above is written for the person holding the document and
+    # adds a plain-language summary plus a "what to do" line. That is right for
+    # a collector and useless for a SAP administrator, who needs the literal
+    # string to search notes and logs against. Keeping both means neither
+    # audience is served a translation of the other's message.
+    sap_raw_error = models.TextField(blank=True, default='')
+    sap_raw_error_code = models.CharField(max_length=20, blank=True, default='')
 
     attachments = GenericRelation('attachments.Attachment',
                                   related_query_name='bank_deposit')
@@ -430,7 +473,7 @@ class BankDeposit(TimeStampedModel):
         indexes = [
             models.Index(fields=['company', 'status', '-deposit_date'],
                          name='idx_dep_company_status'),
-            models.Index(fields=['bank_account', '-deposit_date'],
+            models.Index(fields=['bank_gl_account', '-deposit_date'],
                          name='idx_dep_bank_date'),
         ]
         constraints = [
@@ -589,6 +632,15 @@ class SapPostingHistory(models.Model):
     sap_doc_entry = models.IntegerField(null=True, blank=True)
     sap_doc_num = models.IntegerField(null=True, blank=True)
     sap_response = models.TextField(blank=True, default='')
+    # SAP's own words, stored exactly as returned and NEVER rewritten.
+    #
+    # `sap_response` above is written for the person holding the document and
+    # adds a plain-language summary plus a "what to do" line. That is right for
+    # a collector and useless for a SAP administrator, who needs the literal
+    # string to search notes and logs against. Keeping both means neither
+    # audience is served a translation of the other's message.
+    sap_raw_error = models.TextField(blank=True, default='')
+    sap_raw_error_code = models.CharField(max_length=20, blank=True, default='')
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

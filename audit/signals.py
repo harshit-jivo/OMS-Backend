@@ -30,7 +30,6 @@ AUDITED_MODELS = [
     # amplification for strictly worse data.
     'payments.SapCompanyMap',
     'payments.CollectionPerson',
-    'payments.BankAccount',
     'approvals.ApprovalWorkflow',
     'approvals.ApprovalLevel',
     'approvals.ApprovalLevelApprover',

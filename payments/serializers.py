@@ -6,6 +6,7 @@ validation to any child field, and the rows are written by a manual view helper
 with no transaction. Here the children are typed serializers and `create()` is
 atomic.
 """
+import re
 from decimal import Decimal
 
 from django.db import transaction
@@ -15,14 +16,20 @@ from rest_framework import serializers
 from attachments.serializers import AttachmentSerializer
 from core.models import next_document_number
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+import logging
+
+from . import bank_master
+from . import services as payment_services
 from .models import (
-    BankAccount,
     BankDeposit,
     BankDepositLine,
     CashDenomination,
     CollectionPerson,
     PaymentAllocation,
     PaymentMethodEntry,
+    PaymentMethodMapping,
     PaymentReceipt,
     PaymentStatusHistory,
     SapCompanyMap,
@@ -40,12 +47,19 @@ class SapCompanyMapSerializer(serializers.ModelSerializer):
     `company_db` and `hana_schema` were previously omitted, so the admin UI
     rendered blank columns for the two fields that actually matter — and there
     was no way to see or fix a mapping outside Django admin.
+
+    `cash_gl_account` lives here rather than in the payment-method mapping for
+    a physical reason: every other tender lands in a BANK, and SAP publishes
+    those as House Bank Accounts (DSC1). Cash lands in a drawer, which is not a
+    bank and has no DSC1 row — so there is nothing to pick from and the G/L has
+    to be named directly.
     """
 
     class Meta:
         model = SapCompanyMap
         fields = ['id', 'company', 'display_name', 'company_db', 'hana_schema',
-                  'default_bpl_id', 'is_active', 'sort_order']
+                  'default_bpl_id', 'cash_gl_account', 'is_active',
+                  'sort_order']
 
     def validate_company(self, value):
         """`company` is unique — report the clash as a field error, not a 500."""
@@ -56,6 +70,9 @@ class SapCompanyMapSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f'A mapping for {value} already exists. Edit that one instead.')
         return value
+
+
+logger = logging.getLogger(__name__)
 
 
 class CollectionPersonSerializer(serializers.ModelSerializer):
@@ -101,46 +118,6 @@ class CollectionPersonSerializer(serializers.ModelSerializer):
         return f'{base}-{suffix}'
 
 
-class BankAccountSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = BankAccount
-        # sap_gl_account is the SAP posting target — a deposit cannot post
-        # without it, and (company, sap_gl_account) is UNIQUE. It was missing
-        # from this list, so the admin UI could neither set nor see it and two
-        # accounts in one company collided on an empty value.
-        fields = ['id', 'name', 'company', 'account_type', 'masked_number',
-                  'sap_gl_account',
-                  'ifsc', 'branch_name', 'is_active']
-        # DRF's auto-generated UniqueTogetherValidator runs BEFORE validate()
-        # and reports "must make a unique set", which names neither the field
-        # at fault nor the account already using it. Cleared so validate()
-        # below owns the message; the DB constraint still backs it up.
-        validators = []
-
-    def validate(self, attrs):
-        """Report the (company, sap_gl_account) clash as a field error, not a 500."""
-        company = attrs.get('company', getattr(self.instance, 'company', None))
-        gl = attrs.get('sap_gl_account',
-                       getattr(self.instance, 'sap_gl_account', None))
-        if company is None or gl is None:
-            return attrs
-        clash = BankAccount.objects.filter(company=company, sap_gl_account=gl)
-        if self.instance is not None:
-            clash = clash.exclude(pk=self.instance.pk)
-        if clash.exists():
-            raise serializers.ValidationError({
-                'sap_gl_account': (
-                    f'GL account "{gl}" is already used by another '
-                    f'{company} account.'
-                )
-            })
-        return attrs
-
-
-# ---------------------------------------------------------------------------
-# Receipt children
-# ---------------------------------------------------------------------------
-
 class CashDenominationSerializer(serializers.ModelSerializer):
     line_total = serializers.DecimalField(
         max_digits=15, decimal_places=2, read_only=True)
@@ -150,18 +127,78 @@ class CashDenominationSerializer(serializers.ModelSerializer):
         fields = ['id', 'denomination', 'quantity', 'line_total']
 
 
+# A UTR is bank-issued: alphanumeric, sometimes with a separator. Anything
+# else is a typo or a pasted label, and both break reconciliation.
+UPI_REFERENCE_MAX = 50
+UPI_REFERENCE_RE = re.compile(r'[A-Za-z0-9/-]+')
+
+
 class PaymentMethodEntrySerializer(serializers.ModelSerializer):
     denominations = CashDenominationSerializer(many=True, required=False)
+    # Where OMS banks this line, resolved live from the admin mapping. Read
+    # only, and kept separate from `bank_name` (the CUSTOMER's bank on a
+    # cheque) so the detail screen can show the two without conflating them.
+    deposit_account = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentMethodEntry
         fields = ['id', 'method', 'amount', 'upi_reference', 'cheque_number',
-                  'bank_name', 'cheque_date', 'sap_check_key', 'denominations']
+                  'bank_name', 'cheque_date', 'sap_check_key', 'denominations',
+                  'deposit_account']
         read_only_fields = ['sap_check_key']
+
+    def get_deposit_account(self, obj):
+        """Our account for this tender, or None when not configured."""
+        company = getattr(obj.receipt, 'company', None)
+        if not company:
+            return None
+        if obj.method == PaymentMethodEntry.Method.CASH:
+            resolver = bank_master.PaymentAccountResolver(company)
+            gl = resolver.cash_gl()
+            return ({'bank_name': 'Cash', 'gl_account': gl,
+                     'account_number': '', 'branch': ''} if gl else None)
+        try:
+            found = bank_master.PaymentAccountResolver(company).resolve(
+                obj.method)
+        except Exception:                                   # noqa: BLE001
+            # Never let a SAP outage break reading a payment.
+            return None
+        if not found:
+            return None
+        return {'bank_name': found['bank_name'],
+                'gl_account': found['gl_account'],
+                'account_number': found['account_number'],
+                'branch': found['branch']}
 
     def validate(self, attrs):
         method = attrs.get('method')
+
+        if method == PaymentMethodEntry.Method.UPI:
+            # OPTIONAL. A UTR is not always to hand when the receipt is raised,
+            # so it is not demanded — but when one IS given it is cleaned and
+            # checked, because a malformed reference is worse than none: it
+            # looks reconcilable and is not.
+            reference = (attrs.get('upi_reference') or '').strip()
+            if reference:
+                if len(reference) > UPI_REFERENCE_MAX:
+                    raise serializers.ValidationError({
+                        'upi_reference':
+                            f'Must be {UPI_REFERENCE_MAX} characters or fewer.'})
+                if not UPI_REFERENCE_RE.fullmatch(reference):
+                    raise serializers.ValidationError({
+                        'upi_reference':
+                            'Use only letters, numbers, hyphens and slashes.'})
+            # Store trimmed either way, so a stray space can never make two
+            # records of the same UTR look different.
+            attrs['upi_reference'] = reference
+
         if method == PaymentMethodEntry.Method.CHEQUE:
+            # The CUSTOMER's bank, as printed on the cheque — not one of ours,
+            # so it is deliberately NOT validated against our accounts. It is
+            # sent to SAP verbatim as BankCode. Uppercased here as well as in
+            # the UI so the stored value is consistent whatever the client.
+            if attrs.get('bank_name'):
+                attrs['bank_name'] = attrs['bank_name'].strip().upper()
             if not attrs.get('cheque_number'):
                 raise serializers.ValidationError(
                     {'cheque_number': 'Required for a cheque payment.'})
@@ -264,12 +301,22 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
         request = obj.approvals.order_by('-created_at').first()
         if not request:
             return None
+        # The last REJECT of the CURRENT round, so a creator opening a rejected
+        # entry sees why without hunting through the approval history. Scoped to
+        # the round: an older round's rejection was already acted on.
+        rejection = (request.actions
+                     .filter(action='REJECT', round_number=request.round_number)
+                     .order_by('-sequence').first())
         return {
             'id': request.id,
             'status': request.status,
             'current_level': request.current_level,
             'total_levels': request.total_levels,
             'level_label': request.level_label,
+            'round_number': request.round_number,
+            'rejection_reason': (rejection.remarks or '') if rejection else '',
+            'rejected_by': (rejection.approver_username or '') if rejection else '',
+            'rejected_at': rejection.acted_at if rejection else None,
         }
 
 
@@ -288,29 +335,57 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
                   'methods', 'allocations']
 
     def validate(self, attrs):
-        if attrs.get('received_from_type') == PaymentReceipt.ReceivedFromType.PERSON \
-                and not attrs.get('received_from_person'):
+        """Cross-field rules, for both a create and a partial update.
+
+        On a PATCH the payload carries only what changed, so every field is read
+        as "the incoming value, else the one already stored". Reading `attrs`
+        alone would treat an omitted `is_advance` as False and reject an edit
+        that never touched it.
+        """
+        instance = self.instance
+
+        def current(field, default=None):
+            if field in attrs:
+                return attrs[field]
+            if instance is not None:
+                return getattr(instance, field, default)
+            return default
+
+        if current('received_from_type') == PaymentReceipt.ReceivedFromType.PERSON \
+                and not current('received_from_person'):
             raise serializers.ValidationError({
                 'received_from_person':
                     'Required when the payment is received from a company person.'})
 
-        methods = attrs.get('methods') or []
+        # Children are replaced wholesale when sent, so an omitted key means
+        # "leave the stored rows alone" — validate against those instead.
+        if 'methods' in attrs:
+            methods = attrs['methods'] or []
+            total = sum((m['amount'] for m in methods), Decimal('0'))
+        else:
+            methods = list(instance.methods.all()) if instance else []
+            total = sum((m.amount for m in methods), Decimal('0'))
         if not methods:
             raise serializers.ValidationError(
                 {'methods': 'Add at least one payment method.'})
 
-        total = sum((m['amount'] for m in methods), Decimal('0'))
-        allocations = attrs.get('allocations') or []
-        allocated = sum((a['amount_applied'] for a in allocations), Decimal('0'))
+        if 'allocations' in attrs:
+            allocations = attrs['allocations'] or []
+            allocated = sum(
+                (a['amount_applied'] for a in allocations), Decimal('0'))
+        else:
+            allocations = list(instance.allocations.all()) if instance else []
+            allocated = sum((a.amount_applied for a in allocations), Decimal('0'))
 
         if allocated > total:
             raise serializers.ValidationError({
                 'allocations':
                     f'Allocated {allocated} exceeds the payment total {total}.'})
-        if not attrs.get('is_advance') and not allocations:
+        if not current('is_advance') and not allocations:
             raise serializers.ValidationError({
                 'allocations':
                     'Select at least one invoice, or mark this as an advance.'})
+
         return attrs
 
     @transaction.atomic
@@ -358,6 +433,58 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
                    reason='Receipt created.')
         return receipt
 
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        """Replace the receipt's editable content in one atomic write.
+
+        Children are REPLACED, not merged: the client sends the complete set it
+        wants, and diffing method rows by index would silently re-map a cheque's
+        details onto a cash line when the user deletes one in the middle. The
+        old rows go, the new ones land, and the totals are recomputed from them.
+
+        Deliberately NOT editable: `receipt_no` (issued once, quoted elsewhere),
+        `company` (it decides the SAP database and the party's identity — a
+        change there means a different document), `status`, and every SAP field.
+        """
+        methods = validated_data.pop('methods', None)
+        allocations = validated_data.pop('allocations', None)
+        user = self.context['request'].user
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+
+        if methods is not None:
+            instance.methods.all().delete()          # cascades denominations
+            for entry_data in methods:
+                denominations = entry_data.pop('denominations', [])
+                entry = PaymentMethodEntry.objects.create(
+                    receipt=instance, **entry_data)
+                if denominations:
+                    CashDenomination.objects.bulk_create([
+                        CashDenomination(entry=entry, **row)
+                        for row in denominations
+                    ])
+            instance.total_amount = sum(
+                (m['amount'] for m in methods), Decimal('0'))
+
+        if allocations is not None:
+            instance.allocations.all().delete()
+            if allocations:
+                PaymentAllocation.objects.bulk_create([
+                    PaymentAllocation(receipt=instance, **row)
+                    for row in allocations
+                ])
+            instance.allocated_amount = sum(
+                (a['amount_applied'] for a in allocations), Decimal('0'))
+
+        instance.save()
+
+        from .services import log_status
+        log_status(instance, from_status=instance.status,
+                   to_status=instance.status, user=user,
+                   reason='Receipt edited.')
+        return instance
+
 
 # ---------------------------------------------------------------------------
 # Deposit
@@ -377,7 +504,7 @@ class BankDepositSerializer(serializers.ModelSerializer):
     attachments = AttachmentSerializer(many=True, read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     bank_account_name = serializers.CharField(
-        source='bank_account.name', read_only=True)
+        source='bank_display_name', read_only=True)
     deposited_by_name = serializers.CharField(
         source='deposited_by.name', read_only=True, default='')
     shortfall = serializers.DecimalField(
@@ -394,7 +521,8 @@ class BankDepositSerializer(serializers.ModelSerializer):
         model = BankDeposit
         fields = ['id', 'deposit_no', 'company', 'deposit_date',
                   'deposited_by', 'deposited_by_name',
-                  'bank_account', 'bank_account_name', 'deposit_type',
+                  'bank_key', 'bank_code', 'bank_gl_account',
+                  'bank_account_name', 'deposit_type',
                   'collected_amount', 'deposit_amount', 'shortfall',
                   'shortfall_reason', 'bank_charge', 'currency',
                   'slip_number', 'remarks', 'status', 'status_display',
@@ -409,13 +537,99 @@ class BankDepositSerializer(serializers.ModelSerializer):
         request = obj.approvals.order_by('-created_at').first()
         if not request:
             return None
+        # The last REJECT of the CURRENT round, so a creator opening a rejected
+        # entry sees why without hunting through the approval history. Scoped to
+        # the round: an older round's rejection was already acted on.
+        rejection = (request.actions
+                     .filter(action='REJECT', round_number=request.round_number)
+                     .order_by('-sequence').first())
         return {
             'id': request.id,
             'status': request.status,
             'current_level': request.current_level,
             'total_levels': request.total_levels,
             'level_label': request.level_label,
+            'round_number': request.round_number,
+            'rejection_reason': (rejection.remarks or '') if rejection else '',
+            'rejected_by': (rejection.approver_username or '') if rejection else '',
+            'rejected_at': rejection.acted_at if rejection else None,
         }
+
+
+class PaymentMethodMappingSerializer(serializers.ModelSerializer):
+    """Admin CRUD for the method -> SAP account mapping.
+
+    The resolved SAP fields are read-only extras so the admin table can show
+    the bank, G/L and account number without a second request — and so a
+    mapping whose account has vanished from SAP shows up as invalid rather
+    than as a plausible-looking row.
+    """
+
+    resolved = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaymentMethodMapping
+        fields = ['id', 'company', 'payment_method', 'bank_key', 'priority',
+                  'is_active', 'resolved', 'created_at', 'updated_at']
+        # The partial unique constraint reports "must make a unique set",
+        # naming neither the method nor the row already holding it. validate()
+        # below owns the message; the DB still backs it up.
+        validators = []
+
+    def get_resolved(self, obj):
+        try:
+            found = bank_master.find_bank(obj.company, obj.bank_key)
+        except (bank_master.BankMasterUnavailable, DjangoValidationError):
+            return None
+        if not found:
+            return None
+        return {
+            'bank_code': found['bank_code'],
+            'bank_name': found['display_name'],
+            'gl_account': found['gl_account'],
+            'account_number': found['account_number'],
+            'branch': found['branch'],
+            'bank_key': found['key'],
+        }
+
+    def validate(self, attrs):
+        def current(field, default=None):
+            if field in attrs:
+                return attrs[field]
+            if self.instance is not None:
+                return getattr(self.instance, field, default)
+            return default
+
+        company = current('company')
+        method = current('payment_method')
+
+        if method == PaymentMethodEntry.Method.CASH:
+            raise serializers.ValidationError({'payment_method': (
+                'Cash does not use a house bank account. Set the cash G/L on '
+                'the company mapping instead.')})
+
+        if current('is_active', True) and company and method:
+            clash = PaymentMethodMapping.objects.filter(
+                company=company, payment_method=method, is_active=True)
+            if self.instance is not None:
+                clash = clash.exclude(pk=self.instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError({'payment_method': (
+                    f'{method} is already mapped for {company}. Edit that '
+                    f'mapping instead of adding a second one.')})
+
+        # A mapping that does not resolve would post to nothing, so it is
+        # refused at entry rather than discovered at posting time.
+        bank_key = current('bank_key')
+        if bank_key:
+            try:
+                bank_master.find_bank(company, bank_key)
+            except bank_master.BankMasterUnavailable as exc:
+                raise serializers.ValidationError({'bank_key': str(exc)}) from exc
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError(
+                    {'bank_key': exc.messages}) from exc
+        return attrs
 
 
 class BankDepositCreateSerializer(serializers.ModelSerializer):
@@ -427,7 +641,7 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = BankDeposit
         fields = ['id', 'company', 'deposit_date', 'deposited_by',
-                  'bank_account', 'deposit_type', 'deposit_amount',
+                  'bank_key', 'deposit_type', 'deposit_amount',
                   'shortfall_reason', 'bank_charge', 'currency',
                   'slip_number', 'remarks', 'receipt_ids']
 
@@ -458,6 +672,25 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'shortfall_reason':
                     'A reason is required when depositing less than collected.'})
+
+        # Resolve the chosen bank against SAP and snapshot it. The user picks
+        # a bank; the G/L is never typed. Verified here so a bank removed from
+        # SAP is caught at entry rather than at posting.
+        try:
+            bank = bank_master.find_bank(attrs['company'],
+                                         attrs.get('bank_key') or '')
+        except bank_master.BankMasterUnavailable as exc:
+            # A draft may still be saved; submit re-checks and blocks.
+            bank = None
+            if not self.partial:
+                logger.warning('deposit bank unverified: %s', exc)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({'bank_key': exc.messages}) from exc
+        if bank is not None:
+            attrs['bank_key'] = bank['key']
+            attrs['bank_code'] = bank['bank_code']
+            attrs['bank_gl_account'] = bank['gl_account']
+            attrs['bank_display_name'] = bank['label']
 
         attrs['_receipts'] = list(receipts)
         attrs['_collected'] = collected

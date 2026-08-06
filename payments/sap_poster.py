@@ -51,6 +51,23 @@ def _history(document, **kwargs):
         return None
 
 
+def _reopen_approval(document, reason):
+    """Return the approval to its final rung after SAP refused the document.
+
+    Wrapped defensively for the same reason as `_history`: the SAP outcome has
+    already been recorded on the document, and failing to reopen must not lose
+    that or raise into the caller. A warning is enough — the document is still
+    correctly in PENDING_ERROR either way.
+    """
+    from approvals.services import reopen_final_level
+
+    try:
+        return reopen_final_level(document, reason=reason)
+    except Exception:                                    # noqa: BLE001
+        logger.exception('Could not reopen the approval for %s', document.pk)
+        return None
+
+
 def _entity_for(document):
     return ('IncomingPayments' if isinstance(document, PaymentReceipt)
             else 'Deposits')
@@ -78,12 +95,72 @@ def _success_text(doc_entry, doc_num):
             f'DocNum : {doc_num}')
 
 
+# SAP's own messages are written for a consultant reading a trace, not for the
+# person who has to fix the document. "Posting period locked; specify an
+# alternative date" does not say WHICH date is wrong, or what to do about it.
+#
+# Each entry adds a plain-language explanation and the action that clears it.
+# SAP's exact words are ALWAYS kept underneath — support needs the original, and
+# a paraphrase that drifted from it would be worse than no paraphrase at all.
+SAP_ERROR_HELP = {
+    '-4013': (
+        'The accounting period for this payment date is closed in SAP.',
+        'Change the payment date to one inside an open period, then post again. '
+        'If the date is correct, ask your SAP team to open that period.',
+    ),
+    '-5002': (
+        'SAP rejected one of the accounts or amounts on this payment.',
+        'Check the GL account configured for each payment method, and that the '
+        'amount applied does not exceed the invoice balance.',
+    ),
+    '-1000': (
+        'SAP rejected a field on the document.',
+        'The message below names the field. This usually means a master-data '
+        'or configuration mismatch rather than anything wrong with the entry.',
+    ),
+    # -2028 is SAP's GENERIC "No matching records found". It does NOT mean the
+    # business partner is missing -- naming the BP here sent people hunting for
+    # a party that was present and active all along. The commonest cause by far
+    # is a CHEQUE line whose bank has no House Bank Account defined (Banking >
+    # Bank Statements and Reconciliations > House Bank Accounts): SAP cannot
+    # resolve where the cheque is deposited and reports no matching record.
+    '-2028': (
+        'SAP could not match one of the records on this payment.',
+        'If the payment includes a cheque, check that the bank has a House '
+        'Bank Account set up in this company (Administration > Setup > '
+        'Banking > House Bank Accounts). Otherwise check the party, the '
+        'invoice and the G/L accounts still exist and are active.',
+    ),
+    '240005': (
+        'The SAP user OMS posts with is not authorised to create payments.',
+        'Ask your SAP team to grant that user permission for incoming payments.',
+    ),
+}
+
+
 def _error_text(exc):
-    """SAP's own words, kept intact — this is what the UI shows."""
-    text = str(exc).strip()
-    if exc.sap_code:
-        text = f'{text}\n(SAP code {exc.sap_code})'
-    return text
+    """A message the person holding the document can act on.
+
+    Three parts, in the order they are useful:
+      1. what went wrong, in plain words
+      2. what to do about it
+      3. SAP's exact response, verbatim, for support and for the audit trail
+    """
+    raw = str(exc).strip()
+    code = str(exc.sap_code or '').strip()
+
+    help_text = SAP_ERROR_HELP.get(code)
+    if not help_text:
+        # Unknown code — SAP's words are all there is, so do not dress them up.
+        return f'{raw}\n\nSAP code: {code}' if code else raw
+
+    what, action = help_text
+    return (
+        f'{what}\n\n'
+        f'What to do: {action}\n\n'
+        f'SAP said: {raw}'
+        + (f'\nSAP code: {code}' if code else '')
+    )
 
 
 def already_posted(document):
@@ -165,6 +242,14 @@ def post_document(document, payload, *, user=None):
             else:
                 _history(fresh, action='POST_FAILED', status='FAILED',
                          response=message, user=user)
+                # SAP ANSWERED "no", so nothing was committed there and the
+                # final approval did not really stand. Put it back in front of
+                # the last approver, who is the one who can correct and retry.
+                #
+                # Only for a clean rejection — an ambiguous timeout must NOT
+                # reopen anything, because the document may exist in SAP and a
+                # second approval could post it twice.
+                _reopen_approval(fresh, message)
 
         log.status = SapCallLog.Status.FAILED
         log.http_status = exc.status_code

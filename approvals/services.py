@@ -485,3 +485,100 @@ def actionable_request_ids(user):
     filters and simply exclude pending rows that belong to another level.
     """
     return set(inbox_for(user).values_list('id', flat=True))
+
+
+@transaction.atomic
+def reopen_final_level(document, *, reason=''):
+    """Send a document's approval back to its LAST rung after a failed post.
+
+    The final approver's decision only truly stands once the document reaches
+    SAP. If SAP rejects it, leaving the request APPROVED would tell that
+    approver their work is done while the money is nowhere — and the entry would
+    sit in their "Approved" list rather than their queue, so nobody would chase
+    it.
+
+    Reopening puts it back in front of the one person who can retry, and drops
+    the final APPROVE action so `approved_by_me` does not claim an approval that
+    did not hold. Earlier rungs keep their approvals: those levels DID pass, and
+    re-walking the whole ladder for a SAP outage would be busywork.
+
+    Returns the reopened request, or None when there is nothing to reopen.
+    """
+    content_type = ContentType.objects.get_for_model(document.__class__)
+    request = (ApprovalRequest.objects.select_for_update()
+               .filter(content_type=content_type, object_id=document.pk)
+               .order_by('-created_at').first())
+    if request is None or request.status != ApprovalRequest.Status.APPROVED:
+        return None
+
+    final_level = request.total_levels or request.current_level
+
+    # Remove the final rung's APPROVE so the level reads as undecided again.
+    # Rejections are never touched — they are a different outcome entirely.
+    (ApprovalAction.objects
+     .filter(request=request, level=final_level,
+             round_number=request.round_number,
+             action=ApprovalAction.Action.APPROVE)
+     .delete())
+
+    request.status = ApprovalRequest.Status.PENDING
+    request.current_level = final_level
+    request.level_entered_at = timezone.now()
+    request.decided_at = None
+    request.save(update_fields=['status', 'current_level', 'level_entered_at',
+                                'decided_at', 'updated_at'])
+    logger.warning('Approval %s reopened at level %s: %s',
+                   request.pk, final_level, reason or 'SAP posting failed')
+    return request
+
+
+def document_ids_for_view(user, view, document_type, model):
+    """Document ids behind an APPROVER-RELATIVE tracking filter.
+
+    The tracking screen's filters are about THIS approver, not about the
+    document in the abstract:
+
+        awaiting_me  the request is pending AND stopped at a rung this user
+                     may act on right now — not merely "pending somewhere"
+        approved_by_me   this user personally recorded an APPROVE
+        rejected_by_me   this user personally recorded a REJECT
+
+    Document status cannot express any of those: two receipts both reading
+    PENDING_APPROVAL differ only in which rung they are sitting at, and that
+    lives on the approval request, not the receipt.
+
+    Returns a set of `object_id`s for `model`, or None when the view is not
+    approver-relative (the caller then applies a plain status filter).
+    """
+    content_type = ContentType.objects.get_for_model(model)
+    base = ApprovalRequest.objects.filter(
+        content_type=content_type,
+        workflow__document_type=document_type,
+    )
+
+    if view == 'mine':
+        # Everything THIS approver has a stake in: awaiting them now, or
+        # already decided by them. Deliberately NOT every request in the
+        # company — a rung-2 approver has no business seeing a document still
+        # sitting at rung 1, and showing it there was the bug this replaces.
+        ids = base.filter(
+            Q(id__in=actionable_request_ids(user))
+            | Q(actions__approver=user,
+                actions__action__in=[ApprovalAction.Action.APPROVE,
+                                     ApprovalAction.Action.REJECT])
+        )
+    elif view == 'awaiting_me':
+        ids = base.filter(id__in=actionable_request_ids(user))
+    elif view == 'approved_by_me':
+        # The action log is the only record of WHO decided. Filtering on the
+        # request's current level instead would miss a rung this user cleared
+        # before the document moved on.
+        ids = base.filter(actions__approver=user,
+                          actions__action=ApprovalAction.Action.APPROVE)
+    elif view == 'rejected_by_me':
+        ids = base.filter(actions__approver=user,
+                          actions__action=ApprovalAction.Action.REJECT)
+    else:
+        return None
+
+    return set(ids.values_list('object_id', flat=True).distinct())
