@@ -15,6 +15,7 @@ from rest_framework import status as http_status
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from approvals import services as approval_services
@@ -35,15 +36,15 @@ from .permissions import (
     ACTION_PERMISSION_LABELS,
     CanCreateDeposit,
     CanCreatePayment,
+    CanViewPaymentsDashboard,
     ReadOrCreateDeposit,
     ReadOrCreatePayment,
     granted_keys,
 )
-from . import analytics, bank_master, hana_queries
+from . import analytics, analytics_person, bank_master, hana_queries
 from .models import (
     BankDeposit,
     CollectionPerson,
-    PaymentMethodEntry,
     PaymentMethodEntry,
     PaymentMethodMapping,
     PaymentReceipt,
@@ -104,6 +105,37 @@ class CompanyListView(APIView):
         return ok(SapCompanyMapSerializer(rows, many=True).data)
 
 
+def _int(value, default):
+    """Query param -> int, falling back rather than 500-ing on rubbish."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _dashboard_window(params):
+    """(preset, date_from, date_to), or a 400 Response if the range is unusable.
+
+    Shared by all three analytics endpoints so a custom range means the same
+    thing on each — three copies of this would be three chances for the table to
+    cover a different window than the chart above it.
+    """
+    preset = (params.get('preset') or analytics.DEFAULT_PRESET).strip().lower()
+    if preset != 'custom':
+        return preset, None, None
+
+    date_from = parse_date(params.get('date_from') or '')
+    date_to = parse_date(params.get('date_to') or '')
+    if not date_from or not date_to:
+        return fail('A custom range needs both date_from and date_to '
+                    'as YYYY-MM-DD.')
+    if date_from > date_to:
+        # Swapped rather than rejected: the intent is unambiguous, and a date
+        # picker can easily produce this order.
+        date_from, date_to = date_to, date_from
+    return preset, date_from, date_to
+
+
 class PaymentDashboardView(APIView):
     """Every figure on the Payments Dashboard, in one response.
 
@@ -113,35 +145,94 @@ class PaymentDashboardView(APIView):
     donut beside them — and a dashboard that contradicts itself gets distrusted
     for the numbers it gets right.
 
-    `[IsAuthenticated]` matches every other read endpoint here: reads are not
-    narrowed per user (see `_receipt_queryset`), because an approver must be
-    able to see the totals they are approving against.
+    Unlike the operational endpoints, this one requires an explicit grant:
+    it aggregates EVERY receipt and deposit in the company, which is a wider
+    view than a collector has of their own work. Hiding the menu entry is a
+    usability affordance; this permission class is the boundary.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, CanViewPaymentsDashboard]
 
     def get(self, request):
         params = request.query_params
-        preset = (params.get('preset') or 'today').strip().lower()
-
-        date_from = date_to = None
-        if preset == 'custom':
-            date_from = parse_date(params.get('date_from') or '')
-            date_to = parse_date(params.get('date_to') or '')
-            if not date_from or not date_to:
-                return fail('A custom range needs both date_from and date_to '
-                            'as YYYY-MM-DD.')
-            if date_from > date_to:
-                # Swapped rather than rejected: the intent is unambiguous, and
-                # a date picker can easily produce this order.
-                date_from, date_to = date_to, date_from
+        window = _dashboard_window(params)
+        if isinstance(window, Response):
+            return window
+        preset, date_from, date_to = window
 
         return ok(analytics.dashboard(
             company=params.get('company') or '',
             preset=preset,
             date_from=date_from,
             date_to=date_to,
+            search=params.get('search') or '',
+            sort=params.get('sort') or 'total',
+            direction=params.get('direction') or 'desc',
+            page=_int(params.get('page'), 1),
+            page_size=_int(params.get('page_size'), 25),
         ))
+
+
+class CollectionPerformanceView(APIView):
+    """Just the participants table — for paging, searching and sorting.
+
+    The dashboard endpoint already returns page 1, so the first paint needs no
+    second call. This exists so that turning a page or typing in the search box
+    does not re-run the KPI and chart aggregations that have not changed.
+    """
+
+    permission_classes = [IsAuthenticated, CanViewPaymentsDashboard]
+
+    def get(self, request):
+        params = request.query_params
+        window = _dashboard_window(params)
+        if isinstance(window, Response):
+            return window
+        preset, date_from, date_to = window
+
+        start, end = analytics.resolve_range(preset, date_from, date_to)
+        return ok(analytics.collection_performance(
+            (params.get('company') or '').strip().upper(), start, end,
+            search=params.get('search') or '',
+            sort=params.get('sort') or 'total',
+            direction=params.get('direction') or 'desc',
+            page=_int(params.get('page'), 1),
+            page_size=_int(params.get('page_size'), 25),
+        ))
+
+
+class PersonAnalyticsView(APIView):
+    """One participant's collection history.
+
+    `kind` is part of the path because a CollectionPerson and a User can share
+    an id and be different people — see analytics_person for why the two
+    identity spaces are deliberately not merged.
+    """
+
+    permission_classes = [IsAuthenticated, CanViewPaymentsDashboard]
+
+    def get(self, request, kind, pk):
+        if kind not in ('person', 'user'):
+            return fail('Unknown participant type.',
+                        status=http_status.HTTP_404_NOT_FOUND)
+
+        params = request.query_params
+        window = _dashboard_window(params)
+        if isinstance(window, Response):
+            return window
+        preset, date_from, date_to = window
+
+        data = analytics_person.person_detail(
+            kind, pk,
+            company=params.get('company') or '',
+            preset=preset,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if data is None:
+            return fail('That person no longer exists.',
+                        status=http_status.HTTP_404_NOT_FOUND)
+        return ok(data)
 
 
 class PartyListView(APIView):

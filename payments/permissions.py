@@ -29,11 +29,19 @@ PAYMENTS_APPROVE = 'Payments_Approve'
 DEPOSIT_CREATE = 'Deposit_Create'
 DEPOSIT_APPROVE = 'Deposit_Approve'
 
+# Read-only access to the analytics dashboard — every receipt and deposit in the
+# company, in aggregate. Deliberately SEPARATE from the four action keys above:
+# the people who record and approve payments are not automatically the people
+# who should see company-wide collection totals, and a manager who should see
+# the totals has no business raising a receipt. Neither implies the other.
+PAYMENTS_DASHBOARD = 'Payments_Dashboard'
+
 ACTION_PERMISSION_KEYS = [
     PAYMENTS_CREATE,
     PAYMENTS_APPROVE,
     DEPOSIT_CREATE,
     DEPOSIT_APPROVE,
+    PAYMENTS_DASHBOARD,
 ]
 
 # Human labels, surfaced by the /api/payments/my-permissions/ endpoint so the
@@ -43,6 +51,7 @@ ACTION_PERMISSION_LABELS = {
     PAYMENTS_APPROVE: 'Payments — Approve',
     DEPOSIT_CREATE: 'Deposit — Create',
     DEPOSIT_APPROVE: 'Deposit — Approve',
+    PAYMENTS_DASHBOARD: 'Payments Dashboard',
 }
 
 
@@ -84,6 +93,9 @@ ROLE_PERMISSION_MAP = {
     'payments_deposit_creator': {PAYMENTS_CREATE, DEPOSIT_CREATE},
     'payments_deposit_approver': {PAYMENTS_APPROVE, DEPOSIT_APPROVE},
 }
+# PAYMENTS_DASHBOARD appears in none of these on purpose. Company-wide
+# collection totals are a different kind of access from doing the work, so it is
+# only ever granted per user by ticking the box.
 
 
 def granted_keys(user):
@@ -147,6 +159,19 @@ class CanCreateDeposit(_KeyPermission):
 class CanApproveDeposit(_KeyPermission):
     key = DEPOSIT_APPROVE
     message = 'You do not have permission to approve bank deposits.'
+
+
+class CanViewPaymentsDashboard(_KeyPermission):
+    """Guards every analytics endpoint.
+
+    The dashboard aggregates across EVERY receipt and deposit in the company,
+    which is more than any individual collector sees in the operational screens.
+    Hiding the menu entry is not sufficient — the endpoints answer to anyone who
+    knows the URL unless the check is here.
+    """
+
+    key = PAYMENTS_DASHBOARD
+    message = 'You do not have permission to view the payments dashboard.'
 
 
 class ReadOrCreatePayment(BasePermission):
