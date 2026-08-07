@@ -141,14 +141,32 @@ def build_deposit(deposit, *, bpl_id=None):
     only known once the underlying receipt has posted. The worker refuses to
     build a cheque deposit whose lines lack it.
     """
-    type_map = {'CASH': 'dt_Cash', 'CHEQUE': 'dt_Check', 'MIXED': 'dt_Check'}
+    # BoDepositTypeEnum has NO underscore and spells cheques 'dtChecks'. SAP
+    # itself listed the valid names when it rejected 'dt_Cash':
+    #   dtChecks (K) · dtCredit (V) · dtCash (C) · dtBOE (B)
+    type_map = {'CASH': 'dtCash', 'CHEQUE': 'dtChecks', 'MIXED': 'dtChecks'}
     payload = {
         'DepositType': type_map.get(deposit.deposit_type, 'dt_Cash'),
         'DepositDate': _iso(deposit.deposit_date),
-        'BankAccount': deposit.bank_gl_account,
+        # SAP calls this DepositAccount on the Deposit entity — NOT
+        # BankAccount, which is what an IncomingPayment uses. Sending the
+        # wrong name returns "Property 'BankAccount' of 'Deposit' is invalid".
+        # Verified against the Service Layer's own $metadata.
+        'DepositAccount': deposit.bank_gl_account,
+        # The "fund" the money comes OUT of. SAP refuses the document without
+        # it ("Allocation (fund) account is missing"). For a cash deposit the
+        # money is already sitting in the account the receipts posted to, so
+        # the same G/L serves as both source and destination.
+        'AllocationAccount': deposit.bank_gl_account,
         'DepositCurrency': deposit.currency or 'INR',
-        'BankChargeAmount': money(deposit.bank_charge),
-        'Remarks': (deposit.remarks or f'OMS {deposit.deposit_no}')[:254],
+        # A Deposit names these differently from an IncomingPayment. Verified
+        # against the Service Layer's own $metadata after SAP rejected
+        # 'BankChargeAmount' and 'Remarks' by name:
+        #     bank charge -> Commission
+        #     remarks     -> JournalRemarks
+        'Commission': money(deposit.bank_charge),
+        'JournalRemarks': (
+            deposit.remarks or f'OMS {deposit.deposit_no}')[:254],
     }
     if bpl_id is not None:
         payload['BPLID'] = bpl_id
@@ -162,7 +180,10 @@ def build_deposit(deposit, *, bpl_id=None):
         if entry.method == 'CHEQUE' and entry.sap_check_key
     ]
     if check_keys:
-        payload['DepositChecks'] = check_keys
+        # SAP calls this collection CheckLines, of complex type CheckLine —
+        # NOT 'DepositChecks', which does not exist on the Deposit entity.
+        # Verified against the Service Layer's $metadata.
+        payload['CheckLines'] = check_keys
     else:
         payload['TotalLC'] = money(deposit.deposit_amount)
 

@@ -27,57 +27,82 @@ logger = logging.getLogger(__name__)
 
 
 def log_status(document, *, to_status, from_status='', user=None,
-               actor_kind='USER', reason='', ip=None):
-    """Append a lifecycle row. Never updated after insert."""
+               actor_kind='USER', reason='', ip=None,
+               action=None, level=None, level_label='',
+               sap_doc_entry=None, sap_doc_num=None):
+    """Append one row to the activity timeline. Never updated after insert.
+
+    THE single history call for the payments module — approvals, edits and SAP
+    attempts all land here, so one query renders the whole timeline.
+
+    `action` says WHAT happened; the status pair says what it changed. When no
+    action is given it falls back to STATUS_CHANGED, which keeps older callers
+    working without claiming an event they did not record.
+    """
     return PaymentStatusHistory.objects.create(
         content_type=ContentType.objects.get_for_model(document.__class__),
         object_id=document.pk,
+        action=action or PaymentStatusHistory.Action.STATUS_CHANGED,
         from_status=from_status or '',
         to_status=to_status,
         reason=reason or '',
         actor_kind=actor_kind,
+        level=level,
+        level_label=level_label or '',
+        sap_doc_entry=sap_doc_entry,
+        sap_doc_num=sap_doc_num,
         changed_by=user,
         changed_by_username=getattr(user, 'username', '') or '',
         ip_address=ip,
     )
 
 
-def record_sap_history(receipt, *, action, status, response='',
+# The old SapPostingHistory.Action values, mapped onto the single timeline.
+# Kept as an explicit map so the call sites in sap_poster.py — which are SAP
+# posting logic and are deliberately left untouched — keep passing the strings
+# they always have.
+_SAP_ACTIONS = {
+    'POST_STARTED': PaymentStatusHistory.Action.SAP_POST_STARTED,
+    'POST_SUCCESS': PaymentStatusHistory.Action.SAP_POSTED,
+    'POST_FAILED': PaymentStatusHistory.Action.SAP_FAILED,
+    'POST_TIMEOUT': PaymentStatusHistory.Action.SAP_UNKNOWN,
+    'MANUAL_RECOVERY': PaymentStatusHistory.Action.SAP_POSTED,
+    'RESUBMITTED': PaymentStatusHistory.Action.RESUBMITTED,
+}
+
+
+def record_sap_history(document, *, action, status, response='',
                        doc_entry=None, doc_num=None, user=None,
                        attempt_number=None):
-    """Append one SAP posting-history row. Never updates an existing one.
+    """Append one SAP posting event to the activity timeline.
 
-    `attempt_number` is derived rather than passed in by default: POST_STARTED
-    opens a new attempt and every other action belongs to the attempt already in
-    progress. Deriving it in one place keeps the numbering consistent no matter
-    which code path logs the event.
+    Formerly wrote its own `payment_sap_posting_history` row. That table is
+    gone: `payment_status_history` is now the single audit trail, and it carries
+    the SAP DocEntry/DocNum columns this needs. The signature is unchanged so
+    every call site in `sap_poster.py` — SAP posting logic, deliberately not
+    modified — keeps working as-is.
 
-    RESUBMITTED deliberately does NOT open an attempt. It is recorded at submit
-    time, and the POST_STARTED that follows final approval is the attempt it
-    leads to — numbering it separately would split one retry across two attempt
-    numbers and make the timeline read as though a post had been skipped.
+    Two things improve as a side effect. Deposits are recorded too (the old
+    table had a FK to PaymentReceipt, so deposit posts were silently dropped),
+    and a SAP attempt now interleaves with the approval decisions that led to
+    it in one ordered list instead of sitting in a separate table.
+
+    `attempt_number` is accepted and ignored: attempts were only ever a way to
+    group rows in a table of nothing but SAP events. In a timeline the ordering
+    is the grouping — a SAP_POST_STARTED opens the attempt that the next
+    terminal SAP row closes.
     """
-    from .models import SapPostingHistory
-
-    if attempt_number is None:
-        last = (SapPostingHistory.objects
-                .filter(payment=receipt)
-                .order_by('-attempt_number')
-                .values_list('attempt_number', flat=True)
-                .first()) or 0
-        opens = action == SapPostingHistory.Action.POST_STARTED
-        attempt_number = last + 1 if opens else max(last, 1)
-
-    return SapPostingHistory.objects.create(
-        payment=receipt,
-        attempt_number=attempt_number,
-        action=action,
-        status=status,
-        sap_response=(response or '')[:4000],
+    return log_status(
+        document,
+        to_status=getattr(document, 'status', '') or '',
+        from_status='',
+        user=user,
+        actor_kind='SAP',
+        reason=(response or '')[:4000],
+        action=_SAP_ACTIONS.get(action,
+                                PaymentStatusHistory.Action.STATUS_CHANGED),
         sap_doc_entry=doc_entry,
         sap_doc_num=doc_num,
-        created_by=user,
-        created_by_username=getattr(user, 'username', '') or '',
     )
 
 
@@ -99,15 +124,115 @@ def _company_mapping(company):
     return mapping
 
 
-def resolve_bpl_id(company):
-    """SAP branch for a company, or None when not configured.
+def resolve_bpl_id(company, receipt=None):
+    """The SAP branch a payment must post to.
 
-    SAP rejects a document with "Specify an active branch" on multi-branch
-    setups, so this must be sent when the company has one. Returning None (not
-    0 or '') matters: an empty BPLID is itself invalid, so the payload builder
-    omits the key entirely.
+    SAP refuses a payment whose branch differs from the invoice being paid —
+    "Ensure selected branch is the same as the branch of documents to be paid"
+    — so the branch is a property of the INVOICE, never a fixed setting. This
+    company spreads open invoices across DELHI, FACTORY and PUNJAB, so a single
+    default could only ever serve one of them.
+
+    Resolution order:
+      1. the branch on the SAP invoice being settled (the authority)
+      2. `branches` (sap_sync.Branch) when the invoice names a branch but not
+         its id — the mapping table already mirrored from SAP per company
+      3. SapCompanyMap.default_bpl_id, ONLY for an advance, which settles no
+         invoice and so has no branch to inherit
+
+    Raises ValidationError rather than guessing when invoices disagree, when a
+    branch cannot be mapped, or when SAP cannot be reached: posting to the
+    wrong ledger is worse than not posting.
     """
-    return _company_mapping(company).default_bpl_id
+    if receipt is None:
+        return _company_mapping(company).default_bpl_id
+
+    doc_entries = [a.sap_doc_entry for a in receipt.allocations.all()
+                   if a.sap_doc_entry]
+    if not doc_entries:
+        # An advance settles no invoice, so there is nothing to inherit from:
+        # the user says which branch it belongs to.
+        chosen = getattr(receipt, 'sap_branch_id', None)
+        if chosen:
+            logger.info('BPL resolve %s: advance | branch %s | BPLID %s | '
+                        'source: user selection', receipt.receipt_no,
+                        receipt.sap_branch_name or '(unnamed)', chosen)
+            return chosen
+        # Legacy rows only — raised before this field existed. A new advance
+        # cannot be submitted without a branch (see validate_receipt).
+        bpl = _company_mapping(company).default_bpl_id
+        logger.info('BPL resolve %s: advance, no branch selected -> BPLID %s '
+                    '(source: company default, legacy)',
+                    receipt.receipt_no, bpl)
+        return bpl
+
+    try:
+        rows = hana_queries.fetch_invoice_branches(
+            company=company, doc_entries=doc_entries)
+    except Exception as exc:                              # noqa: BLE001
+        raise ValidationError(
+            'Could not read the invoice branch from SAP, so this payment '
+            'cannot be posted to the correct branch. Try again shortly.'
+        ) from exc
+
+    found = {r['doc_entry'] for r in rows}
+    missing = [d for d in doc_entries if d not in found]
+    if missing:
+        raise ValidationError(
+            'Invoice %s no longer exists in SAP.'
+            % ', '.join(str(d) for d in missing))
+
+    closed = [r for r in rows
+              if r['doc_status'] != 'O' or r['cancelled'] == 'Y']
+    if closed:
+        raise ValidationError(
+            'Invoice %s is closed or cancelled in SAP and cannot be paid.'
+            % ', '.join(str(r['doc_num'] or r['doc_entry']) for r in closed))
+
+    branches = {}
+    for row in rows:
+        bpl = row['bpl_id']
+        if bpl is None:
+            # Only a name — resolve it through the mapping table.
+            bpl = _branch_id_from_name(company, row['bpl_name'])
+            row['_source'] = 'branches (by name)'
+        else:
+            row['_source'] = 'SAP invoice'
+        branches.setdefault(bpl, []).append(row)
+
+    if len(branches) > 1:
+        names = ', '.join(sorted(
+            {f"{r['bpl_name'] or r['bpl_id']}" for r in rows}))
+        raise ValidationError(
+            f'Selected invoices belong to multiple SAP branches ({names}). '
+            f'Please create separate receipts.')
+
+    bpl_id, matched = next(iter(branches.items()))
+    sample = matched[0]
+    logger.info(
+        'BPL resolve %s: invoices %s | branch %s | BPLID %s | source: %s',
+        receipt.receipt_no,
+        ', '.join(str(r['doc_num'] or r['doc_entry']) for r in matched),
+        sample['bpl_name'] or '(unnamed)', bpl_id, sample['_source'])
+    return bpl_id
+
+
+def _branch_id_from_name(company, name):
+    """Branch name -> BPLId via the `branches` table mirrored from SAP."""
+    from sap_sync.models import Branch
+
+    cleaned = (name or '').strip()
+    if not cleaned:
+        raise ValidationError(
+            'The invoice does not name a SAP branch, so the payment branch '
+            'cannot be determined.')
+    row = (Branch.objects
+           .filter(category=company, bpl_name__iexact=cleaned, is_active=True)
+           .first())
+    if row is None:
+        raise ValidationError(
+            f"No SAP Branch mapping exists for branch '{cleaned}'.")
+    return row.bpl_id
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +274,13 @@ def validate_receipt(receipt):
     if not receipt.is_advance and not allocated:
         raise ValidationError(
             'Select at least one invoice, or mark the receipt as an advance.')
+
+    # An advance inherits no branch from an invoice, so one must be chosen.
+    # Enforced at submit rather than only in the form: the API is reachable
+    # without it, and a missing branch is only discovered by SAP otherwise.
+    if receipt.is_advance and not allocated and not receipt.sap_branch_id:
+        raise ValidationError(
+            'Select the SAP branch this advance belongs to.')
 
     _validate_gl_accounts(receipt.company, {m.method for m in methods})
     return True
@@ -236,12 +368,10 @@ def submit_receipt(receipt, user, ctx=None):
     # first submission has not involved SAP at all, and logging it there would
     # imply an attempt that never happened.
     if previous == PaymentReceipt.Status.PENDING_ERROR:
-        from .models import SapPostingHistory
-
         record_sap_history(
             receipt,
-            action=SapPostingHistory.Action.RESUBMITTED,
-            status=SapPostingHistory.Status.POSTING,
+            action='RESUBMITTED',
+            status='POSTING',
             response='Payment resubmitted after correction.',
             user=user,
         )
@@ -302,7 +432,7 @@ def post_receipt_to_sap(receipt, user=None):
     payload = build_incoming_payment(
         receipt,
         bank_accounts=_bank_accounts_for(receipt.company, receipt),
-        bpl_id=resolve_bpl_id(receipt.company),
+        bpl_id=resolve_bpl_id(receipt.company, receipt),
     )
     return post_document(receipt, payload, user=user)
 
@@ -326,15 +456,16 @@ def validate_deposit(deposit):
     if deposit.deposit_amount < collected and not deposit.shortfall_reason.strip():
         raise ValidationError('A reason is required when depositing less than collected.')
 
-    # The deposit posts to THIS account's GL (sap_payloads.build_deposit reads
-    # it directly), so a blank one means SAP rejects the document after it has
-    # already been approved.
-    account = deposit.bank_account
-    if account and not (account.sap_gl_account or '').strip():
+    # The deposit posts to THIS account's G/L (sap_payloads.build_deposit reads
+    # bank_gl_account directly), so a blank one means SAP rejects the document
+    # after it has already been approved.
+    #
+    # Reads the snapshot columns, not a FK: the bank master was removed and SAP
+    # now owns the accounts, so the deposit carries its own copy.
+    if not (deposit.bank_gl_account or '').strip():
         raise ValidationError(
-            f'The bank account "{account.name}" has no SAP GL account. '
-            f'Ask an administrator to set one under Approval Management > '
-            f'Masters > Bank accounts before depositing to it.')
+            'This deposit has no SAP G/L account. Select the bank it was paid '
+            'into before submitting.')
     return True
 
 

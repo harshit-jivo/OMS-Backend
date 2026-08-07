@@ -20,7 +20,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 import logging
 
-from . import bank_master
+from . import bank_master, hana_queries
 from . import services as payment_services
 from .models import (
     BankDeposit,
@@ -33,7 +33,6 @@ from .models import (
     PaymentReceipt,
     PaymentStatusHistory,
     SapCompanyMap,
-    SapPostingHistory,
 )
 
 
@@ -82,8 +81,7 @@ class CollectionPersonSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CollectionPerson
-        fields = ['id', 'name', 'code', 'company', 'phone', 'sap_slp_code',
-                  'is_active']
+        fields = ['id', 'name', 'code', 'company', 'phone', 'is_active']
 
     def validate_code(self, value):
         value = (value or '').strip().upper()
@@ -244,22 +242,6 @@ class PaymentStatusHistorySerializer(serializers.ModelSerializer):
                   'changed_by_username', 'created_at']
 
 
-class SapPostingHistorySerializer(serializers.ModelSerializer):
-    """Read-only. Every field is read_only so the API cannot rewrite history."""
-
-    action_display = serializers.CharField(
-        source='get_action_display', read_only=True)
-    status_display = serializers.CharField(
-        source='get_status_display', read_only=True)
-
-    class Meta:
-        model = SapPostingHistory
-        fields = ['id', 'attempt_number', 'action', 'action_display',
-                  'status', 'status_display', 'sap_doc_entry', 'sap_doc_num',
-                  'sap_response', 'sap_raw_error', 'sap_raw_error_code', 'created_by_username', 'created_at']
-        read_only_fields = fields
-
-
 # ---------------------------------------------------------------------------
 # Receipt
 # ---------------------------------------------------------------------------
@@ -276,6 +258,10 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
     unallocated_amount = serializers.DecimalField(
         max_digits=15, decimal_places=2, read_only=True)
     approval = serializers.SerializerMethodField()
+    # The branch this receipt WILL post to, and where that came from, so the
+    # UI can show it before posting and label it correctly: an invoice payment
+    # inherits it and must not be editable, an advance is the user's choice.
+    sap_branch = serializers.SerializerMethodField()
     # Who raised this entry. Stored since day one but never exposed, so no
     # client could show it — the list and detail screens both need it.
     created_by_name = serializers.CharField(
@@ -291,11 +277,50 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
                   'unallocated_amount', 'currency', 'remarks',
                   'status', 'status_display',
                   'sap_doc_entry', 'sap_doc_num', 'sap_posted_at',
+                  'sap_branch_id', 'sap_branch_name', 'sap_branch',
                   'sap_response', 'sap_raw_error', 'sap_raw_error_code',
                   'methods', 'allocations', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
                   'created_at', 'updated_at']
         read_only_fields = fields
+
+    def get_sap_branch(self, obj):
+        """{'bpl_id', 'name', 'source', 'editable'} — never raises.
+
+        Read paths must keep working when SAP is unreachable, so a failure
+        here degrades to "unknown" rather than breaking the whole response.
+        """
+        allocations = list(obj.allocations.all())
+        if allocations:
+            try:
+                rows = hana_queries.fetch_invoice_branches(
+                    company=obj.company,
+                    doc_entries=[a.sap_doc_entry for a in allocations
+                                 if a.sap_doc_entry])
+            except Exception as exc:                    # noqa: BLE001
+                # SAP being unreachable must not break reading a payment, but
+                # a coding error here would otherwise hide silently — which is
+                # exactly what a bare `rows = []` did during development.
+                logger.warning('sap_branch lookup failed for receipt %s: %s',
+                               obj.pk, exc)
+                rows = []
+            names = {r['bpl_name'] for r in rows if r['bpl_name']}
+            ids = {r['bpl_id'] for r in rows if r['bpl_id'] is not None}
+            return {
+                'bpl_id': next(iter(ids)) if len(ids) == 1 else None,
+                'name': next(iter(names)) if len(names) == 1 else '',
+                # Named so the UI can render "DELHI (Auto from Invoice)".
+                'source': 'invoice',
+                'editable': False,
+                'conflict': len(ids) > 1,
+            }
+        return {
+            'bpl_id': obj.sap_branch_id,
+            'name': obj.sap_branch_name,
+            'source': 'user' if obj.sap_branch_id else 'none',
+            'editable': True,
+            'conflict': False,
+        }
 
     def get_approval(self, obj):
         request = obj.approvals.order_by('-created_at').first()
@@ -332,6 +357,7 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         fields = ['id', 'company', 'card_code', 'card_name',
                   'received_from_type', 'received_from_person',
                   'payment_date', 'is_advance', 'currency', 'remarks',
+                  'sap_branch_id',
                   'methods', 'allocations']
 
     def validate(self, attrs):
@@ -386,7 +412,39 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
                 'allocations':
                     'Select at least one invoice, or mark this as an advance.'})
 
+        self._validate_branch(attrs, current, allocations)
         return attrs
+
+    @staticmethod
+    def _validate_branch(attrs, current, allocations):
+        """A branch may be chosen ONLY when there is no invoice to inherit one.
+
+        An invoice payment must use the invoice's branch — SAP rejects any
+        other — so accepting a user's branch there would store a value that is
+        either ignored or wrong. Refusing it is clearer than both.
+        """
+        from sap_sync.models import Branch
+
+        branch_id = attrs.get('sap_branch_id')
+        if branch_id in (None, ''):
+            return
+
+        if allocations:
+            raise serializers.ValidationError({'sap_branch_id': (
+                'The branch of an invoice payment comes from the invoice and '
+                'cannot be set here.')})
+
+        company = current('company')
+        row = (Branch.objects
+               .filter(category=company, bpl_id=branch_id, is_active=True)
+               .first())
+        if row is None:
+            raise serializers.ValidationError({'sap_branch_id': (
+                f'Branch {branch_id} is not a valid SAP branch for '
+                f'{company}.')})
+        # Snapshot the name, so a receipt stays readable if the branch is
+        # later renamed or deactivated in SAP.
+        attrs['sap_branch_name'] = row.bpl_name
 
     @transaction.atomic
     def create(self, validated_data):

@@ -63,13 +63,22 @@ def _fire(event, request):
 # Approver resolution
 # ---------------------------------------------------------------------------
 
-def eligible_approver_ids(level, company=''):
+def eligible_approver_ids(level, company='', document_type=''):
     """Users who may act at `level`.
 
-    Named approvers NARROW the level; the role is only a fallback:
+    Three sources, most specific first:
 
       * named approvers exist -> ONLY those users
-      * no named approvers    -> anyone holding the level's role
+      * a role is set         -> anyone holding that role
+      * NEITHER               -> anyone with the module's approve GRANT
+                                 (Payments_Approve / Deposit_Approve)
+
+    That last fallback is what lets a level be configured by PAGE PERMISSION
+    instead of by role. A role forces one person per job — a user who approves
+    both payments and deposits needs two accounts and has to log out to switch.
+    A grant does not: one user can hold Payments_Approve and Deposit_Approve at
+    once, so leaving a level's role blank makes it "whoever is authorised for
+    this document type".
 
     That ordering is what makes a multi-level ladder work. Two levels commonly
     share one role (both rungs are "payment_approver"), so unioning role holders
@@ -92,7 +101,12 @@ def eligible_approver_ids(level, company=''):
         return named
 
     if not level.role_id:
-        return set()
+        # No role and nobody named: fall back to the module grant. Resolved
+        # here rather than by the caller so every path — the API, can_act, and
+        # the flag the UI reads — agrees on who may act.
+        doc_type = document_type or getattr(
+            getattr(level, 'workflow', None), 'document_type', '')
+        return _grant_holder_ids(doc_type)
 
     # Match the PRIMARY role or any extra role — a Manager granted "Payment
     # Approver" via extra_roles keeps "manager" as their primary, so filtering
@@ -107,6 +121,23 @@ def eligible_approver_ids(level, company=''):
     )
 
 
+def _grant_holder_ids(document_type):
+    """Every active user holding the approve grant for `document_type`.
+
+    Reads the same `extra_pages` keys the rest of the module enforces, so a
+    level with no role is governed by exactly the permission an admin ticks on
+    the Permissions page.
+    """
+    from users.models import User
+
+    if not document_type:
+        return set()
+    return {
+        u.id for u in User.objects.filter(is_active=True)
+        if has_approve_permission(u, document_type)
+    }
+
+
 def can_act(user, request):
     """Whether `user` may decide `request` at its current level."""
     if not user or not user.is_authenticated or request.status != ApprovalRequest.Status.PENDING:
@@ -117,8 +148,15 @@ def can_act(user, request):
         return False
     level = _level_at(request, request.current_level)
     if level is None:
-        return False
-    return user.id in eligible_approver_ids(level, request.company)
+        # The ladder shrank under this document and it is parked past the end.
+        # `approve` realigns it and finishes the chain, so whoever could clear
+        # the LAST remaining rung is who may act — say so here too, or the UI
+        # hides the button on a document the API would happily accept.
+        level = _level_at(request, _live_level_count(request))
+        if level is None:
+            return False
+    return user.id in eligible_approver_ids(
+        level, request.company, request.workflow.document_type)
 
 
 def has_approve_permission(user, document_type):
@@ -165,6 +203,54 @@ def _level_at(request, position):
     if position < 1 or position > len(levels):
         return None
     return levels[position - 1]
+
+
+def _live_level_count(request):
+    """How many rungs the workflow has RIGHT NOW, ignoring the snapshot."""
+    return (ApprovalLevel.objects
+            .filter(workflow_id=request.workflow_id, is_active=True)
+            .count())
+
+
+def _reconcile_levels(request):
+    """Realign an in-flight request with a workflow that has since changed.
+
+    `total_levels` is snapshotted at submit so an admin editing the ladder
+    cannot retroactively skip an approval on a document already moving through
+    it. That protection is right, but it must not STRAND the document: delete
+    the last rung of a two-level workflow and every request parked at level 2
+    points at a level that no longer exists, and nobody can act on it.
+
+    So the snapshot is re-read against the live ladder at decision time:
+
+      * ladder GREW   -> total_levels rises; the extra rungs are still ahead,
+                         so nothing already decided is invalidated.
+      * ladder SHRANK -> total_levels falls. If the document is now parked
+                         beyond the end, it has passed every rung that still
+                         exists and is therefore fully approved.
+
+    Returns True when the request is now complete and the caller should finish
+    it rather than ask for another decision.
+    """
+    live = (ApprovalLevel.objects
+            .filter(workflow_id=request.workflow_id, is_active=True)
+            .count())
+    if live == 0 or live == request.total_levels:
+        return False
+
+    logger.info(
+        'approval %s: workflow now has %s level(s), snapshot said %s — '
+        'realigning', request.document_number, live, request.total_levels)
+    request.total_levels = live
+    if request.current_level > live:
+        # Parked past the end of the shortened ladder: every rung that still
+        # exists has already approved it.
+        request.current_level = live
+        request.save(update_fields=['total_levels', 'current_level',
+                                    'updated_at'])
+        return True
+    request.save(update_fields=['total_levels', 'updated_at'])
+    return False
 
 
 def resolve_workflow(*, document_type, company):
@@ -308,6 +394,19 @@ def approve(*, request_id, user, remarks='', ctx=None):
         .select_related('workflow', 'content_type')
         .get(pk=request_id)
     )
+    # Realign BEFORE validating: an admin may have changed the ladder since
+    # this document was submitted, and validation looks up the current rung.
+    if _reconcile_levels(request):
+        # The ladder shrank past where this document was parked, so every rung
+        # that still exists has approved it. Finish rather than demand a
+        # decision from a level that no longer exists.
+        request.status = ApprovalRequest.Status.APPROVED
+        request.decided_at = timezone.now()
+        request.save(update_fields=['status', 'decided_at', 'updated_at'])
+        request._acting_user = user
+        _fire('approved', request)
+        return request
+
     level = _validate(request, user, ApprovalAction.Action.APPROVE, remarks)
 
     _log(request, action=ApprovalAction.Action.APPROVE, user=user,

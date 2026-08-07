@@ -77,12 +77,13 @@ class CollectionPerson(TimeStampedModel):
     # Blank = selectable in every company.
     company = models.CharField(
         max_length=20, choices=CATEGORY_CHOICES, blank=True, default='')
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='collection_profiles')
-    sap_slp_code = models.IntegerField(null=True, blank=True)   # optional OSLP link
     phone = models.CharField(max_length=20, blank=True, default='')
     is_active = models.BooleanField(default=True)
+
+    # Dropped from TimeStampedModel for this model only: a collection person is
+    # reference data an admin maintains, not a document, so who first typed the
+    # row carries no meaning. `created_at` is kept. Every row had this NULL.
+    created_by = None
 
     class Meta:
         db_table = 'payment_collection_person'
@@ -204,6 +205,15 @@ class PaymentReceipt(TimeStampedModel):
     # SAP's exact words from the last posting attempt — the success
     # confirmation or the rejection reason. Shown verbatim in the UI so a user
     # can act on it without database access or developer help.
+    # SAP branch chosen by the user, for an ADVANCE only.
+    #
+    # An invoice payment inherits its branch from the invoice and must never be
+    # overridden — SAP refuses a mismatch. An advance settles nothing, so there
+    # is no branch to inherit and somebody has to say which ledger it belongs
+    # to. Null on an invoice payment, and on legacy rows that predate this.
+    sap_branch_id = models.IntegerField(null=True, blank=True)
+    sap_branch_name = models.CharField(max_length=100, blank=True, default='')
+
     sap_response = models.TextField(blank=True, default='')
     # SAP's own words, stored exactly as returned and NEVER rewritten.
     #
@@ -557,7 +567,8 @@ class SapCallLog(models.Model):
     company_db = models.CharField(max_length=100, blank=True, default='')
     # Always a POST to one of two endpoints, so the verb is not stored. Retries
     # are not stored either: posting is synchronous, so one call is one row, and
-    # attempt sequencing across resubmissions lives on SapPostingHistory.
+    # the attempt sequence across resubmissions is readable from the ordered
+    # SAP_* entries in PaymentStatusHistory.
     endpoint = models.CharField(max_length=300)
 
     request_data = models.JSONField(null=True, blank=True)      # redacted
@@ -587,96 +598,53 @@ class SapCallLog(models.Model):
         return f'{self.endpoint} [{self.status}]'
 
 
-class SapPostingHistory(models.Model):
-    """Append-only record of every SAP posting attempt on one receipt.
+class PaymentStatusHistory(models.Model):
+    """Append-only activity timeline for receipts AND deposits.
 
-    `payment_receipt` holds only the LATEST SAP state; this holds the whole
-    lifecycle, so a support engineer can answer "how many attempts, when, what
-    did SAP say, was it resubmitted, when did it finally succeed, and with which
-    DocEntry" from one screen — without server logs or database access.
+    THE single history table for the payments module. It records every event —
+    created, updated, submitted, each approval level, rejection, and each SAP
+    posting attempt and outcome — so one query renders the whole timeline.
 
-    Distinct from the two neighbouring logs, which answer different questions:
-      * ApprovalAction        — who approved or rejected, and at which level
-      * PaymentStatusHistory  — every status transition, including non-SAP ones
-      * SapCallLog            — the raw HTTP exchange (payload, headers, timing)
-
-    Rows are NEVER updated or deleted. Corrections are appended.
+    `action` carries WHAT happened; `from_status`/`to_status` carry the state
+    change it caused. Both are needed: several actions can leave the status
+    unchanged (an edit, a failed SAP attempt), and a status change alone does
+    not say who caused it or why.
     """
 
     class Action(models.TextChoices):
-        POST_STARTED = 'POST_STARTED', 'Post started'
-        POST_SUCCESS = 'POST_SUCCESS', 'Post succeeded'
-        POST_FAILED = 'POST_FAILED', 'Post failed'
-        POST_TIMEOUT = 'POST_TIMEOUT', 'Post timed out'
-        RESUBMITTED = 'RESUBMITTED', 'Resubmitted after correction'
-        MANUAL_RECOVERY = 'MANUAL_RECOVERY', 'Manual recovery'
-
-    class Status(models.TextChoices):
-        POSTING = 'POSTING', 'Posting'
-        SUCCESS = 'SUCCESS', 'Success'
-        FAILED = 'FAILED', 'Failed'
-        UNKNOWN = 'UNKNOWN', 'Unknown'
-
-    payment = models.ForeignKey(
-        PaymentReceipt, on_delete=models.CASCADE, related_name='sap_history')
-    # 1 for the first attempt, rising on each resubmission. Assigned by
-    # services.record_sap_history so callers cannot get it out of step.
-    attempt_number = models.PositiveSmallIntegerField(default=1)
-
-    action = models.CharField(max_length=20, choices=Action.choices)
-    status = models.CharField(max_length=10, choices=Status.choices)
-
-    # Captured on the row itself rather than read back from the receipt: the
-    # receipt only ever holds the LATEST keys, so a history row that pointed at
-    # it would silently change meaning after the next attempt.
-    sap_doc_entry = models.IntegerField(null=True, blank=True)
-    sap_doc_num = models.IntegerField(null=True, blank=True)
-    sap_response = models.TextField(blank=True, default='')
-    # SAP's own words, stored exactly as returned and NEVER rewritten.
-    #
-    # `sap_response` above is written for the person holding the document and
-    # adds a plain-language summary plus a "what to do" line. That is right for
-    # a collector and useless for a SAP administrator, who needs the literal
-    # string to search notes and logs against. Keeping both means neither
-    # audience is served a translation of the other's message.
-    sap_raw_error = models.TextField(blank=True, default='')
-    sap_raw_error_code = models.CharField(max_length=20, blank=True, default='')
-
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='sap_posting_history')
-    created_by_username = models.CharField(max_length=150, blank=True, default='')
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-
-    class Meta:
-        db_table = 'payment_sap_posting_history'
-        ordering = ['-created_at', '-id']       # newest first, as the UI shows it
-        verbose_name = 'SAP posting history'
-        verbose_name_plural = 'SAP posting history'
-        indexes = [
-            models.Index(fields=['payment', '-created_at'],
-                         name='idx_sph_payment'),
-        ]
-
-    def __str__(self):
-        return f'{self.payment_id} #{self.attempt_number} {self.action}'
-
-
-class PaymentStatusHistory(models.Model):
-    """Append-only lifecycle log for receipts AND deposits.
-
-    Distinct from ApprovalAction: that records approver decisions, this records
-    every transition including system-driven ones (QUEUED -> POSTED by the
-    worker). Together they answer "log of every action" completely.
-    """
+        CREATED = 'CREATED', 'Created'
+        UPDATED = 'UPDATED', 'Updated'
+        SUBMITTED = 'SUBMITTED', 'Submitted for approval'
+        RESUBMITTED = 'RESUBMITTED', 'Resubmitted'
+        APPROVED = 'APPROVED', 'Approved'
+        REJECTED = 'REJECTED', 'Rejected'
+        RETURNED = 'RETURNED', 'Returned to creator'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+        SAP_POST_STARTED = 'SAP_POST_STARTED', 'SAP posting started'
+        SAP_POSTED = 'SAP_POSTED', 'Posted to SAP'
+        SAP_FAILED = 'SAP_FAILED', 'SAP posting failed'
+        SAP_UNKNOWN = 'SAP_UNKNOWN', 'SAP outcome unknown'
+        STATUS_CHANGED = 'STATUS_CHANGED', 'Status changed'
 
     content_type = models.ForeignKey('contenttypes.ContentType',
                                      on_delete=models.CASCADE)
     object_id = models.PositiveBigIntegerField()
 
+    # What happened. Defaults to STATUS_CHANGED so every existing row stays
+    # valid without a data migration inventing an action it never recorded.
+    action = models.CharField(max_length=20, choices=Action.choices,
+                              default=Action.STATUS_CHANGED, db_index=True)
     from_status = models.CharField(max_length=20, blank=True, default='')
     to_status = models.CharField(max_length=20)
     reason = models.TextField(blank=True, default='')
+    # Approval rung, for APPROVED/REJECTED rows — "Approved (Level 2 of 2)".
+    # Null for anything that is not an approval event.
+    level = models.PositiveSmallIntegerField(null=True, blank=True)
+    level_label = models.CharField(max_length=60, blank=True, default='')
+    # SAP identifiers, so a posting row carries its own outcome rather than
+    # forcing a join back to the document.
+    sap_doc_entry = models.IntegerField(null=True, blank=True)
+    sap_doc_num = models.IntegerField(null=True, blank=True)
     actor_kind = models.CharField(max_length=20, default='USER')   # USER|SYSTEM|SAP_WORKER
 
     changed_by = models.ForeignKey(

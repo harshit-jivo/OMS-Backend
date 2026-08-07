@@ -10,6 +10,7 @@ import logging
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Case, IntegerField, Q, When
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_date
 from rest_framework import status as http_status
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -38,7 +39,7 @@ from .permissions import (
     ReadOrCreatePayment,
     granted_keys,
 )
-from . import bank_master, hana_queries
+from . import analytics, bank_master, hana_queries
 from .models import (
     BankDeposit,
     CollectionPerson,
@@ -48,7 +49,6 @@ from .models import (
     PaymentReceipt,
     PaymentStatusHistory,
     SapCompanyMap,
-    SapPostingHistory,
 )
 from .serializers import (
     BankDepositCreateSerializer,
@@ -59,7 +59,6 @@ from .serializers import (
     PaymentReceiptSerializer,
     PaymentStatusHistorySerializer,
     SapCompanyMapSerializer,
-    SapPostingHistorySerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +102,46 @@ class CompanyListView(APIView):
     def get(self, request):
         rows = user_companies(request.user).order_by('sort_order', 'company')
         return ok(SapCompanyMapSerializer(rows, many=True).data)
+
+
+class PaymentDashboardView(APIView):
+    """Every figure on the Payments Dashboard, in one response.
+
+    One endpoint rather than one per widget, so the KPI cards and the charts are
+    guaranteed to describe the same instant. Split across five requests, a
+    receipt posted midway through would leave the cards disagreeing with the
+    donut beside them — and a dashboard that contradicts itself gets distrusted
+    for the numbers it gets right.
+
+    `[IsAuthenticated]` matches every other read endpoint here: reads are not
+    narrowed per user (see `_receipt_queryset`), because an approver must be
+    able to see the totals they are approving against.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        params = request.query_params
+        preset = (params.get('preset') or 'today').strip().lower()
+
+        date_from = date_to = None
+        if preset == 'custom':
+            date_from = parse_date(params.get('date_from') or '')
+            date_to = parse_date(params.get('date_to') or '')
+            if not date_from or not date_to:
+                return fail('A custom range needs both date_from and date_to '
+                            'as YYYY-MM-DD.')
+            if date_from > date_to:
+                # Swapped rather than rejected: the intent is unambiguous, and
+                # a date picker can easily produce this order.
+                date_from, date_to = date_to, date_from
+
+        return ok(analytics.dashboard(
+            company=params.get('company') or '',
+            preset=preset,
+            date_from=date_from,
+            date_to=date_to,
+        ))
 
 
 class PartyListView(APIView):
@@ -242,6 +281,29 @@ class CollectionPersonListView(APIView):
         if company := (request.query_params.get('company') or '').strip().upper():
             rows = rows.filter(Q(company=company) | Q(company=''))
         return ok(CollectionPersonSerializer(rows.order_by('name'), many=True).data)
+
+
+class SapBranchListView(APIView):
+    """SAP branches a payment may be posted to, for this company.
+
+    Scoped to the company and to active rows — the shared /api/sap/branches/
+    endpoint returns all 22 across every company and is AllowAny, so it cannot
+    be used to populate a payment form.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from sap_sync.models import Branch
+
+        company = (request.query_params.get('company') or '').strip().upper()
+        if not company:
+            return fail('A company is required.')
+        rows = (Branch.objects
+                .filter(category=company, is_active=True)
+                .order_by('bpl_id')
+                .values('bpl_id', 'bpl_name'))
+        return ok(list(rows))
 
 
 class BankAccountListView(APIView):
@@ -450,14 +512,20 @@ class PaymentReceiptListCreateView(APIView):
                        message='Receipt created.')
 
 
-def _receipt_permissions(receipt, user):
-    """What `user` may do with `receipt`. One rule, used by GET and PATCH.
+def _document_permissions(document, user):
+    """What `user` may do with `document` — a receipt OR a deposit.
+
+    One rule for both. The logic never depended on anything receipt-specific:
+    it reads the approval chain, the creator, and the status enum that each
+    model carries as `Status`. Duplicating it for deposits would have meant two
+    copies of the self-approval and mid-chain-edit rules drifting apart.
 
     The client cannot derive these: `can_decide` depends on which rung the
     approval is parked at and whether the user is eligible for it (named
     approvers narrow a level), and self-approval is forbidden.
     """
-    approval = receipt.approvals.order_by('-created_at').first()
+    Status = document.__class__.Status
+    approval = document.approvals.order_by('-created_at').first()
     can_decide = bool(
         approval is not None
         and approval_services.can_act(user, approval))
@@ -486,29 +554,29 @@ def _receipt_permissions(receipt, user):
         and approval.actions.filter(
             action='APPROVE', round_number=approval.round_number).exists())
     creator_may_edit = (
-        receipt.created_by_id == user.id
+        document.created_by_id == user.id
         and (
-            receipt.status in (PaymentReceipt.Status.DRAFT,
-                               PaymentReceipt.Status.REJECTED,
-                               PaymentReceipt.Status.PENDING_ERROR)
-            or (receipt.status == PaymentReceipt.Status.PENDING_APPROVAL
+            document.status in (Status.DRAFT,
+                               Status.REJECTED,
+                               Status.PENDING_ERROR)
+            or (document.status == Status.PENDING_APPROVAL
                 and not approved_already)
         )
     )
     return {
         'can_decide': can_decide,
         'can_edit': (
-            not receipt.sap_doc_entry
+            not document.sap_doc_entry
             and (can_decide or creator_may_edit)
         ),
         # Only the creator resubmits, and only when no chain is open.
         'can_resubmit': (
-            receipt.created_by_id == user.id
-            and not receipt.sap_doc_entry
-            and receipt.status in (PaymentReceipt.Status.DRAFT,
-                                   PaymentReceipt.Status.REJECTED,
-                                   PaymentReceipt.Status.PENDING_ERROR)
-            and not receipt.approvals.filter(
+            document.created_by_id == user.id
+            and not document.sap_doc_entry
+            and document.status in (Status.DRAFT,
+                                   Status.REJECTED,
+                                   Status.PENDING_ERROR)
+            and not document.approvals.filter(
                 status__in=['DRAFT', 'PENDING']).exists()
         ),
     }
@@ -520,7 +588,7 @@ class PaymentReceiptDetailView(APIView):
     def get(self, request, pk):
         receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
         data = PaymentReceiptSerializer(receipt).data
-        data['permissions'] = _receipt_permissions(receipt, request.user)
+        data['permissions'] = _document_permissions(receipt, request.user)
         return ok(data)
 
     def patch(self, request, pk):
@@ -532,7 +600,7 @@ class PaymentReceiptDetailView(APIView):
         posted document being rewritten.
         """
         receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
-        permissions = _receipt_permissions(receipt, request.user)
+        permissions = _document_permissions(receipt, request.user)
         if not permissions['can_edit']:
             reason = (
                 f'{receipt.receipt_no} is already posted to SAP and cannot be '
@@ -555,7 +623,7 @@ class PaymentReceiptDetailView(APIView):
             return fail('; '.join(exc.messages))
 
         data = PaymentReceiptSerializer(receipt).data
-        data['permissions'] = _receipt_permissions(receipt, request.user)
+        data['permissions'] = _document_permissions(receipt, request.user)
         return ok(data, message='Receipt updated.')
 
 
@@ -589,25 +657,6 @@ class PaymentReceiptHistoryView(APIView):
             object_id=receipt.pk,
         )
         return ok(PaymentStatusHistorySerializer(rows, many=True).data)
-
-
-class PaymentReceiptSapHistoryView(APIView):
-    """Every SAP posting attempt on one receipt, newest first.
-
-    Read-only by construction: there is no POST/PATCH/DELETE here, and the
-    serializer marks every field read_only. History is only ever appended, by
-    the posting service.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, pk):
-        receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
-        rows = (SapPostingHistory.objects
-                .filter(payment=receipt)
-                .select_related('created_by')
-                .order_by('-created_at', '-id'))
-        return ok(SapPostingHistorySerializer(rows, many=True).data)
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +713,11 @@ class BankDepositDetailView(APIView):
 
     def get(self, request, pk):
         deposit = get_object_or_404(_deposit_queryset(request.user), pk=pk)
-        return ok(BankDepositSerializer(deposit).data)
+        data = BankDepositSerializer(deposit).data
+        # Same shape a receipt returns, from the same helper — so the app can
+        # gate the approve/reject bar identically for both documents.
+        data['permissions'] = _document_permissions(deposit, request.user)
+        return ok(data)
 
 
 class BankDepositSubmitView(APIView):

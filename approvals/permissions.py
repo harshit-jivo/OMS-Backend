@@ -8,7 +8,6 @@ from rest_framework.permissions import BasePermission
 
 def is_admin(user):
     """Admin by role name, Django staff, or superuser.
-
     Three near-identical `is_admin` helpers already exist in the project
     (devices/permissions.py:11, uilabels/permissions.py:12, users/views.py:867)
     and they disagree — two ignore is_superuser. This one honours all three.

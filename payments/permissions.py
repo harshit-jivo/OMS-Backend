@@ -64,36 +64,54 @@ def is_admin(user):
 # "Payment Approver" to a user is enough — an admin does not have to also tick
 # the matching checkbox on the Permissions page, which would be two places to
 # get right and one to forget.
+# Role name -> the keys that role confers.
+#
+# A role may confer SEVERAL keys. That is what makes a combined role such as
+# `payments_and_deposit` possible: one role to assign, all four actions, and no
+# second account for a person who handles both. The single-purpose roles remain
+# for anyone who should only do one job.
+#
+# Roles and per-user `extra_pages` grants are UNIONED (see granted_keys), so an
+# admin can start from a role and add one extra key to an individual without
+# inventing a new role for them.
 ROLE_PERMISSION_MAP = {
-    'payment_creator': PAYMENTS_CREATE,
-    'payment_approver': PAYMENTS_APPROVE,
-    'deposit_creator': DEPOSIT_CREATE,
-    'deposit_approver': DEPOSIT_APPROVE,
+    # One role covers a whole job. The four single-purpose roles
+    # (payment_creator, payment_approver, deposit_creator, deposit_approver)
+    # were removed: they forced a second account on anyone who handled both
+    # payments and deposits, and made them log out to switch.
+    'payments_and_deposit': {PAYMENTS_CREATE, PAYMENTS_APPROVE,
+                             DEPOSIT_CREATE, DEPOSIT_APPROVE},
+    'payments_deposit_creator': {PAYMENTS_CREATE, DEPOSIT_CREATE},
+    'payments_deposit_approver': {PAYMENTS_APPROVE, DEPOSIT_APPROVE},
 }
 
 
 def granted_keys(user):
     """The permission keys this user holds.
 
-    Three sources, unioned: admin (all), the roles they hold (primary or extra),
-    and explicit per-user grants in `extra_pages`.
+    `extra_pages` — the boxes an admin ticks on the Permissions page — is the
+    ONLY source, apart from admin, who holds everything implicitly.
+
+    The role is IDENTITY, not authority. `payments_and_deposit` says "this
+    account exists to work on payments and deposits"; it does not say which of
+    the four actions they may take. Granting from the role as well meant a user
+    with two boxes ticked was silently given all four — the admin's choice was
+    overwritten by the role, which is the opposite of what the Permissions page
+    appears to promise.
+
+    That separation is also what lets ANY role hold a payments permission: a
+    manager ticked for Payments_Create can raise a receipt without being given
+    a payments role at all.
     """
     if not user or not user.is_authenticated:
         return set()
     if is_admin(user):
         return set(ACTION_PERMISSION_KEYS)
 
-    keys = {str(k).strip() for k in (user.extra_pages or []) if str(k).strip()}
-
-    # Roles → permissions. `all_role_names` covers the primary FK and the M2M;
-    # guarded with getattr so this still works for any user-like object that
-    # predates the helper (e.g. a stub in a test).
-    names = user.all_role_names() if hasattr(user, 'all_role_names') else set()
-    for name in names:
-        key = ROLE_PERMISSION_MAP.get(name)
-        if key:
-            keys.add(key)
-    return keys
+    return {
+        str(k).strip() for k in (user.extra_pages or [])
+        if str(k).strip() in ACTION_PERMISSION_KEYS
+    }
 
 
 def has_permission_key(user, key):

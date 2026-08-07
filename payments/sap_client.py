@@ -15,6 +15,7 @@ Two bugs in serviceLayer/service.py are deliberately NOT reproduced:
 """
 from __future__ import annotations
 
+import json
 import logging
 
 import requests
@@ -145,6 +146,18 @@ def request(method, path, *, company_db, json_body=None, session=None,
     """
     session = session or get_session(company_db)
     url = f'{_base()}{path}'
+
+    # The exact JSON about to go over the wire, UNMASKED.
+    #
+    # The call log deliberately masks cheque and bank detail, which makes it
+    # impossible to tell from the log alone whether a "***" was stored or sent.
+    # This answers that question directly. Gated on DEBUG level so it is silent
+    # in normal operation and never writes customer bank data to a production
+    # log by default — enable with LOGGING for 'payments.sap_client'.
+    if json_body is not None and logger.isEnabledFor(logging.DEBUG):
+        logger.debug('SAP %s %s outgoing body: %s', method, path,
+                     json.dumps(json_body, default=str))
+
     try:
         response = session.request(method, url, json=json_body,
                                    verify=_verify(), timeout=_timeout())

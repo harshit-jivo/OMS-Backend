@@ -22,6 +22,10 @@ urlpatterns = [
          views.CollectionPersonAdminDetailView.as_view(),
          name='payment-admin-collection-person-detail'),
 
+    # Analytics behind the Payments Dashboard. One call fills the whole page.
+    path('dashboard/', views.PaymentDashboardView.as_view(),
+         name='payment-dashboard'),
+
     # Cascade: company -> parties -> open invoices
     path('companies/', views.CompanyListView.as_view(), name='payment-companies'),
     path('parties/', views.PartyListView.as_view(), name='payment-parties'),
@@ -38,6 +42,8 @@ urlpatterns = [
     path('admin/method-mapping-status/',
          views.PaymentMethodMappingStatusView.as_view(),
          name='payment-method-mapping-status'),
+    path('sap-branches/', views.SapBranchListView.as_view(),
+         name='payment-sap-branches'),
     path('banks/', views.BankAccountListView.as_view(),
          name='payment-banks'),
     path('bank-accounts/', views.BankAccountListView.as_view(),
@@ -52,9 +58,6 @@ urlpatterns = [
          name='payment-receipt-submit'),
     path('receipts/<int:pk>/history/', views.PaymentReceiptHistoryView.as_view(),
          name='payment-receipt-history'),
-    path('receipts/<int:pk>/sap-history/',
-         views.PaymentReceiptSapHistoryView.as_view(),
-         name='payment-receipt-sap-history'),
     path('receipts/<int:pk>/attachments/',
          views.ReceiptAttachmentUploadView.as_view(),
          name='payment-receipt-attachment-upload'),

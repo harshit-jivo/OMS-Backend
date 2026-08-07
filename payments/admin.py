@@ -11,7 +11,6 @@ from .models import (
     PaymentStatusHistory,
     SapCallLog,
     SapCompanyMap,
-    SapPostingHistory,
 )
 
 
@@ -111,29 +110,3 @@ class PaymentStatusHistoryAdmin(admin.ModelAdmin):
         return False
 
 
-@admin.register(SapPostingHistory)
-class SapPostingHistoryAdmin(admin.ModelAdmin):
-    """Append-only audit of every SAP posting attempt.
-
-    All three write permissions are denied: history is written exclusively by
-    the posting service, and a row that can be edited from the admin is not an
-    audit trail.
-    """
-
-    list_display = ('created_at', 'payment', 'attempt_number', 'action',
-                    'status', 'sap_doc_entry', 'sap_doc_num',
-                    'created_by_username')
-    list_filter = ('action', 'status', 'created_at')
-    search_fields = ('payment__receipt_no', 'sap_response')
-    readonly_fields = ('payment', 'attempt_number', 'action', 'status',
-                       'sap_doc_entry', 'sap_doc_num', 'sap_response',
-                       'created_by', 'created_by_username', 'created_at')
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False

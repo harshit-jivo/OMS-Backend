@@ -51,8 +51,11 @@ def open_invoices_sql(schema):
             T0."DocTotal"    AS "doc_total",
             IFNULL(T0."PaidToDate", 0) AS "paid_to_date",
             T0."DocTotal" - IFNULL(T0."PaidToDate", 0) AS "balance_due",
-            DAYS_BETWEEN(T0."DocDueDate", CURRENT_DATE) AS "days_overdue"
+            DAYS_BETWEEN(T0."DocDueDate", CURRENT_DATE) AS "days_overdue",
+            T0."BPLId"       AS "bpl_id",
+            IFNULL(T1."BPLName", '') AS "bpl_name"
         FROM "{schema}"."OINV" AS T0
+        LEFT JOIN "{schema}"."OBPL" AS T1 ON T1."BPLId" = T0."BPLId"
         WHERE T0."CardCode"  = ?
           AND T0."DocStatus" = 'O'
           AND T0."CANCELED"  = 'N'
@@ -138,8 +141,11 @@ def invoice_balance_sql(schema):
             T0."DocEntry" AS "doc_entry",
             T0."DocTotal" - IFNULL(T0."PaidToDate", 0) AS "balance_due",
             T0."DocStatus" AS "doc_status",
-            T0."CANCELED"  AS "cancelled"
+            T0."CANCELED"  AS "cancelled",
+            T0."BPLId"     AS "bpl_id",
+            IFNULL(T1."BPLName", '') AS "bpl_name"
         FROM "{schema}"."OINV" AS T0
+        LEFT JOIN "{schema}"."OBPL" AS T1 ON T1."BPLId" = T0."BPLId"
         WHERE T0."DocEntry" = ?
     '''
 
@@ -220,3 +226,44 @@ def fetch_company_banks(*, company):
             'label': (f'{name} — {account}' if account else name),
         })
     return out
+
+
+def invoice_branches_sql(schema):
+    """Branch of each of several invoices, in one round trip."""
+    return f'''
+        SELECT
+            T0."DocEntry"                   AS "doc_entry",
+            T0."DocNum"                     AS "doc_num",
+            T0."BPLId"                      AS "bpl_id",
+            IFNULL(T1."BPLName", '')        AS "bpl_name",
+            T0."DocStatus"                  AS "doc_status",
+            T0."CANCELED"                   AS "cancelled"
+        FROM "{schema}"."OINV" AS T0
+        LEFT JOIN "{schema}"."OBPL" AS T1 ON T1."BPLId" = T0."BPLId"
+        WHERE T0."DocEntry" IN ({{placeholders}})
+    '''
+
+
+def fetch_invoice_branches(*, company, doc_entries):
+    """Branch of each invoice. Raises if SAP cannot be reached.
+
+    Deliberately NOT swallowing errors: the branch decides which SAP ledger a
+    payment lands in, so "could not check" must never be mistaken for "use the
+    default". The caller turns a failure into a refusal to post.
+    """
+    entries = [int(d) for d in doc_entries if d]
+    if not entries:
+        return []
+    schema = _schema_for(company)
+    placeholders = ', '.join(['?'] * len(entries))
+    sql = invoice_branches_sql(schema).replace('{placeholders}', placeholders)
+    with HANAConnection() as conn:
+        rows = conn.execute(sql, entries)
+    return [{
+        'doc_entry': int(r['doc_entry']),
+        'doc_num': r.get('doc_num'),
+        'bpl_id': int(r['bpl_id']) if r.get('bpl_id') not in (None, '') else None,
+        'bpl_name': str(r.get('bpl_name') or '').strip(),
+        'doc_status': str(r.get('doc_status') or '').strip(),
+        'cancelled': str(r.get('cancelled') or '').strip(),
+    } for r in rows]

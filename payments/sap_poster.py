@@ -33,14 +33,16 @@ ALREADY_POSTED = 'This payment has already been posted to SAP.'
 
 
 def _history(document, **kwargs):
-    """Append a posting-history row, for receipts only.
+    """Append a posting event to the document's activity timeline.
 
-    Deposits have no history table, so they are skipped rather than special
-    cased at each call site. Wrapped defensively: an audit-trail failure must
-    never abort a real SAP post that already succeeded.
+    Receipts AND deposits. The old receipt-only guard was a limitation of the
+    dropped `payment_sap_posting_history` table, whose foreign key pointed at
+    PaymentReceipt — deposit posts were silently discarded here. The timeline is
+    generic, so a deposit now keeps the same SAP record a receipt does.
+
+    Wrapped defensively: an audit-trail failure must never abort a real SAP post
+    that already succeeded.
     """
-    if not isinstance(document, PaymentReceipt):
-        return None
     from .services import record_sap_history
 
     try:
