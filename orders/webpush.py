@@ -10,6 +10,7 @@ so the two channels never interfere (Task 6).
 
 import json
 import logging
+import time
 
 from django.conf import settings
 
@@ -147,6 +148,7 @@ def send_web_push_to_user(user, payload):
     if not subscriptions:
         return 0
 
+    started = time.monotonic()
     delivered = 0
     removed = 0
     for subscription in subscriptions:
@@ -156,13 +158,24 @@ def send_web_push_to_user(user, payload):
         elif outcome == DEACTIVATED:
             removed += 1
 
-    if removed:
-        logger.info(
-            "Web push send complete user_id=%s total=%s delivered=%s removed=%s "
-            "(dead endpoints deactivated; delivery continued)",
-            user.id,
-            len(subscriptions),
-            delivered,
-            removed,
-        )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    failed = len(subscriptions) - delivered - removed
+    # Logged on every send, not only when a subscription was retired: without
+    # this there was no record that web push ran at all for a healthy user, so
+    # "did the browser get it?" was unanswerable from the logs.
+    logger.info(
+        "push channel=webpush outcome=%s notification_id=%s user_id=%s "
+        "order_id=%s event_type=%s subscriptions=%s delivered=%s "
+        "deactivated=%s failed=%s duration_ms=%s",
+        "ok" if failed == 0 else "partial",
+        payload.get("notification_id"),
+        user.id,
+        payload.get("order_id"),
+        payload.get("event_type"),
+        len(subscriptions),
+        delivered,
+        removed,
+        failed,
+        elapsed_ms,
+    )
     return delivered

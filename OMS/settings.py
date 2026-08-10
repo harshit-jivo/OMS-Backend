@@ -539,3 +539,99 @@ WEB_PUSH_CLEANUP_LOCK = config(
     "WEB_PUSH_CLEANUP_LOCK",
     default=str(BASE_DIR / "logs" / "web_push_cleanup.lock"),
 )
+
+# =========================================================================
+# Logging
+# =========================================================================
+# Until now the project had NO LOGGING configuration at all. Every
+# `logger.info(...)` in the codebase went to Django's default handler, which
+# for a non-DEBUG process means nowhere — so the structured notification
+# delivery lines (`channel=expo outcome=accepted ... duration_ms=...`) could
+# not be read in production, and "was this user actually notified?" was
+# unanswerable after the fact.
+#
+# `disable_existing_loggers` is False so that adding this block cannot silence
+# any logger that is working today.
+#
+# Handlers:
+#   console      always on; how developers already read output
+#   app_file     rotating file for our own code
+#   error_file   rotating file for WARNING and above, across everything, so a
+#                production problem is one file to open rather than a grep
+#
+# RotatingFileHandler rather than TimedRotating or logrotate: this deploys on
+# Windows Server under Task Scheduler, where logrotate does not exist and a
+# size cap is the only thing that reliably bounds disk use.
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Level for our own apps. DEBUG locally, INFO on a server, tunable per
+# environment without a code change.
+APP_LOG_LEVEL = config("APP_LOG_LEVEL", default="DEBUG" if DEBUG else "INFO")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        # Structured-ish and greppable. The notification code already emits
+        # `key=value` pairs in the message itself, so the prefix only has to
+        # supply time, level and origin.
+        "standard": {
+            "format": "{asctime} {levelname:<8} {name}: {message}",
+            "style": "{",
+        },
+        "console": {
+            "format": "{levelname:<8} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "console",
+        },
+        "app_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(LOG_DIR / "oms.log"),
+            "maxBytes": 10 * 1024 * 1024,   # 10 MB
+            "backupCount": 5,               # ~50 MB ceiling
+            "encoding": "utf-8",
+            "formatter": "standard",
+        },
+        "error_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(LOG_DIR / "oms_errors.log"),
+            "maxBytes": 5 * 1024 * 1024,
+            "backupCount": 5,
+            "encoding": "utf-8",
+            "level": "WARNING",
+            "formatter": "standard",
+        },
+    },
+    "root": {
+        "handlers": ["console", "error_file"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        # Our own apps. propagate=False so a record is not written twice
+        # (once here, once by root).
+        app: {
+            "handlers": ["console", "app_file", "error_file"],
+            "level": APP_LOG_LEVEL,
+            "propagate": False,
+        }
+        for app in (
+            "orders", "payments", "approvals", "attachments", "core",
+            "devices", "einvoice", "ewaybill", "hana", "invoice", "legal",
+            "sap_sync", "serviceLayer", "tracker", "uilabels", "users",
+        )
+    },
+}
+
+# django.request logs a full traceback for every 5xx; keep it, but only in the
+# error file so the app log stays readable.
+LOGGING["loggers"]["django.request"] = {
+    "handlers": ["console", "error_file"],
+    "level": "ERROR",
+    "propagate": False,
+}

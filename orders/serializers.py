@@ -525,8 +525,13 @@ class CreateSchemeSerializer(serializers.ModelSerializer):
         extra_kwargs = {"state_code": {"required": False, "allow_blank": True, "allow_null": True}}
 
 class NotificationSerializer(serializers.ModelSerializer):
-    order_id = serializers.IntegerField(source='order.id', read_only=True)
-    
+    # Reads the local `order_id` COLUMN rather than traversing to `order.id`.
+    # The traversal loaded the whole related Order per row, so serialising a
+    # page without select_related('order') cost one extra query per
+    # notification. Sourcing the column keeps the output byte-identical while
+    # making the query plan independent of how the caller built the queryset.
+    order_id = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Notification
         fields = ['id', 'message', 'is_read', 'created_at', 'order_id']
