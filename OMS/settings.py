@@ -47,6 +47,8 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
+
+
 ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
 CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
 # ALLOWED_HOSTS = ['*']
@@ -173,6 +175,18 @@ DATABASES = {
                 default=config('HANA_COMPANY_DB', default=''),
             ),
         ),
+        'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
+        # Same story as SCHEMA above: `.env` carries the beverage company DB as
+        # HANA_BEVERAGE_COMPANY_DB / HANA_COMPANY_DB_BEVERAGES, and has
+        # HANA_DB_BEVERAGE_NAME commented out. Fall back through those instead
+        # of hard-requiring a key that isn't set, which stops Django booting.
+        'BEVERAGE_SCHEMA': config(
+            'HANA_DB_BEVERAGE_NAME',
+            default=config(
+                'HANA_BEVERAGE_COMPANY_DB',
+                default=config('HANA_COMPANY_DB_BEVERAGES', default=''),
+            ),
+        ),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     },
@@ -184,7 +198,28 @@ DATABASES = {
 HANA_SERVICE_LAYER_URL = HANA_SERVICE_LAYER_URL = config('HANA_SERVICE_LAYER_URL')
 HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
-HANA_COMPANY_DB = config('HANA_COMPANY_DB')
+CRYSTAL_URL = config('CRYSTAL_URL')
+
+# Dedicated Service Layer user for Sales Order creation (falls back to the
+# default Service Layer user when not configured).
+SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
+SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
+
+HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
+HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+# Third company (Mart). Blank disables everything Mart-specific.
+HANA_MART_COMPANY_DB = config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB')
+
+# --- JSAP (budget approval) SQL Server -------------------------------------
+# Read-only source for budget-approval status of a SAP *draft* document.
+# Blank host disables every JSAP lookup (the tracker degrades to "unknown").
+JSAP_DB_HOST = config('JSAP_DB_HOST', default='')
+JSAP_DB_PORT = config('JSAP_DB_PORT', default=1433, cast=int)
+JSAP_DB_NAME = config('JSAP_DB_NAME', default='')
+JSAP_DB_USER = config('JSAP_DB_USER', default='')
+JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='')
+
+
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
 HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='')
@@ -194,12 +229,26 @@ HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
 
+# DSR credit-limit service (external project; proxied because it has no CORS)
+DSR_API_BASE = config('JSAP_API_BASE')
+# Fixed OMS user id stamped as createdBy on DSR credit-limit requests.
+OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
+
 # SAP SQL Server (source for sync)
 SAP_DB_HOST = config('SAP_DB_HOST', default='103.89.45.75')
 SAP_DB_PORT = config('SAP_DB_PORT', default=1433, cast=int)
 SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
 SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
+
+# JSAP SQL Server — the DSR/JSAP application's own database. Read-only here; used
+# to resolve a credit-limit document to its approval flow id without paging the
+# DSR document-list API. Same host as the SAP box, different database.
+JSAP_DB_HOST = config('JSAP_DB_HOST', default='103.89.45.75')
+JSAP_DB_PORT = config('JSAP_DB_PORT', default=1433, cast=int)
+JSAP_DB_NAME = config('JSAP_DB_NAME', default='jsaplive3')
+JSAP_DB_USER = config('JSAP_DB_USER', default='ab')
+JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='Jivo@!@#$')
 
 # VAPID (Web Push) keys are configured lower down in this file — see the
 # "Web Push (VAPID)" section near the bottom.
@@ -308,6 +357,31 @@ SIMPLE_JWT = {
 
 CORS_ALLOW_ALL_ORIGINS = True
 
+# ---------------------------------------------------------------------------
+# Email (SMTP) — used by the tracker's stuck-invoice alert emails.
+# All from .env; blank host falls back to the console backend so nothing breaks
+# in dev. See `manage.py email_stuck_alerts`.
+# ---------------------------------------------------------------------------
+EMAIL_HOST = config('EMAIL_HOST', default='')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_USE_TLS = _parse_bool(config('EMAIL_USE_TLS', default='true'), default=True)
+EMAIL_USE_SSL = _parse_bool(config('EMAIL_USE_SSL', default='false'), default=False)
+EMAIL_BACKEND = config(
+    'EMAIL_BACKEND',
+    default=('django.core.mail.backends.smtp.EmailBackend' if EMAIL_HOST
+             else 'django.core.mail.backends.console.EmailBackend'),
+)
+DEFAULT_FROM_EMAIL = config(
+    'DEFAULT_FROM_EMAIL', default=(EMAIL_HOST_USER or 'oms-tracker@jivo.com'))
+
+# Re-notify cooldown (hours): how long before the same stuck invoice emails the
+# stage's users again. Prevents the periodic sweep from spamming.
+TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
+    'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)
+
+
 # CORS_ALLOW_ALL_ORIGINS wildcards the ORIGIN only — it does NOT allow arbitrary
 # request HEADERS. The web client attaches device/version metadata headers to
 # every request (see Frontend-web/src/services/webDeviceService.ts), and those
@@ -409,6 +483,24 @@ EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), 
 # Blank = disabled. {doc_no}, {irn}, {ack_no}, {env} are substituted into the name.
 EINV_QR_SAVE_DIR = config('EINV_QR_SAVE_DIR', default='')
 EINV_QR_FILENAME = config('EINV_QR_FILENAME', default='{doc_no}.png')
+
+# Per-company QR folders. The IRN's QR PNG is written into the folder of the
+# company DB the invoice belongs to, so each company's bitmaps stay separate:
+#   \\JIVO-APP\OMS_Attachments\OIL_ATTACHMENTS\Bitmap
+#   \\JIVO-APP\OMS_Attachments\BEVERAGE_ATTACHMENTS\Bitmap
+#   \\JIVO-APP\OMS_Attachments\MART_ATTACHMENTS\Bitmap
+# A blank entry falls back to EINV_QR_SAVE_DIR.
+_EINV_QR_ROOT = config('EINV_QR_ROOT', default=r'\\JIVO-APP\OMS_Attachments')
+EINV_QR_SAVE_DIRS = {
+    HANA_OIL_COMPANY_DB: config(
+        'EINV_QR_SAVE_DIR_OIL', default=rf'{_EINV_QR_ROOT}\OIL_ATTACHMENTS\Bitmap'),
+    HANA_BEVERAGE_COMPANY_DB: config(
+        'EINV_QR_SAVE_DIR_BEVERAGE', default=rf'{_EINV_QR_ROOT}\BEVERAGE_ATTACHMENTS\Bitmap'),
+    HANA_MART_COMPANY_DB: config(
+        'EINV_QR_SAVE_DIR_MART', default=rf'{_EINV_QR_ROOT}\MART_ATTACHMENTS\Bitmap'),
+}
+# Drop unconfigured company DBs (blank key) so lookups can't match by accident.
+EINV_QR_SAVE_DIRS = {k: v for k, v in EINV_QR_SAVE_DIRS.items() if k and v}
 # Credentials for the share (needed when the Django service account can't reach it
 # on its own). Username may be 'user' or 'DOMAIN\\user'. Blank = write as the
 # process account (no explicit SMB auth). Requires the `smbprotocol` package.
@@ -464,7 +556,6 @@ EWB = {
     "GSTIN": config('EWB_GSTIN', default=EINV["GSTIN"]),
     "PUBLIC_KEY_PATH": config('EWB_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"]),
 }
-DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
 # --- Web Push (VAPID) -------------------------------------------------------
 # Keys for browser Web Push (Phase 3), loaded from .env via python-decouple

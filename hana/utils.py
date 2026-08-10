@@ -1,3 +1,38 @@
+from .services.services import SalesOrderService
+
+# Company databases the invoice queries can be pointed at.
+VALID_BRANCHES = ('OIL', 'BEVERAGE')
+
+
+def normalize_branch(value, default='OIL'):
+    """Map whatever the caller sent ('oil', 'bev', 'BEVERAGES', '') to a branch.
+
+    Returns None for anything that is not a recognised company, so callers can
+    answer 400 rather than silently printing from the wrong database.
+    """
+    branch = str(value or '').strip().upper()
+    if not branch:
+        return default
+    if branch.startswith('BEV'):
+        return 'BEVERAGE'
+    if branch.startswith('OIL'):
+        return 'OIL'
+    return None
+
+
+def resolve_doc_entry(doc_num, branch='OIL'):
+    """DocNum -> OINV."DocEntry" for the given company, or None if not found.
+
+    DocNum is the number printed on the invoice; every downstream consumer
+    (Crystal bill print, SAP Service Layer) keys off DocEntry instead, and the
+    same DocNum can exist in both company databases — hence the branch.
+    """
+    rows = SalesOrderService().get_docEntry(doc_num, branch)
+    if not rows:
+        return None
+    return rows[0]['DocEntry']
+
+
 def group_sales_orders(rows):
     orders = {}
 

@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from django.db.models import Q
-from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q
+from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q  , SalesOrderLog
 from .serializers import (ProductSerializer, PartySerializer, PartyListSerializer,
     PartyAddressSerializer, SyncLogSerializer, SyncScheduleSerializer,BranchSerializer)
 from .services import SyncService
@@ -439,7 +439,7 @@ class SalesQuotationLogByOrderView(APIView):
 
     def get(self, request, order_id):
         quotation_log = (
-            SalesQuotationLog.objects
+            SalesOrderLog.objects
             .filter(order_id=str(order_id), status='SUCCESS', sap_doc_num__isnull=False)
             .order_by('-created_at')
             .first()
@@ -700,7 +700,7 @@ class   ApproveSalesOrderAPIView(APIView):
     
     def post(self, request):
         order_id = request.data.get('order_id')
-        
+    
         if not order_id:
             return Response({
                 'success': False,
@@ -710,6 +710,13 @@ class   ApproveSalesOrderAPIView(APIView):
         try:
             service = SyncService(triggered_by=request.user.username)
             order = Order.objects.get(id=order_id)
+
+            if str(order.status).strip() == 'Completed':
+                return Response({"error" : "Invoice Already posted"})
+
+
+
+
             result = service.create_sales_order(order)
             logger.info("Order %s approval result: %s", order_id, result)
 

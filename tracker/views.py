@@ -1,5 +1,6 @@
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import status as http
 from .permissions import (
     IsTrackerAdmin, IsTrackerAlerts, IsTrackerEntry, IsTrackerReports,
@@ -9,7 +10,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import services
-from .permissions import PAGE_ENTRY, tracker_pages_for
+from .permissions import PAGE_ADMIN, PAGE_ENTRY, tracker_pages_for
+
+# A tracker admin may delete an invoice up to this stage order (inclusive).
+# Stage 6 == "JSAP Approval"; nothing at Save-in-SAP or Payment can be deleted.
+# (Was 5 when SAP and JSAP shared one desk — the split moved the cut-off down.)
+DELETE_ADMIN_MAX_ORDER = 6
 from .reports import build_report
 from .models import (
     Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
@@ -39,6 +45,57 @@ class VendorsView(APIView):
                 status=http.HTTP_502_BAD_GATEWAY)
 
 
+class JsapStatusView(APIView):
+    """Budget-approval status of one invoice, straight from JSAP.
+
+    Read-only: JSAP owns the decision, this only reports it. Always 200 —
+    "we could not link this invoice to SAP" is an answer the desk needs to
+    show, not an error.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def get(self, request, pk):
+        from . import jsap
+        invoice = Invoice.objects.filter(pk=pk).select_related(
+            'unit', 'branch', 'category').first()
+        if not invoice:
+            return Response(status=http.HTTP_404_NOT_FOUND)
+        return Response(jsap.status_for_invoice(invoice))
+
+
+class JsapSyncView(APIView):
+    """Manual "refresh from JSAP" for the JSAP desk.
+
+    Same engine as the scheduled `sync_jsap` command: approved invoices
+    advance, rejected ones return to SAP Approval with JSAP's own reason,
+    pending ones stay. POST with {"invoice_id": n} to sync one invoice, or no
+    body to sweep the whole desk.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def post(self, request):
+        from . import jsap
+        if not jsap.is_configured():
+            return Response({'detail': 'JSAP database is not configured.'},
+                            status=http.HTTP_503_SERVICE_UNAVAILABLE)
+
+        invoice_id = request.data.get('invoice_id')
+        try:
+            if invoice_id:
+                invoice = Invoice.objects.filter(pk=invoice_id).select_related(
+                    'current_stage', 'unit', 'branch', 'category').first()
+                if not invoice:
+                    return Response(status=http.HTTP_404_NOT_FOUND)
+                if not services.can_act(request.user, invoice):
+                    return Response({'detail': 'You are not assigned to this stage.'},
+                                    status=http.HTTP_403_FORBIDDEN)
+                return Response(services.sync_jsap(invoice, user=request.user))
+            return Response(services.sync_jsap_all(user=request.user))
+        except (ValidationError, PermissionDenied) as exc:
+            return Response({'detail': str(getattr(exc, 'message', exc))},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+
 class LookupsView(APIView):
     """Everything the entry form / filters need in one call."""
     permission_classes = [IsTrackerUser]
@@ -62,6 +119,11 @@ def _can_use_entry(user):
     return user.is_superuser or PAGE_ENTRY in tracker_pages_for(user)
 
 
+def _is_tracker_admin(user):
+    """True for a tracker admin (holds the Tracker_Admin page) or a superuser."""
+    return user.is_superuser or PAGE_ADMIN in tracker_pages_for(user)
+
+
 def _scoped_queryset(user):
     """Invoices this user is allowed to see: their own creations, anything
     parked at a stage they're assigned to, plus — for entry-desk users — every
@@ -69,7 +131,7 @@ def _scoped_queryset(user):
     who created it). Superusers see all."""
     qs = Invoice.objects.select_related(
         'current_stage', 'gst_type', 'gst_rate', 'category',
-        'unit', 'branch', 'mode', 'created_by',
+        'unit', 'branch', 'mode', 'created_by', 'payment',
     )
     if user.is_superuser:
         return qs
@@ -87,6 +149,14 @@ def _apply_filters(qs, params):
     inv_no = params.get('invoice_number')
     if inv_no:
         qs = qs.filter(invoice_number__icontains=inv_no)
+    # Effective month filter — value is "YYYY-MM"; match that accounting period.
+    eff = params.get('effective_month')
+    if eff:
+        try:
+            y, m = str(eff).split('-')[:2]
+            qs = qs.filter(effective_month__year=int(y), effective_month__month=int(m))
+        except (ValueError, TypeError):
+            pass
     for field in ('category', 'branch', 'unit', 'status'):
         val = params.get(field)
         if val:
@@ -152,6 +222,44 @@ class InvoiceDetailView(APIView):
         return Response(
             InvoiceDetailSerializer(invoice, context={'request': request}).data)
 
+    def delete(self, request, pk):
+        """Soft-delete an invoice (row kept, hidden everywhere).
+
+        Two paths:
+          * Tracker admin  -> may delete an invoice up to stage 5 (order <= 5),
+            regardless of lock state or stage-assignment scope.
+          * Entry-desk user -> may delete only while it is still unlocked at the
+            entry (head-office) stage.
+        """
+        user = request.user
+        admin = _is_tracker_admin(user)
+        # Admins can reach any invoice; entry users are limited to their scope.
+        invoice = (Invoice.objects.filter(pk=pk).first() if admin
+                   else self._get(request, pk))
+        if not invoice:
+            return Response(status=http.HTTP_404_NOT_FOUND)
+
+        stage = invoice.current_stage
+        if admin:
+            if stage.order > DELETE_ADMIN_MAX_ORDER:
+                return Response(
+                    {'detail': f'This invoice is at "{stage.name}" (stage {stage.order}). '
+                               f'Tracker admins can delete only up to stage '
+                               f'{DELETE_ADMIN_MAX_ORDER}.'},
+                    status=http.HTTP_403_FORBIDDEN)
+        elif _can_use_entry(user) and not invoice.is_locked and stage.code == 'entry':
+            pass  # entry desk deleting a fresh entry-stage invoice
+        else:
+            return Response(
+                {'detail': 'You do not have permission to delete this invoice.'},
+                status=http.HTTP_403_FORBIDDEN)
+
+        invoice.is_deleted = True
+        invoice.deleted_at = timezone.now()
+        invoice.deleted_by = request.user
+        invoice.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'updated_at'])
+        return Response(status=http.HTTP_204_NO_CONTENT)
+
 
 class MyQueueView(APIView):
     """The actionable inbox: invoices parked at a stage this user handles.
@@ -172,7 +280,10 @@ class MyQueueView(APIView):
         if entry and _can_use_entry(user):
             stage_ids.add(entry.id)
 
-        qs = Invoice.objects.select_related('current_stage').filter(
+        qs = Invoice.objects.select_related(
+            'current_stage', 'gst_type', 'gst_rate', 'category',
+            'unit', 'branch', 'mode', 'created_by', 'payment',
+        ).filter(
             current_stage_id__in=stage_ids,
             status=Invoice.Status.IN_PROGRESS,
         )
@@ -299,7 +410,7 @@ class AdminInvoicesView(APIView):
     def get(self, request):
         qs = Invoice.objects.select_related(
             'current_stage', 'gst_type', 'gst_rate', 'category',
-            'unit', 'branch', 'mode', 'created_by',
+            'unit', 'branch', 'mode', 'created_by', 'payment',
         )
         qs = _apply_filters(qs, request.query_params)
         data = InvoiceListSerializer(qs, many=True, context={'request': request}).data
@@ -354,7 +465,7 @@ class AlertsView(APIView):
 
     def get(self, request):
         qs = StuckAlert.objects.filter(is_active=True).select_related(
-            'invoice', 'stage')
+            'invoice', 'stage').prefetch_related('notifications__user')
         if not request.user.is_superuser:
             stage_ids = services.accessible_stage_ids(request.user)
             qs = qs.filter(stage_id__in=stage_ids)
@@ -379,12 +490,20 @@ class PaymentDetailView(APIView):
                 {'detail': 'You are not assigned to the payment stage.'},
                 status=http.HTTP_403_FORBIDDEN)
 
-        payment, _ = PaymentDetail.objects.get_or_create(invoice=invoice)
-        serializer = PaymentDetailSerializer(payment, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(updated_by=request.user)
-        if payment.status == PaymentDetail.Status.PAID:
-            invoice.status = Invoice.Status.COMPLETED
-            invoice.save(update_fields=['status'])
+        # The client sends the inputs (discount %, TDS %, paid amount); the
+        # engine derives the amounts, open balance and status, caps the paid
+        # amount at the net payable, and completes the invoice when fully paid.
+        try:
+            invoice, _payment = services.apply_payment(
+                invoice=invoice, user=request.user,
+                discount_pct=request.data.get('discount_pct', 0),
+                tds_pct=request.data.get('tds_pct', 0),
+                paid_amount=request.data.get('paid_amount'),
+                hold_added_back=request.data.get('hold_added_back', False),
+            )
+        except ValidationError as exc:
+            return Response(
+                {'detail': str(getattr(exc, 'message', exc))},
+                status=http.HTTP_400_BAD_REQUEST)
         return Response(
             InvoiceDetailSerializer(invoice, context={'request': request}).data)

@@ -286,7 +286,13 @@ class UpdateUserSerializer(serializers.Serializer):
         if categories_list is not None:
             instance.categories.set(categories_list)
             # Keep the single `category` FK in sync with the first selected one.
-            instance.category = categories_list[0] if categories_list else None
+            # An empty list must NOT null a `category` that was sent alongside it:
+            # this block runs after the field loop above, so doing so silently wiped
+            # the category on every update from a client that posts `categories: []`.
+            if categories_list:
+                instance.category = categories_list[0]
+            elif 'category' not in validated_data:
+                instance.category = None
 
         # Agar nawa password ditta gaya hai taan hi update karo
         password = validated_data.get('password')

@@ -10,11 +10,13 @@ uncached login to that company so the fetch is explicit and side-effect free.
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 import requests
 import urllib3
 from django.conf import settings
 
+from einvoice.mapping import gstin as _gstin
 from serviceLayer.service import SAPServiceLayerManager
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -41,12 +43,19 @@ def _timeout():
 def get_session(company_db: str | None = None) -> requests.Session:
     """Return a logged-in Service Layer session for `company_db`.
 
-    None / the app default -> the cached shared session. A non-default company_db
-    -> a fresh (uncached) login, so callers can target the live company DB
-    without disturbing the shared cache.
+    Known company DBs (OIL / BEVERAGE) go through SAPServiceLayerManager, whose
+    session cache is keyed PER COMPANY — so an OIL session is never handed to a
+    BEVERAGE caller. Any other company DB gets a dedicated, uncached login.
     """
-    if not company_db or company_db == settings.HANA_COMPANY_DB:
-        return SAPServiceLayerManager.get_session()
+    known = {
+        settings.HANA_OIL_COMPANY_DB: "OIL",
+        getattr(settings, "HANA_BEVERAGE_COMPANY_DB", None): "BEVERAGE",
+    }
+    known.pop(None, None)
+    if not company_db:
+        return SAPServiceLayerManager.get_session("OIL")
+    if company_db in known:
+        return SAPServiceLayerManager.get_session(known[company_db])
 
     session = requests.Session()
     session.verify = _verify()
@@ -70,12 +79,29 @@ def get_session(company_db: str | None = None) -> requests.Session:
     return session
 
 
+def company_choices() -> list[dict]:
+    """Selectable companies: [{label, company_db}] — the OIL/BEVERAGE company DBs
+    actually configured in settings. Drives the UI's company picker so the user
+    can choose which DB an IRN is generated against and mirrored into."""
+    pairs = [
+        ("OIL", getattr(settings, "HANA_OIL_COMPANY_DB", "")),
+        ("BEVERAGE", getattr(settings, "HANA_BEVERAGE_COMPANY_DB", "")),
+    ]
+    out, seen = [], set()
+    for label, db in pairs:
+        db = (db or "").strip()
+        if db and db not in seen:
+            seen.add(db)
+            out.append({"label": label, "company_db": db})
+    return out
+
+
 def _known_company_dbs() -> list[str]:
     """The company DBs a DocNum search may scan. Configurable via
     settings.EINV_COMPANY_DBS; the configured default is always tried first."""
     dbs = list(getattr(settings, "EINV_COMPANY_DBS", None)
-               or ["JIVO_OIL_HANADB", "JIVO_BEVERAGES_HANADB", "TEST_OIL_15122025"])
-    default = settings.HANA_COMPANY_DB
+               or [c["company_db"] for c in company_choices()])
+    default = settings.HANA_OIL_COMPANY_DB
     if default:
         dbs = [default] + [d for d in dbs if d != default]
     return dbs
@@ -170,11 +196,107 @@ def resolve_hsn(entries, company_db: str | None = None, session=None) -> dict:
     return out
 
 
+def _get_json(session, path):
+    """GET a Service Layer path, returning the JSON body or None. Best-effort:
+    these are enrichment lookups and must never fail an invoice fetch."""
+    try:
+        resp = session.get(f"{_base()}{path}", verify=_verify(), timeout=_timeout())
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def _joined(*parts):
+    """Join address fragments, dropping empties. None when nothing is left."""
+    joined = " ".join(str(p).strip() for p in parts if str(p or "").strip())
+    return joined or None
+
+
+def _branch_dispatch_address(invoice: dict, bpl_id, session) -> dict:
+    """Where the branch that issued this invoice actually dispatches from.
+
+    The goods-issuing warehouse is tried first — it is what SAP itself uses to
+    build DispatchFrom* on a correctly-populated document, and it carries a real
+    street/city, whereas the BusinessPlaces record here holds little more than a
+    PIN. Only a warehouse belonging to that same branch is accepted. Returns
+    {"addr1", "loc", "pin"} with whatever could not be resolved left as None.
+    """
+    seen, codes = set(), []
+    for ln in (invoice.get("DocumentLines") or []):
+        code = str(ln.get("WarehouseCode") or "").strip()
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+
+    for code in codes:
+        wh = _get_json(session, f"/Warehouses('{quote(code)}')")
+        if not wh:
+            continue
+        if bpl_id is not None and wh.get("BusinessPlaceID") != bpl_id:
+            continue    # a warehouse of a different branch would be the wrong state
+        addr1 = _joined(wh.get("Block"), wh.get("BuildingFloorRoom"), wh.get("Street"))
+        if addr1 or wh.get("City"):
+            return {"addr1": addr1, "loc": wh.get("City"), "pin": wh.get("ZipCode")}
+
+    bp = _get_json(session, f"/BusinessPlaces({int(bpl_id)})") if bpl_id is not None else None
+    if bp:
+        return {"addr1": _joined(bp.get("Block"), bp.get("Building"), bp.get("Street")),
+                "loc": bp.get("City"), "pin": bp.get("ZipCode")}
+    return {"addr1": None, "loc": None, "pin": None}
+
+
+def normalize_seller_branch(invoice: dict, session) -> bool:
+    """Repair EWayBillDetails.BillFrom*/DispatchFrom* in place when SAP populated
+    them from the wrong registration. Returns True when something was changed.
+
+    SAP fills that block from the MAIN business place rather than the branch
+    (BPL) that issued the document. On a branch-to-branch invoice — customer =
+    another GST registration of the same legal entity — it comes back holding the
+    RECIPIENT's GSTIN and address, which makes the e-invoice self-dealing (NIC
+    2211 "supplier and recipient GSTIN must not be the same") and flips the supply
+    from inter- to intra-state. The document's own VATRegNum is the issuing
+    branch's GSTIN and is authoritative, so it decides whether the block is stale.
+
+    Both blocks are rewritten together: keeping the old dispatch address under a
+    corrected GSTIN would just trade error 2211 for 2258/2231 (state / PIN not
+    matching the GSTIN).
+    """
+    ewb = invoice.get("EWayBillDetails")
+    doc_gstin = _gstin(invoice.get("VATRegNum"))
+    if not ewb or not doc_gstin or _gstin(ewb.get("BillFromGSTIN")) == doc_gstin:
+        return False
+
+    bpl_id = invoice.get("BPL_IDAssignedToInvoice")
+    addr = _branch_dispatch_address(invoice, bpl_id, session)
+    logger.warning(
+        "Invoice %s: SAP BillFromGSTIN %r is not the issuing branch's GSTIN %s "
+        "(BPL %s) — rebuilding the seller block from the branch.",
+        invoice.get("DocEntry"), ewb.get("BillFromGSTIN"), doc_gstin, bpl_id)
+
+    ewb["BillFromGSTIN"] = doc_gstin
+    ewb["BillFromStateGSTCode"] = doc_gstin[:2]
+    # Always overwritten, even with None: a leftover address from the other
+    # registration is worse than an absent one, which the pre-submit validator
+    # reports as a missing mandatory field.
+    ewb["DispatchFromAddress1"] = addr["addr1"]
+    ewb["DispatchFromAddress2"] = None
+    ewb["DispatchFromPlace"] = addr["loc"]
+    ewb["DispatchFromZipCode"] = addr["pin"]
+    ewb["DispatchFromStateGSTCode"] = doc_gstin[:2]
+    return True
+
+
 def fetch_invoice_for_irn(docentry: int, company_db: str | None = None, session=None):
-    """Fetch an invoice and resolve all its line HSN codes in one session.
-    Returns (invoice_dict, hsn_map)."""
+    """Fetch an invoice, repair its seller block and resolve all its line HSN
+    codes in one session. Returns (invoice_dict, hsn_map)."""
     session = session or get_session(company_db)
     invoice = fetch_invoice(docentry, session=session)
+    normalize_seller_branch(invoice, session)
     entries = [ln.get("HSNEntry") for ln in (invoice.get("DocumentLines") or [])]
     hsn_map = resolve_hsn(entries, session=session)
     return invoice, hsn_map

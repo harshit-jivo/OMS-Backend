@@ -1,8 +1,8 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, Company, MainGroup, State
+from .models import User, Company, MainGroup, State,UserRole
 
-
+@admin.register(UserRole)
 @admin.register(Company)
 class CompanyAdmin(admin.ModelAdmin):
     list_display = ['id', 'name', 'is_active']

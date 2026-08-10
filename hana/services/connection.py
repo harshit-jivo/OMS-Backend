@@ -57,47 +57,15 @@ class HANAConnection:
 
 
 class Queries():
-    SCHEMA = settings.DATABASES['hana']['SCHEMA']
+    OIL_SCHEMA = settings.DATABASES['hana']['OIL_SCHEMA']
+    BEVERAGE_SCHEMA = settings.DATABASES['hana']['BEVERAGE_SCHEMA']
 
     @staticmethod
-    def _open_so_schemas():
-        """All configured SAP company DBs (OIL / BEVERAGES / MART), de-duplicated.
-
-        Open sales orders live in a different company DB per category, so any
-        query that looks up open SOs must search across all of them - matching
-        get_product_stock(). Otherwise a BEVERAGES/MART item shows open-order
-        demand in the stock list but its drill-down (single schema) finds nothing.
-        """
-        configured = [
-            getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA,
-            getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''),
-            getattr(settings, 'HANA_COMPANY_DB_MART', ''),
-        ]
-        schemas = []
-        seen = set()
-        for schema in configured:
-            schema = str(schema or '').strip()
-            if schema and schema not in seen:
-                seen.add(schema)
-                schemas.append(schema)
-        return schemas
-
-    @staticmethod
-    def get_product_stock():
-        configured_schemas = [
-            (getattr(settings, 'HANA_COMPANY_DB', '') or Queries.SCHEMA, 'OIL'),
-            (getattr(settings, 'HANA_COMPANY_DB_BEVERAGES', ''), 'BEVERAGES'),
-            (getattr(settings, 'HANA_COMPANY_DB_MART', ''), 'MART'),
-        ]
-        unique_schemas = []
-        seen = set()
-
-        for schema, category in configured_schemas:
-            schema = str(schema or '').strip()
-            if not schema or schema in seen:
-                continue
-            seen.add(schema)
-            unique_schemas.append((schema, category))
+    def get_product_stock(branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
 
         item_filter = """
             (
@@ -164,7 +132,11 @@ class Queries():
         return "\nUNION ALL\n".join(queries)
     
     @staticmethod
-    def get_party_with_open_so():
+    def get_party_with_open_so(branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         branches = [
             f"""
             SELECT
@@ -176,7 +148,7 @@ class Queries():
               AND T0."CANCELED" = 'N'
             GROUP BY T0."CardCode", T0."CardName"
             """
-            for s in Queries._open_so_schemas()
+            # for s in Queries._open_so_schemas()
         ]
         union = "\nUNION ALL\n".join(branches)
         # Sum across company DBs so a party with open SOs in more than one DB
@@ -195,7 +167,11 @@ class Queries():
     
        
     @staticmethod
-    def get_quotation_status(doc_entries, company_db=None):
+    def get_quotation_status(doc_entries,  branch ,company_db=None):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         """Status of one or more Sales Quotations (OQUT) by DocEntry.
 
         Returns DocStatus ('O' = open, 'C' = closed) and CANCELED ('Y'/'N') so
@@ -217,7 +193,12 @@ class Queries():
         """
 
     @staticmethod
-    def get_sales_orders_for_party(party_code):
+    def get_sales_orders_for_party(party_code , branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+            
         safe_party_code = str(party_code).replace("'", "''")
         branches = [
             f"""
@@ -240,13 +221,14 @@ class Queries():
               AND T1."LineStatus" = 'O'
               AND T1."OpenQty" > 0
             """
-            for s in Queries._open_so_schemas()
+            # for s in Queries._open_so_schemas()
         ]
         return "\nUNION ALL\n".join(branches) + '\nORDER BY "DocDate" DESC, "DocNum", "LineNum"'
 
     @staticmethod
     def get_sales_orders_for_product(item_code):
         safe_item_code = str(item_code).replace("'", "''")
+
         branches = [
             f"""
             SELECT
@@ -273,8 +255,11 @@ class Queries():
         return "\nUNION ALL\n".join(branches) + '\nORDER BY "CardName", "DocDate" DESC, "DocNum", "LineNum"'
     
     @staticmethod
-    def get_customer_details(party_code):
-        s = Queries.SCHEMA
+    def get_customer_details(party_code ,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT
             T0."CardCode" , 
@@ -288,8 +273,11 @@ class Queries():
         """
         
     @staticmethod
-    def get_warehouse_details(whs_code):
-        s = Queries.SCHEMA
+    def get_warehouse_details(whs_code,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT
             T0."WhsCode",
@@ -299,8 +287,11 @@ class Queries():
         """ 
         
     @staticmethod
-    def  get_salesperson_details(slp_code):
-        s = Queries.SCHEMA
+    def  get_salesperson_details(slp_code,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT
             T0."SlpCode",
@@ -309,8 +300,11 @@ class Queries():
         WHERE T0."SlpCode" = '{slp_code}'
         """
     @staticmethod
-    def get_addresse(card_code):
-        s = Queries.SCHEMA
+    def get_addresse(card_code,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT
             T0."Address",
@@ -326,8 +320,11 @@ class Queries():
         """
         
     @staticmethod
-    def get_freight_masters():
-        s = Queries.SCHEMA
+    def get_freight_masters(branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
             SELECT 
             	T0."ExpnsCode",
@@ -337,8 +334,11 @@ class Queries():
         """  
     
     @staticmethod  
-    def get_customer_state():
-        s = Queries.SCHEMA
+    def get_customer_state(branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
             SELECT 
             	DISTINCT T0."State1"
@@ -346,8 +346,11 @@ class Queries():
         """
         
     @staticmethod
-    def get_state_chain(stateCode=None):
-        s = Queries.SCHEMA
+    def get_state_chain(branch ,stateCode=None):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         
         if stateCode:
             return f"""
@@ -364,8 +367,12 @@ class Queries():
         """
             
     @staticmethod
-    def get_all_customer():
-        s = Queries.SCHEMA
+    def get_all_customer(branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+
         return f"""
            SELECT 
                 T0."U_Main_Group",
@@ -385,8 +392,11 @@ class Queries():
         """
 
     @staticmethod    
-    def get_next_doc_no(object_code):
-        s = Queries.SCHEMA
+    def get_next_doc_no(object_code ,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
             SELECT TOP 1 T0."NextNumber"
             FROM "{s}"."NNM1" AS T0
@@ -397,8 +407,11 @@ class Queries():
         """
         
     @staticmethod
-    def get_fg_items():
-        s = Queries.SCHEMA 
+    def get_fg_items(branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA 
         return f"""
         SELECT 
         	T0."ItemCode",
@@ -416,8 +429,54 @@ class Queries():
         ORDER BY "TotalQty" DESC
         """
     @staticmethod
-    def get_batch_details(item_code, whs_code):
-        s = Queries.SCHEMA
+    def get_fg_warehouse_stock(branch, item_codes=None, whs_code=None):
+        """Per-warehouse on-hand stock for FG items.
+
+        `item_codes` / `whs_code` narrow the result to the items and warehouse
+        actually on an invoice — without them the whole FG catalogue across every
+        warehouse comes back (a few thousand rows).
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+
+        filters = ['T0."ItemCode" LIKE \'FG%\'']
+        if item_codes:
+            safe_codes = ",".join(
+                "'" + str(code).replace("'", "''") + "'" for code in item_codes
+            )
+            filters.append(f'T0."ItemCode" IN ({safe_codes})')
+
+        # Driven off OITM, not OITW: an item with no stock row for the warehouse
+        # must still come back — with its name and a NULL OnHand — rather than
+        # vanishing from the result.
+        whs_join = ""
+        if whs_code:
+            safe_whs = str(whs_code).replace("'", "''")
+            whs_join = f"""AND T1."WhsCode" = '{safe_whs}'"""
+        where = " AND ".join(filters)
+
+        return f"""
+            SELECT
+                T0."ItemCode",
+                T0."ItemName",
+                T1."WhsCode",
+                T1."OnHand"
+            FROM "{s}"."OITM" AS T0
+            LEFT JOIN "{s}"."OITW" AS T1
+                ON T1."ItemCode" = T0."ItemCode"
+                {whs_join}
+            WHERE {where}
+            ORDER BY T1."OnHand" DESC, T1."WhsCode"
+        """
+
+    @staticmethod
+    def get_batch_details(item_code, whs_code,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT 
             T0."SysNumber",
@@ -440,8 +499,11 @@ class Queries():
         """
         
     @staticmethod
-    def get_inventory_details(item_code):
-        s = Queries.SCHEMA
+    def get_inventory_details(item_code,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
            SELECT 
                 DISTINCT T0."WhsCode",
@@ -452,8 +514,11 @@ class Queries():
         """
         
     @staticmethod
-    def get_item_price(item_code ,  price_list):
-        s = Queries.SCHEMA
+    def get_item_price(item_code ,  price_list,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
             SELECT 
                 T0."ItemCode",
@@ -465,8 +530,40 @@ class Queries():
         """
 
     @staticmethod
-    def get_series(finYear , BPLId):
-        s = Queries.SCHEMA
+    def get_costing_code(prc_name, branch):
+        """Resolve a Profit Center code (OPRC."PrcCode") from its name.
+
+        SAP document lines expect the short ``CostingCode`` (PrcCode, max 8
+        chars), not the human-readable profit-center name -- e.g. the variety
+        "SUNFLOWER" is PrcCode "SUNFLOWR". Sending the name works only for the
+        varieties where the two happen to be identical; anything longer than 8
+        chars is rejected by SAP with "Value too long in property 'CostingCode'".
+
+        Scoped to dimension 1 and active rows: PrcName is NOT unique across
+        dimensions (e.g. "KARNATAKA" exists twice under DimCode 5, one of them
+        inactive), so an unscoped TOP 1 can return another dimension's code --
+        which SAP accepts and books to the wrong profit center. Product
+        varieties always live in dimension 1.
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        safe_prc_name = str(prc_name).replace("'", "''")
+        return f"""
+            SELECT TOP 1 T0."PrcCode"
+            FROM "{s}"."OPRC" AS T0
+            WHERE T0."PrcName" = '{safe_prc_name}'
+              AND T0."DimCode" = 1
+              AND T0."Active" = 'Y'
+        """
+
+    @staticmethod
+    def get_series(finYear , BPLId,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
             SELECT 
                 T0."Series",
@@ -479,13 +576,19 @@ class Queries():
         """
         
     @staticmethod
-    def get_draft_verification(refId):
-        s = Queries.SCHEMA
+    def get_draft_verification(refId,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""SELECT * FROM "{s}"."ODRF" AS T0 WHERE T0."U_OMS_REF" = '{refId}' """
     
     @staticmethod
-    def get_invoice_status(statusCode):
-        s = Queries.SCHEMA
+    def get_invoice_status(statusCode,branch):
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
         	SELECT 
 		T0."WddCode",
@@ -509,5 +612,24 @@ class Queries():
         ORDER BY T1."DocDate" DESC
 
     """
+    @staticmethod
+    def get_docEntry(docNum, branch='OIL'):
+        """Resolve an invoice's internal key (OINV."DocEntry") from its DocNum.
+
+        DocNum is only unique within a company database, so the branch decides
+        which schema is searched (OIL vs BEVERAGE).
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        return f"""
+            SELECT
+                "DocEntry"
+            FROM "{s}"."OINV"
+            WHERE "DocNum" = '{docNum}'
+        """
+    
+
 
 

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView
 
 urlpatterns=[
     
@@ -17,6 +17,8 @@ urlpatterns=[
     path('<int:order_id>/reject/', RejectOrderView.as_view(), name='reject_list'),
     path('party-products/<str:card_code>/', PartyProductsView.as_view(), name='party-products'),
     path('schemes/', SchemeListView.as_view(), name='schemes'),
+    path('schemes/manage/', SchemeManageListView.as_view(), name='schemes-manage'),
+    path('schemes/<int:scheme_id>/', SchemeDetailView.as_view(), name='scheme-detail'),
     path('status/',OrderStatusList.as_view(),name='status'),
     path('flow-config/',OrderFlowConfigView.as_view(),name='order-flow-config'),
     path('party-flow-config/',PartyOrderFlowConfigView.as_view(),name='party-order-flow-config'),

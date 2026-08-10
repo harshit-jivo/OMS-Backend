@@ -7,7 +7,7 @@ the row in place. DocEntry is an auto-increment identity, so we never supply it.
 Everything here is best-effort — a failure is logged and never breaks the IRN flow.
 
 Gated by settings.EINV_MIRROR_HANA (the caller checks it). Targets the company DB
-schema (settings.HANA_COMPANY_DB) unless a schema is passed.
+schema (settings.HANA_OIL_COMPANY_DB) unless a schema is passed.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ _DOCTYPE = {"INV": "13", "CRN": "14", "DBN": "14"}
 
 
 def _schema(schema):
-    return schema or getattr(settings, "HANA_COMPANY_DB", "")
+    return schema or getattr(settings, "HANA_OIL_COMPANY_DB", "")
 
 
 def _int_or_none(v):
@@ -108,6 +108,58 @@ def write_failure(*, docentry=None, doc_no=None, doc_type=None, error="", schema
     except Exception:  # noqa: BLE001
         logger.exception("OMS_IRN_LOG: failed to write F row for doc %s", doc_no)
         return False
+
+
+def irn_status_by_docentry(docentries, *, schema=None) -> dict:
+    """Look up existing IRNs for a set of SAP DocEntries across BOTH HANA tables.
+
+    Checks the SAP add-on's @UTL_MDEXTH first, then OMS's OMS_IRN_LOG (fallback),
+    so an invoice whose IRN was generated in SAP is recognised even though it was
+    never written to the OMS Django table. Returns:
+        { docentry(int): {"irn": str, "ack_no": str|None, "source": "@UTL_MDEXTH"|"OMS_IRN_LOG"} }
+    Only DocEntries that actually have a successful, non-cancelled IRN appear.
+    Best-effort: any error returns {} (the caller falls back to the Django table).
+    """
+    from hana.services.connection import HANAConnection
+
+    schema = _schema(schema)
+    ids = [str(int(d)) for d in (docentries or []) if _int_or_none(d) is not None]
+    if not schema or not ids:
+        return {}
+    in_list = ",".join(ids)
+
+    def _latest(table, extra_where):
+        sql = (
+            f'SELECT "de", "irn", "ack" FROM ('
+            f'  SELECT "U_UTL_BaseEntry" AS "de", "U_UTL_IRN" AS "irn", "U_UTL_AckNo" AS "ack",'
+            f'         ROW_NUMBER() OVER (PARTITION BY "U_UTL_BaseEntry"'
+            f'                            ORDER BY "U_UTL_IRNGENDT" DESC) AS "rn"'
+            f'  FROM "{schema}"."{table}"'
+            f'  WHERE "U_UTL_DocType" = 13 AND "U_UTL_IST" = \'S\''
+            f'    AND IFNULL("U_UTL_IRN", \'\') <> \'\' {extra_where}'
+            f'    AND "U_UTL_BaseEntry" IN ({in_list})'
+            f') WHERE "rn" = 1'
+        )
+        with HANAConnection() as conn:
+            return conn.execute(sql)
+
+    result = {}
+    try:
+        # OMS_IRN_LOG first, then @UTL_MDEXTH overrides -> SAP add-on wins on ties.
+        for row in _latest("OMS_IRN_LOG", "AND IFNULL(\"Canceled\", 'N') <> 'Y'"):
+            de = _int_or_none(row.get("de"))
+            if de is not None:
+                result[de] = {"irn": row.get("irn"), "ack_no": row.get("ack"),
+                              "source": "OMS_IRN_LOG"}
+        for row in _latest("@UTL_MDEXTH", ""):
+            de = _int_or_none(row.get("de"))
+            if de is not None:
+                result[de] = {"irn": row.get("irn"), "ack_no": row.get("ack"),
+                              "source": "@UTL_MDEXTH"}
+    except Exception:  # noqa: BLE001
+        logger.exception("irn_status_by_docentry: HANA lookup failed")
+        return {}
+    return result
 
 
 def mark_cancelled(irn, *, schema=None) -> bool:
