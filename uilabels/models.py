@@ -25,6 +25,20 @@ class UILabel(models.Model):
     )
     description = models.CharField(max_length=255, blank=True, default='')
     is_active = models.BooleanField(default=True)
+    # Field-behaviour flags. These only apply when the row represents an actual
+    # input field (e.g. 'po_number') rather than a pure text label (e.g.
+    # 'price_list'). `is_enabled` controls whether clients show the field at all;
+    # `is_required` controls whether it is mandatory when shown. Both are
+    # admin-editable so a field can be turned on/off or made optional/required
+    # without a frontend or mobile code change.
+    is_enabled = models.BooleanField(
+        default=True,
+        help_text="Field-only: clients hide the field when this is off.",
+    )
+    is_required = models.BooleanField(
+        default=False,
+        help_text="Field-only: clients make the field mandatory when this is on.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
