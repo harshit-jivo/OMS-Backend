@@ -24,6 +24,7 @@ from .models import (
     PaymentMethodEntry,
     PaymentReceipt,
 )
+from .permissions import PAYMENTS_DASHBOARD
 from .views import PaymentDashboardView
 
 TODAY = date(2026, 8, 5)
@@ -59,10 +60,22 @@ class RangeResolutionTests(TestCase):
         self.assertEqual(analytics.resolve_range('this_month', today=TODAY),
                          (date(2026, 8, 1), TODAY))
 
-    def test_unknown_preset_falls_back_to_today(self):
-        # A bad value must not blow up or silently widen the window.
+    def test_unknown_preset_falls_back_to_the_default(self):
+        # A stale client must not blow up or silently widen the window.
         self.assertEqual(analytics.resolve_range('nonsense', today=TODAY),
-                         (TODAY, TODAY))
+                         analytics.resolve_range(analytics.DEFAULT_PRESET,
+                                                 today=TODAY))
+
+    def test_default_preset_is_last_30_days(self):
+        """The window a manager works in, and what an omitted preset means.
+
+        A rolling 30 days rather than the calendar month: on the 1st of a month
+        "this month" is one day of data, so the dashboard opened near-empty and
+        the reader's first action was always to widen the range.
+        """
+        self.assertEqual(analytics.DEFAULT_PRESET, 'last_30_days')
+        self.assertEqual(analytics.resolve_range(None, today=TODAY),
+                         (date(2026, 7, 12), TODAY))
 
     def test_custom_uses_the_supplied_dates(self):
         self.assertEqual(
@@ -95,6 +108,10 @@ class DashboardAggregationTests(TestCase):
         return analytics.dashboard(company=company, preset=preset,
                                    today=TODAY, **kw)
 
+    def people(self, **kw):
+        """Just the participant rows, for the table assertions."""
+        return self.dash(**kw)['collection_performance']['results']
+
     def receipt(self, amount, *, status='POSTED', advance=False,
                 company=CO, day=TODAY, person=None, methods=()):
         r = PaymentReceipt.objects.create(
@@ -124,34 +141,104 @@ class DashboardAggregationTests(TestCase):
 
     # -- What counts ------------------------------------------------------
 
-    def test_draft_and_rejected_are_not_received(self):
-        """Money in hand excludes documents where nothing changed hands."""
+    def test_only_sap_posted_receipts_are_counted(self):
+        """The screen reports what is settled in SAP, nothing else.
+
+        Every excluded status is listed explicitly rather than tested in a
+        loop, so a future change to one of them fails on the status it broke
+        instead of on an opaque total.
+        """
         self.receipt(1000, status='POSTED')
-        self.receipt(500, status='DRAFT')
-        self.receipt(700, status='REJECTED')
-        self.receipt(900, status='CANCELLED')
+        for excluded in ('DRAFT', 'PENDING_APPROVAL', 'APPROVED',
+                         'POSTING_TO_SAP', 'REJECTED', 'CANCELLED'):
+            self.receipt(500, status=excluded)
 
         data = self.dash()
         self.assertEqual(data['kpis']['received_total'], 1000.0)
         self.assertEqual(data['kpis']['received_count'], 1)
 
-    def test_total_payments_counts_everything_including_drafts(self):
-        """The card is labelled "all payment receipts", so a draft belongs."""
+    def test_sap_failures_are_not_counted(self):
+        """SAP ANSWERED with an error, so nothing was committed there."""
+        self.receipt(1000, status='POSTED')
+        self.receipt(2000, status='PENDING_ERROR')
+
+        self.assertEqual(self.dash()['kpis']['received_total'], 1000.0)
+
+    def test_unconfirmed_postings_are_not_counted(self):
+        """SAP_UNKNOWN means SAP never answered.
+
+        The document may or may not exist. Counting an unconfirmed posting is
+        the one error a finance dashboard must not make, because a reader
+        cannot tell it apart from a real one.
+        """
+        self.receipt(1000, status='POSTED')
+        self.receipt(4000, status='SAP_UNKNOWN')
+
+        self.assertEqual(self.dash()['kpis']['received_total'], 1000.0)
+
+    def test_total_payments_shares_the_posted_filter(self):
+        """No card may answer a different question from its neighbours."""
         self.receipt(1000, status='POSTED')
         self.receipt(500, status='DRAFT')
+        self.receipt(700, status='PENDING_ERROR')
 
         kpis = self.dash()['kpis']
-        self.assertEqual(kpis['total_payments'], 1500.0)
+        self.assertEqual(kpis['total_payments'], 1000.0)
+        self.assertEqual(kpis['total_payments'], kpis['received_total'])
+
+    def test_pending_counts_what_the_posted_totals_exclude(self):
+        """The two sets are complementary, not overlapping."""
+        self.receipt(1000, status='POSTED')
+        self.receipt(200, status='DRAFT')
+        self.receipt(300, status='PENDING_APPROVAL')
+        self.receipt(400, status='PENDING_ERROR')
+
+        kpis = self.dash()['kpis']
         self.assertEqual(kpis['received_total'], 1000.0)
+        self.assertEqual(kpis['pending_receipts'], 900.0)
+        self.assertEqual(kpis['pending_receipts_count'], 3)
 
-    def test_unresolved_sap_states_still_count_as_received(self):
-        """The cash was taken; only the SAP posting is unresolved."""
-        self.receipt(1000, status='PENDING_ERROR')
-        self.receipt(2000, status='SAP_UNKNOWN')
+    def test_rejected_and_cancelled_are_not_pending(self):
+        """Nobody is waiting on them and nothing will ever post."""
+        self.receipt(500, status='REJECTED')
+        self.receipt(700, status='CANCELLED')
 
-        self.assertEqual(
-            self.dash()['kpis']['received_total'],
-            3000.0)
+        kpis = self.dash()['kpis']
+        self.assertEqual(kpis['pending_receipts'], 0.0)
+        self.assertEqual(kpis['pending_receipts_count'], 0)
+
+    def test_blocked_is_only_what_needs_a_human(self):
+        """In-flight work clears itself; these two do not."""
+        self.receipt(100, status='PENDING_APPROVAL')   # advances on its own
+        self.receipt(400, status='PENDING_ERROR')      # SAP refused it
+        self.receipt(600, status='SAP_UNKNOWN')        # SAP never answered
+
+        kpis = self.dash()['kpis']
+        self.assertEqual(kpis['pending_receipts'], 1100.0)
+        self.assertEqual(kpis['blocked_total'], 1000.0)
+        self.assertEqual(kpis['blocked_count'], 2)
+
+    def test_pending_deposits_are_reported_separately(self):
+        """Adding them to pending receipts would count the same money twice."""
+        self.receipt(500, status='PENDING_ERROR')
+        self.deposit(300, status='PENDING_ERROR')
+
+        kpis = self.dash()['kpis']
+        self.assertEqual(kpis['pending_receipts'], 500.0)
+        self.assertEqual(kpis['pending_deposits'], 300.0)
+        # Blocked spans both, because both need someone to act.
+        self.assertEqual(kpis['blocked_total'], 800.0)
+        self.assertEqual(kpis['blocked_count'], 2)
+
+    def test_only_posted_deposits_are_counted(self):
+        """Same rule for the bank side."""
+        self.deposit(900, status='POSTED')
+        self.deposit(400, status='PENDING_ERROR')
+        self.deposit(300, status='PENDING_APPROVAL')
+
+        kpis = self.dash()['kpis']
+        self.assertEqual(kpis['deposit_total'], 900.0)
+        self.assertEqual(kpis['deposit_count'], 1)
 
     # -- Splits -----------------------------------------------------------
 
@@ -240,7 +327,7 @@ class DashboardAggregationTests(TestCase):
 
         self.assertEqual(data['kpis']['received_total'], 0.0)
         self.assertEqual(data['kpis']['deposit_total'], 0.0)
-        self.assertEqual(data['collection_performance'], [])
+        self.assertEqual(data['collection_performance']['results'], [])
         for chart in data['charts'].values():
             self.assertEqual(chart['total'], 0.0)
             for slice_ in chart['slices']:
@@ -256,7 +343,7 @@ class DashboardAggregationTests(TestCase):
         # Goldy ranks first: 300 received + 900 banked beats Amit's 1000. That
         # is the point of ranking on the total — someone who collects a lot but
         # banks none of it is not out-performing someone who does both.
-        rows = self.dash()['collection_performance']
+        rows = self.people()
         self.assertEqual([r['name'] for r in rows], ['Goldy Test', 'Amit Test'])
         self.assertEqual(rows[0]['total'], 1200.0)
         self.assertEqual(rows[0]['deposited'], 900.0)
@@ -267,26 +354,35 @@ class DashboardAggregationTests(TestCase):
         self.receipt(1000, person=self.person)
         self.receipt(500, person=self.other)
 
-        rows = self.dash()['collection_performance']
-        by_name = {r['name']: r for r in rows}
+        by_name = {r['name']: r for r in self.people()}
         self.assertEqual(by_name['Amit Test']['received_percent'], 100)
         self.assertEqual(by_name['Goldy Test']['received_percent'], 50)
 
-    def test_table_is_capped_at_five_people(self):
+    def test_every_participant_is_listed_not_just_a_top_few(self):
+        """The table shows the whole team.
+
+        A cut-off would silently hide the people whose figures most need
+        looking at, which is the opposite of what the screen is for.
+        """
         for i in range(8):
-            person = CollectionPerson.objects.create(name=f'P{i}', code=f'P{i}')
+            person = CollectionPerson.objects.create(
+                name=f'P{i} Test', code=f'TEST-P{i}')
             self.receipt(100 * (i + 1), person=person)
 
-        rows = self.dash()['collection_performance']
-        self.assertEqual(len(rows), 5)
-        # The five biggest, in order.
-        self.assertEqual([r['name'] for r in rows],
-                         ['P7', 'P6', 'P5', 'P4', 'P3'])
+        table = self.dash(page_size=100)['collection_performance']
+        # 8 collection persons + the party receipts have no person, so 8.
+        self.assertEqual(table['pagination']['total'], 8)
+        self.assertEqual(len(table['results']), 8)
 
-    def test_party_receipts_do_not_appear_in_the_table(self):
-        """Only receipts collected BY a person belong to a person."""
+    def test_party_receipts_still_list_their_creator(self):
+        """A receipt with no collection person still had someone record it.
+
+        `created_by` is NULL here because the fixture writes through the ORM
+        rather than a request, so this asserts the row is simply absent rather
+        than crashing — the four-path merge must tolerate a missing identity.
+        """
         self.receipt(1000)                       # received_from_type=PARTY
-        self.assertEqual(self.dash()['collection_performance'], [])
+        self.assertEqual(self.people(), [])
 
 
 class DashboardViewTests(TestCase):
@@ -294,12 +390,20 @@ class DashboardViewTests(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        cls.user = get_user_model().objects.create_user(
-            username='dash', password='x')
+        User = get_user_model()
+        cls.user = User.objects.create_user(
+            username='dash-granted', password='x',
+            extra_pages=[PAYMENTS_DASHBOARD])
+        # Holds every ACTION permission but NOT the dashboard grant — the case
+        # that proves doing the work does not imply seeing the totals.
+        cls.worker = User.objects.create_user(
+            username='dash-worker', password='x',
+            extra_pages=['Payments_Create', 'Payments_Approve',
+                         'Deposit_Create', 'Deposit_Approve'])
 
-    def get(self, query=''):
+    def get(self, query='', user=None):
         request = APIRequestFactory().get(f'/api/payments/dashboard/{query}')
-        force_authenticate(request, user=self.user)
+        force_authenticate(request, user=user or self.user)
         return PaymentDashboardView.as_view()(request)
 
     def test_requires_authentication(self):

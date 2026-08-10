@@ -14,9 +14,13 @@ slower every month.
 
 WHAT COUNTS AS WHAT — the definitions the UI labels imply:
 
-  * "Received"       — receipts that represent money actually in hand. Draft,
-                       rejected and cancelled receipts are excluded: nothing was
-                       received. See COUNTED_RECEIPT_STATUSES.
+  * SCOPE            — SAP-POSTED DOCUMENTS ONLY. Every figure on this screen
+                       describes money settled in the books of record. Anything
+                       still in the OMS pipeline (draft, awaiting approval,
+                       mid-post) or that SAP refused or never confirmed is
+                       excluded. See COUNTED_RECEIPT_STATUSES for each reason.
+                       The operational tracking screens answer the other
+                       question — what is outstanding.
   * "Against invoice" vs "Advance" — `PaymentReceipt.is_advance`, the stored
                        flag, NOT whether allocations exist. A receipt can be
                        flagged advance and later be allocated in SAP; the flag
@@ -24,9 +28,9 @@ WHAT COUNTS AS WHAT — the definitions the UI labels imply:
   * "Deposited"      — `BankDeposit.deposit_amount`, the money that reached the
                        bank. NOT `collected_amount`, which is what was handed
                        over before any shortfall.
-  * "Total payments" — every receipt in the window regardless of status, which
-                       is why it is larger than "Received" and is labelled
-                       "all payment receipts".
+  * "Total payments" — every POSTED receipt in the window. It shares the posted
+                       filter with everything else so no card on the screen
+                       answers a different question from its neighbours.
 
 Amounts are returned as floats. They are money, so Decimal is what the database
 and the ORM carry, but JSON has no decimal type and the client formats for
@@ -46,21 +50,58 @@ from .models import (
     PaymentReceipt,
 )
 
-# Statuses where the money is genuinely in hand. DRAFT has not been submitted,
-# REJECTED was refused, CANCELLED was withdrawn, and none of the three mean a
-# rupee moved. PENDING_ERROR / SAP_UNKNOWN DO count: the receipt exists and the
-# cash was taken; only the SAP posting is unresolved.
-COUNTED_RECEIPT_STATUSES = (
+# ONLY documents that reached SAP successfully.
+#
+# The dashboard reports money that is settled in the books of record, not money
+# that is somewhere in the OMS pipeline. Everything else is excluded and each
+# for its own reason:
+#
+#   DRAFT / PENDING_APPROVAL / APPROVED / POSTING_TO_SAP
+#       still in flight — no SAP document exists yet, and an approval can still
+#       be refused, so counting these would report revenue that may never land.
+#   REJECTED / CANCELLED
+#       refused or withdrawn; nothing moved.
+#   PENDING_ERROR
+#       SAP ANSWERED with an error, so nothing was committed there.
+#   SAP_UNKNOWN
+#       SAP never answered. The document may or may not exist. Counting an
+#       unconfirmed posting is the one error a finance dashboard must not make,
+#       because it cannot be told apart from a real one by looking.
+#
+# A receipt sitting in PENDING_ERROR is still real work and the cash may well be
+# in someone's hand — but this screen answers "what is posted in SAP", and the
+# operational tracking screens answer "what is outstanding". Conflating the two
+# is what makes a dashboard stop being trusted.
+COUNTED_RECEIPT_STATUSES = ('POSTED',)
+
+# Same rule for deposits: banked and confirmed by SAP, or not counted.
+COUNTED_DEPOSIT_STATUSES = ('POSTED',)
+
+# Raised but NOT yet settled in SAP — the counterpart to the figures above.
+#
+# Restricting the dashboard to posted documents makes the totals trustworthy but
+# would otherwise hide real work: a receipt SAP refused this morning is money
+# somebody is holding, and a screen that simply omitted it would understate the
+# day with no hint that anything was missing. These statuses are surfaced as
+# their own cards so the two questions stay separate and both get answered.
+#
+# REJECTED and CANCELLED are NOT pending: they were refused or withdrawn, so
+# nobody is waiting on them and nothing will ever post.
+PENDING_STATUSES = (
+    'DRAFT',
     'PENDING_APPROVAL',
     'APPROVED',
     'POSTING_TO_SAP',
-    'POSTED',
     'PENDING_ERROR',
     'SAP_UNKNOWN',
 )
 
-# Same reasoning for deposits.
-COUNTED_DEPOSIT_STATUSES = COUNTED_RECEIPT_STATUSES
+# The subset that needs a human to look. The rest advance on their own as the
+# approval chain moves; these two are stuck until someone acts:
+#   PENDING_ERROR  SAP refused it — correct and resubmit.
+#   SAP_UNKNOWN    SAP never answered — must be reconciled before retrying, or
+#                  the payment could post twice.
+BLOCKED_STATUSES = ('PENDING_ERROR', 'SAP_UNKNOWN')
 
 # Sum() returns NULL for an empty set, which would serialise as null and force
 # every consumer to null-check before formatting. Coalesced to 0 here so the
@@ -78,7 +119,10 @@ def _sum(field):
     return Coalesce(Sum(field), ZERO)
 
 
-DEFAULT_PRESET = 'this_month'
+# A rolling 30-day window rather than the calendar month: on the 1st of a month
+# "this month" is a single day of data, so the dashboard opened almost empty and
+# every reader's first action was to widen the range.
+DEFAULT_PRESET = 'last_30_days'
 
 
 def resolve_range(preset, date_from=None, date_to=None, today=None):
@@ -109,38 +153,77 @@ def resolve_range(preset, date_from=None, date_to=None, today=None):
     if preset == 'this_month':
         return (today.replace(day=1), today)
     # Anything unrecognised falls back to the default window rather than
-    # erroring, so a stale client cannot break the page.
-    return (today.replace(day=1), today)
+    # erroring, so a stale client cannot break the page. Derived from
+    # DEFAULT_PRESET so the fallback cannot drift away from it.
+    return (today - timedelta(days=29), today)
 
 
-def _receipts(company, start, end):
+def _receipts(company, start, end, statuses=COUNTED_RECEIPT_STATUSES):
     qs = PaymentReceipt.objects.filter(
-        status__in=COUNTED_RECEIPT_STATUSES,
+        status__in=statuses,
         payment_date__gte=start,
         payment_date__lte=end,
     )
     return qs.filter(company=company) if company else qs
 
 
-def _deposits(company, start, end):
+def _deposits(company, start, end, statuses=COUNTED_DEPOSIT_STATUSES):
     qs = BankDeposit.objects.filter(
-        status__in=COUNTED_DEPOSIT_STATUSES,
+        status__in=statuses,
         deposit_date__gte=start,
         deposit_date__lte=end,
     )
     return qs.filter(company=company) if company else qs
 
 
-def _kpis(company, start, end):
-    """The five headline cards, in two queries."""
-    # `total_payments` deliberately ignores the status filter: the card is
-    # labelled "all payment receipts", so a draft still counts toward it. Every
-    # other figure here is money in hand.
-    everything = PaymentReceipt.objects.filter(
-        payment_date__gte=start, payment_date__lte=end)
-    if company:
-        everything = everything.filter(company=company)
+def _pending(company, start, end):
+    """Receipts and deposits raised but not yet settled in SAP.
 
+    Two aggregates rather than one combined figure: a pending receipt and a
+    pending deposit are different problems for different people, and adding
+    them would also double-count the same money where a receipt has been
+    banked but neither document has posted.
+    """
+    receipts = _receipts(company, start, end, PENDING_STATUSES).aggregate(
+        total=_sum('total_amount'),
+        count=Count('id'),
+        blocked=Coalesce(
+            Sum('total_amount', filter=Q(status__in=BLOCKED_STATUSES)), ZERO),
+        blocked_count=Count('id', filter=Q(status__in=BLOCKED_STATUSES)),
+    )
+    deposits = _deposits(company, start, end, PENDING_STATUSES).aggregate(
+        total=_sum('deposit_amount'),
+        count=Count('id'),
+        blocked=Coalesce(
+            Sum('deposit_amount', filter=Q(status__in=BLOCKED_STATUSES)), ZERO),
+        blocked_count=Count('id', filter=Q(status__in=BLOCKED_STATUSES)),
+    )
+    return {
+        'pending_receipts': _money(receipts['total']),
+        'pending_receipts_count': receipts['count'],
+        'pending_deposits': _money(deposits['total']),
+        'pending_deposits_count': deposits['count'],
+        # Needs someone to act, as opposed to simply waiting its turn in the
+        # approval chain. This is the number worth chasing.
+        'blocked_total': _money(receipts['blocked'] + deposits['blocked']),
+        'blocked_count': receipts['blocked_count'] + deposits['blocked_count'],
+    }
+
+
+def _kpis(company, start, end):
+    """The five headline cards, in two queries.
+
+    `total_payments` counts the SAME posted-only set as everything else. It once
+    included drafts and rejections, on the reasoning that the card said "all
+    payment receipts" — but with every other figure now restricted to what SAP
+    confirmed, that one card would be the only number on the screen answering a
+    different question, and the first thing a reader would do is try to
+    reconcile it against Received Total and fail.
+
+    It still differs from Received Total in a useful way: this is every posted
+    receipt, Received Total is the money side of the same set, so the two agree
+    while the counts show whether any posted receipt carries no value.
+    """
     received = _receipts(company, start, end).aggregate(
         total=_sum('total_amount'),
         against_invoice=Coalesce(
@@ -148,9 +231,12 @@ def _kpis(company, start, end):
         advance=Coalesce(
             Sum('total_amount', filter=Q(is_advance=True)), ZERO),
         count=Count('id'),
+        # Counted alongside the sums so the Against Invoice and Advance cards
+        # can state a receipt count like every other card, instead of prose
+        # that repeats what their tooltip already says.
+        against_invoice_count=Count('id', filter=Q(is_advance=False)),
+        advance_count=Count('id', filter=Q(is_advance=True)),
     )
-    all_totals = everything.aggregate(total=_sum('total_amount'),
-                                      count=Count('id'))
     deposits = _deposits(company, start, end).aggregate(
         total=_sum('deposit_amount'),
         collected=_sum('collected_amount'),
@@ -158,15 +244,18 @@ def _kpis(company, start, end):
     )
 
     return {
-        'total_payments': _money(all_totals['total']),
-        'total_payments_count': all_totals['count'],
+        'total_payments': _money(received['total']),
+        'total_payments_count': received['count'],
         'deposit_total': _money(deposits['total']),
         'deposit_collected': _money(deposits['collected']),
         'deposit_count': deposits['count'],
         'received_total': _money(received['total']),
         'received_count': received['count'],
         'against_invoice': _money(received['against_invoice']),
+        'against_invoice_count': received['against_invoice_count'],
         'advance_payment': _money(received['advance']),
+        'advance_count': received['advance_count'],
+        **_pending(company, start, end),
     }
 
 

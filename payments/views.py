@@ -428,9 +428,15 @@ class BankAccountListView(APIView):
         return response
 
 class PaymentMethodMappingAdminView(ListCreateAPIView):
-    """Admin CRUD for payment method -> SAP account mapping."""
+    """Admin CRUD for payment method -> SAP account mapping.
 
-    permission_classes = [IsAuthenticated]
+    Gated like every other Masters view. It previously required only
+    IsAuthenticated despite being admin CRUD, so any logged-in user could
+    rewrite the GL and bank accounts that decide where receipt money lands in
+    SAP — the highest-value rows in the module.
+    """
+
+    permission_classes = [IsAuthenticated, IsApprovalAdmin]
     serializer_class = PaymentMethodMappingSerializer
 
     def get_queryset(self):
@@ -442,7 +448,7 @@ class PaymentMethodMappingAdminView(ListCreateAPIView):
 
 
 class PaymentMethodMappingAdminDetailView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsApprovalAdmin]
     serializer_class = PaymentMethodMappingSerializer
     queryset = PaymentMethodMapping.objects.all()
 
@@ -453,9 +459,13 @@ class PaymentMethodMappingStatusView(APIView):
     Drives the admin page. Returns EVERY method, mapped or not, so a missing
     mapping is as visible as a broken one — an absent row is the commonest
     configuration fault and would otherwise simply not appear.
+
+    Read-only, but gated with the rest of the Masters tab it feeds: it reports
+    the SAP account each method posts to, which is configuration detail rather
+    than something an ordinary collector needs.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsApprovalAdmin]
 
     def get(self, request):
         company = (request.query_params.get('company') or '').strip().upper()
