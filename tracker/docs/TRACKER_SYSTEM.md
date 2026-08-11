@@ -124,7 +124,7 @@ Nine desks (as of the 2026-08-11 Transport Approval branch):
 |---|---|---|---|---|---|
 | 1 | `entry` | Head Office In | — | no | 2 d |
 | 2 | `bilty_grpo` | Bilty / GRPO | — | yes | 3 d |
-| 3 | `pre_audit` | Pre-Audit | OK · HOLD · DEBIT · RETURN | yes | 3 d |
+| 3 | `pre_audit` | Pre-Audit | OK · HOLD · DEBIT · TRANSPORT_APPROVAL · RETURN | yes | 3 d |
 | 4 | `transport_approval` | Transport Approval | APPROVED · REJECTED | yes | 2 d |
 | 5 | `data_entry` | Data Entry | — | yes | 2 d |
 | 6 | `sap_approval` | SAP Approval | APPROVED · REJECTED | yes | 3 d |
@@ -178,6 +178,12 @@ Pre-Audit desk can see which of the two the button will do.
 Non-Transport invoices never see the desk, and if it is deactivated in Admin
 the branch simply disappears — Pre-Audit goes straight to Data Entry again.
 
+**Sending one there by hand.** Pre-Audit also carries a `TRANSPORT_APPROVAL`
+disposition, which overrides the route and sends *any* invoice to the desk —
+including a non-Transport one that happens to need transport's sign-off. It
+behaves like an advance in every other respect, and the trip shows up in the
+Transport Approval tab exactly like an automatic one.
+
 ### Locking
 
 Advancing out of `entry` sets `is_locked = True` and the entry desk can no
@@ -194,7 +200,8 @@ actions (`apply_bulk`) call it per invoice, so no rule can be bypassed in bulk.
 | Status | Effect |
 |---|---|
 | `OK` / none | Advance |
-| `HOLD` + `FULL` | **Stays put.** Annotated with an immutable note; the dwell clock keeps running |
+| `HOLD` + `FULL` | **Stays put.** Annotated with an immutable note; the dwell clock keeps running. Released from the Hold tab (§11) |
+| `TRANSPORT_APPROVAL` | **Advances to the Transport Approval desk**, whatever the category — the manual override for the branch (§2) |
 | `HOLD` + `PARTIAL` | **Advances**, withholding `amount` into `Invoice.hold_amount` |
 | `DEBIT` | **Advances**, adding `amount` to `Invoice.debit_amount` permanently |
 | `RETURN` | Back one stage along the route |
@@ -589,6 +596,15 @@ the invoice sits *now* (`still here` marks a full hold that never left). The
 Transport Approval tab groups the approval desk's rows by **visit**, so a
 rejection and the later re-send are two rows, each with its own verdict:
 `AWAITING` · `APPROVED` · `REJECTED` · `REJECTION_PENDING`.
+
+**The Hold tab is the one that can act.** A FULL hold is still parked at the
+desk, so those rows carry a checkbox and a **Release as OK** button (plus
+*Release for transport approval* at Pre-Audit). It posts the ordinary bulk
+action, so every rule still applies — the invoice advances exactly as if it had
+been dispositioned from the Current tab, and a Transport invoice released as OK
+still detours to the approval desk. The hold row stays in the log as history,
+now showing where the invoice went. Every other row in every other log tab is
+read-only, because the invoice has already moved on.
 
 **Verdicts collapse per visit.** APPROVED / REJECTED / RETURN are one decision
 per stage visit, so the note row a reason-less rejection writes and the row that
