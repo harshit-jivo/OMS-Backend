@@ -39,6 +39,8 @@ urlpatterns = [
     path('api/ui-config/', include('uilabels.urls')),
     path('api/payments/', include('payments.urls')),
     path('api/approvals/', include('approvals.urls')),
+    # HAIS — hardware asset register (own `hais` Postgres schema).
+    path('api/hais/', include('HAIS.urls')),
 ]
 
 
