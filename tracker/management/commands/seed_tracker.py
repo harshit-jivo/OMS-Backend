@@ -20,8 +20,11 @@ STAGES = [
     dict(code='bilty_grpo',   name='Bilty / GRPO',       order=2,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=3),
+    # TRANSPORT_APPROVAL sends the invoice to the Transport Approval desk by
+    # hand; Transport-category invoices go there on an ordinary OK anyway.
     dict(code='pre_audit',    name='Pre-Audit',          order=3,
-         status_choices=['OK', 'HOLD', 'DEBIT', 'RETURN'],    requires_status=True,
+         status_choices=['OK', 'HOLD', 'DEBIT', 'TRANSPORT_APPROVAL', 'RETURN'],
+         requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
     # A BRANCH off Pre-Audit, not a step along the line: only Transport
     # invoices go here, and both verdicts hand them back to Pre-Audit, which

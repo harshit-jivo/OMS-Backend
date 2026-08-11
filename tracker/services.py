@@ -37,6 +37,10 @@ TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
 PRE_AUDIT_STAGE_CODE = 'pre_audit'
 TRANSPORT_APPROVAL_STAGE_CODE = 'transport_approval'
 BRANCH_STAGE_CODES = {TRANSPORT_APPROVAL_STAGE_CODE}
+# Pre-Audit disposition that sends an invoice to the Transport Approval desk by
+# hand. Transport invoices route there automatically; this is the explicit
+# override for anything else that needs the transport desk's sign-off.
+TRANSPORT_APPROVAL_STATUS = 'TRANSPORT_APPROVAL'
 # The JSAP desk mirrors a decision taken in the JSAP system. Mart invoices are
 # not budget-approved there at all, so they skip the desk entirely.
 JSAP_STAGE_CODE = 'jsap_approval'
@@ -387,6 +391,11 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
             raise ValidationError('Remarks are mandatory to return an invoice.')
         kind = 'RETURN'
 
+    # Sending to the Transport Approval desk by hand overrides the route: it is
+    # a branch, so the invoice would otherwise advance along the main line.
+    force_transport = (kind == 'ADVANCE'
+                       and status == TRANSPORT_APPROVAL_STATUS)
+
     now = timezone.now()
     stage = invoice.current_stage
     visit = _open_event(invoice)
@@ -416,7 +425,12 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         return invoice
 
     # ADVANCE or RETURN both close the current visit.
-    target = _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1)
+    if force_transport:
+        target = _stage_by_code(TRANSPORT_APPROVAL_STAGE_CODE)
+        if target is None:
+            raise ValidationError('The Transport Approval desk is not configured.')
+    else:
+        target = _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1)
     if target is None:
         raise ValidationError('No adjacent stage to move to.')
 
