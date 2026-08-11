@@ -76,7 +76,10 @@ class PartyAddress(models.Model):
     class Meta:
         db_table = 'sap_party_addresses'
         ordering = ['card_code', 'address_name']
-        unique_together = ['card_code', 'address_name', 'category']
+        # Mirrors SAP's CRD1 key: the same Address exists once as a bill-to (B)
+        # and once as a ship-to (S), each with its own GSTRegnNo. Leaving
+        # address_type out collapsed the pair and lost the bill-to row.
+        unique_together = ['card_code', 'address_name', 'category', 'address_type']
     
     def __str__(self):
         return f"{self.card_code} - {self.address_name}"

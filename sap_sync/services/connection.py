@@ -22,10 +22,13 @@ class SAPConnection:
         self.cursor = None
     
     def connect(self):
+        # This host only answers to the FreeTDS host:port / separate-port forms;
+        # the "host,port" form is kept last so a move to a named instance or a
+        # different FreeTDS build keeps working.
         attempts = [
-            {"server": f"{self.host},{self.port}"},
-            {"server": f"{self.host}:{self.port}"},
             {"server": self.host, "port": self.port},
+            {"server": f"{self.host}:{self.port}"},
+            {"server": f"{self.host},{self.port}"},
         ]
         last_error = None
 
@@ -44,7 +47,9 @@ class SAPConnection:
                 return True
             except Exception as e:
                 last_error = e
-                logger.warning(
+                # Per-attempt failures are expected while walking the ladder;
+                # the raised ConnectionError below is the real signal.
+                logger.debug(
                     "SAP DB connect attempt failed (%s): %s",
                     params,
                     str(e),

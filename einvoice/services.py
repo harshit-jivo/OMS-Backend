@@ -52,7 +52,7 @@ def test_irn_warning(company_db, irn=None):
     """Warning to CANCEL immediately when an IRN was generated from a test company
     against NIC production (a real live e-invoice for test data). None otherwise."""
     if is_test_company(company_db) and current_environment() == "production":
-        db = company_db or settings.HANA_COMPANY_DB
+        db = company_db or settings.HANA_OIL_COMPANY_DB
         msg = (f"⚠ Generated from TEST company {db} against NIC PRODUCTION — this is a "
                f"REAL, live e-invoice for test data. CANCEL THIS IRN IMMEDIATELY "
                f"(within 24 hours).")
@@ -351,21 +351,38 @@ def store_standalone_ewb(result, *, order_id=None, request_payload=None):
 
 # ---- automatic IRN generation from a SAP invoice (with audit log) ---------
 
+def qr_dir_for_company(company_db=None) -> str:
+    """QR folder for a company DB.
+
+    Each company writes its bitmaps into its own folder (OIL_ATTACHMENTS /
+    BEVERAGE_ATTACHMENTS / MART_ATTACHMENTS), configured in
+    settings.EINV_QR_SAVE_DIRS. Falls back to the single EINV_QR_SAVE_DIR when
+    the company has no folder of its own (or is unknown).
+    """
+    per_company = getattr(settings, "EINV_QR_SAVE_DIRS", None) or {}
+    default_db = getattr(settings, "HANA_OIL_COMPANY_DB", "")
+    return (per_company.get(company_db or default_db)
+            or getattr(settings, "EINV_QR_SAVE_DIR", "") or "")
+
+
 def post_generate_hooks(record, result, *, company_db=None, docentry=None):
     """
     Best-effort side effects after a successful IRN generation, gated by settings:
-      - EINV_QR_SAVE_DIR   -> write the QR PNG file to the shared folder
+      - EINV_QR_SAVE_DIRS  -> write the QR PNG into THIS company's folder
       - EINV_MIRROR_HANA   -> write the row into HANA OMS_IRN_LOG (UDO-shaped)
       - EINV_SAP_WRITEBACK -> write the IRN back onto the SAP invoice (e-Billing)
     Never raises; failures are logged so they can't break the IRN flow.
     """
-    # 1. QR PNG to the shared folder (path is reused for OMS_IRN_LOG.U_UTL_QRPT).
+    # 1. QR PNG into the company's own folder. The path written here is what gets
+    #    stored in OMS_IRN_LOG.U_UTL_QRPT, so the report reads the same location.
     qr_path = None
-    if record is not None and getattr(settings, "EINV_QR_SAVE_DIR", ""):
+    qr_dir = qr_dir_for_company(company_db)
+    if record is not None and qr_dir:
         try:
-            qr_path = save_qr_to_dir(record, settings.EINV_QR_SAVE_DIR)
+            qr_path = save_qr_to_dir(record, qr_dir)
         except Exception:
-            logger.exception("QR file-save hook failed for doc %s", getattr(record, "doc_no", None))
+            logger.exception("QR file-save hook failed for doc %s (dir %s)",
+                             getattr(record, "doc_no", None), qr_dir)
 
     # 2. Row into HANA OMS_IRN_LOG (mirrors the SAP add-on's @UTL_MDEXTH shape).
     if record is not None and getattr(settings, "EINV_MIRROR_HANA", False):
@@ -398,34 +415,78 @@ def save_qr_to_dir(record, directory: str):
         logger.warning("QR file-save skipped: no signed QR for doc %s", record.doc_no)
         return None
 
+    path = save_signed_qr(
+        record.signed_qr_code, directory,
+        doc_no=record.doc_no, irn=record.irn, ack_no=record.ack_no,
+        environment=record.environment,
+    )
+    logger.info("Saved IRN QR PNG for doc %s -> %s", record.doc_no, path)
+    return path
+
+
+def qr_file_name(*, doc_no=None, irn=None, ack_no=None, environment=None) -> str:
+    """Bare filename for a QR PNG, per settings.EINV_QR_FILENAME."""
+    import os
+
     pattern = getattr(settings, "EINV_QR_FILENAME", "{doc_no}.png") or "{doc_no}.png"
     name = pattern.format(
-        doc_no=record.doc_no or "unknown",
-        irn=record.irn or "unknown",
-        ack_no=record.ack_no or "",
-        env=record.environment or "",
+        doc_no=doc_no or "unknown",
+        irn=irn or "unknown",
+        ack_no=ack_no or "",
+        env=environment or "",
     )
     name = os.path.basename(name)                       # never let the pattern escape the dir
     for ch in '<>:"/\\|?*':
         name = name.replace(ch, "_")
+    return name
 
-    png = qrgen.make_qr_png(record.signed_qr_code)
+
+def save_signed_qr(signed_qr: str, directory: str, *, doc_no=None, irn=None,
+                   ack_no=None, environment=None) -> str:
+    """Render a signed-QR string to PNG and write it into `directory`.
+
+    Split out from save_qr_to_dir so it can also be driven from a stored
+    U_UTL_QRST value (the backfill command) without an IrnRecord in hand.
+    Returns the path written.
+    """
+    import os
+    from . import qr as qrgen
+
+    name = qr_file_name(doc_no=doc_no, irn=irn, ack_no=ack_no, environment=environment)
+    png = qrgen.make_qr_png(signed_qr)
 
     # If SMB credentials are configured, authenticate to the share explicitly
     # (the Django process account may not have network access on its own).
-    smb_user = getattr(settings, "EINV_QR_SMB_USERNAME", "") or ""
-    if smb_user:
-        path = _save_png_smb(directory, name, png, smb_user,
-                             getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "")
-    else:
-        os.makedirs(directory, exist_ok=True)           # no-op if the share is already there
-        path = os.path.join(directory, name)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(png)
-        os.replace(tmp, path)                           # atomic swap into place
-    logger.info("Saved IRN QR PNG for doc %s -> %s", record.doc_no, path)
+    # Only for a real UNC path — a local/mapped-drive target has no server to
+    # authenticate to, and passing "C:\..." to smbclient makes it try to
+    # connect to a host called "C:".
+    smb_user = (getattr(settings, "EINV_QR_SMB_USERNAME", "") or "").strip()
+    is_unc = directory.replace("/", "\\").startswith("\\\\")
+    if smb_user and is_unc:
+        return _save_png_smb(directory, name, png, smb_user,
+                             (getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "").strip())
+
+    os.makedirs(directory, exist_ok=True)               # no-op if the share is already there
+    path = os.path.join(directory, name)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(png)
+    os.replace(tmp, path)                               # atomic swap into place
     return path
+
+
+def smb_username_for(server: str, username: str) -> str:
+    """Qualify a bare SMB username with the target host: 'OMS' -> 'JIVO-APP\\OMS'.
+
+    The OMS service runs as NT AUTHORITY\\SYSTEM, and under SYSTEM the Windows
+    SSPI layer rejects an unqualified username with "The credentials supplied to
+    the package were not recognized" — so every QR save failed and U_UTL_QRPT was
+    left NULL. Interactive accounts accept either form (which is why the same
+    code worked from a shell), so we always qualify.
+    """
+    if not username or "\\" in username or "@" in username:
+        return username
+    return f"{server}\\{username}"
 
 
 def _save_png_smb(directory: str, name: str, png: bytes, username: str, password: str) -> str:
@@ -436,11 +497,12 @@ def _save_png_smb(directory: str, name: str, png: bytes, username: str, password
     import smbclient
 
     server = directory.strip("\\/").replace("/", "\\").split("\\")[0]   # JIVO-APP
-    smbclient.register_session(server, username=username, password=password)
+    smbclient.register_session(server, username=smb_username_for(server, username),
+                               password=password)
     try:
         smbclient.makedirs(directory, exist_ok=True)
     except Exception:  # noqa: BLE001 — dir usually already exists
-        pass
+        logger.debug("SMB makedirs on %s failed (continuing)", directory, exc_info=True)
     path = ntpath.join(directory, name)
     tmp = f"{path}.tmp"
     with smbclient.open_file(tmp, mode="wb") as fh:

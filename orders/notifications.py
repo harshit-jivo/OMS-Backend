@@ -164,25 +164,29 @@ def save_notification(user, order, message):
 
 
 def _build_push_data(notification, event_type=None, notification_type=None, title=None):
-    """Assemble the structured ``data`` block for a push message.
+    """Assemble the structured ``data`` block for an Expo push message.
 
     Existing keys (``notification_id``, ``order_id``, ``screen``) are always
     present for backward compatibility (Task 9). New keys are additive and let
     the app navigate from structured fields rather than message text (Task 3).
+
+    Delegates to :func:`build_notification_payload` and drops the two keys the
+    Expo block does not carry. The two builders previously repeated the same
+    eight keys, so a field added to one silently diverged from the other; this
+    keeps a single definition of the payload shape while producing exactly the
+    same dict Expo received before.
     """
-    created_at = getattr(notification, "created_at", None)
-    return {
-        # --- existing keys (do not remove -- older clients rely on these) ---
-        "notification_id": notification.id,
-        "order_id": notification.order_id,
-        "screen": NOTIFICATION_SCREEN,
-        # --- new, optional structured fields --------------------------------
-        "notification_type": notification_type,
-        "event_type": event_type,
-        "title": title or DEFAULT_PUSH_TITLE,
-        "message": notification.message,
-        "timestamp": created_at.isoformat() if created_at else None,
-    }
+    payload = build_notification_payload(
+        notification,
+        event_type=event_type,
+        notification_type=notification_type,
+        title=title,
+    )
+    # `order_number` and `body` are web-push-only additions. Removing them here
+    # keeps the Expo `data` block byte-identical to the previous implementation.
+    payload.pop("order_number", None)
+    payload.pop("body", None)
+    return payload
 
 
 def _deactivate_dead_tokens(tokens, reason):
@@ -266,6 +270,7 @@ def send_push_notification(
     if not payload:
         return
 
+    started = time.monotonic()
     try:
         response = requests.post(
             EXPO_PUSH_URL,
@@ -277,6 +282,7 @@ def send_push_notification(
             },
             timeout=10,
         )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         try:
             response_data = response.json()
         except ValueError:
@@ -284,8 +290,16 @@ def send_push_notification(
 
         if response.status_code >= 400:
             logger.error(
-                "Expo push notification failed status=%s response=%s",
+                "push channel=expo outcome=failed notification_id=%s user_id=%s "
+                "order_id=%s event_type=%s status=%s tokens=%s duration_ms=%s "
+                "response=%s",
+                notification.id,
+                user.id,
+                notification.order_id,
+                event_type,
                 response.status_code,
+                len(payload),
+                elapsed_ms,
                 response_data,
             )
             return
@@ -298,9 +312,14 @@ def send_push_notification(
         ticket_errors = [t for t in tickets if t.get("status") != "ok"]
         if response_data.get("errors") or ticket_errors:
             logger.error(
-                "Expo push notification ticket errors user_id=%s notification_id=%s errors=%s ticket_errors=%s",
-                user.id,
+                "push channel=expo outcome=ticket_error notification_id=%s "
+                "user_id=%s order_id=%s event_type=%s duration_ms=%s errors=%s "
+                "ticket_errors=%s",
                 notification.id,
+                user.id,
+                notification.order_id,
+                event_type,
+                elapsed_ms,
                 response_data.get("errors", []),
                 ticket_errors,
             )
@@ -330,13 +349,44 @@ def send_push_notification(
             ).start()
 
         logger.info(
-            "Expo push notification accepted user_id=%s notification_id=%s token_count=%s",
-            user.id,
+            "push channel=expo outcome=accepted notification_id=%s user_id=%s "
+            "order_id=%s event_type=%s notification_type=%s tokens=%s "
+            "accepted=%s duration_ms=%s",
             notification.id,
+            user.id,
+            notification.order_id,
+            event_type,
+            notification_type,
+            len(payload),
             len(ticket_id_by_token),
+            elapsed_ms,
         )
     except requests.RequestException as error:
-        logger.error("Expo push notification error: %s", error)
+        # Network-level failure: timeout, DNS, connection reset. The
+        # notification row is already saved, so the user still sees it in-app
+        # and on next poll — only the push itself is lost.
+        logger.error(
+            "push channel=expo outcome=error notification_id=%s user_id=%s "
+            "order_id=%s event_type=%s duration_ms=%s error=%s",
+            notification.id,
+            user.id,
+            notification.order_id,
+            event_type,
+            int((time.monotonic() - started) * 1000),
+            error,
+        )
+    except Exception as error:
+        # Anything unforeseen (malformed response shape, encoding error).
+        # Delivery is best-effort: a push failure must never surface as a 500
+        # on the business request that triggered it.
+        logger.exception(
+            "push channel=expo outcome=unexpected_error notification_id=%s "
+            "user_id=%s order_id=%s error=%s",
+            notification.id,
+            user.id,
+            notification.order_id,
+            error,
+        )
 
 
 def build_notification_payload(
@@ -379,14 +429,28 @@ def deliver_notification(
     if notification is None:
         return None
 
-    # Mobile (unchanged).
-    send_push_notification(
-        user,
-        notification,
-        event_type=event_type,
-        notification_type=notification_type,
-        title=title,
-    )
+    # Mobile. Wrapped for the same reason web push always was: the record is
+    # already committed, so a transport failure must not propagate into the
+    # business request that triggered it. Previously only the internals of
+    # send_push_notification were guarded, so a database error while reading
+    # PushToken rows would surface as a 500 on order approval.
+    try:
+        send_push_notification(
+            user,
+            notification,
+            event_type=event_type,
+            notification_type=notification_type,
+            title=title,
+        )
+    except Exception as error:
+        logger.exception(
+            "push channel=expo outcome=dispatch_failed notification_id=%s "
+            "user_id=%s order_id=%s error=%s",
+            notification.id,
+            getattr(user, "id", None),
+            notification.order_id,
+            error,
+        )
 
     # Browser Web Push (independent of mobile; safe no-op for mobile-only users).
     try:
@@ -401,7 +465,14 @@ def deliver_notification(
         )
         send_web_push_to_user(user, payload)
     except Exception as error:  # never let web push break delivery
-        logger.error("Web push dispatch failed notification_id=%s: %s", notification.id, error)
+        logger.exception(
+            "push channel=webpush outcome=dispatch_failed notification_id=%s "
+            "user_id=%s order_id=%s error=%s",
+            notification.id,
+            getattr(user, "id", None),
+            notification.order_id,
+            error,
+        )
 
     return notification
 
@@ -410,19 +481,56 @@ def deliver_notification_to_many(
     users, order, message, exclude_user=None, event_type=None,
     notification_type=None, title=None,
 ):
-    """Deliver the same ``message`` to each resolved recipient in ``users``."""
+    """Deliver the same ``message`` to each resolved recipient in ``users``.
+
+    One recipient failing never stops the rest: ``deliver_notification`` isolates
+    each channel, and the summary line below records how many of the intended
+    recipients actually got a record. That count is the answer to the commonest
+    production question -- "was this order's approver notified at all?" -- which
+    previously required correlating individual per-user log lines.
+    """
+    started = time.monotonic()
     exclude_id = getattr(exclude_user, "id", None)
+    targeted = 0
+    saved = 0
+
     for user in users:
         if exclude_id is not None and getattr(user, "id", None) == exclude_id:
             continue
-        deliver_notification(
-            user,
-            order,
-            message,
-            event_type=event_type,
-            notification_type=notification_type,
-            title=title,
-        )
+        targeted += 1
+        try:
+            if deliver_notification(
+                user,
+                order,
+                message,
+                event_type=event_type,
+                notification_type=notification_type,
+                title=title,
+            ) is not None:
+                saved += 1
+        except Exception as error:
+            # Belt and braces: deliver_notification already guards both
+            # channels, so reaching here means the DB write itself failed.
+            # Continue to the remaining recipients rather than losing them all.
+            logger.exception(
+                "notification fan-out failed for one recipient user_id=%s "
+                "order_id=%s event_type=%s error=%s",
+                getattr(user, "id", None),
+                getattr(order, "id", None),
+                event_type,
+                error,
+            )
+
+    logger.info(
+        "notification fan-out order_id=%s event_type=%s notification_type=%s "
+        "targeted=%s saved=%s duration_ms=%s",
+        getattr(order, "id", None),
+        event_type,
+        notification_type,
+        targeted,
+        saved,
+        int((time.monotonic() - started) * 1000),
+    )
 
 
 def deactivate_push_token(user, token):

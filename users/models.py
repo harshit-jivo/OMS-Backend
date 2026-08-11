@@ -194,7 +194,24 @@ class User(AbstractUser):
         null=True,
         blank=True
     )
-    
+
+    # ADDITIONAL roles, on top of the primary `role` above.
+    #
+    # `role` is a single FK, so a user who is a Manager cannot also be a
+    # Payment Approver without losing "manager" — and with it their access to
+    # orders, reports and everything else keyed off that role. This M2M lets a
+    # user hold function-specific roles (payment_approver, deposit_creator, …)
+    # while keeping the primary role that defines the rest of their access.
+    #
+    # Anything resolving "does this user hold role X" must check BOTH — see
+    # users.models.User.has_role and approvals.services.eligible_approver_ids.
+    extra_roles = models.ManyToManyField(
+        'users.UserRole',
+        blank=True,
+        related_name='extra_users',
+        help_text='Additional roles beyond the primary one, e.g. Payment Approver.',
+    )
+
     company = models.ForeignKey(
         'Company',
         on_delete=models.PROTECT,
@@ -276,8 +293,35 @@ class User(AbstractUser):
     class Meta:
         db_table = 'users_user'
 
-    def __str__(self):  
+    def __str__(self):
         return self.username
+
+    # -- Role helpers --------------------------------------------------------
+    # A user's roles are the primary FK plus any extra_roles. Every "does this
+    # user hold role X" check must go through these, or a grant made via
+    # extra_roles would be invisible to half the codebase.
+
+    def all_role_ids(self):
+        """IDs of every role this user holds (primary + extras)."""
+        ids = set(self.extra_roles.values_list('id', flat=True))
+        if self.role_id:
+            ids.add(self.role_id)
+        return ids
+
+    def all_role_names(self):
+        """Lower-cased names of every role this user holds."""
+        names = {
+            str(n).strip().lower()
+            for n in self.extra_roles.values_list('name', flat=True)
+        }
+        primary = getattr(self.role, 'name', '')
+        if primary:
+            names.add(str(primary).strip().lower())
+        return names
+
+    def has_role(self, name):
+        """True when the user holds `name` as either their primary or an extra role."""
+        return str(name).strip().lower() in self.all_role_names()
 
 
     
