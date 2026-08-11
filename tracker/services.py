@@ -29,6 +29,14 @@ REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 # Stages that only apply to certain invoices. Bilty/GRPO is a Transport-only
 # desk — non-Transport invoices skip it and go straight to Pre-Audit.
 TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
+# Transport Approval is a BRANCH off the main line, not a step along it: a
+# Transport invoice leaving Pre-Audit detours there for approval and is handed
+# straight back to Pre-Audit (approved or rejected), which then advances it to
+# Data Entry. It is therefore excluded from the linear route and routed
+# explicitly by `_branch_neighbour()`.
+PRE_AUDIT_STAGE_CODE = 'pre_audit'
+TRANSPORT_APPROVAL_STAGE_CODE = 'transport_approval'
+BRANCH_STAGE_CODES = {TRANSPORT_APPROVAL_STAGE_CODE}
 # The JSAP desk mirrors a decision taken in the JSAP system. Mart invoices are
 # not budget-approved there at all, so they skip the desk entirely.
 JSAP_STAGE_CODE = 'jsap_approval'
@@ -146,20 +154,81 @@ def _is_transport(invoice):
     return _category_name(invoice) == 'transport'
 
 
-def stage_route(invoice):
-    """The ordered stages this invoice actually travels through.
+def stage_route(invoice, stages=None):
+    """The ordered stages this invoice travels along the MAIN line.
 
     Non-Transport invoices skip the Bilty/GRPO desk and go Entry -> Pre-Audit.
+    Branch desks (Transport Approval) never appear here — they hang off the
+    line and are routed by `_branch_neighbour()`, so "previous stage" for Data
+    Entry stays Pre-Audit rather than the approval detour.
     """
-    stages = list(Stage.objects.filter(is_active=True).order_by('order'))
-    if _is_transport(invoice):
-        return stages
-    return [s for s in stages if s.code not in TRANSPORT_ONLY_STAGE_CODES]
+    if stages is None:
+        stages = list(Stage.objects.filter(is_active=True).order_by('order'))
+    transport = _is_transport(invoice)
+    return [s for s in stages
+            if s.code not in BRANCH_STAGE_CODES
+            and (transport or s.code not in TRANSPORT_ONLY_STAGE_CODES)]
 
 
-def _route_neighbour(invoice, step):
-    """Next (+1) or previous (-1) stage along this invoice's route."""
-    route = stage_route(invoice)
+def _stage_by_code(code, stages=None):
+    if stages is not None:
+        return next((s for s in stages if s.code == code), None)
+    return Stage.objects.filter(code=code, is_active=True).first()
+
+
+def transport_approved_this_visit(invoice):
+    """True if the Transport Approval desk approved the invoice INTO its
+    current Pre-Audit visit.
+
+    Keyed to the visit rather than to the invoice: an approval closes with
+    `exited_at` == the arrival time of the visit it creates, so a later bounce
+    back to Pre-Audit (a fresh visit) needs a fresh approval.
+    """
+    return StageEvent.objects.filter(
+        invoice=invoice,
+        stage__code=TRANSPORT_APPROVAL_STAGE_CODE,
+        event_type=StageEvent.EventType.ADVANCE,
+        exited_at=invoice.current_stage_entered_at,
+    ).exists()
+
+
+def needs_transport_approval(invoice, stages=None):
+    """True if this invoice, sitting at Pre-Audit, must detour through the
+    Transport Approval desk before it may go on to Data Entry."""
+    if invoice.current_stage.code != PRE_AUDIT_STAGE_CODE:
+        return False
+    if not _is_transport(invoice):
+        return False
+    if _stage_by_code(TRANSPORT_APPROVAL_STAGE_CODE, stages) is None:
+        return False        # desk not configured / deactivated — carry on
+    return not transport_approved_this_visit(invoice)
+
+
+def _branch_neighbour(invoice, step, stages=None):
+    """Where the Transport Approval branch sends an invoice, or None if this
+    move is an ordinary step along the main line.
+
+        Pre-Audit --advance--> Transport Approval  (Transport, not yet approved)
+        Transport Approval --approve/reject--> Pre-Audit
+    """
+    code = invoice.current_stage.code
+    if code == TRANSPORT_APPROVAL_STAGE_CODE:
+        # Both verdicts hand it back to the desk that sent it; APPROVED closes
+        # as an ADVANCE (which is what marks the visit approved), REJECTED as a
+        # RETURN carrying the reason.
+        return _stage_by_code(PRE_AUDIT_STAGE_CODE, stages)
+    if step > 0 and needs_transport_approval(invoice, stages):
+        return _stage_by_code(TRANSPORT_APPROVAL_STAGE_CODE, stages)
+    return None
+
+
+def _route_neighbour(invoice, step, stages=None):
+    """Next (+1) or previous (-1) stage for this invoice — the branch detour if
+    one applies, otherwise the neighbour along its main-line route."""
+    branch = _branch_neighbour(invoice, step, stages)
+    if branch is not None:
+        return branch
+    route = stage_route(invoice, stages)
     codes = [s.code for s in route]
     try:
         idx = codes.index(invoice.current_stage.code)
@@ -167,6 +236,15 @@ def _route_neighbour(invoice, step):
         return None
     nxt = idx + step
     return route[nxt] if 0 <= nxt < len(route) else None
+
+
+def next_stage(invoice, stages=None):
+    """The stage an ADVANCE from here would move the invoice to (None at the
+    terminal desk). Pass `stages` (all active stages) to avoid a query per
+    invoice when annotating a list."""
+    if invoice.current_stage.is_terminal:
+        return None
+    return _route_neighbour(invoice, +1, stages)
 
 
 def _open_event(invoice):
