@@ -95,6 +95,9 @@ INSTALLED_APPS = [
     'approvals',
     'attachments',
     'payments',
+    # HAIS — Hardware Asset Identification Software. Owns its own `hais`
+    # Postgres schema (created by its initial migration), same as payments.
+    'HAIS',
 ]
 
 MIDDLEWARE = [
