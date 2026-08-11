@@ -115,6 +115,11 @@ class LookupsView(APIView):
         })
 
 
+def _flag_true(value):
+    """Query-param truthiness: ?x=1 / true / yes."""
+    return str(value or '').strip().lower() in ('1', 'true', 'yes')
+
+
 def _can_use_entry(user):
     """True for users who work the head-office / entry desk (entry-page role)."""
     return user.is_superuser or PAGE_ENTRY in tracker_pages_for(user)
@@ -383,26 +388,36 @@ class StageAdvancedView(APIView):
 
 
 class StageDecisionsView(APIView):
-    """The decision log of a stage: what this desk marked OK / HOLD / DEBIT,
-    plus what it sent on for Transport Approval.
+    """The decision log of a stage: what this desk decided, and what became of it.
 
-    Pre-Audit's Hold, OK, Debit and Transport Approval tabs read this. It is a
-    log of *events*, not of invoices — only a FULL hold keeps the invoice here
-    (OK, DEBIT and a PARTIAL hold all advance it), so filtering the live queue
-    would show almost nothing. An invoice debited twice appears twice, each row
-    carrying its own amount, reason and handler, plus where the invoice sits now.
+    Every history tab reads this — Pre-Audit's Hold / OK / Debit / Sent Back /
+    Transport Approval, SAP's Approved / Rejected. It is a log of *events*, not
+    of invoices: only a FULL hold keeps the invoice here (OK, DEBIT and a PARTIAL
+    hold all advance it), so filtering the live queue would show almost nothing.
+    An invoice debited twice appears twice, each row carrying its own amount,
+    reason and handler, plus where the invoice sits now.
 
-        ?stage=pre_audit            every decision (OK + HOLD + DEBIT)
+        ?stage=pre_audit                              OK + HOLD + DEBIT + verdicts
         ?stage=pre_audit&decision=HOLD,DEBIT
-        ?stage=pre_audit&decision=TRANSPORT_APPROVAL   one row per approval trip
+        ?stage=pre_audit&decision=RETURN              what this desk sent back
+        ?stage=sap_approval&decision=APPROVED
+        ?stage=pre_audit&decision=TRANSPORT_APPROVAL  one row per approval trip
+        &include_resolved=1                           keep send-backs that came back
 
     Newest decision first.
     """
     permission_classes = [IsTrackerUser]
 
-    # Dispositions worth logging. RETURN/REJECTED are already covered by the
-    # Returned and Rejected tabs at the receiving desk.
-    DECISIONS = ['OK', 'HOLD', 'DEBIT']
+    # Dispositions worth logging.
+    DECISIONS = ['OK', 'HOLD', 'DEBIT', 'APPROVED', 'REJECTED', 'RETURN']
+    # Verdicts — one per stage *visit*, unlike OK/HOLD/DEBIT which can repeat.
+    # A rejection parked for remarks writes a note row and then closes the same
+    # visit when the remarks arrive; both describe one decision, so they collapse.
+    VERDICTS = {'APPROVED', 'REJECTED', 'RETURN'}
+    # Verdicts that sent the invoice back. Once it returns to this desk the
+    # rejection is answered, so these drop out of the tab (`?include_resolved=1`
+    # keeps them, flagged `came_back`).
+    SENT_BACK = {'REJECTED', 'RETURN'}
     # Pseudo-decision: the branch trip to the Transport Approval desk. Built
     # from that desk's visits, but shown to (and permissioned as) Pre-Audit,
     # which is the desk that sent them.
@@ -505,20 +520,27 @@ class StageDecisionsView(APIView):
 
         rows = []
         if decisions:
+            match = Q(stage_status__in=decisions)
+            if 'RETURN' in decisions:
+                # A desk with no status list sends back with the plain Return
+                # button, which leaves stage_status empty — still a send-back.
+                match |= Q(event_type=StageEvent.EventType.RETURN, stage_status='')
             events = (StageEvent.objects
-                      .filter(stage=stage, stage_status__in=decisions,
-                              invoice__is_deleted=False)
+                      .filter(match, stage=stage, invoice__is_deleted=False)
                       .select_related('invoice', 'invoice__current_stage',
                                       'invoice__category', 'invoice__unit',
                                       'invoice__branch', 'acted_by'))
+
+            visits = {}     # (invoice, entered_at, decision) -> collapsed verdict
             for ev in events:
                 inv = ev.invoice
+                decision = ev.stage_status or 'RETURN'
                 # A full hold is an in-place note (never exits), so fall back to
                 # when the row was written.
-                rows.append({
+                row = {
                     **self._invoice_fields(inv, stage),
                     'event_id': ev.id,
-                    'decision': ev.stage_status,
+                    'decision': decision,
                     'hold_type': ev.hold_type,
                     'amount': str(ev.amount) if ev.amount is not None else None,
                     'remarks': ev.remarks,
@@ -526,12 +548,59 @@ class StageDecisionsView(APIView):
                     'decided_at': ev.exited_at or ev.created_at,
                     'days_spent': (str(ev.days_spent)
                                    if ev.days_spent is not None else None),
-                })
+                    # Parked here awaiting the written reason (SAP/JSAP two-step).
+                    'awaiting_remarks': bool(
+                        decision == 'REJECTED' and ev.exited_at is None),
+                }
+                if decision not in self.VERDICTS:
+                    rows.append(row)
+                    continue
+                key = (inv.id, ev.entered_at, decision)
+                prev = visits.get(key)
+                # The closed row wins: it carries the reason and the real time.
+                if prev is None or (ev.exited_at and not prev['_closed']):
+                    row['_closed'] = ev.exited_at is not None
+                    visits[key] = row
+            rows += list(visits.values())
+
         if self.TRANSPORT_APPROVAL in asked:
             rows += self._transport_approval_rows(stage)
 
+        rows = self._flag_return_visits(rows, stage)
+        if not _flag_true(request.query_params.get('include_resolved')):
+            rows = [r for r in rows
+                    if not (r['decision'] in self.SENT_BACK and r['came_back'])]
+
         rows.sort(key=lambda r: r['decided_at'], reverse=True)
+        for r in rows:
+            r.pop('_closed', None)
         return Response(rows)
+
+    def _flag_return_visits(self, rows, stage):
+        """Mark every row whose invoice came BACK to this desk after the decision.
+
+        This is what keeps a send-back tab honest: a rejected invoice that has
+        since returned here is no longer outstanding — the desk is looking at it
+        again — so it drops out of the tab instead of lingering forever.
+
+        "Came back" means an arrival at this stage later than the decision, which
+        is exactly a `StageEvent.entered_at` after it. Note rows written during a
+        visit share that visit's `entered_at`, so they can't trigger it.
+        """
+        own = [r for r in rows if r['decision'] != self.TRANSPORT_APPROVAL]
+        ids = {r['invoice_id'] for r in own}
+        arrivals = {}
+        for inv_id, entered_at in (StageEvent.objects
+                                   .filter(stage=stage, invoice_id__in=ids)
+                                   .values_list('invoice_id', 'entered_at')):
+            arrivals.setdefault(inv_id, set()).add(entered_at)
+        for r in rows:
+            # Transport Approval rows describe a different desk's visits — the
+            # invoice is *meant* to come back here, so the flag would be noise.
+            seen = () if r['decision'] == self.TRANSPORT_APPROVAL else \
+                arrivals.get(r['invoice_id'], ())
+            r['came_back'] = any(a > r['decided_at'] for a in seen)
+        return rows
 
 
 class StageExportView(APIView):
