@@ -102,6 +102,10 @@ class Order(models.Model):
     
     company = models.CharField(max_length=100, blank=True,null=True)
     po_number = models.CharField(max_length=100, blank=True,null=True)
+    # Chosen once for the whole order and stamped on every SAP line, free stock
+    # included. Blank falls back to the per-category default in settings, which
+    # is how every order placed before the picker existed still maps.
+    warehouse_code = models.CharField(max_length=20, blank=True, default='')
     is_foc = models.BooleanField(default=False)
     remarks = models.TextField(blank=True,null=True)
     

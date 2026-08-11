@@ -39,6 +39,13 @@ class SalesOrderService():
 
         return result
     
+    def getWarehouses(self, branch):
+        with HANAConnection() as conn:
+            query = Queries.get_warehouses(branch)
+            result = conn.execute(query)
+
+        return result
+
     def getWarehouseDetails(self, warehouse_code,branch):
         with HANAConnection() as conn:
             query = Queries.get_warehouse_details(warehouse_code,branch)

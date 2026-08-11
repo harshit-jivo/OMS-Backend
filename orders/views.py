@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime
+from decimal import Decimal
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
@@ -26,6 +27,7 @@ from .scheme_rules import (
     get_ordered_quantity,
     get_party_product_scheme,
     should_mirror_punjab_combo_scheme_qty)
+from . import scheme_engine
 from users.models import SchemeProduct, User, State
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -507,6 +509,107 @@ def _create_order_item(order, item, to_float, to_bool):
     ])
 
     return order_item
+
+
+def _apply_engine_schemes(order, items, created_items):
+    """Persist the giveaways the scheme engine resolves for this order.
+
+    The client sends back the proposals it displayed, but it is not the
+    authority on them. An older client, a resumed draft, or an order placed
+    through a screen that never called the preview endpoint would otherwise
+    save no giveaway at all — and since the SAP push builds its free lines from
+    `OrderItemScheme`, the customer's free stock would silently never ship.
+
+    Re-resolving server-side makes the engine the single source of truth for
+    what is owed. Anything the client already sent for the same (line, giveaway
+    item) is left alone, so a hand-typed override is never overwritten.
+    """
+    card_code = getattr(order, 'card_code', '') or ''
+    if not card_code:
+        return
+
+    # Mirrors the preview call: one category for the order, with the engine's
+    # per-line check keeping a mixed-category order honest.
+    category = next(
+        (str(item.get('category') or '').strip() for item in items if item.get('category')),
+        '',
+    )
+
+    try:
+        proposals = scheme_engine.resolve_schemes(card_code, category, items)
+    except Exception:
+        logger.exception(
+            'Scheme engine failed for order %s; no giveaway lines added',
+            getattr(order, 'id', None),
+        )
+        return
+
+    # What the client already sent, so we only fill the gaps.
+    already = defaultdict(set)
+    for row in OrderItemScheme.objects.filter(order_item__in=[i for i in created_items if i]):
+        already[row.order_item_id].add((row.benefit_item_code or '').strip().upper())
+
+    new_rows = []
+    added_qty = defaultdict(Decimal)
+
+    for proposal in proposals:
+        # No rule means the quantity is still the user's to type; proposing a
+        # zero-quantity free line would ship nothing and confuse the picker.
+        if proposal.qty_is_user_supplied or proposal.qty <= 0:
+            continue
+        if not (0 <= proposal.line_index < len(created_items)):
+            continue
+        order_item = created_items[proposal.line_index]
+        if order_item is None:
+            continue
+
+        benefit_item_code = (proposal.benefit_item_code or '').strip()
+        if not benefit_item_code:
+            continue
+        if benefit_item_code.upper() in already[order_item.id]:
+            continue
+        already[order_item.id].add(benefit_item_code.upper())
+
+        new_rows.append(OrderItemScheme(
+            order_item=order_item,
+            scheme=None,
+            scheme_v2_id=proposal.scheme_id,
+            benefit_id=proposal.benefit_id,
+            # Snapshot: the SAP push ships exactly this, so editing the scheme
+            # afterwards cannot change what an approved order sends.
+            benefit_item_code=benefit_item_code,
+            qty_scheme=proposal.qty,
+            computed_qty=proposal.qty,
+            is_manual_override=False,
+            scope_type=proposal.scope_type,
+            scope_value=proposal.scope_value,
+        ))
+        added_qty[order_item.id] += proposal.qty
+
+    if not new_rows:
+        return
+
+    OrderItemScheme.objects.bulk_create(new_rows)
+
+    # Keep the line's own totals in step with what _create_order_item writes.
+    by_id = {item.id: item for item in created_items if item}
+    for order_item_id, qty in added_qty.items():
+        order_item = by_id.get(order_item_id)
+        if order_item is None:
+            continue
+        order_item.qty_scheme = (order_item.qty_scheme or Decimal('0')) + qty
+        order_item.is_scheme_visible = True
+        order_item.save(update_fields=['qty_scheme', 'is_scheme_visible'])
+
+    logger.info(
+        'Scheme engine added %s giveaway line(s) to order %s',
+        len(new_rows), getattr(order, 'id', None),
+    )
+
+
+def _normalize_warehouse_code(value):
+    """One warehouse for the whole order. SAP codes are short and upper-case."""
+    return str(value or '').strip().upper()[:20]
 
 
 def _normalize_order_type(value):
@@ -2394,6 +2497,8 @@ class UpdateOrderView(APIView):
         order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
         order.company = data.get('company', order.company)
         order.po_number = data.get('po_number', order.po_number)
+        order.warehouse_code = _normalize_warehouse_code(
+            data.get('warehouse_code', order.warehouse_code))
         order.is_foc = data.get('is_foc', order.is_foc)
         order.delivery_date = data.get('delivery_date') or order.delivery_date
         order.remarks = order_remarks
@@ -2404,8 +2509,9 @@ class UpdateOrderView(APIView):
         needs_approval = False
         flagged_items = []
 
+        created_items = []
         for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
+            created_items.append(_create_order_item(order, item, _to_float, _to_bool))
 
             bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
@@ -2413,6 +2519,8 @@ class UpdateOrderView(APIView):
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
+        _apply_engine_schemes(order, items, created_items)
 
         order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
 
@@ -2533,6 +2641,8 @@ class CreateOrderView(APIView):
             order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
             order.company = data.get('company', order.company)
             order.po_number = data.get('po_number', order.po_number)
+            order.warehouse_code = _normalize_warehouse_code(
+                data.get('warehouse_code', order.warehouse_code))
             order.is_foc = data.get('is_foc', order.is_foc)
             order.delivery_date = data.get('delivery_date') or order.delivery_date
             order.remarks = order_remarks
@@ -2541,14 +2651,17 @@ class CreateOrderView(APIView):
 
             needs_approval = False
             flagged_items = []
+            created_items = []
             for item in items:
-                _create_order_item(order, item, _to_float, _to_bool)
+                created_items.append(_create_order_item(order, item, _to_float, _to_bool))
                 bp = _to_float(item.get('price_list_basic', 0))
                 mp = _to_float(item.get('basic_price', 0))
                 rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
+
+            _apply_engine_schemes(order, items, created_items)
             assign_rate_approvers(order)
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
@@ -2677,6 +2790,7 @@ class CreateOrderView(APIView):
             dispatch_from_name=data.get('dispatch_from_name', ''),
             company=data.get('company', ''),
             po_number=data.get('po_number', ''),
+            warehouse_code=_normalize_warehouse_code(data.get('warehouse_code')),
             is_foc=data.get('is_foc', False),
             total_amount=total_amount,
             status=get_status('Order Created'),
@@ -2689,14 +2803,17 @@ class CreateOrderView(APIView):
         needs_approval = False
         flagged_items = []
 
+        created_items = []
         for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
+            created_items.append(_create_order_item(order, item, _to_float, _to_bool))
             bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
+        _apply_engine_schemes(order, items, created_items)
 
         OrderRateApproval.objects.filter(order=order).delete()
         OrderItemApprovalMapping.objects.filter(order=order).delete()
@@ -4824,7 +4941,6 @@ from django.db import transaction as _db_transaction
 
 from .models import Scheme, SchemeAssignment
 from .serializers import SchemeV2Serializer, SchemeAssignmentSerializer
-from . import scheme_engine
 
 
 class SchemeV2ListCreateView(APIView):

@@ -109,6 +109,7 @@ class CreateOrderSerializer(serializers.Serializer):
     dispatch_from_name = serializers.CharField(required=False, allow_blank=True, default='')
     company = serializers.CharField(required=False, allow_blank=True, default='')
     po_number = serializers.CharField(required=False, allow_blank=True, default='')
+    warehouse_code = serializers.CharField(required=False, allow_blank=True, default='')
     is_foc = serializers.BooleanField(required=False, default=False)
     remarks = serializers.CharField(required=False, allow_blank=True, default='')
     items = serializers.ListField(child=serializers.DictField())
@@ -524,7 +525,8 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         fields = [
             "id", "order_number", "card_code", "card_name",
             "bill_to_id", "bill_to_address", "ship_to_id", "ship_to_address",
-            "dispatch_from_id", "dispatch_from_name", "company", "po_number","is_foc",
+            "dispatch_from_id", "dispatch_from_name", "company", "po_number",
+            "warehouse_code", "is_foc",
             "remarks", "total_amount", "status", "status_display",
             "created_by", "created_by_name", "created_at", "delivery_date",
             "sap_created", "sap_doc_number", "quotation_cancelled",
