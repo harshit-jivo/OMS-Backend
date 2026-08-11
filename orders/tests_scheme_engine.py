@@ -461,3 +461,106 @@ class SchemeV2OrderLineTests(TestCase):
         _raw_scheme_id, qty, snapshot = entries[0]
         self.assertEqual(qty, 6.0)
         self.assertEqual(snapshot, 'FG-FREE')
+
+
+class OrderCreateResolvesSchemesTests(TestCase):
+    """The order-create path must resolve giveaways itself.
+
+    The client echoes back the proposals it displayed, but an older client, a
+    resumed draft, or a screen that never called the preview endpoint sends
+    none — and the SAP push builds its free lines from OrderItemScheme, so the
+    customer's free stock would silently never ship.
+    """
+
+    def setUp(self):
+        from orders.models import OrderStatus
+
+        State.objects.create(name='Delhi', code='DL')
+        Parties.objects.create(card_code='P1', card_name='Dealer', state='DL')
+        self.status = OrderStatus.objects.create(code='CREATED', name='Created')
+
+        self.scheme = make_scheme('BUY10GET1', category='OIL')
+        SchemeTrigger.objects.create(scheme=self.scheme, match_type='ITEM', match_value='FG-1')
+        SchemeBenefit.objects.create(scheme=self.scheme, free_item_code='FG-FREE',
+                                     per_qty=10, free_qty=1)
+        SchemeAssignment.objects.create(scheme=self.scheme, scope_type='STATE', scope_value='DL')
+
+    def _order_with(self, lines):
+        from orders.models import Order, OrderItem
+
+        order = Order.objects.create(order_number='SO-E', card_code='P1',
+                                     card_name='Dealer', status=self.status)
+        created = [
+            OrderItem.objects.create(
+                order=order,
+                item_code=line['item_code'],
+                category=line.get('category', ''),
+                qty=line.get('qty', 0),
+            )
+            for line in lines
+        ]
+        return order, created
+
+    def test_giveaway_is_saved_even_when_the_client_sends_none(self):
+        from orders.models import OrderItemScheme
+        from orders.views import _apply_engine_schemes
+
+        lines = [{'item_code': 'FG-1', 'category': 'OIL', 'qty': 30}]
+        order, created = self._order_with(lines)
+
+        _apply_engine_schemes(order, lines, created)
+
+        rows = OrderItemScheme.objects.filter(order_item__order=order)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].benefit_item_code, 'FG-FREE')
+        self.assertEqual(rows[0].qty_scheme, Decimal('3'))
+        self.assertEqual(rows[0].scheme_v2_id, self.scheme.id)
+        self.assertEqual(rows[0].scope_value, 'DL')
+
+        created[0].refresh_from_db()
+        self.assertEqual(created[0].qty_scheme, Decimal('3'))
+        self.assertTrue(created[0].is_scheme_visible)
+
+    def test_a_giveaway_the_client_already_sent_is_not_duplicated(self):
+        from orders.models import OrderItemScheme
+        from orders.views import _apply_engine_schemes
+
+        lines = [{'item_code': 'FG-1', 'category': 'OIL', 'qty': 30}]
+        order, created = self._order_with(lines)
+        # What the client saved, with a hand-typed quantity.
+        OrderItemScheme.objects.create(
+            order_item=created[0], scheme=None, scheme_v2=self.scheme,
+            benefit_item_code='FG-FREE', qty_scheme=Decimal('5'),
+            is_manual_override=True,
+        )
+
+        _apply_engine_schemes(order, lines, created)
+
+        rows = OrderItemScheme.objects.filter(order_item__order=order)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].qty_scheme, Decimal('5'))
+        self.assertTrue(rows[0].is_manual_override)
+
+    def test_a_scheme_for_another_category_is_not_added(self):
+        from orders.models import OrderItemScheme
+        from orders.views import _apply_engine_schemes
+
+        lines = [{'item_code': 'FG-1', 'category': 'MART', 'qty': 30}]
+        order, created = self._order_with(lines)
+
+        _apply_engine_schemes(order, lines, created)
+
+        self.assertEqual(OrderItemScheme.objects.filter(order_item__order=order).count(), 0)
+
+    def test_a_ruleless_scheme_proposes_nothing(self):
+        """Quantity still typed by hand — a zero-qty free line would ship nothing."""
+        from orders.models import OrderItemScheme
+        from orders.views import _apply_engine_schemes
+
+        self.scheme.benefits.update(per_qty=0, free_qty=0)
+        lines = [{'item_code': 'FG-1', 'category': 'OIL', 'qty': 30}]
+        order, created = self._order_with(lines)
+
+        _apply_engine_schemes(order, lines, created)
+
+        self.assertEqual(OrderItemScheme.objects.filter(order_item__order=order).count(), 0)
