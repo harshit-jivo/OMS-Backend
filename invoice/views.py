@@ -20,7 +20,9 @@ from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
 from django.http import HttpResponse
 
+from devices.context import describe_request_device
 from hana.services.services import SalesOrderService
+from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
 
@@ -38,6 +40,10 @@ class InvoiceLogCreateView(APIView):
         if isinstance(edited_from, (list, tuple)):
             edited_from = edited_from[0] if edited_from else None
 
+        # Resolved once per request: both history rows written below describe the
+        # same submission from the same machine.
+        device = describe_request_device(request)
+
         serializer = InvoiceLogSerializer(data=data)
         if serializer.is_valid():
             with transaction.atomic():
@@ -51,9 +57,10 @@ class InvoiceLogCreateView(APIView):
                     rejection_reason=invoice_log_instance.rejection_reason,
                     error_message=invoice_log_instance.error_message,
                     invoice_payload=invoice_log_instance.invoice_payload,
-                    created_by=request.user
+                    created_by=request.user,
+                    **device,
                 )
-                source = self._close_edited_source(edited_from, request.user)
+                source = self._close_edited_source(edited_from, request.user, device)
                 if source is not None:
                     # Link the replacement to the version it grew out of, so the
                     # approver of this log can see (and trace) the rejection
@@ -66,7 +73,7 @@ class InvoiceLogCreateView(APIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def _close_edited_source(self, edited_from, user):
+    def _close_edited_source(self, edited_from, user, device):
         """Retire the rejected log this submission replaces, and return it.
 
         Only runs once the replacement exists, so an edit that is started and then
@@ -98,6 +105,7 @@ class InvoiceLogCreateView(APIView):
             error_message=source.error_message,
             invoice_payload=source.invoice_payload,
             created_by=user,
+            **device,
         )
         return source
 
@@ -145,7 +153,10 @@ class InvoicelogStatusUpdateView(APIView):
                     rejection_reason=invoice_log.rejection_reason,
                     error_message=invoice_log.error_message,
                     invoice_payload=invoice_log.invoice_payload,
-                    created_by=user
+                    created_by=user,
+                    # The approve/reject path: this is the row an approver would
+                    # later dispute, so stamp the machine the decision came from.
+                    **describe_request_device(request),
         )
         print(f"Creator{invoice_log.created_by}")
         print(f"Approver{request.user}")
@@ -277,7 +288,8 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
             rejection_reason=invoice_log_instance.rejection_reason,
             error_message=invoice_log_instance.error_message,
             invoice_payload=invoice_log_instance.invoice_payload,
-            created_by=self.request.user
+            created_by=self.request.user,
+            **describe_request_device(self.request),
         )
 
 
@@ -477,6 +489,12 @@ class GetPrintReport(APIView):
     # Characters Windows/macOS refuse in a filename, plus control chars.
     _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
+    # Each company has its own Crystal report, reached through its own path.
+    _CRYSTAL_PATHS = {
+        'OIL': 'api/billprint',
+        'BEVERAGE': 'api/billprint/bev',
+    }
+
     @classmethod
     def _download_name(cls, doc_num, party_name):
         """'<DocNum> <Party Name>.pdf', scrubbed so it is a legal filename.
@@ -492,6 +510,14 @@ class GetPrintReport(APIView):
 
     def get(self, request):
         docNum = request.query_params.get('docNum')
+        # Which company's invoice this is: it picks both the schema the DocNum
+        # is resolved against and the Crystal path the PDF is rendered from.
+        # Defaults to OIL so existing callers keep working unchanged.
+        branch = normalize_branch(request.query_params.get('branch'))
+        if branch is None:
+            return Response({'error': 'branch must be one of: OIL, BEVERAGE'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         # The caller may already know the internal OINV key (the review screen
         # keeps it from the SAP post response). Using it skips the DocNum ->
         # DocEntry lookup, which is what the Crystal service wants anyway.
@@ -501,13 +527,12 @@ class GetPrintReport(APIView):
             if not docNum:
                 return Response({"error": "docNum is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-            docEntry = SalesOrderService().get_docEntry(docNum)
-            if not docEntry:
-                return Response({"error": f"No invoice found for docNum {docNum}"},
+            doc_entry = resolve_doc_entry(docNum, branch)
+            if not doc_entry:
+                return Response({"error": f"No {branch} invoice found for docNum {docNum}"},
                                 status=status.HTTP_404_NOT_FOUND)
-            doc_entry = docEntry[0]['DocEntry']
 
-        url = f"{settings.CRYSTAL_URL}/api/billprint/{doc_entry}"
+        url = f"{settings.CRYSTAL_URL}/{self._CRYSTAL_PATHS[branch]}/{doc_entry}"
         try:
             crystal_response = requests.get(url, timeout=60, verify=False)
         except requests.RequestException as exc:

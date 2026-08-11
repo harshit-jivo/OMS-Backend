@@ -565,6 +565,47 @@ class Queries():
         WHERE T0."ObjectCode" = '13' AND T0."Indicator" = '{finYear }' AND T0."BPLId" = '{BPLId}'
         """
         
+    # Marketing-document tables a customer reference can already be sitting on.
+    # Whitelisted because the table name is interpolated into the SQL below.
+    NUM_AT_CARD_TABLES = ('OINV', 'ODRF', 'ORDR', 'OQUT')
+
+    @staticmethod
+    def get_duplicate_num_at_card(num_at_card, card_code, branch, table):
+        """Find documents already holding this customer reference (NumAtCard).
+
+        Scoped to ONE document type and ONE business partner, which is how SAP
+        itself applies the rule -- the same PO legitimately flows order -> draft
+        -> invoice (three rows, one ref), and distinct customers legitimately
+        reuse a reference. A company-wide check would reject valid documents.
+
+        Matched on TRIM(UPPER(...)) because SAP stores the reference uppercased
+        and callers may not have normalised yet. Cancelled documents don't hold
+        a reference, so they're excluded.
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            raise ValueError(f"Unknown branch for NumAtCard lookup: {branch!r}")
+        if table not in Queries.NUM_AT_CARD_TABLES:
+            raise ValueError(f"Unsupported document table: {table!r}")
+
+        safe_ref = str(num_at_card).strip().upper().replace("'", "''")
+        safe_card = str(card_code).replace("'", "''")
+        return f"""
+            SELECT
+                T0."DocEntry",
+                T0."DocNum",
+                T0."DocDate",
+                T0."NumAtCard",
+                T0."CardCode"
+            FROM "{s}"."{table}" AS T0
+            WHERE TRIM(UPPER(T0."NumAtCard")) = '{safe_ref}'
+              AND T0."CardCode" = '{safe_card}'
+              AND T0."CANCELED" = 'N'
+        """
+
     @staticmethod
     def get_draft_verification(refId,branch):
         if branch == 'OIL':
@@ -603,11 +644,20 @@ class Queries():
 
     """
     @staticmethod
-    def get_docEntry(docNum):
+    def get_docEntry(docNum, branch='OIL'):
+        """Resolve an invoice's internal key (OINV."DocEntry") from its DocNum.
+
+        DocNum is only unique within a company database, so the branch decides
+        which schema is searched (OIL vs BEVERAGE).
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
         return f"""
-            SELECT 
+            SELECT
                 "DocEntry"
-            FROM "JIVO_OIL_HANADB"."OINV"
+            FROM "{s}"."OINV"
             WHERE "DocNum" = '{docNum}'
         """
     

@@ -200,6 +200,11 @@ class OrderItem(models.Model):
     # non-null value.
     combo_source_code = models.CharField(max_length=50, blank=True, default='')
 
+    # Set on the zero-priced line auto-added for the free half of a combo pack.
+    # `combo_source_code` is the item_code of the combo that generated it.
+    is_auto_free = models.BooleanField(default=False)
+    combo_source_code = models.CharField(max_length=50, null=True, blank=True)
+
     class Meta:
         db_table = 'order_items'
     
@@ -304,6 +309,36 @@ class OrderItemScheme(models.Model):
     )
     qty_scheme = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
 
+    # --- Scheme engine v2 ---------------------------------------------------
+    # `scheme` above points at the legacy flat `scheme_product` row and stays
+    # populated for historical orders. New orders resolved by scheme_engine fill
+    # the fields below instead.
+    scheme_v2 = models.ForeignKey(
+        'orders.Scheme',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='order_item_schemes',
+    )
+    benefit = models.ForeignKey(
+        'orders.SchemeBenefit',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_item_schemes',
+    )
+    # Snapshot of the giveaway item as it stood when the order was placed. The
+    # SAP push reads this instead of re-resolving from the scheme tables, so
+    # editing a scheme can no longer change what an already-approved order ships.
+    benefit_item_code = models.CharField(max_length=50, null=True, blank=True)
+    # What the engine proposed, kept alongside `qty_scheme` (what was actually
+    # granted) so a manual override stays visible.
+    computed_qty = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    is_manual_override = models.BooleanField(default=False)
+    # Why the scheme applied — 'STATE' / 'PB', 'PARTY' / 'CUSTA000123', ...
+    scope_type = models.CharField(max_length=20, blank=True, default='')
+    scope_value = models.CharField(max_length=100, blank=True, default='')
+
     class Meta:
         db_table = 'order_item_schemes'
 class Categories(models.Model):
@@ -311,6 +346,252 @@ class Categories(models.Model):
 
     class Meta:
         db_table = 'categories'
+
+
+# ---------------------------------------------------------------------------
+# Scheme engine v2
+#
+# The legacy `users.SchemeProduct` packs three concerns into one flat row: the
+# offer identity (scheme_name), the giveaway item (item_code) and geography
+# (state_code) — and a multi-item scheme is faked as several rows sharing a
+# scheme_name, which sync_service then joins on by string. The four models below
+# separate those concerns so a scheme can be targeted at one vendor or at every
+# vendor in a state, and so its giveaway can hang off either half of a 1+1 combo.
+#
+# See docs/scheme-architecture.md.
+# ---------------------------------------------------------------------------
+
+UOM_CHOICES = (
+    ('QTY', 'Qty'),
+    ('PCS', 'Pieces'),
+    ('BOX', 'Boxes'),
+    ('LTR', 'Litres'),
+)
+
+# UOM code -> the OrderItem field holding that measure.
+UOM_FIELDS = {
+    'QTY': 'qty',
+    'PCS': 'pcs',
+    'BOX': 'boxes',
+    'LTR': 'ltrs',
+}
+
+
+class Scheme(models.Model):
+    """One offer. Carries no product, no geography and no vendor — those live in
+    the benefit / trigger / assignment children."""
+
+    CATEGORY_CHOICES = (
+        ('OIL', 'Oil'),
+        ('BEVERAGES', 'Beverages'),
+        ('MART', 'Mart'),
+    )
+
+    code = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
+
+    # The business line this offer belongs to. An OIL scheme never fires on a
+    # MART or BEVERAGES line, however it was targeted — targeting says *who*
+    # gets an offer, this says *what it is an offer on*. Blank = every category,
+    # which is what every scheme created before this field existed means.
+    category = models.CharField(
+        max_length=20, choices=CATEGORY_CHOICES, blank=True, default='', db_index=True,
+    )
+
+    valid_from = models.DateField(null=True, blank=True)
+    valid_to = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    # Higher priority wins when two schemes target the same line and the winner
+    # is not stackable.
+    priority = models.IntegerField(default=0)
+    stackable = models.BooleanField(default=False)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_schemes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'schemes'
+        ordering = ['-priority', 'name']
+        indexes = [
+            models.Index(fields=['is_active', 'valid_from', 'valid_to'],
+                         name='scheme_active_window_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.code} — {self.name}'
+
+    def is_live_on(self, on_date):
+        if not self.is_active:
+            return False
+        if self.valid_from and on_date < self.valid_from:
+            return False
+        if self.valid_to and on_date > self.valid_to:
+            return False
+        return True
+
+
+class SchemeBenefit(models.Model):
+    """What a scheme gives away. Several rows = several giveaway items, replacing
+    the old "N scheme_product rows sharing a scheme_name" fan-out."""
+
+    scheme = models.ForeignKey(Scheme, on_delete=models.CASCADE, related_name='benefits')
+
+    # NULL means "the same item as the trigger line" — buy 10 boxes, get 1 free.
+    free_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    free_uom = models.CharField(max_length=10, choices=UOM_CHOICES, default='PCS')
+
+    # Ratio rule: buy `per_qty`, get `free_qty`. per_qty = 0 means a flat
+    # giveaway of `free_qty` regardless of how much was ordered; free_qty = 0
+    # with per_qty = 0 means the quantity is supplied by the user (this is what
+    # every migrated legacy scheme becomes, preserving today's behaviour).
+    per_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    free_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    max_free_qty = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+
+    class Meta:
+        db_table = 'scheme_benefits'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.scheme.code} -> {self.free_item_code or "(same item)"}'
+
+
+class SchemeTrigger(models.Model):
+    """What earns a scheme."""
+
+    MATCH_ITEM = 'ITEM'
+    MATCH_CHOICES = (
+        (MATCH_ITEM, 'Item code'),
+        ('SUB_GROUP', 'Sub group'),
+        ('VARIETY', 'Variety'),
+        ('BRAND', 'Brand'),
+        ('CATEGORY', 'Category'),
+        ('ALL', 'Any item'),
+    )
+
+    # Which half of a combo pack supplies the qualifying quantity.
+    #   PAID_LINE — the ordered, priced quantity (ordinary single-FG scheme)
+    #   FREE_LINE — the auto-added zero-priced companion of a 1+1
+    #               (OrderItem.is_auto_free, combo_source_code = this item), so
+    #               the giveaway is computed on top of the combo's free half
+    #   BOTH      — the sum of the two
+    APPLIES_TO_CHOICES = (
+        ('PAID_LINE', 'Paid line'),
+        ('FREE_LINE', 'Free (combo) line'),
+        ('BOTH', 'Both'),
+    )
+
+    scheme = models.ForeignKey(Scheme, on_delete=models.CASCADE, related_name='triggers')
+
+    match_type = models.CharField(max_length=20, choices=MATCH_CHOICES, default=MATCH_ITEM)
+    match_value = models.CharField(max_length=100, blank=True, default='')
+
+    min_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    min_uom = models.CharField(max_length=10, choices=UOM_CHOICES, default='QTY')
+
+    applies_to = models.CharField(max_length=20, choices=APPLIES_TO_CHOICES, default='PAID_LINE')
+
+    class Meta:
+        db_table = 'scheme_triggers'
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['match_type', 'match_value'], name='scheme_trigger_match_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.scheme.code}: {self.match_type}={self.match_value or "*"}'
+
+
+class SchemeAssignment(models.Model):
+    """Who a scheme reaches.
+
+    One STATE row covers every vendor in that state, including ones onboarded
+    later; one PARTY row covers a single vendor. Specificity decides which wins
+    (see SCOPE_SPECIFICITY), so a per-party row overrides the state default, and
+    `is_exclusion` carves a vendor out of a state-wide scheme in one row.
+    """
+
+    SCOPE_PARTY = 'PARTY'
+    SCOPE_MAIN_GROUP = 'MAIN_GROUP'
+    SCOPE_STATE = 'STATE'
+    SCOPE_CATEGORY = 'CATEGORY'
+    SCOPE_ALL = 'ALL'
+
+    SCOPE_CHOICES = (
+        (SCOPE_PARTY, 'Party (card code)'),
+        (SCOPE_MAIN_GROUP, 'Main group'),
+        (SCOPE_STATE, 'State'),
+        (SCOPE_CATEGORY, 'Category'),
+        (SCOPE_ALL, 'All vendors'),
+    )
+
+    # Most specific scope wins. Ties are impossible — the unique constraint
+    # allows at most one row per (scheme, scope_type, scope_value, category).
+    SCOPE_SPECIFICITY = {
+        SCOPE_PARTY: 100,
+        SCOPE_MAIN_GROUP: 60,
+        SCOPE_STATE: 50,
+        SCOPE_CATEGORY: 20,
+        SCOPE_ALL: 0,
+    }
+
+    scheme = models.ForeignKey(Scheme, on_delete=models.CASCADE, related_name='assignments')
+
+    scope_type = models.CharField(max_length=20, choices=SCOPE_CHOICES, default=SCOPE_PARTY)
+    # card_code / main_group / state code / category. Blank for ALL.
+    scope_value = models.CharField(max_length=100, blank=True, default='')
+
+    # Optional extra narrowing: the same item_code exists under OIL, BEVERAGES
+    # and MART, so any scope can be limited to one of them. Blank = all.
+    category = models.CharField(max_length=20, blank=True, default='')
+
+    # A carve-out. Exclusions are absolute at every level, not specificity-ranked
+    # — an explicit carve-out is always deliberate.
+    is_exclusion = models.BooleanField(default=False)
+
+    # Optional per-assignment narrowing of the scheme's own validity window.
+    valid_from = models.DateField(null=True, blank=True)
+    valid_to = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_scheme_assignments',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'scheme_assignments'
+        unique_together = ('scheme', 'scope_type', 'scope_value', 'category')
+        ordering = ['scheme_id', 'scope_type', 'scope_value']
+        indexes = [
+            models.Index(fields=['scope_type', 'scope_value', 'is_active'],
+                         name='scheme_assign_scope_idx'),
+        ]
+
+    def __str__(self):
+        target = self.scope_value or '*'
+        prefix = 'EXCLUDE ' if self.is_exclusion else ''
+        return f'{prefix}{self.scheme_id}: {self.scope_type}={target}'
+
+    @property
+    def specificity(self):
+        return self.SCOPE_SPECIFICITY.get(self.scope_type, 0)
+
+    def is_live_on(self, on_date):
+        if not self.is_active:
+            return False
+        if self.valid_from and on_date < self.valid_from:
+            return False
+        if self.valid_to and on_date > self.valid_to:
+            return False
+        return True
 
 class Notification(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')

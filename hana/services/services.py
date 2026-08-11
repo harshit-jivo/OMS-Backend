@@ -153,6 +153,18 @@ class SalesOrderService():
             return result[0].get("PrcCode")
         return None
 
+    def find_duplicate_num_at_card(self, num_at_card, card_code, branch, table):
+        """Return documents of ``table`` already holding this customer reference.
+
+        Empty list when the reference is free (or blank -- a blank NumAtCard is
+        never a duplicate; SAP only enforces the rule on a supplied value).
+        """
+        if not str(num_at_card or "").strip() or not card_code:
+            return []
+        query = Queries.get_duplicate_num_at_card(num_at_card, card_code, branch, table)
+        with HANAConnection() as conn:
+            return conn.execute(query) or []
+
     def get_series(self , finYear , groupCode, branch):
         with HANAConnection() as conn:
             query = Queries.get_series(finYear , groupCode, branch)
@@ -174,9 +186,9 @@ class SalesOrderService():
 
         return result
     
-    def get_docEntry(self , docNum):
+    def get_docEntry(self , docNum, branch='OIL'):
         with HANAConnection() as conn:
-            query = Queries.get_docEntry(docNum)
+            query = Queries.get_docEntry(docNum, branch)
             result = conn.execute(query)
             
         return result

@@ -1,6 +1,8 @@
 from django.contrib import admin
 from django.urls import path,include
 from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView
+from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
 
 urlpatterns=[
     
@@ -22,6 +24,8 @@ urlpatterns=[
     path('mart/<int:order_id>/reject/', MartRejectView.as_view(), name='mart-reject'),
     path('party-products/<str:card_code>/', PartyProductsView.as_view(), name='party-products'),
     path('schemes/', SchemeListView.as_view(), name='schemes'),
+    path('schemes/manage/', SchemeManageListView.as_view(), name='schemes-manage'),
+    path('schemes/<int:scheme_id>/', SchemeDetailView.as_view(), name='scheme-detail'),
     path('status/',OrderStatusList.as_view(),name='status'),
     path('flow-config/',OrderFlowConfigView.as_view(),name='order-flow-config'),
     path('party-flow-config/',PartyOrderFlowConfigView.as_view(),name='party-order-flow-config'),
@@ -51,7 +55,15 @@ urlpatterns=[
     path("quotation-status/", QuotationStatusView.as_view(), name="quotation-status"),
     path("quotation-overview/", QuotationOverviewView.as_view(), name="quotation-overview"),
     path("<int:order_id>/cancel-quotation/", CancelSalesQuotationView.as_view(), name="cancel-quotation"),
-    path("orders-by-item/", GetOrdersByItemView.as_view(), name="orders-by-item")
-    
-    
+    path("orders-by-item/", GetOrdersByItemView.as_view(), name="orders-by-item"),
+
+    # --- Scheme engine v2 (docs/scheme-architecture.md) ---------------------
+    # Kept on a /v2/ prefix so the legacy /orders/schemes/ endpoints feeding the
+    # current Add Sales picker stay untouched until the migration completes.
+    path("v2/schemes/", SchemeV2ListCreateView.as_view(), name="scheme-v2-list"),
+    path("v2/schemes/preview/", SchemePreviewView.as_view(), name="scheme-v2-preview"),
+    path("v2/schemes/applicable/", SchemeApplicableView.as_view(), name="scheme-v2-applicable"),
+    path("v2/schemes/<int:scheme_id>/", SchemeV2DetailView.as_view(), name="scheme-v2-detail"),
+    path("v2/schemes/<int:scheme_id>/assignments/", SchemeAssignmentView.as_view(),
+         name="scheme-v2-assignments"),
 ]

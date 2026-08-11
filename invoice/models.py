@@ -16,7 +16,16 @@ class InvocieHistory(models.Model):
     invoice_payload = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.CharField(max_length=125 , null=True , blank=True)
-    
+
+    # The device the action was taken from, resolved from the caller's
+    # X-Device-Id header and snapshotted as text (not FK'd) so the audit line
+    # still reads the same after that device is renamed or deactivated.
+    # Corroborating evidence only: device_id is client-reported telemetry, so it
+    # backs up "who approved this", it does not by itself prove it.
+    device_id = models.CharField(max_length=64, blank=True, default='')
+    device_name = models.CharField(max_length=150, blank=True, default='')
+
+
     class Meta:
         db_table = 'invoice_history'
         
