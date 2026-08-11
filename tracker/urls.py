@@ -9,7 +9,7 @@ from .views import (
     AdminInvoicesExportView, AdminInvoicesView, AlertsView, BulkActionView,
     InvoiceDetailView, InvoiceListCreateView, JsapStatusView, JsapSyncView,
     LookupsView, MyQueueView, PaymentDetailView, ReportsView,
-    StageAdvancedView, VendorsView,
+    StageAdvancedView, StageDecisionsView, StageExportView, VendorsView,
 )
 
 urlpatterns = [
@@ -22,6 +22,8 @@ urlpatterns = [
     path('jsap/sync/', JsapSyncView.as_view(), name='tracker-jsap-sync'),
     path('my-queue/', MyQueueView.as_view(), name='tracker-my-queue'),
     path('stage-advanced/', StageAdvancedView.as_view(), name='tracker-stage-advanced'),
+    path('stage-decisions/', StageDecisionsView.as_view(), name='tracker-stage-decisions'),
+    path('stage-export/', StageExportView.as_view(), name='tracker-stage-export'),
     path('actions/bulk/', BulkActionView.as_view(), name='tracker-bulk-action'),
     path('reports/', ReportsView.as_view(), name='tracker-reports'),
     path('alerts/', AlertsView.as_view(), name='tracker-alerts'),
