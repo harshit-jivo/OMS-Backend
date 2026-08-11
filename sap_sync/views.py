@@ -714,9 +714,6 @@ class   ApproveSalesOrderAPIView(APIView):
             if str(order.status).strip() == 'Completed':
                 return Response({"error" : "Invoice Already posted"})
 
-
-
-
             result = service.create_sales_order(order)
             logger.info("Order %s approval result: %s", order_id, result)
 
