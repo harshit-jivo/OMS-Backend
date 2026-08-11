@@ -448,7 +448,7 @@ All under `/api/tracker/`.
 | POST | `jsap/sync/` | user | Pull decisions from JSAP (`{invoice_id}` or whole desk) |
 | GET | `my-queue/` | user | The actionable inbox + stage tabs with counts |
 | GET | `stage-advanced/?stage=` | user | Read-only history of what left a desk |
-| GET | `stage-decisions/?stage=&decision=` | user | A desk's decision log — `OK` · `HOLD` · `DEBIT` · `TRANSPORT_APPROVAL` (comma-separated; omit for all three dispositions) |
+| GET | `stage-decisions/?stage=&decision=` | user | A desk's decision log — `OK` · `HOLD` · `DEBIT` · `APPROVED` · `REJECTED` · `RETURN` · `TRANSPORT_APPROVAL` (comma-separated; omit for all). `&include_resolved=1` keeps send-backs the invoice has since come back from |
 | GET | `stage-export/?stage=&tab=&ids=` | user | One queue tab as Excel, in the All-Invoices register layout |
 | POST | `actions/bulk/` | user | Apply one action to many invoices |
 | GET | `reports/` | reports | Turnaround analytics |
@@ -561,18 +561,27 @@ styles in `src/styles/Tracker.css`.
 |---|---|
 | Current | Normal arrivals |
 | Returned | Arrived via RETURN — shows who sent it back and why |
-| Rejected | `rejection_pending` — supply remarks to send back (SAP/JSAP desks) |
+| Awaiting Remarks | `rejection_pending` — rejected here, reason still owed; supply remarks to send it back (SAP/JSAP desks) |
 | Partial | Part-paid invoices (terminal stage), kept out of Current |
 | Advanced | Read-only history of what left this desk (entry desk) |
-| Hold · OK · Debit | The desk's **decision log** — shown wherever the stage offers that status, i.e. Pre-Audit |
+| Hold · OK · Debit | The desk's **decision log** — Pre-Audit |
+| Approved · Rejected | Verdict log — SAP / JSAP / Transport Approval |
+| Sent Back | What this desk returned — Pre-Audit |
 | Transport Approval | Pre-Audit only — one row per trip to the approval desk |
+
+Which of these appear is driven by the stage's own `status_choices`, so retuning
+a stage in Admin picks them up without a code change.
+
+> **"Awaiting Remarks" vs "Rejected".** They are different questions. The first
+> is the live queue: rejected here, still sitting here, reason not written yet.
+> The second is the log: what this desk actually sent back, and to whom.
 
 ### The decision-log tabs
 
-Hold, OK, Debit and Transport Approval read `stage-decisions/`, not the live
-queue. They **have to**: only a FULL hold keeps an invoice at Pre-Audit — OK,
-DEBIT and a PARTIAL hold all advance it — so filtering the queue would leave the
-OK and Debit tabs permanently empty.
+Every history tab reads `stage-decisions/`, not the live queue. They **have
+to**: only a FULL hold keeps an invoice at Pre-Audit — OK, DEBIT and a PARTIAL
+hold all advance it — so filtering the queue would leave the OK and Debit tabs
+permanently empty.
 
 They are logs of **events**, not invoices: an invoice debited twice appears
 twice, each row with its own amount, reason, handler and timestamp, plus where
@@ -581,8 +590,23 @@ Transport Approval tab groups the approval desk's rows by **visit**, so a
 rejection and the later re-send are two rows, each with its own verdict:
 `AWAITING` · `APPROVED` · `REJECTED` · `REJECTION_PENDING`.
 
-Which tabs appear is driven by the stage's own `status_choices`, so retuning a
-stage in Admin picks them up without a code change.
+**Verdicts collapse per visit.** APPROVED / REJECTED / RETURN are one decision
+per stage visit, so the note row a reason-less rejection writes and the row that
+closes the visit when the reason arrives are the *same* decision — they merge
+into one row (the closed one wins, since it carries the reason). Reject the same
+invoice twice, with a return to the desk in between, and you get two rows.
+
+> ### A send-back drops off once the invoice comes back
+> The Rejected and Sent Back tabs answer "what is still out there", not "what
+> did I ever reject". A row is dropped once the invoice has **arrived at this
+> desk again** after the decision — `came_back`, computed by comparing each
+> later `StageEvent.entered_at` at this stage against the decision time. The
+> desk is looking at it again, so the rejection is answered.
+>
+> Tick **"Also show ones that came back"** (`?include_resolved=1`) to see the
+> full history; those rows are flagged *came back since*. Note rows written
+> during a visit share that visit's `entered_at`, so they can never trigger the
+> flag by themselves.
 
 ### Per-tab Excel export
 
@@ -662,6 +686,8 @@ everyone but superusers** — the usual cause of "the new desk isn't showing".
 | The same invoice keeps returning to Transport Approval | By design — approval is per Pre-Audit visit, so every bounce back to Pre-Audit needs a fresh approval (§2) |
 | Transport Approval desk is empty for everyone | No `UserStageAccess` rows for it — a new stage starts with nobody mapped (§12) |
 | Pre-Audit's OK / Debit tabs look "wrong" | They are logs of past decisions, not the queue — those invoices have moved on (§11) |
+| A rejection vanished from the Rejected tab | The invoice came back to this desk, so it is no longer outstanding. Tick "Also show ones that came back" (§11) |
+| Two tabs both look like "rejected" | **Awaiting Remarks** = rejected here, reason still owed, still sitting here. **Rejected** = the log of what was actually sent back (§11) |
 | Invoice fully paid but still OPEN | An un-released hold. `open_balance` is against `total_owed`, which always includes the hold (§4) |
 | Discount looks "wrong" after a hold | Intended — discount is on the net invoice value **including** the hold |
 | Invoice number rejected as duplicate but not visible | A **soft-deleted** invoice still reserves its number (`all_objects`) |
