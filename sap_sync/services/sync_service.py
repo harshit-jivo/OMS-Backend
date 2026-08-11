@@ -223,6 +223,14 @@ def _iter_related_schemes(item):
 
 
 def _get_order_item_scheme_entries(item, card_code, item_code, category):
+    """Return [(raw_scheme_id, qty, snapshot_item_code), ...] for one order line.
+
+    `snapshot_item_code` is `OrderItemScheme.benefit_item_code`, written at order
+    creation. When it is present the caller ships exactly that item and never
+    re-resolves from the scheme tables — otherwise editing a scheme would change
+    what an already-approved order sends to SAP. It is None for rows predating
+    the snapshot, which fall back to the legacy name-based fan-out.
+    """
     entries = []
 
     for item_scheme in _iter_related_schemes(item):
@@ -232,8 +240,9 @@ def _get_order_item_scheme_entries(item, card_code, item_code, category):
             or getattr(scheme_obj, "scheme_id", None)
         )
         scheme_qty = _to_float(getattr(item_scheme, "qty_scheme", None), 0)
-        if raw_scheme_id not in (None, "") and scheme_qty > 0:
-            entries.append((raw_scheme_id, scheme_qty))
+        snapshot = (getattr(item_scheme, "benefit_item_code", None) or "").strip() or None
+        if (raw_scheme_id not in (None, "") or snapshot) and scheme_qty > 0:
+            entries.append((raw_scheme_id, scheme_qty, snapshot))
 
     if entries:
         return entries
@@ -251,7 +260,7 @@ def _get_order_item_scheme_entries(item, card_code, item_code, category):
         raw_scheme_id = getattr(scheme_obj, "scheme_id", None)
 
     if raw_scheme_id not in (None, "") and scheme_qty > 0:
-        return [(raw_scheme_id, scheme_qty)]
+        return [(raw_scheme_id, scheme_qty, None)]
 
     return []
 
@@ -1011,20 +1020,25 @@ class SyncService:
                     line["WarehouseCode"] = warehouse_code
                 document_lines.append(line)
 
-            for raw_scheme_id, scheme_qty in scheme_entries:
-                scheme_item_codes = []
-                try:
-                    raw_scheme_id_int = int(raw_scheme_id)
-                    scheme_item_codes = get_scheme_item_codes_for_combo(
-                        raw_scheme_id_int,
-                    )
-                except (SchemeProduct.DoesNotExist, TypeError, ValueError):
-                    logger.warning(
-                        "Skipping invalid scheme mapping for order item %s with raw scheme_id=%r",
-                        getattr(item, "id", None),
-                        raw_scheme_id,
-                    )
-                    
+            for raw_scheme_id, scheme_qty, snapshot_item_code in scheme_entries:
+                if snapshot_item_code:
+                    # Snapshot taken at order creation — authoritative. Editing
+                    # the scheme afterwards must not change what this order ships.
+                    scheme_item_codes = [snapshot_item_code]
+                else:
+                    scheme_item_codes = []
+                    try:
+                        raw_scheme_id_int = int(raw_scheme_id)
+                        scheme_item_codes = get_scheme_item_codes_for_combo(
+                            raw_scheme_id_int,
+                        )
+                    except (SchemeProduct.DoesNotExist, TypeError, ValueError):
+                        logger.warning(
+                            "Skipping invalid scheme mapping for order item %s with raw scheme_id=%r",
+                            getattr(item, "id", None),
+                            raw_scheme_id,
+                        )
+
                 if not scheme_item_codes:
                     logger.warning(
                         "Scheme %r on order item %s resolved to NO giveaway item; "

@@ -376,6 +376,11 @@ def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
+    # The free half of a combo pack is priced at 0 by design, so the 0-vs-0
+    # comparison below must not drag the whole order into rate approval.
+    if str(item.get('is_auto_free', '')).lower() in ('true', '1'):
+        return None
+
     if item.get('qty') not in (None, ''):
         try:
             qty = float(item.get('qty') or 0)
@@ -404,7 +409,39 @@ def _resolve_scheme_by_id(scheme_id):
             return None
     return None
 
-def _extract_order_item_schemes(item, to_float):
+def _scheme_entry(raw, scheme_obj, scheme_qty, to_float, to_bool):
+    """One granted giveaway, in the shape _create_order_item persists.
+
+    `scheme` is the legacy SchemeProduct (kept populated for orders still placed
+    through the old picker). `scheme_v2_id` / `benefit_id` / `benefit_item_code`
+    come from a scheme_engine proposal the client accepted. `benefit_item_code`
+    is a snapshot: the SAP push reads it rather than re-resolving the giveaway
+    item, so editing a scheme cannot change what an approved order ships.
+    """
+    benefit_item_code = (raw.get('benefit_item_code') or '').strip() or None
+    if not benefit_item_code and scheme_obj is not None:
+        benefit_item_code = (getattr(scheme_obj, 'item_code', '') or '').strip() or None
+
+    return {
+        'scheme': scheme_obj,
+        'qty': scheme_qty,
+        'scheme_v2_id': raw.get('scheme_v2_id') or raw.get('scheme_v2'),
+        'benefit_id': raw.get('benefit_id') or raw.get('benefit'),
+        'benefit_item_code': benefit_item_code,
+        'computed_qty': to_float(raw.get('computed_qty', 0)),
+        'is_manual_override': to_bool(raw.get('is_manual_override')),
+        'scope_type': (raw.get('scope_type') or '')[:20],
+        'scope_value': (raw.get('scope_value') or '')[:100],
+    }
+
+
+def _extract_order_item_schemes(item, to_float, to_bool=bool):
+    """Normalise the schemes on one incoming order line.
+
+    A v2 entry qualifies on `scheme_v2_id` alone — it has no legacy
+    SchemeProduct row to point at — while legacy entries still require one, so
+    the old client keeps behaving exactly as before.
+    """
     raw_schemes = item.get('schemes')
     if isinstance(raw_schemes, list):
         extracted = []
@@ -412,19 +449,23 @@ def _extract_order_item_schemes(item, to_float):
             if not isinstance(raw_scheme, dict):
                 continue
             scheme_obj = _resolve_scheme_by_id(raw_scheme.get('scheme_id') or raw_scheme.get('scheme'))
+            scheme_v2_id = raw_scheme.get('scheme_v2_id') or raw_scheme.get('scheme_v2')
             scheme_qty = to_float(raw_scheme.get('scheme_qty', raw_scheme.get('qty_scheme', 0)))
-            if scheme_obj and scheme_qty > 0:
-                extracted.append((scheme_obj, scheme_qty))
+            if (scheme_obj or scheme_v2_id) and scheme_qty > 0:
+                extracted.append(_scheme_entry(raw_scheme, scheme_obj, scheme_qty, to_float, to_bool))
         return extracted
 
     scheme_obj = _resolve_scheme_by_id(item.get('scheme_id') or item.get('scheme'))
+    scheme_v2_id = item.get('scheme_v2_id') or item.get('scheme_v2')
     scheme_qty = to_float(item.get('scheme_qty', item.get('qty_scheme', 0)))
-    return [(scheme_obj, scheme_qty)] if scheme_obj and scheme_qty > 0 else []
+    if (scheme_obj or scheme_v2_id) and scheme_qty > 0:
+        return [_scheme_entry(item, scheme_obj, scheme_qty, to_float, to_bool)]
+    return []
 
 def _create_order_item(order, item, to_float, to_bool):
-    item_schemes = _extract_order_item_schemes(item, to_float)
-    first_scheme = item_schemes[0][0] if item_schemes else None
-    total_scheme_qty = sum(qty for _, qty in item_schemes)
+    item_schemes = _extract_order_item_schemes(item, to_float, to_bool)
+    first_scheme = next((e['scheme'] for e in item_schemes if e['scheme']), None)
+    total_scheme_qty = sum(e['qty'] for e in item_schemes)
 
     order_item = OrderItem.objects.create(
         order=order,
@@ -445,11 +486,24 @@ def _create_order_item(order, item, to_float, to_bool):
         scheme=first_scheme,
         qty_scheme=total_scheme_qty,
         is_scheme_visible=to_bool(item.get('is_scheme_visible')) or bool(item_schemes),
+        is_auto_free=to_bool(item.get('is_auto_free')),
+        combo_source_code=item.get('combo_source_code') or None,
     )
 
     OrderItemScheme.objects.bulk_create([
-        OrderItemScheme(order_item=order_item, scheme=scheme_obj, qty_scheme=scheme_qty)
-        for scheme_obj, scheme_qty in item_schemes
+        OrderItemScheme(
+            order_item=order_item,
+            scheme=entry['scheme'],
+            qty_scheme=entry['qty'],
+            scheme_v2_id=entry['scheme_v2_id'],
+            benefit_id=entry['benefit_id'],
+            benefit_item_code=entry['benefit_item_code'],
+            computed_qty=entry['computed_qty'],
+            is_manual_override=entry['is_manual_override'],
+            scope_type=entry['scope_type'],
+            scope_value=entry['scope_value'],
+        )
+        for entry in item_schemes
     ])
 
     return order_item
@@ -1912,6 +1966,70 @@ def extract_type_from_name(item_name):
         return result
     return None
 
+def is_combo_item_name(item_name):
+    """Combo packs are named "<paid part> + <free part>" in SAP."""
+    return '+' in str(item_name or '')
+
+
+# One free unit per combo unit: the order form counts pieces, and a combo pack
+# carries one of the free product per piece. The trailing "4 PCS" / "6 PCS" in a
+# combo name is the paid SKU's carton config (it equals sal_factor2), not a free
+# count, so it is deliberately not parsed. Set `free_qty_per_unit` on the
+# assignment for the rare pack that gives away more than one.
+DEFAULT_COMBO_FREE_QTY_PER_UNIT = 1.0
+
+
+def _resolve_combo_free_mapping(assignment):
+    """Return (free_item_code, free_qty_per_unit) for a combo assignment.
+
+    The mapping lives on `party_product_assignments`, so it is nominally
+    per-party. A combo's free half is the same product for everyone, though, so
+    a blank mapping falls back to any other party's row for the same
+    item_code/category — set it once and every party picks it up.
+    """
+    free_item_code = (assignment.free_item_code or '').strip()
+    free_qty = assignment.free_qty_per_unit
+
+    if not free_item_code:
+        donor = PartyProductAssignment.objects.filter(
+            item_code=assignment.item_code,
+            category=assignment.category,
+            is_active=True,
+        ).exclude(free_item_code__isnull=True).exclude(free_item_code='').first()
+        if donor:
+            free_item_code = (donor.free_item_code or '').strip()
+            if free_qty is None:
+                free_qty = donor.free_qty_per_unit
+
+    if not free_item_code:
+        return None, None
+
+    qty_per_unit = float(free_qty) if free_qty is not None else DEFAULT_COMBO_FREE_QTY_PER_UNIT
+    return free_item_code, (qty_per_unit if qty_per_unit > 0 else DEFAULT_COMBO_FREE_QTY_PER_UNIT)
+
+
+def _serialize_free_product(free_item_code, category):
+    product = (
+        SapProduct.objects.filter(active_product_q(), item_code=free_item_code, category=category).first()
+        or SapProduct.objects.filter(active_product_q(), item_code=free_item_code).first()
+    )
+    if not product:
+        return None
+    return {
+        'item_code': product.item_code,
+        'item_name': product.item_name,
+        'category': product.category,
+        'brand': product.brand,
+        'variety': product.sub_group,
+        'sub_group': product.sub_group,
+        'sal_factor2': product.sal_factor2,
+        'sal_pack_unit': product.sal_pack_unit,
+        'tax_rate': product.tax_rate,
+        # Free of cost — the auto-added order line is always zero-priced.
+        'basic_rate': 0,
+    }
+
+
 class PartyProductsView(APIView):
     permission_classes = [AllowAny]
 
@@ -1940,11 +2058,20 @@ class PartyProductsView(APIView):
             if not product:
                 continue
 
+            item_name = getattr(product, 'item_name', None)
+            is_combo = is_combo_item_name(item_name)
+            free_item_code, free_qty_per_unit = (
+                _resolve_combo_free_mapping(assignment) if is_combo else (None, None)
+            )
+            free_product = (
+                _serialize_free_product(free_item_code, assignment.category) if free_item_code else None
+            )
+
             rows.append({
                 'item_code': assignment.item_code,
                 'category': assignment.category,
                 'basic_rate': assignment.basic_rate,
-                'item_name': getattr(product, 'item_name', None),
+                'item_name': item_name,
                 'sal_factor2': getattr(product, 'sal_factor2', None),
                 'tax_rate': getattr(product, 'tax_rate', None),
                 'sal_pack_unit': getattr(product, 'sal_pack_unit', None),
@@ -1955,6 +2082,13 @@ class PartyProductsView(APIView):
                 'sub_group': getattr(product, 'sub_group', None),
                 'combo_scheme_id': assignment.scheme_id,
                 'combo_scheme_name': assignment.scheme.scheme_name if assignment.scheme else None,
+                # Combo pack -> free-of-cost companion line. `free_item` is null
+                # when the combo has no mapping yet, and the UI then behaves as
+                # it always did.
+                'is_combo': is_combo,
+                'free_item_code': free_product['item_code'] if free_product else None,
+                'free_qty_per_unit': free_qty_per_unit if free_product else None,
+                'free_item': free_product,
             })
 
         return Response(rows)
@@ -2652,8 +2786,27 @@ class SchemeListView(APIView):
                 state_filter |= Q(state_code__iexact=value)
             queryset = queryset.filter(state_filter)
 
-        schemes = queryset.order_by('scheme_name', 'scheme_id','state_code').values('scheme_id', 'scheme_name','state_code').distinct()
-        return Response(list(schemes))
+        schemes = list(
+            queryset
+            .order_by('scheme_name', 'scheme_id', 'state_code')
+            .values('scheme_id', 'scheme_name', 'state_code', 'item_code')
+        )
+
+        # Add Sales renders the giveaway as its own line in the item list, so the
+        # picker has to name the item, not just the offer. One query for the whole
+        # page rather than one per scheme.
+        item_codes = {s['item_code'] for s in schemes if s.get('item_code')}
+        names = {}
+        if item_codes:
+            names = dict(
+                SapProduct.objects
+                .filter(active_product_q(), item_code__in=item_codes)
+                .values_list('item_code', 'item_name')
+            )
+        for scheme in schemes:
+            scheme['item_name'] = names.get(scheme.get('item_code')) or scheme.get('item_code') or ''
+
+        return Response(schemes)
 
 
 class OrderStatusList(APIView):
@@ -4658,3 +4811,245 @@ class GetOrdersByItemView(APIView):
 
         serializer = OrdersByItemSerializer(orders, many=True)
         return Response(serializer.data)
+
+# ---------------------------------------------------------------------------
+# Scheme engine v2 (see docs/scheme-architecture.md)
+#
+# Permission classes match the existing scheme views (AllowAny) so this lands
+# behind the same gate as SchemeManageListView / SchemeDetailView rather than
+# introducing a second, inconsistent auth story mid-migration.
+# ---------------------------------------------------------------------------
+
+from django.db import transaction as _db_transaction
+
+from .models import Scheme, SchemeAssignment
+from .serializers import SchemeV2Serializer, SchemeAssignmentSerializer
+from . import scheme_engine
+
+
+class SchemeV2ListCreateView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        queryset = Scheme.objects.prefetch_related('benefits', 'triggers', 'assignments')
+
+        include_inactive = str(
+            request.query_params.get('include_inactive') or ''
+        ).strip().lower() in {'1', 'true', 'yes'}
+        if not include_inactive:
+            queryset = queryset.filter(is_active=True)
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(code__icontains=search) | Q(name__icontains=search))
+
+        # ?category=OIL keeps the uncategorised ("every category") schemes too —
+        # they apply to OIL as much as to anything else.
+        category = (request.query_params.get('category') or '').strip()
+        if category:
+            queryset = queryset.filter(Q(category='') | Q(category__iexact=category))
+
+        # Filter by who a scheme reaches, e.g. ?scope_type=STATE&scope_value=PB
+        scope_type = (request.query_params.get('scope_type') or '').strip()
+        scope_value = (request.query_params.get('scope_value') or '').strip()
+        if scope_type:
+            scope_q = Q(assignments__scope_type=scope_type, assignments__is_active=True)
+            if scope_value:
+                scope_q &= Q(assignments__scope_value__iexact=scope_value)
+            queryset = queryset.filter(scope_q).distinct()
+
+        serializer = SchemeV2Serializer(queryset, many=True)
+        return Response({'success': True, 'data': serializer.data, 'total': len(serializer.data)})
+
+    def post(self, request):
+        serializer = SchemeV2Serializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response({'success': False, 'message': 'Failed to create scheme',
+                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        with _db_transaction.atomic():
+            serializer.save()
+        return Response({'success': True, 'message': 'Scheme created', 'data': serializer.data},
+                        status=status.HTTP_201_CREATED)
+
+
+class SchemeV2DetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def _get_object(self, scheme_id):
+        return (
+            Scheme.objects
+            .prefetch_related('benefits', 'triggers', 'assignments')
+            .filter(pk=scheme_id)
+            .first()
+        )
+
+    def get(self, request, scheme_id):
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': True, 'data': SchemeV2Serializer(scheme).data})
+
+    def patch(self, request, scheme_id):
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        serializer = SchemeV2Serializer(scheme, data=request.data, partial=True,
+                                        context={'request': request})
+        if not serializer.is_valid():
+            return Response({'success': False, 'message': 'Failed to update scheme',
+                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        with _db_transaction.atomic():
+            serializer.save()
+        return Response({'success': True, 'message': 'Scheme updated', 'data': serializer.data})
+
+    def delete(self, request, scheme_id):
+        """Deactivate by default.
+
+        OrderItemScheme.scheme_v2 is PROTECT, so a scheme referenced by any order
+        line cannot be deleted at all -- the giveaway record has to survive.
+        Deactivating removes it from every read path and stays reversible.
+        """
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        hard = str(request.query_params.get('hard') or '').strip().lower() in {'1', 'true', 'yes'}
+        used_by_orders = OrderItemScheme.objects.filter(scheme_v2_id=scheme_id).count()
+
+        if hard:
+            if used_by_orders:
+                return Response({
+                    'success': False,
+                    'message': (f'Cannot hard-delete: {used_by_orders} order line(s) reference '
+                                'this scheme. Deactivate it instead.'),
+                }, status=status.HTTP_409_CONFLICT)
+            scheme.delete()
+            return Response({'success': True, 'message': 'Scheme deleted', 'deactivated': False})
+
+        scheme.is_active = False
+        scheme.save(update_fields=['is_active', 'updated_at'])
+        return Response({'success': True, 'message': 'Scheme deactivated', 'deactivated': True,
+                         'used_by_order_lines': used_by_orders})
+
+
+class SchemeAssignmentView(APIView):
+    """Target a scheme at a party, a state, a main group, a category, or everyone.
+
+    One STATE row reaches every vendor in that state -- including ones onboarded
+    later -- which is the whole point of separating assignment from the offer.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, scheme_id):
+        if not Scheme.objects.filter(pk=scheme_id).exists():
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        rows = SchemeAssignment.objects.filter(scheme_id=scheme_id).select_related('scheme')
+        return Response({'success': True, 'data': SchemeAssignmentSerializer(rows, many=True).data})
+
+    def post(self, request, scheme_id):
+        scheme = Scheme.objects.filter(pk=scheme_id).first()
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # Accept a single object or a list, so "assign to these 40 parties" is one call.
+        payload = request.data if isinstance(request.data, list) else [request.data]
+        serializer = SchemeAssignmentSerializer(data=payload, many=True)
+        if not serializer.is_valid():
+            return Response({'success': False, 'message': 'Failed to assign scheme',
+                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user if getattr(request.user, 'is_authenticated', False) else None
+        saved = []
+        with _db_transaction.atomic():
+            for row in serializer.validated_data:
+                row.pop('scheme', None)
+                obj, _created = SchemeAssignment.objects.update_or_create(
+                    scheme=scheme,
+                    scope_type=row['scope_type'],
+                    scope_value=row.get('scope_value', ''),
+                    category=row.get('category', ''),
+                    defaults={
+                        'is_exclusion': row.get('is_exclusion', False),
+                        'valid_from': row.get('valid_from'),
+                        'valid_to': row.get('valid_to'),
+                        'is_active': row.get('is_active', True),
+                        'created_by': user,
+                    },
+                )
+                saved.append(obj)
+
+        return Response({'success': True, 'message': f'{len(saved)} assignment(s) saved',
+                         'data': SchemeAssignmentSerializer(saved, many=True).data},
+                        status=status.HTTP_201_CREATED)
+
+    def delete(self, request, scheme_id):
+        assignment_id = request.query_params.get('assignment_id')
+        if not assignment_id:
+            return Response({'success': False, 'message': 'assignment_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        deleted, _ = SchemeAssignment.objects.filter(scheme_id=scheme_id, pk=assignment_id).delete()
+        if not deleted:
+            return Response({'success': False, 'message': 'Assignment not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': True, 'message': 'Assignment removed'})
+
+
+class SchemePreviewView(APIView):
+    """Dry-run the engine over a draft order.
+
+    Body: {card_code, category, lines: [{item_code, category, sub_group, brand,
+    qty, pcs, boxes, ltrs, is_auto_free, combo_source_code, item_type}, ...]}
+
+    This is what makes state-wide targeting usable -- the salesperson never picks
+    a scheme from a dropdown, the engine proposes and they confirm.
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        card_code = (request.data.get('card_code') or '').strip()
+        if not card_code:
+            return Response({'success': False, 'message': 'card_code is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        lines = request.data.get('lines') or []
+        if not isinstance(lines, list):
+            return Response({'success': False, 'message': 'lines must be a list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        category = (request.data.get('category') or '').strip()
+        ctx = scheme_engine.build_party_context(card_code, category)
+        proposals = scheme_engine.resolve_schemes(card_code, category, lines, ctx=ctx)
+
+        return Response({
+            'success': True,
+            'context': {
+                'card_code': ctx.card_code,
+                'category': ctx.category,
+                'state_code': ctx.state_code,
+                'main_group': ctx.main_group,
+            },
+            'proposals': [p.as_dict() for p in proposals],
+        })
+
+
+class SchemeApplicableView(APIView):
+    """Everything reaching a vendor, with the scope that let each scheme in --
+    the first question anyone asks about an unexpected giveaway."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        card_code = (request.query_params.get('card_code') or '').strip()
+        if not card_code:
+            return Response({'success': False, 'message': 'card_code is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        category = (request.query_params.get('category') or '').strip()
+        rows = scheme_engine.applicable_schemes(card_code, category)
+        return Response({'success': True, 'data': rows, 'total': len(rows)})
