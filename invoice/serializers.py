@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import InvocieHistory, InvoiceLog , InvoiceRefLogs , CreditLimitLogs
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, fg_stock_for_log
+from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, item_names_for_log
 
 class InvoiveHistorySerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
@@ -20,6 +21,11 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
     # Live HANA on-hand stock for every FG line in invoice_payload, so a reviewer
     # can see whether the warehouse can actually cover the invoice.
     fg_stock = serializers.SerializerMethodField()
+    # {item_code: product name} for the payload's lines, so the review screen can
+    # show what the item actually is instead of an FG number. Alongside the
+    # payload rather than inside it — the payload is the record of what went to
+    # SAP and must not be rewritten.
+    item_names = serializers.SerializerMethodField()
     # Whether the Delete action should be offered for this row, so the review
     # screen does not have to keep its own copy of the deletable-status list.
     can_delete = serializers.SerializerMethodField()
@@ -58,6 +64,9 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
 
     def get_fg_stock(self, obj):
         return fg_stock_for_log(obj, self.context.get(FG_STOCK_CONTEXT_KEY))
+
+    def get_item_names(self, obj):
+        return item_names_for_log(obj, self.context.get(ITEM_NAME_CONTEXT_KEY))
 
     def get_can_delete(self, obj):
         return not obj.is_deleted and obj.status in InvoiceLog.DELETABLE_STATUSES

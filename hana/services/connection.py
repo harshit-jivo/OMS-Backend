@@ -262,12 +262,17 @@ class Queries():
             s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT
-            T0."CardCode" , 
-            T0."CardName" , 
-            T0."State1" ,  
-            T0."U_Chain" ,  
-            T0."BillToDef" , 
-            T0."ShipToDef" 	 
+            T0."CardCode" ,
+            T0."CardName" ,
+            T0."State1" ,
+            T0."U_Chain" ,
+            T0."BillToDef" ,
+            T0."ShipToDef" ,
+            -- What the customer still owes: OCRD."Balance" is the running AR
+            -- balance, already net of payments and credit memos. Positive means
+            -- they owe us. Rides along here so the invoice screen needs no
+            -- second round trip.
+            T0."Balance"
         FROM "{s}"."OCRD" AS T0
         WHERE T0."CardCode" = '{party_code}'
         """

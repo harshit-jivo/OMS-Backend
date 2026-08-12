@@ -25,6 +25,7 @@ from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
+from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_item_name_map
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,52 @@ def _wants_deleted(request):
     only live rows without changing anything.
     """
     return str(request.query_params.get('include_deleted', '')).lower() in ('1', 'true', 'yes')
+
+
+# The two company databases an invoice can belong to, keyed by the product
+# category a user is assigned. MART lives in the oil company alongside OIL,
+# which is the same split `resolve_company_db_for_order` makes.
+CATEGORY_BRANCHES = {
+    'OIL': 'OIL',
+    'MART': 'OIL',
+    'BEVERAGES': 'BEVERAGE',
+}
+
+
+def branches_for_user(user):
+    """Which invoice branches this user may see, or None for "all of them".
+
+    An OIL user has no business reviewing beverage bills and vice versa, so the
+    review screens are scoped to the branches behind the user's own categories.
+
+    None — meaning unrestricted — is returned for superusers and for anyone with
+    no category assigned at all. That last case matters: admins and auditors are
+    set up without categories, and scoping them to nothing would empty the
+    review screen for the very people who have to work it.
+    """
+    if not user or not getattr(user, 'is_authenticated', False):
+        return None
+    if getattr(user, 'is_superuser', False):
+        return None
+
+    names = {
+        str(name or '').strip().upper()
+        for name in user.categories.values_list('category', flat=True)
+    }
+    primary = getattr(getattr(user, 'category', None), 'category', '')
+    if primary:
+        names.add(str(primary).strip().upper())
+
+    branches = {CATEGORY_BRANCHES[name] for name in names if name in CATEGORY_BRANCHES}
+    return branches or None
+
+
+def scope_logs_to_user(invoice_logs, request):
+    """Narrow an InvoiceLog queryset to the branches the caller may see."""
+    branches = branches_for_user(getattr(request, 'user', None))
+    if branches is None:
+        return invoice_logs
+    return invoice_logs.filter(branch__in=branches)
 
 
 
@@ -304,6 +351,9 @@ class InvoiceLogListView(APIView):
         .filter(warehouse=warehouse)
     )
 
+    # An OIL user sees oil bills, a beverage user sees beverage bills.
+    invoice_logs = scope_logs_to_user(invoice_logs, request)
+
     # Soft-deleted entries are off the review screen unless asked for by name.
     if not _wants_deleted(request):
         invoice_logs = invoice_logs.filter(is_deleted=False)
@@ -317,7 +367,10 @@ class InvoiceLogListView(APIView):
     serializer = InvoiceLogSerializer(
         invoice_logs,
         many=True,
-        context={FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs)},
+        context={
+            FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs),
+            ITEM_NAME_CONTEXT_KEY: build_item_name_map(invoice_logs),
+        },
     )
     return Response(serializer.data)
 
@@ -709,6 +762,7 @@ class InvoiceLogListwoWhsView(APIView):
     # select_related/prefetch_related keep the lineage fields on the serializer
     # from costing a query per row.
     invoice_logs = InvoiceLog.objects.select_related('supersedes').prefetch_related('superseded_by')
+    invoice_logs = scope_logs_to_user(invoice_logs, request)
     if not _wants_deleted(request):
         invoice_logs = invoice_logs.filter(is_deleted=False)
     if inv_status:
@@ -718,6 +772,64 @@ class InvoiceLogListwoWhsView(APIView):
     serializer = InvoiceLogSerializer(
         invoice_logs,
         many=True,
-        context={FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs)},
+        context={
+            FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs),
+            ITEM_NAME_CONTEXT_KEY: build_item_name_map(invoice_logs),
+        },
     )
     return Response(serializer.data)
+
+class UsedSalesOrdersView(APIView):
+    """Which sales orders already appear on an invoice log.
+
+    The Sales Invoice screen lists a customer's open SOs from SAP, which has no
+    idea an OMS invoice is already in flight against one — SAP only closes the
+    order once the invoice actually posts, so a second user can pick the same SO
+    and invoice it twice. This is what lets the picker mark those SOs.
+
+    `so_number` holds the comma-joined DocNums of every line on the log, so it
+    is split back out here rather than matched as a string.
+
+    Rejected and soft-deleted logs are left out: neither blocks re-invoicing, so
+    flagging them would train people to ignore the badge.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    BLOCKING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
+
+    def get(self, request):
+        logs = (
+            InvoiceLog.objects
+            .filter(is_deleted=False, status__in=self.BLOCKING_STATUSES)
+            .order_by('-created_at')
+            .values('id', 'so_number', 'status', 'sap_doc_num', 'created_at')
+        )
+
+        card_code = (request.query_params.get('card_code') or '').strip()
+        branch = (request.query_params.get('branch') or '').strip()
+        if branch:
+            logs = logs.filter(branch=branch)
+
+        used = {}
+        for log in logs:
+            for raw in str(log['so_number'] or '').split(','):
+                so_number = raw.strip()
+                if not so_number or so_number in used:
+                    continue
+                # Ordered newest first, so the first row wins — the most recent
+                # attempt is the one worth showing.
+                used[so_number] = {
+                    'so_number': so_number,
+                    'log_id': log['id'],
+                    'status': log['status'],
+                    'sap_doc_num': log['sap_doc_num'] or '',
+                    'created_at': log['created_at'],
+                }
+
+        return Response({
+            'success': True,
+            'card_code': card_code,
+            'data': list(used.values()),
+            'total': len(used),
+        })
