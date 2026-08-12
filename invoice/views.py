@@ -679,10 +679,13 @@ class GetPrintReport(APIView):
     # Characters Windows/macOS refuse in a filename, plus control chars.
     _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
-    # Each company has its own Crystal report, reached through its own path.
+    # Each company is rendered through its own path on the Crystal service,
+    # which maps it to that company's ODBC DSN and HANA schema.
+    # 'api/billprint/{DocEntry}' (no company) is the service's legacy OIL route.
     _CRYSTAL_PATHS = {
         'OIL': 'api/billprint',
         'BEVERAGE': 'api/billprint/bev',
+        'MART': 'api/billprint/mart',
     }
 
     @classmethod
@@ -704,9 +707,11 @@ class GetPrintReport(APIView):
         # is resolved against and the Crystal path the PDF is rendered from.
         # Defaults to OIL so existing callers keep working unchanged.
         branch = normalize_branch(request.query_params.get('branch'))
-        if branch is None:
-            return Response({'error': 'branch must be one of: OIL, BEVERAGE'},
-                            status=status.HTTP_400_BAD_REQUEST)
+        if branch is None or branch not in self._CRYSTAL_PATHS:
+            return Response(
+                {'error': 'branch must be one of: '
+                          + ', '.join(sorted(self._CRYSTAL_PATHS))},
+                status=status.HTTP_400_BAD_REQUEST)
 
         # The caller may already know the internal OINV key (the review screen
         # keeps it from the SAP post response). Using it skips the DocNum ->

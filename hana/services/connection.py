@@ -59,6 +59,9 @@ class HANAConnection:
 class Queries():
     OIL_SCHEMA = settings.DATABASES['hana']['OIL_SCHEMA']
     BEVERAGE_SCHEMA = settings.DATABASES['hana']['BEVERAGE_SCHEMA']
+    # Third company. Only the DocNum -> DocEntry lookup (bill print) is wired for
+    # it so far; the other queries below are still OIL/BEVERAGE only.
+    MART_SCHEMA = getattr(settings, 'HANA_MART_COMPANY_DB', '')
 
     @staticmethod
     def get_product_stock(branch):
@@ -622,12 +625,18 @@ class Queries():
         """Resolve an invoice's internal key (OINV."DocEntry") from its DocNum.
 
         DocNum is only unique within a company database, so the branch decides
-        which schema is searched (OIL vs BEVERAGE).
+        which schema is searched (OIL / BEVERAGE / MART).
         """
-        if branch == 'OIL':
-            s = Queries.OIL_SCHEMA
-        elif branch == 'BEVERAGE':
-            s = Queries.BEVERAGE_SCHEMA
+        schemas = {
+            'OIL': Queries.OIL_SCHEMA,
+            'BEVERAGE': Queries.BEVERAGE_SCHEMA,
+            'MART': Queries.MART_SCHEMA,
+        }
+        s = schemas.get(branch)
+        if not s:
+            # Better a clear error than an f-string with an undefined schema —
+            # that used to raise UnboundLocalError deep in the query builder.
+            raise ValueError(f'No HANA schema configured for branch {branch!r}.')
         return f"""
             SELECT
                 "DocEntry"
