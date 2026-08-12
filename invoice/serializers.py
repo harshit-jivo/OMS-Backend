@@ -23,7 +23,10 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
     # Whether the Delete action should be offered for this row, so the review
     # screen does not have to keep its own copy of the deletable-status list.
     can_delete = serializers.SerializerMethodField()
-    deleted_by_name = serializers.CharField(source='deleted_by.name', read_only=True)
+    # default=None keeps the key present on live rows too — without it DRF drops
+    # the field whenever deleted_by is null, so the shape of a row would change
+    # depending on whether it had been deleted.
+    deleted_by_name = serializers.CharField(source='deleted_by.name', read_only=True, default=None)
 
     class Meta:
         model = InvoiceLog
