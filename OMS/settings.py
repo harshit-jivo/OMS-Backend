@@ -464,7 +464,8 @@ EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
 # HANA_COMPANY_DB is always tried first). Comma-separated in .env.
 EINV_COMPANY_DBS = [d.strip() for d in config(
     'EINV_COMPANY_DBS',
-    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,TEST_OIL_15122025',
+    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,JIVO_MART_HANADB,'
+            'TEST_OIL_15122025',
 ).split(',') if d.strip()]
 
 # Non-production (test) company DBs. Generating an IRN from one of these while the

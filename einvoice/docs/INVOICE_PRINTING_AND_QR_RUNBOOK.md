@@ -193,15 +193,25 @@ _maybe_auto_irn(DocEntry, trigger='invoice_create',
                 company_db=SAPServiceLayerManager.schema_for(branch), ...)
 ```
 
-`schema_for()` accepts `BEVERAGE` **or** `BEVERAGES` and falls back to **OIL** for a
-missing/unknown branch — so a branch the frontend forgets to send silently means OIL.
+`schema_for()` accepts `BEVERAGE` **or** `BEVERAGES`, and `MART`, and falls back to
+**OIL** for a missing/unknown branch — so a branch the frontend forgets to send
+silently means OIL. `branch_for()` is its inverse (company DB → `OIL` / `BEVERAGE` /
+`MART`).
+
+> Before 2026-08-12, `MART` was not a branch code here: `schema_for('MART')` hit the
+> unknown-branch fallback and returned **OIL**, so a Mart invoice routed by branch
+> read and wrote the wrong company. Mart is now first-class in `schema_for`,
+> `branch_for`, `clear_session`, `einvoice.sap.get_session` (per-company session
+> cache rather than a fresh login each call) and the company picker.
 
 ### Auto-IRN (polling sweep)
 `python manage.py auto_generate_irns` with **no `--company-db` sweeps every configured
 company** (previously it only ever did OIL). One scheduled job covers all.
 
 ### Manual generation — user picks the company
-- `GET /api/einvoice/companies/` → `[{label: OIL, company_db: …}, {label: BEVERAGE, …}]` + default.
+- `GET /api/einvoice/companies/` → `[{label: OIL, …}, {label: BEVERAGE, …}, {label: MART, …}]`
+  + default. Built from `HANA_*_COMPANY_DB`, so a company with no DB configured
+  simply doesn't appear — no code change needed to add or drop one.
 - The shared `CompanyDbSelect` component (Invoice Browser, Generate IRN, e-Way Bill)
   populates from that endpoint instead of a hardcoded list, and the chosen
   `company_db` is passed to `listInvoices` / `previewFromInvoice` / `generateFromInvoice`.
@@ -219,24 +229,47 @@ company or all.
 ## 5. The Crystal service (`CrystalReportService`)
 
 - ASP.NET Web API 2 (.NET 4.8). Endpoints:
-  - `GET /api/billprint/{docEntry}` → renders `Reports/BillPrint.rpt`, returns PDF.
+  - `GET /api/billprint/{company}/{docEntry}` → renders `Reports/BillPrint.rpt` against
+    that company, returns PDF (see the multi-company note below).
+  - `GET /api/billprint/{docEntry}` → legacy, OIL.
   - `GET /api/health` → `{"status":"ok"}`.
-- `Web.config` appSettings: `DbServer=HANA_LIVE_OIL`, `DbName=JIVO_OIL_HANADB`,
-  `DbUser=DSR`, `DbPassword=…`, `ReportParamName=DocKey@`.
+- `Web.config` appSettings: per-company `DbServer` / `DbName` (DSNs `HANA_LIVE_OIL`,
+  `HANA_LIVE_BEVERAGES`, and Mart's), `DbUser=DSR`, `DbPassword=…`,
+  `ReportParamName=DocKey@`. Every DSN must be a **64-bit System DSN** — the app pool
+  is 64-bit, and a User DSN is invisible to the `.\OMS` app-pool identity.
 - IIS: dedicated app pool **CrystalReportService**, No-Managed-Code? No — CLR v4,
   Integrated, **Enable 32-bit = False** (must match 64-bit Crystal runtime).
 - The report's QR is a **picture object** whose **Graphic Location** formula returns
   the `UNE QR Code` field (`Format Graphic → Picture tab → Graphic Location → x+2`).
   A plain text/field placement will *never* render as an image.
 
-> ⚠️ **The render service is bound to ONE company.** `Web.config` pins
-> `DbServer=HANA_LIVE_OIL` / `DbName=JIVO_OIL_HANADB`, so `/api/billprint/{DocEntry}`
-> always resolves the DocEntry **in OIL** — even though the SP is now deployed in all
-> three company schemas (§3) and the IRN/QR data is per-company (§4). Printing a
-> BEVERAGE or MART invoice through this endpoint would read the *wrong* document
-> (DocEntry is a per-company sequence). Supporting multi-company printing needs the
-> service to select the DSN/company per request (e.g. a `?company=` parameter mapped
-> to per-company ODBC DSNs) — **not yet done**.
+### 2026-08-12 — multi-company printing (done)
+
+The service now takes the company in the path and picks that company's ODBC DSN +
+schema per request:
+
+| Route | Renders from |
+|---|---|
+| `GET /api/billprint/oil/{DocEntry}` | `JIVO_OIL_HANADB` |
+| `GET /api/billprint/bev/{DocEntry}` | `JIVO_BEVERAGES_HANADB` |
+| `GET /api/billprint/mart/{DocEntry}` | `JIVO_MART_HANADB` |
+| `GET /api/billprint/{DocEntry}` | **legacy — OIL** |
+| unknown company | 400 |
+
+Verified in production on **port 8008** (not 5001 — that's an unrelated Kestrel app):
+`mart/38076` → 138 KB PDF, `oil/78512` → 172 KB, `bev/1` → 107 KB, `health` → 200.
+Mart needed a 64-bit **System** ODBC DSN on .75; its first `SERVERNODE` had a typo
+(`20.20.89.192` — no such host, so Crystal reported `Communication link failure … rc=10060`).
+HANA is `20.20.45.192:30015` internally.
+
+> ⚠️ **DocEntry is a per-company sequence.** `mart/38076` and the legacy
+> `/38076` return *different invoices*, not different renderings of one — always send
+> the company. The legacy route is kept only so old links don't break.
+
+The OMS UI's **Invoice Report** page (`Invoice_Report.tsx`) now has a Company picker
+(Oil / Beverages / Mart) that drives the path segment, and the viewer shows the
+source schema next to the file name. The page calls the render service **directly**
+from the browser (`VITE_BILLPRINT_API_URL`), so Django is not in the print path.
 
 ---
 
