@@ -841,27 +841,35 @@ class UsedSalesOrdersView(APIView):
 
 
 class ReservedBatchesView(APIView):
-    """Batch numbers an in-flight invoice log has already committed.
+    """How much of each batch an in-flight invoice log has already committed.
 
     SAP does not know a batch is spoken for until the invoice actually posts, so
-    the batch picker keeps offering it and two drafts happily allocate the same
-    stock. This is what lets auto-allocation skip batches another draft is
-    already holding.
+    the batch picker keeps offering that stock and two drafts happily allocate
+    the same pieces. This covers exactly that window.
 
-    A REJECTED log releases its batches — that invoice is not going to post, so
-    its stock is free again. Soft-deleted logs release theirs for the same
-    reason. Everything else still holds.
+    A QUANTITY per batch, not a flag: one batch holds thousands of pieces and is
+    normally split across many invoices, so the caller subtracts what is held
+    and keeps the rest usable. Treating a batch as taken outright meant twenty
+    pieces on someone else's draft locked the whole batch.
 
     Keyed by item and warehouse as well as batch number: the same batch number
     can exist for a different item, and holding it everywhere would block stock
     nothing has claimed.
+
+    A REJECTED log releases its batches — that invoice is not going to post, so
+    its stock is free again. Soft-deleted logs release theirs for the same
+    reason.
     """
 
     permission_classes = [IsAuthenticated]
 
-    # Same rule as UsedSalesOrdersView: everything except REJECTED still holds
-    # its stock.
-    HOLDING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
+    # Statuses that have NOT reached SAP. POSTED_TO_SAP is deliberately absent:
+    # once the invoice posts, SAP has already taken the stock out of the batch,
+    # so OIBT reports the reduced quantity. Holding it here as well would
+    # subtract the same pieces twice and make a batch look emptier than it is --
+    # harmless when a hold merely hid the batch, wrong now that the quantity is
+    # netted off. This endpoint exists only for the window before SAP knows.
+    HOLDING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED')
 
     def get(self, request):
         logs = (
