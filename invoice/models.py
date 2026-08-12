@@ -16,7 +16,7 @@ class InvocieHistory(models.Model):
     invoice_payload = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.CharField(max_length=125 , null=True , blank=True)
-    
+
     class Meta:
         db_table = 'invoice_history'
         
@@ -36,7 +36,13 @@ class InvoiceLog(models.Model):
         ('POSTED_TO_SAP' , 'Posted to SAP'),
         ('CL_RAISED' , 'CL Raised')
     ]
-    
+
+    # Statuses a reviewer may clear off the review screen. Everything else —
+    # APPROVED and POSTED_TO_SAP — is a decision already acted on downstream (a
+    # real SAP document, in the POSTED_TO_SAP case), so removing it would leave
+    # OMS disagreeing with SAP about what happened.
+    DELETABLE_STATUSES = ('PENDING', 'ERROR', 'REJECTED', 'EDITED', 'CL_RAISED')
+
     so_number = models.CharField(max_length=100)
     party_name = models.CharField(max_length=255)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -68,6 +74,22 @@ class InvoiceLog(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='invoice_logs')
+
+    # Soft delete. The review screen hides these rows, but the log and its
+    # history survive: an invoice log is an audit record, and a reviewer
+    # clearing clutter must not be able to destroy the trail of who submitted
+    # what and why it was turned down. deleted_by is SET_NULL rather than
+    # CASCADE so removing a user account does not take the deleted rows with it.
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='deleted_invoice_logs',
+    )
+    delete_reason = models.TextField(blank=True, null=True)
 
     class Meta:
         db_table = 'invoice_log'

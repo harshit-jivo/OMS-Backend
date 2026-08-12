@@ -9,6 +9,7 @@ import requests
 from django.conf import settings
 from django.db import transaction, IntegrityError
 from django.shortcuts import render
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -26,6 +27,15 @@ from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
 
 logger = logging.getLogger(__name__)
+
+
+def _wants_deleted(request):
+    """True when the caller explicitly asked to see soft-deleted entries.
+
+    Off by default, so every existing caller of the list endpoints keeps getting
+    only live rows without changing anything.
+    """
+    return str(request.query_params.get('include_deleted', '')).lower() in ('1', 'true', 'yes')
 
 
 
@@ -83,8 +93,9 @@ class InvoiceLogCreateView(APIView):
         except (InvoiceLog.DoesNotExist, ValueError, TypeError):
             return None
         # Only a rejected invoice can be reworked; anything else (approved, already
-        # posted to SAP) must not be moved by a resubmission.
-        if source.status != 'REJECTED':
+        # posted to SAP, or removed from the review screen) must not be moved by a
+        # resubmission.
+        if source.status != 'REJECTED' or source.is_deleted:
             return None
 
         source.status = 'EDITED'
@@ -111,9 +122,17 @@ class InvoicelogStatusUpdateView(APIView):
         except InvoiceLog.DoesNotExist:
             return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        # A deleted entry is off the review screen; it must not be approvable,
+        # rejectable or postable to SAP until someone restores it.
+        if invoice_log.is_deleted:
+            return Response(
+                {'error': 'This invoice has been deleted. Restore it before changing its status.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         new_status = request.data.get('status')
         user = request.data.get('user')
-        
+
         if new_status not in dict(InvoiceLog.STATUS_CHOICES):
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
         if new_status == 'REJECTED' and not request.data.get('rejection_reason'):
@@ -154,8 +173,122 @@ class InvoicelogStatusUpdateView(APIView):
         return Response({'message': 'Status updated successfully'}, status=status.HTTP_200_OK)
     
     
+class InvoiceLogDeleteView(APIView):
+    """Soft-delete a review entry, and restore one.
+
+    Only the statuses in ``InvoiceLog.DELETABLE_STATUSES`` may be removed —
+    an APPROVED or POSTED_TO_SAP log corresponds to a decision already acted on
+    (a real SAP document, in the posted case), so it stays on the screen.
+
+    Nothing is erased: the row is stamped and hidden, its history is untouched,
+    and a DELETED entry is appended to the timeline so the removal is itself
+    part of the audit trail.
+    """
+
+    def delete(self, request, pk):
+        try:
+            invoice_log = InvoiceLog.objects.get(pk=pk)
+        except InvoiceLog.DoesNotExist:
+            return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Idempotent: a double-click or a retry on a row the client has already
+        # dropped from its list must not read as a failure.
+        if invoice_log.is_deleted:
+            return Response(
+                {'message': 'Invoice already deleted', 'id': invoice_log.pk},
+                status=status.HTTP_200_OK,
+            )
+
+        if invoice_log.status not in InvoiceLog.DELETABLE_STATUSES:
+            return Response(
+                {
+                    'error': f'An invoice marked "{invoice_log.get_status_display()}" cannot be deleted.',
+                    'detail': (
+                        'Only '
+                        + ', '.join(InvoiceLog.DELETABLE_STATUSES)
+                        + ' entries can be removed from the review screen.'
+                    ),
+                    'status': invoice_log.status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        reason = (request.data.get('delete_reason') or '').strip() or None
+
+        with transaction.atomic():
+            invoice_log.is_deleted = True
+            invoice_log.deleted_at = timezone.now()
+            invoice_log.deleted_by = request.user
+            invoice_log.delete_reason = reason
+            invoice_log.save(
+                update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'delete_reason']
+            )
+            # Status on the log itself is left alone — the entry was PENDING or
+            # ERROR when it was removed and that is what the record should say.
+            # The history row carries DELETED so the timeline shows the removal,
+            # with the reason in the same field a rejection reason is archived in.
+            InvocieHistory.objects.create(
+                invoice_log=invoice_log,
+                so_number=invoice_log.so_number,
+                party_name=invoice_log.party_name,
+                total_amount=invoice_log.total_amount,
+                status='DELETED',
+                rejection_reason=reason,
+                error_message=invoice_log.error_message,
+                invoice_payload=invoice_log.invoice_payload,
+                created_by=request.user,
+            )
+
+        return Response(
+            {
+                'message': 'Invoice deleted successfully',
+                'id': invoice_log.pk,
+                'deleted_at': invoice_log.deleted_at,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, pk):
+        """Restore a soft-deleted entry — the undo for a mistaken delete."""
+        try:
+            invoice_log = InvoiceLog.objects.get(pk=pk)
+        except InvoiceLog.DoesNotExist:
+            return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not invoice_log.is_deleted:
+            return Response(
+                {'message': 'Invoice is not deleted', 'id': invoice_log.pk},
+                status=status.HTTP_200_OK,
+            )
+
+        with transaction.atomic():
+            invoice_log.is_deleted = False
+            invoice_log.deleted_at = None
+            invoice_log.deleted_by = None
+            invoice_log.delete_reason = None
+            invoice_log.save(
+                update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'delete_reason']
+            )
+            InvocieHistory.objects.create(
+                invoice_log=invoice_log,
+                so_number=invoice_log.so_number,
+                party_name=invoice_log.party_name,
+                total_amount=invoice_log.total_amount,
+                status='RESTORED',
+                rejection_reason=invoice_log.rejection_reason,
+                error_message=invoice_log.error_message,
+                invoice_payload=invoice_log.invoice_payload,
+                created_by=request.user,
+            )
+
+        return Response(
+            {'message': 'Invoice restored successfully', 'id': invoice_log.pk},
+            status=status.HTTP_200_OK,
+        )
+
+
 class InvoiceLogListView(APIView):
-    
+
   def get(self, request):
     inv_status = request.query_params.get('status')
     warehouse = request.query_params.get('whs')
@@ -170,6 +303,10 @@ class InvoiceLogListView(APIView):
         .prefetch_related('superseded_by')
         .filter(warehouse=warehouse)
     )
+
+    # Soft-deleted entries are off the review screen unless asked for by name.
+    if not _wants_deleted(request):
+        invoice_logs = invoice_logs.filter(is_deleted=False)
 
     if inv_status:
         invoice_logs = invoice_logs.filter(status=inv_status)
@@ -262,7 +399,9 @@ class InvoiceRefLogCreateView(CreateAPIView):
 
 
 class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
-    queryset = InvoiceLog.objects.all()
+    # Deleted entries are excluded rather than merely hidden: editing one would
+    # write a history entry against a log nobody can see.
+    queryset = InvoiceLog.objects.filter(is_deleted=False)
     serializer_class = InvoiceLogSerializer
     lookup_field = 'id'
 
@@ -323,6 +462,15 @@ class CreditLimitRequestView(APIView):
             return Response(
                 {'error': f'No invoice log found with id {invoice_log_id}.'},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Raising a credit-limit document in JSAP for an invoice that has been
+        # removed from the review screen would leave a real approval request
+        # pointing at nothing.
+        if invoice_log.is_deleted:
+            return Response(
+                {'error': 'This invoice has been deleted. Restore it before raising a credit-limit request.'},
+                status=status.HTTP_409_CONFLICT,
             )
 
         # credit_limit_logs is keyed by invoice_log_id (one request per invoice).
@@ -561,6 +709,8 @@ class InvoiceLogListwoWhsView(APIView):
     # select_related/prefetch_related keep the lineage fields on the serializer
     # from costing a query per row.
     invoice_logs = InvoiceLog.objects.select_related('supersedes').prefetch_related('superseded_by')
+    if not _wants_deleted(request):
+        invoice_logs = invoice_logs.filter(is_deleted=False)
     if inv_status:
         invoice_logs = invoice_logs.filter(status=inv_status)
 
