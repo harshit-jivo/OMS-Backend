@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView , InvoiceRefLogCreateView ,UpdateInvoiceLogView , CreditLimitCardsView , CreditLimitRequestView ,GetCreditLimitJSAPFlow ,GetPrintReport , InvoiceLogListwoWhsView , InvoiceLogDeleteView , UsedSalesOrdersView
+from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView , InvoiceRefLogCreateView ,UpdateInvoiceLogView , CreditLimitCardsView , CreditLimitRequestView ,GetCreditLimitJSAPFlow ,GetPrintReport , InvoiceLogListwoWhsView , InvoiceLogDeleteView , UsedSalesOrdersView , ReservedBatchesView
 
 urlpatterns = [
     path('pending/', InvoiceLogCreateView.as_view(), name='invoice-log-pending'),
@@ -17,5 +17,7 @@ urlpatterns = [
     path('logs/all/' , InvoiceLogListwoWhsView.as_view()),
     # SOs already carried by an in-flight invoice log, for the SO picker.
     path('used-sales-orders/', UsedSalesOrdersView.as_view(), name='invoice-used-sales-orders'),
+    # Batches an in-flight log already holds, so auto-allocation can skip them.
+    path('reserved-batches/', ReservedBatchesView.as_view(), name='invoice-reserved-batches'),
 
 ]

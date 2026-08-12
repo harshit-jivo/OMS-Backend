@@ -1,8 +1,10 @@
 from django.urls import path
-from .views import GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView , GetSeries , GetDraftVerification , GetInvoiceDrafts
+from .views import GetInventoryReportView , GetPendingDispatchView , GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView , GetSeries , GetDraftVerification , GetInvoiceDrafts
 
 urlpatterns = [
     path('product-stock/' , GetProductStockView.as_view()),
+    path('inventory-report/' , GetInventoryReportView.as_view()),
+    path('pending-dispatch/' , GetPendingDispatchView.as_view()),
     path('so/' , GetSalesOrderView.as_view()),
     path('product-so/' , GetProductSalesOrderView.as_view()),
     path('open-parties/' , GetOpenPartiesView.as_view()),

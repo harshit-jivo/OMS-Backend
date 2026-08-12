@@ -838,3 +838,78 @@ class UsedSalesOrdersView(APIView):
             'data': list(used.values()),
             'total': len(used),
         })
+
+
+class ReservedBatchesView(APIView):
+    """Batch numbers an in-flight invoice log has already committed.
+
+    SAP does not know a batch is spoken for until the invoice actually posts, so
+    the batch picker keeps offering it and two drafts happily allocate the same
+    stock. This is what lets auto-allocation skip batches another draft is
+    already holding.
+
+    A REJECTED log releases its batches — that invoice is not going to post, so
+    its stock is free again. Soft-deleted logs release theirs for the same
+    reason. Everything else still holds.
+
+    Keyed by item and warehouse as well as batch number: the same batch number
+    can exist for a different item, and holding it everywhere would block stock
+    nothing has claimed.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    # Same rule as UsedSalesOrdersView: everything except REJECTED still holds
+    # its stock.
+    HOLDING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
+
+    def get(self, request):
+        logs = (
+            InvoiceLog.objects
+            .filter(is_deleted=False, status__in=self.HOLDING_STATUSES)
+            .order_by('-created_at')
+        )
+
+        branch = normalize_branch(request.query_params.get('branch'), default=None)
+        if branch:
+            logs = logs.filter(branch=branch)
+
+        # Scoped like the review screens, so a beverage user is not blocked by
+        # an oil draft they cannot even see.
+        logs = scope_logs_to_user(logs, request)
+
+        reserved = {}
+        for log in logs.values('id', 'status', 'invoice_payload'):
+            for line in ((log['invoice_payload'] or {}).get('DocumentLines') or []):
+                if not isinstance(line, dict):
+                    continue
+                item_code = str(line.get('ItemCode') or '').strip().upper()
+                warehouse = str(line.get('WarehouseCode') or '').strip().upper()
+                for batch in (line.get('BatchNumbers') or []):
+                    if not isinstance(batch, dict):
+                        continue
+                    number = str(batch.get('BatchNumber') or '').strip()
+                    if not (item_code and number):
+                        continue
+                    key = (item_code, warehouse, number.upper())
+                    entry = reserved.get(key)
+                    if entry is None:
+                        entry = {
+                            'item_code': item_code,
+                            'warehouse_code': warehouse,
+                            'batch_number': number,
+                            'quantity': 0.0,
+                            'log_id': log['id'],
+                            'status': log['status'],
+                        }
+                        reserved[key] = entry
+                    try:
+                        entry['quantity'] += float(batch.get('Quantity') or 0)
+                    except (TypeError, ValueError):
+                        pass
+
+        return Response({
+            'success': True,
+            'data': list(reserved.values()),
+            'total': len(reserved),
+        })
