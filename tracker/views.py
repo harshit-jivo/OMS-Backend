@@ -13,10 +13,9 @@ from . import services
 from .permissions import PAGE_ADMIN, PAGE_ENTRY, tracker_pages_for
 
 # A tracker admin may delete an invoice up to this stage order (inclusive).
-# Stage 7 == "JSAP Approval"; nothing at Save-in-SAP or Payment can be deleted.
-# (Was 5 when SAP and JSAP shared one desk, then 6 after the split; inserting
-# Transport Approval at order 4 pushed everything after it down one again.)
-DELETE_ADMIN_MAX_ORDER = 7
+# Stage 6 == "JSAP Approval"; nothing at Save-in-SAP or Payment can be deleted.
+# (Was 5 when SAP and JSAP shared one desk — the split moved the cut-off down.)
+DELETE_ADMIN_MAX_ORDER = 6
 from .reports import build_report
 from .models import (
     Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
@@ -320,17 +319,6 @@ class MyQueueView(APIView):
             invoice_id__in=inv_ids, exited_at__isnull=False
         ).select_related('stage', 'acted_by').order_by('invoice_id', 'exited_at'):
             latest_closed[ev.invoice_id] = ev  # last wins == latest exit
-        # Where an Advance would send each invoice. Pre-Audit needs this: a
-        # Transport invoice detours to the Transport Approval desk first and
-        # only goes on to Data Entry once that desk has approved it, so the
-        # handler should see which of the two the button will do.
-        all_stages = list(Stage.objects.filter(is_active=True).order_by('order'))
-        by_id = {i.id: i for i in invoices}
-        for r in rows:
-            nxt = services.next_stage(by_id[r['id']], all_stages)
-            r['next_stage_code'] = nxt.code if nxt else None
-            r['next_stage_name'] = nxt.name if nxt else None
-
         for r in rows:
             ev = latest_closed.get(r['id'])
             if ev and ev.event_type == StageEvent.EventType.RETURN:
@@ -390,19 +378,18 @@ class StageAdvancedView(APIView):
 class StageDecisionsView(APIView):
     """The decision log of a stage: what this desk decided, and what became of it.
 
-    Every history tab reads this — Pre-Audit's Hold / OK / Debit / Sent Back /
-    Transport Approval, SAP's Approved / Rejected. It is a log of *events*, not
-    of invoices: only a FULL hold keeps the invoice here (OK, DEBIT and a PARTIAL
-    hold all advance it), so filtering the live queue would show almost nothing.
-    An invoice debited twice appears twice, each row carrying its own amount,
-    reason and handler, plus where the invoice sits now.
+    Every history tab reads this — Pre-Audit's Hold / OK / Debit / Sent Back,
+    SAP's Approved / Rejected. It is a log of *events*, not of invoices: only a
+    FULL hold keeps the invoice here (OK, DEBIT and a PARTIAL hold all advance
+    it), so filtering the live queue would show almost nothing. An invoice
+    debited twice appears twice, each row carrying its own amount, reason and
+    handler, plus where the invoice sits now.
 
-        ?stage=pre_audit                              OK + HOLD + DEBIT + verdicts
+        ?stage=pre_audit                     OK + HOLD + DEBIT + verdicts
         ?stage=pre_audit&decision=HOLD,DEBIT
-        ?stage=pre_audit&decision=RETURN              what this desk sent back
+        ?stage=pre_audit&decision=RETURN     what this desk sent back
         ?stage=sap_approval&decision=APPROVED
-        ?stage=pre_audit&decision=TRANSPORT_APPROVAL  one row per approval trip
-        &include_resolved=1                           keep send-backs that came back
+        &include_resolved=1                  keep send-backs that came back
 
     Newest decision first.
     """
@@ -418,10 +405,6 @@ class StageDecisionsView(APIView):
     # rejection is answered, so these drop out of the tab (`?include_resolved=1`
     # keeps them, flagged `came_back`).
     SENT_BACK = {'REJECTED', 'RETURN'}
-    # Pseudo-decision: the branch trip to the Transport Approval desk. Built
-    # from that desk's visits, but shown to (and permissioned as) Pre-Audit,
-    # which is the desk that sent them.
-    TRANSPORT_APPROVAL = 'TRANSPORT_APPROVAL'
 
     def _invoice_fields(self, inv, stage):
         return {
@@ -444,63 +427,6 @@ class StageDecisionsView(APIView):
             'total_hold_amount': str(inv.hold_amount or 0),
         }
 
-    def _transport_approval_rows(self, stage):
-        """One row per trip to the Transport Approval desk.
-
-        A trip is a stage *visit* there, keyed by (invoice, entered_at) — a
-        rejection that is later re-sent makes a second row. The verdict comes
-        from how the visit closed: ADVANCE == approved (which is what hands it
-        back to Pre-Audit for Data Entry), RETURN == rejected with the reason.
-        An open visit is still awaiting a decision.
-        """
-        events = (StageEvent.objects
-                  .filter(stage__code=services.TRANSPORT_APPROVAL_STAGE_CODE,
-                          invoice__is_deleted=False)
-                  .select_related('invoice', 'invoice__current_stage',
-                                  'invoice__category', 'invoice__unit',
-                                  'invoice__branch', 'acted_by')
-                  .order_by('entered_at'))
-
-        visits = {}     # (invoice_id, entered_at) -> the row for that trip
-        for ev in events:
-            key = (ev.invoice_id, ev.entered_at)
-            inv = ev.invoice
-            row = visits.get(key)
-            if row is None:
-                row = visits[key] = {
-                    **self._invoice_fields(inv, stage),
-                    'event_id': ev.id,
-                    'decision': self.TRANSPORT_APPROVAL,
-                    'verdict': 'AWAITING',
-                    'sent_at': ev.entered_at,
-                    'decided_at': ev.entered_at,   # sort key until it closes
-                    'hold_type': '',
-                    'amount': None,
-                    'remarks': '',
-                    'acted_by_name': None,
-                    'days_spent': None,
-                }
-            if ev.stage_status:
-                row['remarks'] = ev.remarks or row['remarks']
-            if ev.exited_at:
-                # The closing row of the visit carries the verdict.
-                row.update(
-                    event_id=ev.id,
-                    verdict=('APPROVED'
-                             if ev.event_type == StageEvent.EventType.ADVANCE
-                             else 'REJECTED'),
-                    decided_at=ev.exited_at,
-                    remarks=ev.remarks,
-                    acted_by_name=ev.acted_by.username if ev.acted_by_id else None,
-                    days_spent=str(ev.days_spent) if ev.days_spent is not None else None,
-                )
-            elif ev.stage_status == 'REJECTED':
-                # Rejected without a reason — parked at the approval desk until
-                # the remarks arrive (same two-step as SAP/JSAP).
-                row['verdict'] = 'REJECTION_PENDING'
-                row['acted_by_name'] = ev.acted_by.username if ev.acted_by_id else None
-        return list(visits.values())
-
     def get(self, request):
         stage = Stage.objects.filter(code=request.query_params.get('stage')).first()
         if not stage:
@@ -514,9 +440,7 @@ class StageDecisionsView(APIView):
         wanted = [d.strip().upper()
                   for d in (request.query_params.get('decision') or '').split(',')
                   if d.strip()]
-        allowed = self.DECISIONS + [self.TRANSPORT_APPROVAL]
-        asked = [d for d in wanted if d in allowed] or self.DECISIONS
-        decisions = [d for d in asked if d in self.DECISIONS]
+        decisions = [d for d in wanted if d in self.DECISIONS] or self.DECISIONS
 
         rows = []
         if decisions:
@@ -563,9 +487,6 @@ class StageDecisionsView(APIView):
                     visits[key] = row
             rows += list(visits.values())
 
-        if self.TRANSPORT_APPROVAL in asked:
-            rows += self._transport_approval_rows(stage)
-
         rows = self._flag_return_visits(rows, stage)
         if not _flag_true(request.query_params.get('include_resolved')):
             rows = [r for r in rows
@@ -587,18 +508,14 @@ class StageDecisionsView(APIView):
         is exactly a `StageEvent.entered_at` after it. Note rows written during a
         visit share that visit's `entered_at`, so they can't trigger it.
         """
-        own = [r for r in rows if r['decision'] != self.TRANSPORT_APPROVAL]
-        ids = {r['invoice_id'] for r in own}
+        ids = {r['invoice_id'] for r in rows}
         arrivals = {}
         for inv_id, entered_at in (StageEvent.objects
                                    .filter(stage=stage, invoice_id__in=ids)
                                    .values_list('invoice_id', 'entered_at')):
             arrivals.setdefault(inv_id, set()).add(entered_at)
         for r in rows:
-            # Transport Approval rows describe a different desk's visits — the
-            # invoice is *meant* to come back here, so the flag would be noise.
-            seen = () if r['decision'] == self.TRANSPORT_APPROVAL else \
-                arrivals.get(r['invoice_id'], ())
+            seen = arrivals.get(r['invoice_id'], ())
             r['came_back'] = any(a > r['decided_at'] for a in seen)
         return rows
 

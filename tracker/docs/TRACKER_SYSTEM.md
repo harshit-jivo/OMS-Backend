@@ -1,6 +1,6 @@
 # Document Tracker — System Reference
 
-*Last verified: 2026-08-11*
+*Last verified: 2026-08-13*
 
 The Document Tracker follows a purchase invoice from the moment it reaches the
 head office until it is paid, recording **who held it, for how long, and what
@@ -118,19 +118,18 @@ independently. Carries `stage_status`, `hold_type`, `amount`, `receiving_note`
 
 ## 2. The stage flow
 
-Nine desks (as of the 2026-08-11 Transport Approval branch):
+Eight desks (as of the 2026-07-29 SAP/JSAP split):
 
 | # | Code | Name | Statuses | Can return | Threshold |
 |---|---|---|---|---|---|
 | 1 | `entry` | Head Office In | — | no | 2 d |
 | 2 | `bilty_grpo` | Bilty / GRPO | — | yes | 3 d |
-| 3 | `pre_audit` | Pre-Audit | OK · HOLD · DEBIT · TRANSPORT_APPROVAL · RETURN | yes | 3 d |
-| 4 | `transport_approval` | Transport Approval | APPROVED · REJECTED | yes | 2 d |
-| 5 | `data_entry` | Data Entry | — | yes | 2 d |
-| 6 | `sap_approval` | SAP Approval | APPROVED · REJECTED | yes | 3 d |
-| 7 | `jsap_approval` | JSAP Approval | APPROVED · REJECTED | yes | 3 d |
-| 8 | `save_in_sap` | Save in SAP | — | yes | 2 d |
-| 9 | `payment` | Payment | — | no | 5 d (terminal) |
+| 3 | `pre_audit` | Pre-Audit | OK · HOLD · DEBIT · RETURN | yes | 3 d |
+| 4 | `data_entry` | Data Entry | — | yes | 2 d |
+| 5 | `sap_approval` | SAP Approval | APPROVED · REJECTED | yes | 3 d |
+| 6 | `jsap_approval` | JSAP Approval | APPROVED · REJECTED | yes | 3 d |
+| 7 | `save_in_sap` | Save in SAP | — | yes | 2 d |
+| 8 | `payment` | Payment | — | no | 5 d (terminal) |
 
 ### Conditional routing
 
@@ -140,49 +139,6 @@ Nine desks (as of the 2026-08-11 Transport Approval branch):
 Routing is computed per invoice by `stage_route(invoice)`, and advance/return
 move along **that** route — so "previous stage" for a non-Transport invoice at
 Pre-Audit is Entry, not Bilty. Add a conditional stage by extending this set.
-
-### The Transport Approval branch
-
-> **Transport Approval is a branch, not a step.** It is excluded from
-> `stage_route()` entirely (`BRANCH_STAGE_CODES`) and routed explicitly by
-> `_branch_neighbour()`.
-
-```
-                      +--> Transport Approval --+
-                      |   APPROVED / REJECTED   |
-                      |                         v
-Bilty/GRPO --> Pre-Audit <-----------------------+ --> Data Entry
-```
-
-A **Transport** invoice leaving Pre-Audit detours to the approval desk. Both
-verdicts hand it straight **back to Pre-Audit** — APPROVED as an ADVANCE (which
-is what marks the visit approved), REJECTED as a RETURN carrying the reason,
-landing it in Pre-Audit's Returned tab. Pre-Audit then advances it to Data Entry.
-
-Because the branch is off the line, "previous stage" is unaffected: a return
-from Data Entry still goes to Pre-Audit, and a return from Pre-Audit still goes
-to Bilty/GRPO.
-
-**Approval is per visit, not per invoice.** `transport_approved_this_visit()`
-matches the approval's `exited_at` against `Invoice.current_stage_entered_at` —
-the two are the same instant, because closing the approval visit is what opens
-the Pre-Audit one. So **every fresh arrival at Pre-Audit needs a fresh
-approval**: an invoice bounced back from Data Entry goes round again. A full
-hold at Pre-Audit does *not* reset it (the invoice never left, so the visit
-stands).
-
-`services.next_stage(invoice)` answers "where would Advance send this?" and is
-surfaced on every queue row as `next_stage_code` / `next_stage_name`, so the
-Pre-Audit desk can see which of the two the button will do.
-
-Non-Transport invoices never see the desk, and if it is deactivated in Admin
-the branch simply disappears — Pre-Audit goes straight to Data Entry again.
-
-**Sending one there by hand.** Pre-Audit also carries a `TRANSPORT_APPROVAL`
-disposition, which overrides the route and sends *any* invoice to the desk —
-including a non-Transport one that happens to need transport's sign-off. It
-behaves like an advance in every other respect, and the trip shows up in the
-Transport Approval tab exactly like an automatic one.
 
 ### Locking
 
@@ -201,7 +157,6 @@ actions (`apply_bulk`) call it per invoice, so no rule can be bypassed in bulk.
 |---|---|
 | `OK` / none | Advance |
 | `HOLD` + `FULL` | **Stays put.** Annotated with an immutable note; the dwell clock keeps running. Released from the Hold tab (§11) |
-| `TRANSPORT_APPROVAL` | **Advances to the Transport Approval desk**, whatever the category — the manual override for the branch (§2) |
 | `HOLD` + `PARTIAL` | **Advances**, withholding `amount` into `Invoice.hold_amount` |
 | `DEBIT` | **Advances**, adding `amount` to `Invoice.debit_amount` permanently |
 | `RETURN` | Back one stage along the route |
@@ -455,7 +410,7 @@ All under `/api/tracker/`.
 | POST | `jsap/sync/` | user | Pull decisions from JSAP (`{invoice_id}` or whole desk) |
 | GET | `my-queue/` | user | The actionable inbox + stage tabs with counts |
 | GET | `stage-advanced/?stage=` | user | Read-only history of what left a desk |
-| GET | `stage-decisions/?stage=&decision=` | user | A desk's decision log — `OK` · `HOLD` · `DEBIT` · `APPROVED` · `REJECTED` · `RETURN` · `TRANSPORT_APPROVAL` (comma-separated; omit for all). `&include_resolved=1` keeps send-backs the invoice has since come back from |
+| GET | `stage-decisions/?stage=&decision=` | user | A desk's decision log — `OK` · `HOLD` · `DEBIT` · `APPROVED` · `REJECTED` · `RETURN` (comma-separated; omit for all). `&include_resolved=1` keeps send-backs the invoice has since come back from |
 | GET | `stage-export/?stage=&tab=&ids=` | user | One queue tab as Excel, in the All-Invoices register layout |
 | POST | `actions/bulk/` | user | Apply one action to many invoices |
 | GET | `reports/` | reports | Turnaround analytics |
@@ -537,11 +492,9 @@ historical averages are aggregated in the database.
 ### Excel export (`exports.py`)
 
 Flattens each invoice's history back to **one row**, in the original workbook's
-column order — Head Office / Bilty-GRPO / Pre-Audit / **Transport Approval** /
-Data Entry / SAP Approval / **JSAP Approval** / Save-in-SAP / Payment — plus
-newer fields (current stage, GST number, additional charge). The Transport
-Approval columns stay blank for anything that never went there, and read
-`Pending` while the visit is still open.
+column order — Head Office / Bilty-GRPO / Pre-Audit / Data Entry / SAP Approval /
+**JSAP Approval** / Save-in-SAP / Payment — plus newer fields (current stage,
+GST number, additional charge).
 
 For a bounced invoice, `_latest_by_stage()` keeps the **final** pass at each
 stage. The JSAP columns show JSAP's own reason as the remarks.
@@ -572,9 +525,8 @@ styles in `src/styles/Tracker.css`.
 | Partial | Part-paid invoices (terminal stage), kept out of Current |
 | Advanced | Read-only history of what left this desk (entry desk) |
 | Hold · OK · Debit | The desk's **decision log** — Pre-Audit |
-| Approved · Rejected | Verdict log — SAP / JSAP / Transport Approval |
+| Approved · Rejected | Verdict log — SAP / JSAP |
 | Sent Back | What this desk returned — Pre-Audit |
-| Transport Approval | Pre-Audit only — one row per trip to the approval desk |
 
 Which of these appear is driven by the stage's own `status_choices`, so retuning
 a stage in Admin picks them up without a code change.
@@ -592,10 +544,7 @@ permanently empty.
 
 They are logs of **events**, not invoices: an invoice debited twice appears
 twice, each row with its own amount, reason, handler and timestamp, plus where
-the invoice sits *now* (`still here` marks a full hold that never left). The
-Transport Approval tab groups the approval desk's rows by **visit**, so a
-rejection and the later re-send are two rows, each with its own verdict:
-`AWAITING` · `APPROVED` · `REJECTED` · `REJECTION_PENDING`.
+the invoice sits *now* (`still here` marks a full hold that never left).
 
 **The Hold tab is the one that can act.** A FULL hold is still parked at the
 desk, so those rows carry a checkbox and a **Release as OK** button (plus
@@ -698,9 +647,6 @@ everyone but superusers** — the usual cause of "the new desk isn't showing".
 | JSAP status never changes on its own | `run_jsap_sync.bat` is not registered in Task Scheduler (§9) |
 | JSAP lookups return nothing at all | Querying `dbo.*` instead of `bud.*`, or joining `jsDocEntry` to `OPCH` instead of `ODRF` (§6) |
 | Wrong company's approval attached | The `bud.jsBudgetTable.Branch` cross-check was bypassed — draft DocEntry repeats across companies |
-| A Transport invoice went straight to Data Entry | It was already approved **into this Pre-Audit visit**, or the Transport Approval stage is inactive / its category isn't exactly "Transport" |
-| The same invoice keeps returning to Transport Approval | By design — approval is per Pre-Audit visit, so every bounce back to Pre-Audit needs a fresh approval (§2) |
-| Transport Approval desk is empty for everyone | No `UserStageAccess` rows for it — a new stage starts with nobody mapped (§12) |
 | Pre-Audit's OK / Debit tabs look "wrong" | They are logs of past decisions, not the queue — those invoices have moved on (§11) |
 | A rejection vanished from the Rejected tab | The invoice came back to this desk, so it is no longer outstanding. Tick "Also show ones that came back" (§11) |
 | Two tabs both look like "rejected" | **Awaiting Remarks** = rejected here, reason still owed, still sitting here. **Rejected** = the log of what was actually sent back (§11) |
@@ -749,19 +695,14 @@ front made approvers write "-" — so the two-step exists deliberately.
 **The tracker never writes to SAP or JSAP.** Both are systems of record; this is
 a mirror. The only thing that flows back is a human's decision, recorded here.
 
-**Branches vs. steps.** A desk that hands the invoice *back* to its sender is a
-branch, not a step. Modelling Transport Approval as a branch (out of
-`stage_route`, into `_branch_neighbour`) keeps every other neighbour honest —
-had it been a step at order 4, a return from Data Entry would have landed on the
-approval desk instead of Pre-Audit. Its `order` only positions it in the display
-and the delete cut-off.
-
-**The 2026-08-11 Transport Approval branch.** Migration `0015` inserts it at
-order 4 and pushes Data Entry → Payment down one (parking them out of range
-first, as `Stage.order` is unique), and moves `DELETE_ADMIN_MAX_ORDER` 6 → 7 to
-preserve the original intent. Nothing in flight is moved: an invoice already at
-Pre-Audit picks the detour up on its next advance. Assign users to the new desk
-before anyone sends anything there.
+**The Transport Approval desk (added 2026-08-11, removed 2026-08-13).** A
+Transport-only approval branch off Pre-Audit, live for two days. Migration `0017`
+deleted it and **re-pointed its 18 stage events at Pre-Audit**, so those invoices
+keep an unbroken timeline — which is why a handful of Pre-Audit visits carry an
+`APPROVED` / `REJECTED` status Pre-Audit itself never issues, and why 13 carry a
+`TRANSPORT_APPROVAL` status no longer offered anywhere. Read them as the approval
+trip that used to be its own desk. `0015`/`0016` are kept (they were applied on
+production); `0017` undoes them.
 
 **The 2026-07-29 SAP/JSAP split.** These were one desk ("SAP / JSAP Approval").
 Migration `0014` renamed it **in place** so its id, history and user mappings
