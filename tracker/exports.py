@@ -21,8 +21,6 @@ HEADERS = [
     'Bilty GRPO (in)', 'Tiwari ji Receiving', 'Days taken in GRPO',
     'Pre Audit (In)', 'Audit receiving', 'status', 'Remarks under Audit',
     'Days taken in audit',
-    'Transport approval', 'Transport approval status',
-    'Transport approval remarks', 'Days taken in transport approval',
     'Data entry', 'Receiving', 'Days taken in entry',
     'Sap approval', 'Sap approval remarks', 'Days taken in sap approval',
     'Jsap approval', 'Jsap approval remarks', 'Days taken in jsap approval',
@@ -70,7 +68,7 @@ def build_rows(invoices):
         entry, bilty = ev.get('entry'), ev.get('bilty_grpo')
         pa, de = ev.get('pre_audit'), ev.get('data_entry')
         sap, sis = ev.get('sap_approval'), ev.get('save_in_sap')
-        jsp, tra = ev.get('jsap_approval'), ev.get('transport_approval')
+        jsp = ev.get('jsap_approval')
         pay = getattr(inv, 'payment', None)
 
         rows.append([
@@ -103,14 +101,6 @@ def build_rows(invoices):
             pa.stage_status if pa else '',
             pa.remarks if pa else '',
             _fmt_days(pa.days_spent) if pa else '',
-            # Transport Approval — Transport invoices only (blank otherwise).
-            # An open visit is still awaiting the decision.
-            _fmt_date(tra.entered_at) if tra else '',
-            ('' if not tra else
-             (tra.stage_status.title() if tra.exited_at and tra.stage_status
-              else 'Pending')),
-            tra.remarks if tra else '',
-            _fmt_days(tra.days_spent) if tra else '',
             # Data Entry
             _fmt_date(de.entered_at) if de else '',
             _recv(de.receiving_note) if de else '',

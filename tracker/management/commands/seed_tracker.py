@@ -20,34 +20,25 @@ STAGES = [
     dict(code='bilty_grpo',   name='Bilty / GRPO',       order=2,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=3),
-    # TRANSPORT_APPROVAL sends the invoice to the Transport Approval desk by
-    # hand; Transport-category invoices go there on an ordinary OK anyway.
     dict(code='pre_audit',    name='Pre-Audit',          order=3,
-         status_choices=['OK', 'HOLD', 'DEBIT', 'TRANSPORT_APPROVAL', 'RETURN'],
-         requires_status=True,
+         status_choices=['OK', 'HOLD', 'DEBIT', 'RETURN'],    requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    # A BRANCH off Pre-Audit, not a step along the line: only Transport
-    # invoices go here, and both verdicts hand them back to Pre-Audit, which
-    # then advances them to Data Entry (see services._branch_neighbour).
-    dict(code='transport_approval', name='Transport Approval', order=4,
-         status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
-         can_return=True,  is_terminal=False, threshold_days=2),
-    dict(code='data_entry',   name='Data Entry',         order=5,
+    dict(code='data_entry',   name='Data Entry',         order=4,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=2),
     # SAP and JSAP are two separate desks. SAP approval is a person clicking
     # Approve/Reject here; JSAP approval is the budget decision made in the
     # JSAP system, which this stage only mirrors (see tracker/jsap.py).
-    dict(code='sap_approval', name='SAP Approval',       order=6,
+    dict(code='sap_approval', name='SAP Approval',       order=5,
          status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    dict(code='jsap_approval', name='JSAP Approval',     order=7,
+    dict(code='jsap_approval', name='JSAP Approval',     order=6,
          status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    dict(code='save_in_sap',  name='Save in SAP',        order=8,
+    dict(code='save_in_sap',  name='Save in SAP',        order=7,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=2),
-    dict(code='payment',      name='Payment',            order=9,
+    dict(code='payment',      name='Payment',            order=8,
          status_choices=[],                                   requires_status=False,
          can_return=False, is_terminal=True,  threshold_days=5),
 ]
