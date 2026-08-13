@@ -43,5 +43,35 @@ DATABASES['default'] = {
     'ENGINE': 'django.db.backends.sqlite3',
     'NAME': ':memory:',
 }
+
+# --- HAIS schema qualifier flattened for SQLite ----------------------------
+# The HAIS app owns a Postgres SCHEMA and declares its tables as
+# `db_table = 'hais"."tbl_X'`, which Postgres reads as "hais"."tbl_X".
+#
+# SQLite has no schemas, so it reads `hais` as an attached-database name and
+# EVERY app's tests fail with `unknown database "hais"` — including tests that
+# never touch HAIS, because Django builds the whole schema up front.
+#
+# ATTACHing a database called `hais` fixes CREATE TABLE but not the foreign
+# keys: SQLite cannot resolve a schema-qualified name in a REFERENCES clause,
+# so tbl_AssetStorageType and tbl_AssetLog still fail. Dropping HAIS from
+# INSTALLED_APPS is also not an option — OMS/urls.py:43 routes to HAIS.urls,
+# so the app must stay importable.
+#
+# Rewriting `hais"."tbl_X` to `hais_tbl_X` for SQLite only keeps every table
+# and FK inside one database, which is exactly what SQLite needs. Postgres is
+# untouched: this file is only ever loaded by the test runner.
+# Applied from HAIS's own AppConfig.ready() would be intrusive, so it is done
+# here via class_prepared, which fires as each model class is built — early
+# enough that the schema editor and the ORM only ever see the flat name.
+from django.db.models.signals import class_prepared  # noqa: E402
+from django.dispatch import receiver as _receiver  # noqa: E402
+
+
+@_receiver(class_prepared)
+def _flatten_schema_qualified_tables(sender, **kwargs):
+    table = sender._meta.db_table
+    if '"."' in table:
+        sender._meta.db_table = table.replace('"."', '_')
 MIGRATION_MODULES = _SkipMigrations()
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']

@@ -95,6 +95,10 @@ INSTALLED_APPS = [
     'approvals',
     'attachments',
     'payments',
+    # Reusable notification framework. Empty skeleton for now — Orders still
+    # owns and serves every notification. Registered ahead of any behaviour so
+    # this INSTALLED_APPS change is bisectable on its own.
+    'notifications',
     # HAIS — Hardware Asset Identification Software. Owns its own `hais`
     # Postgres schema (created by its initial migration), same as payments.
     'HAIS',
