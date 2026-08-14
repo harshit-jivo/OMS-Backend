@@ -201,6 +201,11 @@ class PaymentReceipt(TimeStampedModel):
     # SAP write-back
     sap_doc_entry = models.IntegerField(null=True, blank=True, db_index=True)
     sap_doc_num = models.IntegerField(null=True, blank=True)
+    # ORCT.TransId — the journal-entry key. DocEntry identifies the PAYMENT;
+    # only TransId reaches JDT1, so without it "show me the accounting for this
+    # receipt" means hunting through SAP by hand. It is already in the response
+    # body we receive; it was simply being discarded.
+    sap_trans_id = models.IntegerField(null=True, blank=True)
     sap_posted_at = models.DateTimeField(null=True, blank=True)
     # SAP's exact words from the last posting attempt — the success
     # confirmation or the rejection reason. Shown verbatim in the UI so a user
@@ -283,6 +288,27 @@ class PaymentMethodEntry(models.Model):
         CASH = 'CASH', 'Cash'
         UPI = 'UPI', 'UPI'
         CHEQUE = 'CHEQUE', 'Cheque'
+
+    # Tenders an employee physically carries to a bank, so they can appear in
+    # an OMS Bank Deposit. UPI (and any future NEFT/RTGS) arrives electronically
+    # — there is nothing to hand over, and offering it would invite a deposit
+    # for money nobody ever held.
+    #
+    # CASH and CHEQUE are depositable for DIFFERENT reasons, and the deposit
+    # poster depends on the distinction:
+    #   CASH   — still sitting in the cash-sale clearing G/L, so the deposit
+    #            posts to SAP to move it into the bank.
+    #   CHEQUE — already debited the bank when the RECEIPT posted (verified:
+    #            DR bank / CR receivable). The OMS deposit records the physical
+    #            hand-over for audit; posting it again would double-debit.
+    #
+    # Defined here so the picker (views.DepositableReceiptListView) and the
+    # validator (services.validate_deposit) read ONE definition. When they
+    # disagreed, the picker offered receipts that submit then refused.
+    DEPOSITABLE_METHODS = ('CASH', 'CHEQUE')
+
+    # The subset whose value the deposit actually posts to SAP.
+    SAP_POSTABLE_DEPOSIT_METHODS = ('CASH',)
 
     # UPI posts to SAP as a bank TRANSFER (TransferSum / TransferAccount).
     # Kept as a tuple rather than inlined because the payload builder groups
@@ -457,6 +483,11 @@ class BankDeposit(TimeStampedModel):
 
     sap_doc_entry = models.IntegerField(null=True, blank=True, db_index=True)
     sap_doc_num = models.IntegerField(null=True, blank=True)
+    # ORCT.TransId — the journal-entry key. DocEntry identifies the PAYMENT;
+    # only TransId reaches JDT1, so without it "show me the accounting for this
+    # receipt" means hunting through SAP by hand. It is already in the response
+    # body we receive; it was simply being discarded.
+    sap_trans_id = models.IntegerField(null=True, blank=True)
     sap_posted_at = models.DateTimeField(null=True, blank=True)
     # SAP's exact words from the last posting attempt — the success
     # confirmation or the rejection reason. Shown verbatim in the UI so a user

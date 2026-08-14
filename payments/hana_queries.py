@@ -223,7 +223,13 @@ def fetch_company_banks(*, company):
             # Unique per ACCOUNT, because one bank can hold several. This is
             # what a dropdown selects and what a payload resolves from.
             'key': f'{code}:{gl}',
-            'label': (f'{name} — {account}' if account else name),
+            # Bank name + G/L, NOT the account number. One bank can hold
+            # several accounts (ICICI appears twice here), so the label has to
+            # distinguish them — but a full account number on a picker is
+            # customer-facing bank detail nobody needs to read to choose, and
+            # the G/L is what the deposit actually posts to. It is also unique
+            # per account, so it separates them just as well.
+            'label': (f'{name} — {gl}' if gl else name),
         })
     return out
 
@@ -267,3 +273,109 @@ def fetch_invoice_branches(*, company, doc_entries):
         'doc_status': str(r.get('doc_status') or '').strip(),
         'cancelled': str(r.get('cancelled') or '').strip(),
     } for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Incoming Payment numbering series (NNM1, ObjectCode 24)
+# ---------------------------------------------------------------------------
+
+# SAP object code for an Incoming Payment. 13 is the A/R invoice used by
+# hana/services/connection.py:402; payments needs 24.
+INCOMING_PAYMENT_OBJECT = '24'
+
+# One series per calendar month, named IP<MM><YY> — verified in NNM1 across
+# JIVO_BEVERAGES_HANADB and TEST_OIL_15122025.
+_SERIES_CACHE_SECONDS = 15 * 60
+
+
+def incoming_payment_series_sql(schema):
+    """Resolve the Incoming Payment series for one month.
+
+    Matched on SeriesName, NOT Indicator. Indicator carries the FISCAL year, so
+    January–March 2027 are labelled 'JAN-26-27'; deriving that from a date would
+    mismatch every Q4 posting. SeriesName is a plain calendar key (IP0127) and
+    is unambiguous.
+
+    Locked='N' and IsManual='N' mirror the existing series lookup at
+    hana/services/connection.py:398-406 — a locked or manual-numbering series
+    cannot be used for an automated post.
+    """
+    return f'''
+        SELECT TOP 1
+            T0."Series"      AS "series",
+            T0."SeriesName"  AS "series_name",
+            T0."Indicator"   AS "indicator"
+        FROM "{schema}"."NNM1" AS T0
+        WHERE T0."ObjectCode" = ?
+          AND T0."SeriesName" = ?
+          AND T0."Locked"     = 'N'
+          AND T0."IsManual"   = 'N'
+    '''
+
+
+def series_name_for(posting_date):
+    """'IP' + 2-digit month + 2-digit year, e.g. 2026-08-12 -> 'IP0826'."""
+    return f'IP{posting_date:%m}{posting_date:%y}'
+
+
+def fetch_incoming_payment_series(*, company, posting_date):
+    """The SAP series number to post an Incoming Payment under.
+
+    Company-specific by design: the SAME month is a different series in each
+    database (August 2026 is 2514 in BEVERAGES and 2564 in TEST_OIL), so this
+    must never be hardcoded or shared between companies.
+
+    Raises ValidationError when SAP has no usable series for that month —
+    failing before the POST, with a message naming the month, rather than
+    letting SAP reject the document after approval.
+    """
+    schema = _schema_for(company)
+    name = series_name_for(posting_date)
+    cache_key = f'pay:series:{schema}:{name}'
+
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    with HANAConnection() as conn:
+        rows = conn.execute(incoming_payment_series_sql(schema),
+                            [INCOMING_PAYMENT_OBJECT, name])
+
+    if not rows:
+        raise ValidationError(
+            f'SAP has no open Incoming Payment numbering series for '
+            f'{posting_date:%B %Y} ({name}) in {company}. Ask Finance to open '
+            f'the series before posting.')
+
+    series = int(rows[0]['series'])
+    cache.set(cache_key, series, _SERIES_CACHE_SECONDS)
+    logger.info('Resolved SAP series company=%s month=%s series=%s',
+                company, name, series)
+    return series
+
+
+def fetch_payment_trans_id(*, company, doc_entry):
+    """ORCT.TransId for a posted Incoming Payment.
+
+    Read from HANA rather than the Service Layer because the Service Layer does
+    NOT expose TransId — verified against a real posted document (DocEntry
+    20791): absent from the POST response and from a subsequent GET, while
+    ORCT holds TransId 212170. It is the only key that reaches JDT1, so
+    without this read the journal entry cannot be linked from OMS.
+
+    Returns None when the row cannot be read. TransId is a convenience for
+    tracing, never a posting precondition — the payment has already succeeded
+    by the time this runs, and a failure here must not disturb that.
+    """
+    try:
+        schema = _schema_for(company)
+        with HANAConnection() as conn:
+            rows = conn.execute(
+                f'SELECT "TransId" AS "trans_id" FROM "{schema}"."ORCT" '
+                f'WHERE "DocEntry" = ?', [int(doc_entry)])
+        if rows and rows[0].get('trans_id') is not None:
+            return int(rows[0]['trans_id'])
+    except Exception as error:
+        logger.warning('Could not read TransId for DocEntry %s in %s: %s',
+                       doc_entry, company, error)
+    return None

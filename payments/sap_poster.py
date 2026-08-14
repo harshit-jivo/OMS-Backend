@@ -71,24 +71,31 @@ def _reopen_approval(document, reason):
 
 
 def _entity_for(document):
-    return ('IncomingPayments' if isinstance(document, PaymentReceipt)
-            else 'Deposits')
+    # BOTH are IncomingPayments now: a receipt is DocType 'C' (customer), a
+    # deposit is DocType 'A' (account). The ODPS Deposit object is unused by
+    # this company — see sap_payloads.build_deposit.
+    return 'IncomingPayments'
 
 
 def _sap_keys(body):
-    """(doc_entry, doc_num) from a Service Layer response.
+    """(doc_entry, doc_num, trans_id) from a Service Layer response.
 
     The two entities name these differently:
         IncomingPayments -> DocEntry / DocNum      (ORCT)
         Deposits         -> DeposId  / DeposNum    (ODPS)
     Several spellings are accepted because the Service Layer version decides
     which it echoes; the table column names are authoritative.
+
+    `trans_id` is ORCT.TransId, the journal-entry key that links the document
+    to JDT1. It may be absent — the Service Layer does not always echo it — so
+    callers must treat None as "not reported", not as a failure.
     """
     doc_entry = (body.get('DocEntry') or body.get('DeposId')
                  or body.get('AbsoluteEntry') or body.get('AbsEntry'))
     doc_num = (body.get('DocNum') or body.get('DeposNum')
                or body.get('DepositNumber'))
-    return doc_entry, doc_num
+    trans_id = body.get('TransId')
+    return doc_entry, doc_num, trans_id
 
 
 def _success_text(doc_entry, doc_num):
@@ -273,7 +280,7 @@ def post_document(document, payload, *, user=None):
         return fresh
 
     duration = int((time.monotonic() - started) * 1000)
-    doc_entry, doc_num = _sap_keys(body)
+    doc_entry, doc_num, trans_id = _sap_keys(body)
 
     if not doc_entry:
         # 2xx with no usable key. The document probably EXISTS in SAP, so this
@@ -301,6 +308,19 @@ def post_document(document, payload, *, user=None):
         fresh.refresh_from_db()
         fresh.sap_doc_entry = doc_entry
         fresh.sap_doc_num = doc_num
+        # The Service Layer does NOT expose TransId — confirmed against a real
+        # posted document: absent from both the POST response and a later GET,
+        # while ORCT held it. So fall back to reading the table directly.
+        # Best-effort: the payment has already succeeded, and a failed trace
+        # lookup must never turn a posted document into an error.
+        # Applies to deposits too: they are account-type Incoming Payments and
+        # land in the same ORCT table.
+        if trans_id is None:
+            from .hana_queries import fetch_payment_trans_id
+            trans_id = fetch_payment_trans_id(
+                company=fresh.company, doc_entry=doc_entry)
+        if trans_id is not None:
+            fresh.sap_trans_id = int(trans_id)
         fresh.sap_posted_at = timezone.now()
         fresh.sap_response = _success_text(doc_entry, doc_num)
         # Clear the previous attempt's error. A posted document showing an old
@@ -309,11 +329,18 @@ def post_document(document, payload, *, user=None):
         fresh.sap_raw_error_code = ''
         fresh.status = fresh.__class__.Status.POSTED
         fresh.save(update_fields=['sap_doc_entry', 'sap_doc_num',
-                                  'sap_posted_at', 'sap_response', 'status',
+                                  'sap_trans_id', 'sap_posted_at',
+                                  'sap_response', 'status',
                                   'sap_raw_error', 'sap_raw_error_code',
                                   'updated_at'])
 
         # Capture CheckKey per cheque so those cheques can later be deposited.
+        #
+        # DORMANT since cheques became transfers: we no longer send
+        # PaymentChecks, so SAP returns none and this loop does nothing. Kept
+        # rather than deleted because BankDeposit still reads sap_check_key,
+        # and removing both belongs with the deposit rework — not here. Harmless
+        # meanwhile: an empty list simply skips the loop.
         if isinstance(fresh, PaymentReceipt):
             checks = body.get('PaymentChecks') or []
             cheques = [e for e in fresh.methods.all() if e.method == 'CHEQUE']
@@ -358,13 +385,16 @@ def reconcile_unknown(document):
         found = fetch_document(document.sap_doc_entry, document.company_db,
                                entity=_entity_for(document))
         if found:
-            doc_entry, doc_num = _sap_keys(found)
+            doc_entry, doc_num, trans_id = _sap_keys(found)
             with transaction.atomic():
                 document.sap_doc_num = doc_num or document.sap_doc_num
+                if trans_id is not None:
+                    document.sap_trans_id = int(trans_id)
                 document.sap_posted_at = document.sap_posted_at or timezone.now()
                 document.sap_response = _success_text(doc_entry, doc_num)
                 document.status = document.__class__.Status.POSTED
-                document.save(update_fields=['sap_doc_num', 'sap_posted_at',
+                document.save(update_fields=['sap_doc_num', 'sap_trans_id',
+                                             'sap_posted_at',
                                              'sap_response', 'status',
                                              'updated_at'])
                 log_status(document, to_status=document.status,

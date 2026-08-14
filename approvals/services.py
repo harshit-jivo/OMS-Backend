@@ -37,13 +37,22 @@ _HOOKS = {}
 
 
 def register_hooks(model_label, *, on_approved=None, on_rejected=None,
-                   on_submitted=None, on_cancelled=None):
-    """Wire domain callbacks for a document type. Called from apps.py ready()."""
+                   on_submitted=None, on_cancelled=None,
+                   on_level_advanced=None):
+    """Wire domain callbacks for a document type. Called from apps.py ready().
+
+    ``on_level_advanced`` fires when an INTERMEDIATE level is cleared and the
+    request moves to the next rung — the signal a domain needs to notify the
+    NEXT level's approvers (mirrors the Orders behaviour of notifying only the
+    stage that now owns the document). The final rung fires ``on_approved``
+    instead, never ``on_level_advanced``.
+    """
     _HOOKS[model_label.lower()] = {
         'approved': on_approved,
         'rejected': on_rejected,
         'submitted': on_submitted,
         'cancelled': on_cancelled,
+        'level_advanced': on_level_advanced,
     }
 
 
@@ -136,6 +145,34 @@ def _grant_holder_ids(document_type):
         u.id for u in User.objects.filter(is_active=True)
         if has_approve_permission(u, document_type)
     }
+
+
+def current_level_approvers(request):
+    """The active users who may act on `request` at its CURRENT level only.
+
+    This is the approval-notification contract that matches the Orders reference
+    behaviour: only the stage that now owns the document is notified, never every
+    level at once. Called on SUBMIT (current_level == 1) and on each level
+    advance (current_level == the new rung).
+
+    Reuses :func:`eligible_approver_ids` for the current rung (the single source
+    of truth for who may approve), so this never becomes a second, diverging
+    approver-selection system. Returns a list of distinct ``User`` instances;
+    the caller drops the submitter and de-duplicates. Empty when the request is
+    not PENDING or the current level has no eligible approver.
+    """
+    from users.models import User
+
+    if request.status != ApprovalRequest.Status.PENDING:
+        return []
+    level = _level_at(request, request.current_level)
+    if level is None:
+        return []
+    ids = eligible_approver_ids(
+        level, request.company, request.workflow.document_type)
+    if not ids:
+        return []
+    return list(User.objects.filter(id__in=ids, is_active=True))
 
 
 def can_act(user, request):
@@ -430,6 +467,11 @@ def approve(*, request_id, user, remarks='', ctx=None):
     request.current_level += 1
     request.level_entered_at = timezone.now()
     request.save(update_fields=['current_level', 'level_entered_at', 'updated_at'])
+    # An intermediate rung was cleared — the document now sits at the NEXT level.
+    # Carry the acting user for logging parity with the approved path, then let
+    # the domain notify whoever owns the new current level.
+    request._acting_user = user
+    _fire('level_advanced', request)
     return request
 
 

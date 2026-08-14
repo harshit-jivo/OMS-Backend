@@ -69,33 +69,24 @@ def is_admin(user):
     return str(role).strip().lower() == 'admin'
 
 
-# Roles that confer an action permission just by being held. Assigning
-# "Payment Approver" to a user is enough — an admin does not have to also tick
-# the matching checkbox on the Permissions page, which would be two places to
-# get right and one to forget.
-# Role name -> the keys that role confers.
+# NOTE: there is deliberately no role -> permission map.
 #
-# A role may confer SEVERAL keys. That is what makes a combined role such as
-# `payments_and_deposit` possible: one role to assign, all four actions, and no
-# second account for a person who handles both. The single-purpose roles remain
-# for anyone who should only do one job.
+# A role is IDENTITY ("this account works in payments"); it grants nothing. All
+# authority comes from two places, and only these two:
 #
-# Roles and per-user `extra_pages` grants are UNIONED (see granted_keys), so an
-# admin can start from a role and add one extra key to an individual without
-# inventing a new role for them.
-ROLE_PERMISSION_MAP = {
-    # One role covers a whole job. The four single-purpose roles
-    # (payment_creator, payment_approver, deposit_creator, deposit_approver)
-    # were removed: they forced a second account on anyone who handled both
-    # payments and deposits, and made them log out to switch.
-    'payments_and_deposit': {PAYMENTS_CREATE, PAYMENTS_APPROVE,
-                             DEPOSIT_CREATE, DEPOSIT_APPROVE},
-    'payments_deposit_creator': {PAYMENTS_CREATE, DEPOSIT_CREATE},
-    'payments_deposit_approver': {PAYMENTS_APPROVE, DEPOSIT_APPROVE},
-}
-# PAYMENTS_DASHBOARD appears in none of these on purpose. Company-wide
-# collection totals are a different kind of access from doing the work, so it is
-# only ever granted per user by ticking the box.
+#   1. `extra_pages`      — the boxes an admin ticks: which pages the user
+#                           opens and which actions they may take.
+#   2. Workflow assignment — whether they are an approver at a level, which
+#                           `approvals` resolves per document.
+#
+# One dummy payments role is enough for every payments user, because the
+# permissions decide everything. A map here would be a THIRD source of
+# authority that silently overrides the admin's choices: a user ticked for one
+# action would be handed four by their role, which is the opposite of what the
+# Permissions page appears to promise.
+#
+# This was already the live behaviour — granted_keys() never consulted the map —
+# so removing it changes no user's access. See tests_permissions.py.
 
 
 def granted_keys(user):

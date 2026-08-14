@@ -39,6 +39,9 @@ urlpatterns = [
     path('api/ui-config/', include('uilabels.urls')),
     path('api/payments/', include('payments.urls')),
     path('api/approvals/', include('approvals.urls')),
+    # Reusable notification framework read API (Payment/Deposit/future modules).
+    # Separate from /api/orders/notifications/ (old Orders system, untouched).
+    path('api/notifications/', include('notifications.urls')),
     # HAIS — hardware asset register (own `hais` Postgres schema).
     path('api/hais/', include('HAIS.urls')),
 ]

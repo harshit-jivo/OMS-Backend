@@ -610,6 +610,23 @@ if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
             "break Web Push for every browser that subscribes."
         )
 
+# --- Notification framework: registration resolvers (Phase 3.6) -------------
+# The generic notification providers resolve a recipient's existing device
+# registrations through these configured callables (dotted paths), so the
+# framework never imports a business module. The concrete resolvers live in
+# orders/notification_resolvers.py and READ (never write) the existing
+# push_tokens / web_push_subscriptions tables. Dependency direction stays
+# business-module -> notifications; the framework only sees a dotted-path string.
+# Override or blank to disable delivery on a given channel.
+NOTIFICATION_MOBILE_TOKEN_RESOLVER = config(
+    "NOTIFICATION_MOBILE_TOKEN_RESOLVER",
+    default="orders.notification_resolvers.resolve_mobile_tokens",
+)
+NOTIFICATION_WEB_SUBSCRIPTION_RESOLVER = config(
+    "NOTIFICATION_WEB_SUBSCRIPTION_RESOLVER",
+    default="orders.notification_resolvers.resolve_web_subscriptions",
+)
+
 # --- Push token cleanup (scheduled) -----------------------------------------
 # `python manage.py prune_push_tokens` deactivates Expo tokens the push service
 # reports as dead. It is meant to run nightly from cron / Task Scheduler --

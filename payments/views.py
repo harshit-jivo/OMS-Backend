@@ -769,7 +769,17 @@ def _deposit_queryset(user):
     return (
         BankDeposit.objects
         .select_related('deposited_by', 'created_by')
-        .prefetch_related('lines__receipt', 'attachments', 'approvals')
+        .prefetch_related(
+            # The line serializer reads each receipt's methods and collector,
+            # so both are prefetched: without them a deposit with N receipts
+            # costs a query per receipt for the tenders and another for the
+            # collector — the difference between 15 queries and 6 on a single
+            # deposit, and it grows with the number of receipts banked.
+            'lines__receipt__methods',
+            'lines__receipt__received_from_person',
+            'attachments',
+            'approvals',
+        )
     )
 
 
@@ -779,6 +789,22 @@ class BankDepositListCreateView(APIView):
 
     def get(self, request):
         qs = _deposit_queryset(request.user)
+
+        # Approver-relative views — the same contract the receipts list honours
+        # (PaymentReceiptListCreateView). Without this the parameter was
+        # accepted and silently IGNORED, so an approver who picked "Pending" on
+        # Deposit Tracking got every deposit back, POSTED and PENDING_ERROR
+        # included: the filter looked applied and was not.
+        #
+        # `status` alone cannot express these: whether a PENDING_APPROVAL
+        # deposit is waiting on THIS user depends on which rung it stopped at,
+        # which lives on the approval request rather than the deposit.
+        if view := (request.query_params.get('approval_view') or '').strip():
+            ids = approval_services.document_ids_for_view(
+                request.user, view, 'DEPOSIT', BankDeposit)
+            if ids is not None:
+                qs = qs.filter(id__in=ids)
+
         if value := request.query_params.get('status'):
             # Comma-separated — see PaymentReceiptListCreateView.
             qs = qs.filter(status__in=[s.strip().upper()
@@ -791,6 +817,26 @@ class BankDepositListCreateView(APIView):
             qs = qs.filter(deposit_date__lte=value)
         if request.query_params.get('mine') == 'true':
             qs = qs.filter(created_by=request.user)
+
+        # "All" orders by what the user must DO about each entry rather than by
+        # date — attention first, finished work last. Mirrors the receipts list
+        # so both tracking screens read the same way.
+        if _flag(request, 'group_by_status'):
+            qs = qs.annotate(
+                _rank=Case(
+                    When(status=BankDeposit.Status.PENDING_APPROVAL, then=0),
+                    When(status__in=[BankDeposit.Status.APPROVED,
+                                     BankDeposit.Status.POSTING_TO_SAP],
+                         then=1),
+                    When(status__in=[BankDeposit.Status.REJECTED,
+                                     BankDeposit.Status.PENDING_ERROR,
+                                     BankDeposit.Status.SAP_UNKNOWN],
+                         then=2),
+                    When(status=BankDeposit.Status.POSTED, then=3),
+                    default=4,
+                    output_field=IntegerField(),
+                )
+            ).order_by('_rank', '-deposit_date', '-id')
 
         paginator = StandardPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
@@ -820,6 +866,42 @@ class BankDepositDetailView(APIView):
         data['permissions'] = _document_permissions(deposit, request.user)
         return ok(data)
 
+    def patch(self, request, pk):
+        """Edit a deposit's content — the mirror of PaymentReceiptDetailView.
+
+        Exists so a deposit SAP refused can be corrected and sent round again
+        rather than cancelled and retyped. `can_edit` is re-checked here, not
+        trusted from the client: hiding the button is a courtesy, and this is
+        the only thing standing between a stale app and a posted document being
+        rewritten.
+        """
+        deposit = get_object_or_404(_deposit_queryset(request.user), pk=pk)
+        permissions = _document_permissions(deposit, request.user)
+        if not permissions['can_edit']:
+            reason = (
+                f'{deposit.deposit_no} is already posted to SAP and cannot be '
+                f'changed.'
+                if deposit.sap_doc_entry else
+                f'{deposit.deposit_no} can no longer be edited — it has been '
+                f'approved or is not yours to change.'
+            )
+            return fail(reason, status=http_status.HTTP_403_FORBIDDEN)
+
+        serializer = BankDepositCreateSerializer(
+            deposit, data=request.data, partial=True,
+            context={'request': request})
+        if not serializer.is_valid():
+            return fail('Could not update the deposit.',
+                        errors=serializer.errors)
+        try:
+            deposit = serializer.save()
+        except DjangoValidationError as exc:
+            return fail('; '.join(exc.messages))
+
+        data = BankDepositSerializer(deposit).data
+        data['permissions'] = _document_permissions(deposit, request.user)
+        return ok(data, message='Deposit updated.')
+
 
 class BankDepositSubmitView(APIView):
     # Same grant as creating — see PaymentReceiptSubmitView.
@@ -845,23 +927,44 @@ class DepositableReceiptListView(APIView):
         company = (request.query_params.get('company') or '').strip().upper()
         if not company:
             return fail('A company is required.')
+
+        # When EDITING a deposit, its own receipts must still be offered —
+        # they are banked, but banked HERE. Without this the edit form loads
+        # with an empty picker and the selection it was prefilled with cannot
+        # be seen, changed, or totalled.
+        editing_id = _int(request.query_params.get('deposit'), 0)
+
+        unbanked = Q(deposit_lines__isnull=True)
+        if editing_id:
+            unbanked |= Q(deposit_lines__deposit_id=editing_id)
+
         qs = (
             _receipt_queryset(request.user)
             # "Not yet banked" is the absence of a BankDepositLine, which is the
             # only link between a receipt and a deposit and carries the unique
             # constraint that stops a receipt being banked twice.
-            .filter(company=company,
-                    status=PaymentReceipt.Status.POSTED,
-                    deposit_lines__isnull=True)
-            # A bank deposit is somebody physically carrying money to a branch,
-            # so only physical instruments can be in one. UPI settles straight
-            # into the bank account and has nothing to hand over — offering it
-            # here invited a deposit for money that was never held.
-            .filter(methods__method__in=[
-                PaymentMethodEntry.Method.CASH,
-                PaymentMethodEntry.Method.CHEQUE,
-            ])
-            # A receipt with BOTH cash and cheque lines matches the join twice.
+            .filter(Q(company=company,
+                      status=PaymentReceipt.Status.POSTED) & unbanked)
+            # Physical tenders only — CASH and CHEQUE (see
+            # PaymentMethodEntry.DEPOSITABLE_METHODS, the single definition
+            # this and services.validate_deposit both read).
+            #
+            # Two clauses, not one. The filter alone matches a MIXED
+            # cash+UPI receipt because it HAS a depositable line, and
+            # validate_deposit would then reject it at submit. The exclude is
+            # the NOT-EXISTS half: drop any receipt carrying even one
+            # non-depositable line.
+            #
+            # The subquery is deliberate. `.exclude(~Q(methods__method__in=...))`
+            # reads equivalently but is NOT — across a multi-valued join it
+            # evaluates per row, so a mixed receipt survives on its cash row.
+            # Verified against live data, where that form wrongly returned two
+            # mixed receipts.
+            .filter(methods__method__in=PaymentMethodEntry.DEPOSITABLE_METHODS)
+            .exclude(id__in=PaymentMethodEntry.objects
+                     .exclude(method__in=PaymentMethodEntry.DEPOSITABLE_METHODS)
+                     .values('receipt_id'))
+            # A receipt with several tender lines matches the join once each.
             .distinct()
             .order_by('-payment_date')
         )

@@ -33,6 +33,16 @@ def _on_receipt_approved(approval_request):
     approver = getattr(approval_request, '_acting_user', None)
     transaction.on_commit(lambda: post_receipt_to_sap(receipt, user=approver))
 
+    # Notify the submitter that their receipt was approved. Runs inside the
+    # approval transaction: the Notification records commit with the approval,
+    # and external push delivery is deferred to on_commit (so a rollback sends
+    # nothing). Delivery failures are isolated by the framework and never break
+    # the approval.
+    from .notification_events import publish_receipt_decision
+    publish_receipt_decision(
+        receipt, approval_request.submitted_by, approved=True, actor=approver,
+    )
+
 
 def _on_receipt_rejected(approval_request):
     from .models import PaymentReceipt
@@ -45,9 +55,48 @@ def _on_receipt_rejected(approval_request):
     receipt.status = PaymentReceipt.Status.REJECTED
     receipt.save(update_fields=['status', 'updated_at'])
     last = approval_request.actions.order_by('-sequence').first()
+    reason = (last.remarks if last else '') or 'Rejected.'
     log_status(receipt, from_status=previous, to_status=receipt.status,
                actor_kind='APPROVAL_ENGINE',
-               reason=(last.remarks if last else '') or 'Rejected.')
+               reason=reason)
+
+    # Notify the submitter their receipt was rejected (same transaction safety
+    # as the approved path above).
+    from .notification_events import publish_receipt_decision
+    publish_receipt_decision(
+        receipt, approval_request.submitted_by, approved=False,
+        actor=getattr(approval_request, '_acting_user', None), reason=reason,
+    )
+
+
+def _on_receipt_submitted(approval_request):
+    """Receipt entered the approval workflow — notify the CURRENT (level-1)
+    approvers. Fires from the approval engine's submit, inside its transaction,
+    so the notification commits with the submission and rolls back with it.
+    """
+    receipt = approval_request.document
+    if receipt is None:
+        return
+    from .notification_events import publish_receipt_submitted
+    publish_receipt_submitted(receipt, approval_request.submitted_by,
+                              request=approval_request)
+
+
+def _on_receipt_level_advanced(approval_request):
+    """An intermediate level cleared — notify the NEW current level's approvers.
+
+    The engine has already incremented current_level before firing this, so the
+    publisher resolves exactly the rung that now owns the receipt (Orders-parity:
+    only the current stage is notified, never every level at once).
+    """
+    receipt = approval_request.document
+    if receipt is None:
+        return
+    from .notification_events import publish_receipt_next_level
+    publish_receipt_next_level(
+        receipt, approval_request,
+        actor=getattr(approval_request, '_acting_user', None),
+    )
 
 
 def _on_receipt_cancelled(approval_request):
@@ -79,6 +128,14 @@ def _on_deposit_approved(approval_request):
     approver = getattr(approval_request, '_acting_user', None)
     transaction.on_commit(lambda: post_deposit_to_sap(deposit, user=approver))
 
+    # Notify the submitter their deposit was approved. Same transaction safety as
+    # the receipt hooks: the Notification records commit with the approval, and
+    # external push delivery is deferred to on_commit (rollback → nothing sent).
+    from .notification_events import publish_deposit_decision
+    publish_deposit_decision(
+        deposit, approval_request.submitted_by, approved=True, actor=approver,
+    )
+
 
 def _on_deposit_rejected(approval_request):
     from .models import BankDeposit
@@ -91,9 +148,40 @@ def _on_deposit_rejected(approval_request):
     deposit.status = BankDeposit.Status.REJECTED
     deposit.save(update_fields=['status', 'updated_at'])
     last = approval_request.actions.order_by('-sequence').first()
+    reason = (last.remarks if last else '') or 'Rejected.'
     log_status(deposit, from_status=previous, to_status=deposit.status,
                actor_kind='APPROVAL_ENGINE',
-               reason=(last.remarks if last else '') or 'Rejected.')
+               reason=reason)
+
+    # Notify the submitter their deposit was rejected (same transaction safety).
+    from .notification_events import publish_deposit_decision
+    publish_deposit_decision(
+        deposit, approval_request.submitted_by, approved=False,
+        actor=getattr(approval_request, '_acting_user', None), reason=reason,
+    )
+
+
+def _on_deposit_submitted(approval_request):
+    """Deposit entered the approval workflow — notify the current (level-1)
+    approvers (same transaction safety as the receipt submit hook)."""
+    deposit = approval_request.document
+    if deposit is None:
+        return
+    from .notification_events import publish_deposit_submitted
+    publish_deposit_submitted(deposit, approval_request.submitted_by,
+                              request=approval_request)
+
+
+def _on_deposit_level_advanced(approval_request):
+    """An intermediate deposit level cleared — notify the NEW current level."""
+    deposit = approval_request.document
+    if deposit is None:
+        return
+    from .notification_events import publish_deposit_next_level
+    publish_deposit_next_level(
+        deposit, approval_request,
+        actor=getattr(approval_request, '_acting_user', None),
+    )
 
 
 def _on_deposit_cancelled(approval_request):
@@ -115,13 +203,17 @@ def register():
 
     register_hooks(
         'payments.paymentreceipt',
+        on_submitted=_on_receipt_submitted,
         on_approved=_on_receipt_approved,
         on_rejected=_on_receipt_rejected,
         on_cancelled=_on_receipt_cancelled,
+        on_level_advanced=_on_receipt_level_advanced,
     )
     register_hooks(
         'payments.bankdeposit',
+        on_submitted=_on_deposit_submitted,
         on_approved=_on_deposit_approved,
         on_rejected=_on_deposit_rejected,
         on_cancelled=_on_deposit_cancelled,
+        on_level_advanced=_on_deposit_level_advanced,
     )

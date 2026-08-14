@@ -217,8 +217,14 @@ def post_incoming_payment(payload, company_db, *, session=None):
 
 
 def post_deposit(payload, company_db, *, session=None):
-    """POST /Deposits. Returns the created document."""
-    _, body = request('POST', '/Deposits', company_db=company_db,
+    """POST a bank deposit as an ACCOUNT-TYPE INCOMING PAYMENT.
+
+    Not /Deposits (ODPS): the company has never used that object — 0 rows in
+    all three live databases — and every real deposit is an account-type
+    Incoming Payment. See sap_payloads.build_deposit for the ORCT/JDT1
+    evidence. The function keeps its name so callers are unaffected.
+    """
+    _, body = request('POST', '/IncomingPayments', company_db=company_db,
                       json_body=payload, session=session)
     return body
 

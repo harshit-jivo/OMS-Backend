@@ -276,7 +276,11 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
                   'payment_date', 'is_advance', 'total_amount', 'allocated_amount',
                   'unallocated_amount', 'currency', 'remarks',
                   'status', 'status_display',
-                  'sap_doc_entry', 'sap_doc_num', 'sap_posted_at',
+                  # sap_trans_id is the journal-entry key: DocEntry finds the
+                  # payment, TransId finds its accounting in JDT1. Additive —
+                  # null on every document posted before it was captured.
+                  'sap_doc_entry', 'sap_doc_num', 'sap_trans_id',
+                  'sap_posted_at',
                   'sap_branch_id', 'sap_branch_name', 'sap_branch',
                   'sap_response', 'sap_raw_error', 'sap_raw_error_code',
                   'methods', 'allocations', 'attachments', 'approval',
@@ -394,6 +398,29 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         if not methods:
             raise serializers.ValidationError(
                 {'methods': 'Add at least one payment method.'})
+
+        # ONE method per receipt — the rule Finance actually follows: a customer
+        # paying by three tenders becomes three Incoming Payments in SAP, not
+        # one document carrying all three.
+        #
+        # It is also the only structural fix for a real misposting. SAP has a
+        # SINGLE TransferAccount/TransferSum pair, so a receipt mixing UPI and
+        # CHEQUE had to merge them: DocEntry 20802 sent ₹12,00,000 of cheque
+        # money to the UPI bank G/L because the first tender's account won.
+        # With one method per receipt that merge cannot occur.
+        #
+        # Compared on DISTINCT method, so several cash lines on one receipt
+        # (a legitimate way to record two bundles of notes) still pass.
+        distinct_methods = sorted({
+            m['method'] if isinstance(m, dict) else m.method for m in methods
+        })
+        if len(distinct_methods) > 1:
+            raise serializers.ValidationError({
+                'methods': (
+                    'Each payment receipt must contain exactly one payment '
+                    'method. Create separate receipts for CASH, UPI or '
+                    f'CHEQUE. This one has: {", ".join(distinct_methods)}.'
+                )})
 
         if 'allocations' in attrs:
             allocations = attrs['allocations'] or []
@@ -549,12 +576,37 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 
 class BankDepositLineSerializer(serializers.ModelSerializer):
+    """One banked receipt, with enough of the receipt to verify it.
+
+    An approver signing off a deposit is confirming that specific notes and
+    cheques were handed over. Answering "which of these is the cheque, and is
+    it the one in my hand?" previously meant opening each receipt separately,
+    so the fields that identify the money are included here.
+    """
+
     receipt_no = serializers.CharField(source='receipt.receipt_no', read_only=True)
     card_name = serializers.CharField(source='receipt.card_name', read_only=True)
+    card_code = serializers.CharField(source='receipt.card_code', read_only=True)
+    payment_date = serializers.DateField(
+        source='receipt.payment_date', read_only=True)
+    receipt_status = serializers.CharField(
+        source='receipt.status', read_only=True)
+    receipt_total = serializers.DecimalField(
+        source='receipt.total_amount', max_digits=15, decimal_places=2,
+        read_only=True)
+    receipt_remarks = serializers.CharField(
+        source='receipt.remarks', read_only=True)
+    collected_by = serializers.CharField(
+        source='receipt.received_from_person.name', read_only=True, default='')
+    # Cash / cheque lines, each with its cheque number, payer bank and date.
+    methods = PaymentMethodEntrySerializer(
+        source='receipt.methods', many=True, read_only=True)
 
     class Meta:
         model = BankDepositLine
-        fields = ['id', 'receipt', 'receipt_no', 'card_name', 'amount']
+        fields = ['id', 'receipt', 'receipt_no', 'card_name', 'card_code',
+                  'payment_date', 'receipt_status', 'receipt_total',
+                  'receipt_remarks', 'collected_by', 'methods', 'amount']
 
 
 class BankDepositSerializer(serializers.ModelSerializer):
@@ -584,7 +636,8 @@ class BankDepositSerializer(serializers.ModelSerializer):
                   'collected_amount', 'deposit_amount', 'shortfall',
                   'shortfall_reason', 'bank_charge', 'currency',
                   'slip_number', 'remarks', 'status', 'status_display',
-                  'sap_doc_entry', 'sap_doc_num', 'sap_posted_at',
+                  'sap_doc_entry', 'sap_doc_num', 'sap_trans_id',
+                  'sap_posted_at',
                   'sap_response', 'sap_raw_error', 'sap_raw_error_code',
                   'lines', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
@@ -704,9 +757,35 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
                   'slip_number', 'remarks', 'receipt_ids']
 
     def validate(self, attrs):
+        """Cross-field rules, for both a create and a partial update.
+
+        On a PATCH the payload carries only what changed, so each value is read
+        as "the incoming one, else the one already stored". Reading `attrs`
+        alone would treat an omitted field as absent and reject an edit that
+        never touched it.
+        """
+        instance = self.instance
+
+        def current(field, default=None):
+            if field in attrs:
+                return attrs[field]
+            if instance is not None:
+                return getattr(instance, field, default)
+            return default
+
+        company = current('company')
+        if 'receipt_ids' in attrs:
+            receipt_ids = attrs['receipt_ids']
+        elif instance is not None:
+            # Unchanged: keep the receipts already banked here.
+            receipt_ids = list(
+                instance.lines.values_list('receipt_id', flat=True))
+        else:
+            receipt_ids = []
+
         receipts = PaymentReceipt.objects.filter(
-            id__in=attrs['receipt_ids'], company=attrs['company'])
-        if receipts.count() != len(set(attrs['receipt_ids'])):
+            id__in=receipt_ids, company=company)
+        if receipts.count() != len(set(receipt_ids)):
             raise serializers.ValidationError({
                 'receipt_ids':
                     'One or more payments do not exist in the selected company.'})
@@ -714,19 +793,25 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
         # Banked already? The answer lives in BankDepositLine, which is the only
         # written link and holds the unique constraint on `receipt` that makes
         # double-banking impossible at the database level.
-        already = receipts.filter(deposit_lines__isnull=False).values_list(
-            'receipt_no', flat=True)
+        #
+        # A receipt already on THIS deposit is excluded: on an edit it is not a
+        # double-banking, it is the row being kept.
+        already_qs = receipts.filter(deposit_lines__isnull=False)
+        if instance is not None:
+            already_qs = already_qs.exclude(deposit_lines__deposit=instance)
+        already = list(already_qs.values_list('receipt_no', flat=True))
         if already:
             raise serializers.ValidationError({
                 'receipt_ids': f'Already deposited: {", ".join(already)}.'})
 
         collected = sum((r.total_amount for r in receipts), Decimal('0'))
-        deposit_amount = attrs['deposit_amount']
+        deposit_amount = current('deposit_amount')
         if deposit_amount > collected:
             raise serializers.ValidationError({
                 'deposit_amount':
                     f'Cannot deposit {deposit_amount}; only {collected} was collected.'})
-        if deposit_amount < collected and not (attrs.get('shortfall_reason') or '').strip():
+        if deposit_amount < collected and not (
+                current('shortfall_reason') or '').strip():
             raise serializers.ValidationError({
                 'shortfall_reason':
                     'A reason is required when depositing less than collected.'})
@@ -735,8 +820,8 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
         # a bank; the G/L is never typed. Verified here so a bank removed from
         # SAP is caught at entry rather than at posting.
         try:
-            bank = bank_master.find_bank(attrs['company'],
-                                         attrs.get('bank_key') or '')
+            bank = bank_master.find_bank(company,
+                                         current('bank_key') or '')
         except bank_master.BankMasterUnavailable as exc:
             # A draft may still be saved; submit re-checks and blocks.
             bank = None
@@ -785,3 +870,44 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
         log_status(deposit, to_status=deposit.status, user=user,
                    reason='Deposit created.')
         return deposit
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        """Edit a deposit in place.
+
+        Used to correct a deposit SAP refused: the approver or creator fixes
+        the bank, the amount or the receipts and sends it round again. The
+        deposit NUMBER never changes — it is the same physical hand-over, and a
+        new number would break the link to whatever has already referenced it.
+
+        Receipt lines are replaced wholesale when `receipt_ids` is sent, and
+        left untouched when it is not. Partial means partial.
+        """
+        validated_data.pop('receipt_ids', None)
+        receipts = validated_data.pop('_receipts', None)
+        collected = validated_data.pop('_collected', None)
+        user = self.context['request'].user
+
+        from .services import log_status
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        if collected is not None:
+            instance.collected_amount = collected
+        instance.save()
+
+        if receipts is not None:
+            # Delete-then-recreate rather than diffing: the unique constraint on
+            # BankDepositLine.receipt means a receipt dropped from this deposit
+            # must release its claim before another deposit can take it, and one
+            # atomic replace is easier to reason about than a partial diff.
+            instance.lines.all().delete()
+            BankDepositLine.objects.bulk_create([
+                BankDepositLine(deposit=instance, receipt=r,
+                                amount=r.total_amount)
+                for r in receipts
+            ])
+
+        log_status(instance, to_status=instance.status, user=user,
+                   reason='Deposit updated.')
+        return instance
