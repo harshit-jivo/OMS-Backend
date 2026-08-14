@@ -4,13 +4,14 @@ from django.apps import AppConfig
 class NotificationsConfig(AppConfig):
     """The reusable notification framework.
 
-    Currently an empty skeleton (Phase 3.1). It exists ahead of any behaviour
-    so that the INSTALLED_APPS change lands on its own and stays bisectable:
-    if a later phase breaks startup, `git bisect` points at the phase that
-    added the code, not at the phase that registered the app.
-
-    Nothing imports this app yet and this app imports nothing. Orders keeps
+    Phase 3.2 adds the framework FOUNDATION only: the event-name contract
+    (`constants.py`) and the empty event registry (`registry.py`). There are
+    still no models, no migrations, and no delivery behaviour — Orders keeps
     serving every notification exactly as before.
+
+    This app imports only its OWN submodules; it imports no business module
+    (orders/payments/approvals/inventory/invoices/users), preserving the
+    one-way dependency direction business-module → notifications.
     """
 
     # ⚠️ AutoField, NOT BigAutoField — deliberate, and the opposite of every
@@ -34,3 +35,12 @@ class NotificationsConfig(AppConfig):
 
     name = 'notifications'
     verbose_name = 'Notification Framework'
+
+    def ready(self):
+        # Load the event registry at startup so its registration point exists
+        # for business modules to register into (from their OWN AppConfig.ready())
+        # in a later phase. This mirrors how the approvals engine exposes its
+        # `_HOOKS` registry. It performs no database query, no network call and
+        # no business logic, and imports only this app's own submodule — never a
+        # business module, so no circular import is possible.
+        from . import registry  # noqa: F401

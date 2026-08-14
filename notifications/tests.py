@@ -56,6 +56,90 @@ class NotificationsAppLoadingTests(SimpleTestCase):
         self.assertEqual(list(config.get_models()), [])
 
 
+class NotificationsRegistryTests(SimpleTestCase):
+    """Phase 3.2: the framework foundation (constants + registry)."""
+
+    def setUp(self):
+        # The registry is process-global; keep each test isolated.
+        from notifications import registry
+
+        self.addCleanup(registry.clear)
+        registry.clear()
+
+    def test_registry_imports_and_initialises(self):
+        from notifications import registry  # noqa: F401
+
+        # Import alone must not raise and must expose the registration API.
+        self.assertTrue(hasattr(registry, "register"))
+        self.assertTrue(hasattr(registry, "get_handler"))
+
+    def test_registry_starts_empty(self):
+        # The framework must start clean — no business module registered.
+        from notifications import registry
+
+        self.assertEqual(registry.registered_events(), frozenset())
+
+    def test_register_and_lookup_roundtrip(self):
+        from notifications import constants, registry
+
+        def handler(*args, **kwargs):
+            return None
+
+        registry.register(constants.PAYMENT_APPROVED, handler)
+        self.assertTrue(registry.is_registered(constants.PAYMENT_APPROVED))
+        self.assertIs(registry.get_handler(constants.PAYMENT_APPROVED), handler)
+        self.assertEqual(
+            registry.registered_events(), frozenset({constants.PAYMENT_APPROVED})
+        )
+
+    def test_register_rejects_invalid_event_name(self):
+        from notifications import registry
+
+        with self.assertRaises(ValueError):
+            registry.register("Order Approved", lambda: None)  # not machine-readable
+
+    def test_register_rejects_non_callable_handler(self):
+        from notifications import constants, registry
+
+        with self.assertRaises(TypeError):
+            registry.register(constants.ORDER_CREATED, "not-callable")
+
+    def test_register_rejects_duplicate(self):
+        from notifications import constants, registry
+
+        registry.register(constants.ORDER_CREATED, lambda: None)
+        with self.assertRaises(ValueError):
+            registry.register(constants.ORDER_CREATED, lambda: None)
+
+    def test_unregistered_lookup_is_none(self):
+        from notifications import constants, registry
+
+        self.assertIsNone(registry.get_handler(constants.DEPOSIT_RECEIVED))
+
+
+class NotificationsEventNameContractTests(SimpleTestCase):
+    """Phase 3.2: every shipped event name follows the naming convention."""
+
+    def test_all_event_names_follow_convention(self):
+        from notifications import constants
+
+        self.assertTrue(constants.EVENT_NAMES, "EVENT_NAMES must not be empty")
+        for name in constants.EVENT_NAMES:
+            self.assertTrue(
+                constants.is_valid_event_name(name),
+                f"event name {name!r} violates the UPPERCASE_UNDERSCORE convention",
+            )
+
+    def test_convention_rejects_human_readable_titles(self):
+        from notifications import constants
+
+        for bad in ["Approved", "Pending", "Order Approved", "order_created", "", 123]:
+            self.assertFalse(
+                constants.is_valid_event_name(bad),
+                f"{bad!r} should not be a valid event name",
+            )
+
+
 class NotificationsDependencyRuleTests(SimpleTestCase):
     """The app must not import any business module (static source scan)."""
 
