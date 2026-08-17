@@ -304,9 +304,11 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
             except Exception as exc:                    # noqa: BLE001
                 # SAP being unreachable must not break reading a payment, but
                 # a coding error here would otherwise hide silently — which is
-                # exactly what a bare `rows = []` did during development.
+                # exactly what a bare `rows = []` did during development. The
+                # message is truncated: a HANA connect failure carries a long
+                # multi-line RTE dump that adds no signal beyond "SAP is down".
                 logger.warning('sap_branch lookup failed for receipt %s: %s',
-                               obj.pk, exc)
+                               obj.pk, str(exc).splitlines()[0][:200])
                 rows = []
             names = {r['bpl_name'] for r in rows if r['bpl_name']}
             ids = {r['bpl_id'] for r in rows if r['bpl_id'] is not None}
