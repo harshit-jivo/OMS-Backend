@@ -21,6 +21,8 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +191,12 @@ class Invoice(models.Model):
     # vendor dropdown. Free-text party_name is still allowed if not in SAP.
     party_code = models.CharField(max_length=50, blank=True, default='')   # OCRD CardCode
     party_gstin = models.CharField(max_length=20, blank=True, default='')
-    invoice_number = models.CharField(max_length=100, unique=True)
+    # Uniqueness is enforced by a PARTIAL index over live rows only (see Meta),
+    # not by unique=True. A soft-deleted invoice must not keep reserving its
+    # number: deletion is capped at stage 6, so a deleted invoice was never
+    # saved in SAP or paid, and re-entering that number is the normal way to
+    # correct a bad entry.
+    invoice_number = models.CharField(max_length=100)
     taxable_value = models.DecimalField(max_digits=15, decimal_places=2)
     gst_type = models.ForeignKey(GstType, on_delete=models.PROTECT, related_name='invoices')
     gst_rate = models.ForeignKey(GstRate, on_delete=models.PROTECT, related_name='invoices')
@@ -248,7 +255,7 @@ class Invoice(models.Model):
     )
 
     objects = InvoiceManager()          # default: excludes soft-deleted
-    all_objects = models.Manager()      # includes soft-deleted (restore/uniqueness)
+    all_objects = models.Manager()      # includes soft-deleted (audit/restore)
 
     class Meta:
         db_table = 'tracker_invoice'
@@ -257,6 +264,18 @@ class Invoice(models.Model):
             models.Index(fields=['current_stage', 'status']),
             models.Index(fields=['invoice_number']),
             models.Index(fields=['party_name']),
+        ]
+        constraints = [
+            # One LIVE invoice per number, compared case-insensitively so
+            # 'ats:394' and 'ATS:394' collide (the old unique=True was
+            # case-sensitive while the serializer checked iexact, so the two
+            # disagreed). Soft-deleted rows are outside the index, which frees
+            # a deleted invoice's number for re-entry.
+            models.UniqueConstraint(
+                Lower('invoice_number'),
+                condition=Q(is_deleted=False),
+                name='uniq_live_invoice_number',
+            ),
         ]
 
     @property
