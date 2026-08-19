@@ -111,9 +111,11 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
         value = (value or '').strip()
         if not value:
             raise serializers.ValidationError('Invoice number is required.')
-        # all_objects: a soft-deleted invoice still reserves its number (the DB
-        # unique constraint covers deleted rows too), so check against every row.
-        qs = Invoice.all_objects.filter(invoice_number__iexact=value)
+        # LIVE rows only, matching the partial unique index on the table. A
+        # soft-deleted invoice releases its number: deletion is capped at stage
+        # 6, so it was never saved in SAP or paid, and re-entering the number is
+        # how a bad entry gets corrected.
+        qs = Invoice.objects.filter(invoice_number__iexact=value)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
