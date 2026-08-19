@@ -21,8 +21,8 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
-from django.db.models import Q
-from django.db.models.functions import Lower
+from django.db.models import Q, Value
+from django.db.models.functions import Coalesce, Lower, NullIf
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +191,9 @@ class Invoice(models.Model):
     # vendor dropdown. Free-text party_name is still allowed if not in SAP.
     party_code = models.CharField(max_length=50, blank=True, default='')   # OCRD CardCode
     party_gstin = models.CharField(max_length=20, blank=True, default='')
-    # Uniqueness is enforced by a PARTIAL index over live rows only (see Meta),
-    # not by unique=True. A soft-deleted invoice must not keep reserving its
-    # number: deletion is capped at stage 6, so a deleted invoice was never
-    # saved in SAP or paid, and re-entering that number is the normal way to
-    # correct a bad entry.
+    # NOT globally unique — unique per vendor, over live rows only, via the
+    # partial index in Meta. Invoice numbers are a per-supplier series, so two
+    # vendors both issuing "058" is normal and must be allowed.
     invoice_number = models.CharField(max_length=100)
     taxable_value = models.DecimalField(max_digits=15, decimal_places=2)
     gst_type = models.ForeignKey(GstType, on_delete=models.PROTECT, related_name='invoices')
@@ -266,15 +264,27 @@ class Invoice(models.Model):
             models.Index(fields=['party_name']),
         ]
         constraints = [
-            # One LIVE invoice per number, compared case-insensitively so
-            # 'ats:394' and 'ATS:394' collide (the old unique=True was
-            # case-sensitive while the serializer checked iexact, so the two
-            # disagreed). Soft-deleted rows are outside the index, which frees
-            # a deleted invoice's number for re-entry.
+            # One LIVE invoice per (vendor, number). Scoped to the vendor
+            # because invoice numbers are only unique within a vendor's own
+            # series — two suppliers legitimately both issue an "058".
+            #
+            # The vendor key is party_code (SAP CardCode) when present, falling
+            # back to party_name for hand-typed vendors that aren't in SAP;
+            # without the fallback every code-less invoice would share one empty
+            # bucket and collide with the others.
+            #
+            # Compared case-insensitively, so 'ats:394' and 'ATS:394' are the
+            # same number (the old unique=True was case-sensitive while the
+            # serializer checked iexact — the two disagreed).
+            #
+            # Soft-deleted rows sit outside the index, so deleting an invoice
+            # releases its number for re-entry. Safe because deletion is capped
+            # at stage 6: a deleted invoice was never saved in SAP or paid.
             models.UniqueConstraint(
+                Coalesce(NullIf(Lower('party_code'), Value('')), Lower('party_name')),
                 Lower('invoice_number'),
                 condition=Q(is_deleted=False),
-                name='uniq_live_invoice_number',
+                name='uniq_live_vendor_invoice_number',
             ),
         ]
 
