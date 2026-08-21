@@ -59,6 +59,7 @@ class HANAConnection:
 class Queries():
     OIL_SCHEMA = settings.DATABASES['hana']['OIL_SCHEMA']
     BEVERAGE_SCHEMA = settings.DATABASES['hana']['BEVERAGE_SCHEMA']
+    MART_SCHEMA = settings.DATABASES['hana'].get('MART_SCHEMA', '')
 
     @staticmethod
     def get_product_stock(branch):
@@ -556,12 +557,14 @@ class Queries():
 
         SAP document lines expect the numeric ``CostingCode`` (PrcCode), not the
         human-readable profit-center name. Looks the name up in the correct
-        company DB schema (OIL vs BEVERAGE).
+        company DB schema (OIL vs BEVERAGE vs MART).
         """
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
         elif branch == 'BEVERAGE':
             s = Queries.BEVERAGE_SCHEMA
+        elif branch == 'MART':
+            s = Queries.MART_SCHEMA
         safe_prc_name = str(prc_name).replace("'", "''")
         return f"""
             SELECT TOP 1 T0."PrcCode"

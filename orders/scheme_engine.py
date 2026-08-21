@@ -387,11 +387,18 @@ def _resolve_conflicts(proposals):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def resolve_schemes(card_code, category, lines, on_date=None, ctx=None):
+def resolve_schemes(card_code, category, lines, on_date=None, ctx=None, strict_category=False):
     """Propose scheme giveaways for an order.
 
     `lines` may be create-payload dicts or saved OrderItem instances. Returns a
     list of :class:`SchemeProposal`, already de-conflicted. Nothing is written.
+
+    ``strict_category`` is the order-flow rule: a scheme is proposed only when the
+    party category (``ctx.category``), the product line category and the scheme's
+    own category are **all present and identical**. A blank anywhere, or any
+    mismatch, drops the scheme. The Add Sales preview and the order-create guard
+    turn this on; the default is the lenient contract (a blank is a wildcard, only
+    a stated-and-different category is blocked) that the pure engine keeps.
     """
     on_date = on_date or timezone.localdate()
     ctx = ctx or build_party_context(card_code, category)
@@ -413,9 +420,30 @@ def resolve_schemes(card_code, category, lines, on_date=None, ctx=None):
         if str(_get(line, 'item_type', '') or '').upper() == 'SCHEME':
             continue
 
+        # Category chain: the party category (ctx.category) and the product line
+        # category are the first two of the three that must line up.
+        line_category = str(_get(line, 'category', '') or '').strip()
+        if strict_category:
+            # Both must be present and equal — a missing category is a mismatch.
+            if not ctx.category or not line_category or \
+                    line_category.casefold() != ctx.category.casefold():
+                continue
+        elif ctx.category and line_category and \
+                line_category.casefold() != ctx.category.casefold():
+            # Lenient: only a stated, different product category is blocked.
+            continue
+
         line_item_code = str(_get(line, 'item_code', '') or '').strip()
 
         for candidate in candidates:
+            # Third of the three: the scheme's own category. Under the strict
+            # order-flow rule it must be present and equal to the party/product
+            # category — a blank (wildcard) scheme is not shown.
+            if strict_category:
+                scheme_category = str(candidate.scheme.category or '').strip()
+                if not scheme_category or \
+                        scheme_category.casefold() != ctx.category.casefold():
+                    continue
             if not _line_category_allows(candidate.scheme, line):
                 continue
             matched = [t for t in candidate.triggers if _trigger_matches(t, line)]
