@@ -57,8 +57,5 @@ urlpatterns = [
     path('approve-sales-order/', ApproveSalesOrderAPIView.as_view(), name='approve-sales-order'),
     
     path('parties/category/', GetPartyByCategoryView.as_view(), name='party-by-category'),
-    
-    
-    
 ]
 

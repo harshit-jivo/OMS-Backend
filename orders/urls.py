@@ -1,6 +1,8 @@
 from django.contrib import admin
 from django.urls import path,include
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
 from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView
+from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
 
 urlpatterns=[
     
@@ -15,6 +17,13 @@ urlpatterns=[
     path('list/', OrderListView.as_view(), name='order_list'),
     path('<int:order_id>/approve/', ApproveOrderView.as_view(), name='approve_list'),
     path('<int:order_id>/reject/', RejectOrderView.as_view(), name='reject_list'),
+    # Mart Approval flow (distributor / company 3 orders)
+    path('mart/list/', MartOrderListView.as_view(), name='mart-order-list'),
+    path('mart/<int:order_id>/', MartOrderDetailView.as_view(), name='mart-order-detail'),
+    path('mart/<int:order_id>/approve/', MartApproveView.as_view(), name='mart-approve'),
+    path('mart/<int:order_id>/reject/', MartRejectView.as_view(), name='mart-reject'),
+    path('mart/<int:order_id>/resend-sap/', MartResendSapView.as_view(), name='mart-resend-sap'),
+    path('sales-order-status/', SalesOrderSapStatusView.as_view(), name='sales-order-sap-status'),
     path('party-products/<str:card_code>/', PartyProductsView.as_view(), name='party-products'),
     path('schemes/', SchemeListView.as_view(), name='schemes'),
     path('schemes/manage/', SchemeManageListView.as_view(), name='schemes-manage'),
@@ -48,7 +57,15 @@ urlpatterns=[
     path("quotation-status/", QuotationStatusView.as_view(), name="quotation-status"),
     path("quotation-overview/", QuotationOverviewView.as_view(), name="quotation-overview"),
     path("<int:order_id>/cancel-quotation/", CancelSalesQuotationView.as_view(), name="cancel-quotation"),
-    path("orders-by-item/", GetOrdersByItemView.as_view(), name="orders-by-item")
-    
-    
+    path("orders-by-item/", GetOrdersByItemView.as_view(), name="orders-by-item"),
+
+    # --- Scheme engine v2 (docs/scheme-architecture.md) ---------------------
+    # Kept on a /v2/ prefix so the legacy /orders/schemes/ endpoints feeding the
+    # current Add Sales picker stay untouched until the migration completes.
+    path("v2/schemes/", SchemeV2ListCreateView.as_view(), name="scheme-v2-list"),
+    path("v2/schemes/preview/", SchemePreviewView.as_view(), name="scheme-v2-preview"),
+    path("v2/schemes/applicable/", SchemeApplicableView.as_view(), name="scheme-v2-applicable"),
+    path("v2/schemes/<int:scheme_id>/", SchemeV2DetailView.as_view(), name="scheme-v2-detail"),
+    path("v2/schemes/<int:scheme_id>/assignments/", SchemeAssignmentView.as_view(),
+         name="scheme-v2-assignments"),
 ]

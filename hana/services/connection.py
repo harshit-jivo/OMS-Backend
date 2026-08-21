@@ -59,6 +59,7 @@ class HANAConnection:
 class Queries():
     OIL_SCHEMA = settings.DATABASES['hana']['OIL_SCHEMA']
     BEVERAGE_SCHEMA = settings.DATABASES['hana']['BEVERAGE_SCHEMA']
+    MART_SCHEMA = settings.DATABASES['hana'].get('MART_SCHEMA', '')
 
     @staticmethod
     def get_product_stock(branch):
@@ -272,6 +273,27 @@ class Queries():
         WHERE T0."CardCode" = '{party_code}'
         """
         
+    @staticmethod
+    def get_warehouses(branch):
+        """Every selectable warehouse, for the order-level warehouse picker.
+
+        `Inactive` is left out of the filter deliberately — it is not present on
+        every B1 build, and a missing column fails the whole query rather than
+        degrading. `Locked` is the flag that actually blocks posting.
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+        return f"""
+        SELECT
+            T0."WhsCode",
+            T0."WhsName"
+        FROM "{s}"."OWHS" AS T0
+        WHERE T0."Locked" = 'N'
+        ORDER BY T0."WhsCode"
+        """
+
     @staticmethod
     def get_warehouse_details(whs_code,branch):
         if branch == 'OIL':
@@ -533,29 +555,21 @@ class Queries():
     def get_costing_code(prc_name, branch):
         """Resolve a Profit Center code (OPRC."PrcCode") from its name.
 
-        SAP document lines expect the short ``CostingCode`` (PrcCode, max 8
-        chars), not the human-readable profit-center name -- e.g. the variety
-        "SUNFLOWER" is PrcCode "SUNFLOWR". Sending the name works only for the
-        varieties where the two happen to be identical; anything longer than 8
-        chars is rejected by SAP with "Value too long in property 'CostingCode'".
-
-        Scoped to dimension 1 and active rows: PrcName is NOT unique across
-        dimensions (e.g. "KARNATAKA" exists twice under DimCode 5, one of them
-        inactive), so an unscoped TOP 1 can return another dimension's code --
-        which SAP accepts and books to the wrong profit center. Product
-        varieties always live in dimension 1.
+        SAP document lines expect the numeric ``CostingCode`` (PrcCode), not the
+        human-readable profit-center name. Looks the name up in the correct
+        company DB schema (OIL vs BEVERAGE vs MART).
         """
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
         elif branch == 'BEVERAGE':
             s = Queries.BEVERAGE_SCHEMA
+        elif branch == 'MART':
+            s = Queries.MART_SCHEMA
         safe_prc_name = str(prc_name).replace("'", "''")
         return f"""
             SELECT TOP 1 T0."PrcCode"
             FROM "{s}"."OPRC" AS T0
             WHERE T0."PrcName" = '{safe_prc_name}'
-              AND T0."DimCode" = 1
-              AND T0."Active" = 'Y'
         """
 
     @staticmethod
@@ -575,6 +589,47 @@ class Queries():
         WHERE T0."ObjectCode" = '13' AND T0."Indicator" = '{finYear }' AND T0."BPLId" = '{BPLId}'
         """
         
+    # Marketing-document tables a customer reference can already be sitting on.
+    # Whitelisted because the table name is interpolated into the SQL below.
+    NUM_AT_CARD_TABLES = ('OINV', 'ODRF', 'ORDR', 'OQUT')
+
+    @staticmethod
+    def get_duplicate_num_at_card(num_at_card, card_code, branch, table):
+        """Find documents already holding this customer reference (NumAtCard).
+
+        Scoped to ONE document type and ONE business partner, which is how SAP
+        itself applies the rule -- the same PO legitimately flows order -> draft
+        -> invoice (three rows, one ref), and distinct customers legitimately
+        reuse a reference. A company-wide check would reject valid documents.
+
+        Matched on TRIM(UPPER(...)) because SAP stores the reference uppercased
+        and callers may not have normalised yet. Cancelled documents don't hold
+        a reference, so they're excluded.
+        """
+        if branch == 'OIL':
+            s = Queries.OIL_SCHEMA
+        elif branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            raise ValueError(f"Unknown branch for NumAtCard lookup: {branch!r}")
+        if table not in Queries.NUM_AT_CARD_TABLES:
+            raise ValueError(f"Unsupported document table: {table!r}")
+
+        safe_ref = str(num_at_card).strip().upper().replace("'", "''")
+        safe_card = str(card_code).replace("'", "''")
+        return f"""
+            SELECT
+                T0."DocEntry",
+                T0."DocNum",
+                T0."DocDate",
+                T0."NumAtCard",
+                T0."CardCode"
+            FROM "{s}"."{table}" AS T0
+            WHERE TRIM(UPPER(T0."NumAtCard")) = '{safe_ref}'
+              AND T0."CardCode" = '{safe_card}'
+              AND T0."CANCELED" = 'N'
+        """
+
     @staticmethod
     def get_draft_verification(refId,branch):
         if branch == 'OIL':

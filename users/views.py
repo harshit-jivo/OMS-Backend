@@ -26,6 +26,31 @@ def _normalize_category(value):
     return normalized or None
 
 
+def _combo_free_defaults(data):
+    """Pull the optional combo -> free-item mapping out of a request body.
+
+    Only keys the caller actually sent are returned, so existing clients that
+    know nothing about combos never blank an already-configured mapping.
+    """
+    defaults = {}
+
+    if 'free_item_code' in data:
+        free_item_code = str(data.get('free_item_code') or '').strip()
+        defaults['free_item_code'] = free_item_code or None
+
+    if 'free_qty_per_unit' in data:
+        raw = data.get('free_qty_per_unit')
+        if raw in (None, ''):
+            defaults['free_qty_per_unit'] = None
+        else:
+            try:
+                defaults['free_qty_per_unit'] = Decimal(str(raw))
+            except (TypeError, ValueError, ArithmeticError):
+                defaults['free_qty_per_unit'] = None
+
+    return defaults
+
+
 def _selected_csv_names(value):
     return list(dict.fromkeys(
         name.strip()
@@ -431,6 +456,10 @@ class PartyProductsView(APIView):
                     'sub_group': product.sub_group,
                     'sal_pack_unit': product.sal_pack_unit,
                     'basic_rate': float(a.basic_rate),
+                    'free_item_code': a.free_item_code,
+                    'free_qty_per_unit': (
+                        float(a.free_qty_per_unit) if a.free_qty_per_unit is not None else None
+                    ),
                     'assigned_at': a.assigned_at,
                 })
 
@@ -480,7 +509,8 @@ class AssignProductToPartyView(APIView):
             defaults={
                 'basic_rate': Decimal(str(basic_rate)),
                 'is_active': True,
-                'assigned_by': request.user
+                'assigned_by': request.user,
+                **_combo_free_defaults(request.data),
             }
         )
 
@@ -490,7 +520,11 @@ class AssignProductToPartyView(APIView):
             'data': {
                 'item_code': item_code,
                 'category': category,
-                'basic_rate': float(obj.basic_rate)
+                'basic_rate': float(obj.basic_rate),
+                'free_item_code': obj.free_item_code,
+                'free_qty_per_unit': (
+                    float(obj.free_qty_per_unit) if obj.free_qty_per_unit is not None else None
+                ),
             }
         })
 class BulkAssignPartyToProductView(APIView):
@@ -650,15 +684,179 @@ class UpdateProductRateView(APIView):
                 card_code=card_code, item_code=item_code, category=category, is_active=True
             )
             assignment.basic_rate = Decimal(str(basic_rate))
+            for field, value in _combo_free_defaults(request.data).items():
+                setattr(assignment, field, value)
             assignment.save()
 
             return Response({
                 'success': True,
                 'message': 'Rate updated',
-                'data': {'basic_rate': float(assignment.basic_rate)}
+                'data': {
+                    'basic_rate': float(assignment.basic_rate),
+                    'free_item_code': assignment.free_item_code,
+                    'free_qty_per_unit': (
+                        float(assignment.free_qty_per_unit)
+                        if assignment.free_qty_per_unit is not None
+                        else None
+                    ),
+                }
             })
         except PartyProductAssignment.DoesNotExist:
             return Response({'success': False, 'message': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
+
+class ComboMappingsView(APIView):
+    """Combo packs and the free-of-cost item each one carries.
+
+    A combo is any assigned product whose SAP name contains a "+". The mapping
+    itself lives on `party_product_assignments`, so this view collapses the
+    per-party rows into one entry per item_code/category and writes a change
+    back to every one of them at once — combos give away the same product for
+    every party.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _free_product_payload(self, free_item_code, category):
+        if not free_item_code:
+            return None
+        product = (
+            Product.objects.filter(active_product_q(), item_code=free_item_code, category=category).first()
+            or Product.objects.filter(active_product_q(), item_code=free_item_code).first()
+        )
+        if not product:
+            # Mapped to something SAP no longer lists — surface the raw code so
+            # the page can show it as broken rather than silently as "unmapped".
+            return {'item_code': free_item_code, 'item_name': None, 'sal_factor2': None}
+        return {
+            'item_code': product.item_code,
+            'item_name': product.item_name,
+            'sal_factor2': product.sal_factor2,
+        }
+
+    def get(self, request):
+        combo_products = {
+            (p.item_code, p.category): p
+            for p in Product.objects.filter(active_product_q(), item_name__contains='+')
+        }
+        if not combo_products:
+            return Response({'success': True, 'data': {'combos': []}})
+
+        assignments = PartyProductAssignment.objects.filter(
+            is_active=True,
+            item_code__in={code for code, _ in combo_products},
+        )
+
+        grouped = {}
+        for assignment in assignments:
+            key = (assignment.item_code, assignment.category)
+            product = combo_products.get(key)
+            if not product:
+                continue
+
+            entry = grouped.setdefault(key, {
+                'item_code': assignment.item_code,
+                'item_name': product.item_name,
+                'category': assignment.category,
+                'sal_factor2': product.sal_factor2,
+                'party_count': 0,
+                'mapped_party_count': 0,
+                'free_item_code': None,
+                'free_qty_per_unit': None,
+            })
+            entry['party_count'] += 1
+
+            free_item_code = (assignment.free_item_code or '').strip()
+            if free_item_code:
+                entry['mapped_party_count'] += 1
+                if not entry['free_item_code']:
+                    entry['free_item_code'] = free_item_code
+                    entry['free_qty_per_unit'] = (
+                        float(assignment.free_qty_per_unit)
+                        if assignment.free_qty_per_unit is not None
+                        else None
+                    )
+
+        combos = []
+        for entry in grouped.values():
+            entry['free_item'] = self._free_product_payload(entry['free_item_code'], entry['category'])
+            # Flags a combo whose parties disagree, e.g. after a partial update.
+            entry['is_partially_mapped'] = (
+                0 < entry['mapped_party_count'] < entry['party_count']
+            )
+            combos.append(entry)
+
+        combos.sort(key=lambda c: (c['item_name'] or '', c['category']))
+        return Response({'success': True, 'data': {'combos': combos}})
+
+    def post(self, request):
+        item_code = str(request.data.get('item_code') or '').strip()
+        category = _normalize_category(request.data.get('category'))
+        free_item_code = str(request.data.get('free_item_code') or '').strip()
+        raw_qty = request.data.get('free_qty_per_unit')
+
+        if not item_code or not category:
+            return Response({
+                'success': False,
+                'message': 'item_code and category are required',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if free_item_code and not _active_product_exists(free_item_code, category):
+            # The free half often sits in a different category to the combo, so
+            # fall back to "exists anywhere" before rejecting it.
+            if not Product.objects.filter(active_product_q(), item_code=free_item_code).exists():
+                return Response({
+                    'success': False,
+                    'message': f'Free item {free_item_code} not found or inactive',
+                }, status=status.HTTP_404_NOT_FOUND)
+
+        if free_item_code and free_item_code == item_code:
+            return Response({
+                'success': False,
+                'message': 'A combo cannot give away itself',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        free_qty_per_unit = None
+        if raw_qty not in (None, ''):
+            try:
+                free_qty_per_unit = Decimal(str(raw_qty))
+            except (TypeError, ValueError, ArithmeticError):
+                return Response({
+                    'success': False,
+                    'message': 'free_qty_per_unit must be a number',
+                }, status=status.HTTP_400_BAD_REQUEST)
+            if free_qty_per_unit <= 0:
+                return Response({
+                    'success': False,
+                    'message': 'free_qty_per_unit must be greater than 0',
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        updated = PartyProductAssignment.objects.filter(
+            item_code=item_code, category=category, is_active=True,
+        ).update(
+            free_item_code=free_item_code or None,
+            free_qty_per_unit=free_qty_per_unit,
+        )
+
+        if not updated:
+            return Response({
+                'success': False,
+                'message': 'No active party assignments for this combo',
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'success': True,
+            'message': (
+                f'Mapping cleared for {updated} parties' if not free_item_code
+                else f'Mapping saved for {updated} parties'
+            ),
+            'data': {
+                'item_code': item_code,
+                'category': category,
+                'free_item_code': free_item_code or None,
+                'free_qty_per_unit': float(free_qty_per_unit) if free_qty_per_unit is not None else None,
+                'party_count': updated,
+            },
+        })
+
 
 class RemoveProductFromPartyView(APIView):
     """Remove a product from party"""
