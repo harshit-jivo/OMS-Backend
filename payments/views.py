@@ -728,6 +728,63 @@ class PaymentReceiptDetailView(APIView):
         return ok(data, message='Receipt updated.')
 
 
+class SapReceiptPdfView(APIView):
+    """Stream an OMS-generated, SAP-style receipt PDF for one posted receipt.
+
+    Built ENTIRELY from OMS data already on the receipt — no SAP call is made to
+    render it. This is NOT the SAP Crystal Report file (that is a separate future
+    phase). See docs/SAP_CRYSTAL_RECEIPT_INTEGRATION.md.
+
+    Security: the client supplies only the OMS receipt id. The backend loads the
+    receipt from the visible queryset, enforces per-receipt access via
+    ``can_be_viewed_by``, and reads sap_doc_entry/num/trans_id from the DB — a
+    client-supplied SAP DocEntry is never trusted.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        # Visibility scope first (404 for a receipt the user cannot see at all)…
+        receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
+        # …then the per-receipt guard (403 for one they may not open).
+        if not receipt.can_be_viewed_by(request.user):
+            return fail('You do not have access to this receipt.',
+                        status=http_status.HTTP_403_FORBIDDEN)
+
+        # Posted-only: a receipt only has a SAP identity once it posted.
+        if receipt.status != PaymentReceipt.Status.POSTED \
+                or receipt.sap_doc_entry is None:
+            return fail(
+                'SAP receipt is not available because this payment has not '
+                'been posted successfully.',
+                status=http_status.HTTP_409_CONFLICT)
+
+        from django.http import HttpResponse
+
+        # ?as=png (or an image Accept header) returns a rasterised image the app
+        # can show inline with <Image>; the default stays a downloadable PDF.
+        # (Not `?format=` — DRF reserves that for content negotiation.)
+        wants_png = (
+            request.query_params.get('as', '').lower() == 'png'
+            or 'image/png' in request.headers.get('Accept', '')
+        )
+        if wants_png:
+            from .receipt_pdf import build_receipt_png
+            png_bytes = build_receipt_png(receipt)
+            response = HttpResponse(png_bytes, content_type='image/png')
+            response['Content-Disposition'] = (
+                f'inline; filename="Receipt-{receipt.receipt_no}.png"')
+            response['Content-Length'] = str(len(png_bytes))
+            return response
+
+        from .receipt_pdf import build_receipt_pdf
+        pdf_bytes = build_receipt_pdf(receipt)
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = (
+            f'attachment; filename="Receipt-{receipt.receipt_no}.pdf"')
+        response['Content-Length'] = str(len(pdf_bytes))
+        return response
+
+
 class PaymentReceiptSubmitView(APIView):
     """Send a draft (or rejected) receipt into the approval chain."""
 

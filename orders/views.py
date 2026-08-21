@@ -455,6 +455,11 @@ def _create_order_item(order, item, to_float, to_bool):
     return order_item
 
 
+def _normalize_warehouse_code(value):
+    """One warehouse for the whole order. SAP codes are short and upper-case."""
+    return str(value or '').strip().upper()[:20]
+
+
 def _normalize_order_type(value):
     order_type = str(value or 'PARTY').strip().upper()
     return 'STAFF' if order_type == 'STAFF' else 'PARTY'
@@ -2260,6 +2265,8 @@ class UpdateOrderView(APIView):
         order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
         order.company = data.get('company', order.company)
         order.po_number = data.get('po_number', order.po_number)
+        order.warehouse_code = _normalize_warehouse_code(
+            data.get('warehouse_code', order.warehouse_code))
         order.is_foc = data.get('is_foc', order.is_foc)
         order.delivery_date = data.get('delivery_date') or order.delivery_date
         order.remarks = order_remarks
@@ -2399,6 +2406,8 @@ class CreateOrderView(APIView):
             order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
             order.company = data.get('company', order.company)
             order.po_number = data.get('po_number', order.po_number)
+            order.warehouse_code = _normalize_warehouse_code(
+                data.get('warehouse_code', order.warehouse_code))
             order.is_foc = data.get('is_foc', order.is_foc)
             order.delivery_date = data.get('delivery_date') or order.delivery_date
             order.remarks = order_remarks
@@ -2543,6 +2552,7 @@ class CreateOrderView(APIView):
             dispatch_from_name=data.get('dispatch_from_name', ''),
             company=data.get('company', ''),
             po_number=data.get('po_number', ''),
+            warehouse_code=_normalize_warehouse_code(data.get('warehouse_code')),
             is_foc=data.get('is_foc', False),
             total_amount=total_amount,
             status=get_status('Order Created'),

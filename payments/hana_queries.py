@@ -163,6 +163,64 @@ def fetch_invoice_balance(*, company, doc_entry):
     return rows[0] if rows else None
 
 
+def party_details_sql(schema):
+    """Business-partner master (OCRD) — the bits the receipt prints.
+
+    * The billing address block is assembled from the OCRD BILL-TO columns
+      (MailAddres / MailBlock / MailCity / MailZipCod), falling back per-line to
+      the ship-to columns (Address / Block / City / ZipCode) and Country. Column
+      names are the HANA (10-char-truncated) forms: "MailAddres", "MailZipCod".
+    * The payment-terms group name comes from OCTG via OCRD.GroupNum — this is
+      the "ADVANCE/CASH/0 DAYS"-style label on the SAP receipt.
+    """
+    return f'''
+        SELECT
+            T0."CardCode"  AS "card_code",
+            T0."CardName"  AS "card_name",
+            IFNULL(NULLIF(T0."MailAddres", ''), IFNULL(T0."Address", '')) AS "line1",
+            IFNULL(NULLIF(T0."MailBlock", ''), IFNULL(T0."Block", ''))    AS "line2",
+            IFNULL(NULLIF(T0."MailCity", ''), IFNULL(T0."City", ''))      AS "city",
+            IFNULL(NULLIF(T0."MailZipCod", ''), IFNULL(T0."ZipCode", '')) AS "zip",
+            IFNULL(T0."Country", '')       AS "country",
+            IFNULL(T1."PymntGroup", '')    AS "payment_terms"
+        FROM "{schema}"."OCRD" AS T0
+        LEFT JOIN "{schema}"."OCTG" AS T1 ON T1."GroupNum" = T0."GroupNum"
+        WHERE T0."CardCode" = ?
+    '''
+
+
+def fetch_party_details(*, company, card_code):
+    """Address + payment-terms label for one party, or None.
+
+    Read-only master-data lookup used when RENDERING a receipt PDF so it matches
+    the SAP layout (address block + payment-terms row). Raises if SAP is
+    unreachable — the caller decides whether to degrade gracefully.
+    """
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(party_details_sql(schema), [str(card_code)])
+    if not rows:
+        return None
+    row = rows[0]
+    # Build a multi-line billing address, one field per line, blanks dropped, and
+    # City + ZIP combined on one line (SAP-receipt style).
+    city_zip = ' '.join(p for p in [(row.get('city') or '').strip(),
+                                    (row.get('zip') or '').strip()] if p)
+    lines = [
+        (row.get('line1') or '').strip(),
+        (row.get('line2') or '').strip(),
+        city_zip,
+        (row.get('country') or '').strip(),
+    ]
+    address = '\n'.join(l for l in lines if l)
+    return {
+        'card_code': (row.get('card_code') or '').strip(),
+        'card_name': (row.get('card_name') or '').strip(),
+        'address': address,
+        'payment_terms': (row.get('payment_terms') or '').strip(),
+    }
+
+
 def company_banks_sql(schema):
     """Every House Bank ACCOUNT in this company, with its bank's display name.
 

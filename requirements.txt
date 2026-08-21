@@ -41,6 +41,8 @@ httpx==0.28.1
 httpx-sse==0.4.3
 idna==3.11
 inflection==0.5.1
+reportlab==4.2.5
+PyMuPDF==1.28.2
 itsdangerous==2.2.0
 Jinja2==3.1.6
 jsonpatch==1.33

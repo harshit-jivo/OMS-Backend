@@ -68,6 +68,10 @@ urlpatterns = [
          name='payment-receipt-submit'),
     path('receipts/<int:pk>/history/', views.PaymentReceiptHistoryView.as_view(),
          name='payment-receipt-history'),
+    # OMS-generated SAP-style receipt PDF (posted receipts only). NOT the SAP
+    # Crystal Report — see docs/SAP_CRYSTAL_RECEIPT_INTEGRATION.md.
+    path('receipts/<int:pk>/sap-report/', views.SapReceiptPdfView.as_view(),
+         name='payment-receipt-sap-report'),
     path('receipts/<int:pk>/attachments/',
          views.ReceiptAttachmentUploadView.as_view(),
          name='payment-receipt-attachment-upload'),
