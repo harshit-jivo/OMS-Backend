@@ -173,6 +173,11 @@ class PaymentReceipt(TimeStampedModel):
         # may not exist in SAP, so resubmitting could duplicate a payment.
         # Reconciliation resolves it; the creator cannot resubmit meanwhile.
         SAP_UNKNOWN = 'SAP_UNKNOWN', 'Awaiting SAP verification'
+        # Posted to SAP successfully, then cancelled IN SAP by a person.
+        # This is NOT a posting failure: the original post succeeded and its
+        # DocEntry/DocNum/TransId stay on the record. Reconciliation sets this
+        # only when ORCT.Canceled = 'Y' is read back from SAP.
+        CANCELLED_IN_SAP = 'CANCELLED_IN_SAP', 'Cancelled in SAP'
         CANCELLED = 'CANCELLED', 'Cancelled'
 
     class ReceivedFromType(models.TextChoices):
@@ -242,6 +247,22 @@ class PaymentReceipt(TimeStampedModel):
     # audience is served a translation of the other's message.
     sap_raw_error = models.TextField(blank=True, default='')
     sap_raw_error_code = models.CharField(max_length=20, blank=True, default='')
+
+    # ---- SAP-side cancellation -------------------------------------------
+    # A document can post successfully and be cancelled IN SAP afterwards.
+    # These fields are SEPARATE from sap_response on purpose: sap_response
+    # records what SAP said about the POSTING, which succeeded and remains
+    # historically true. Overwriting it would destroy that record.
+    #
+    # ORCT.CancelDate, read back during reconciliation. Null until a
+    # cancellation is detected.
+    sap_cancelled_at = models.DateTimeField(null=True, blank=True)
+    # Human-facing explanation of the cancellation, composed by the
+    # reconciliation service. Never SAP's posting response.
+    sap_cancellation_response = models.TextField(blank=True, default='')
+    # When reconciliation last checked this document against SAP, so a stale
+    # 'POSTED' can be told apart from one just verified.
+    sap_reconciled_at = models.DateTimeField(null=True, blank=True)
 
     # The receipt -> deposit link lives ONLY on BankDepositLine, which carries
     # the UniqueConstraint that stops a receipt being banked twice. A second FK
@@ -455,6 +476,11 @@ class BankDeposit(TimeStampedModel):
         # may not exist in SAP, so resubmitting could duplicate a payment.
         # Reconciliation resolves it; the creator cannot resubmit meanwhile.
         SAP_UNKNOWN = 'SAP_UNKNOWN', 'Awaiting SAP verification'
+        # Posted to SAP successfully, then cancelled IN SAP by a person.
+        # This is NOT a posting failure: the original post succeeded and its
+        # DocEntry/DocNum/TransId stay on the record. Reconciliation sets this
+        # only when ORCT.Canceled = 'Y' is read back from SAP.
+        CANCELLED_IN_SAP = 'CANCELLED_IN_SAP', 'Cancelled in SAP'
         CANCELLED = 'CANCELLED', 'Cancelled'
 
     class DepositType(models.TextChoices):
@@ -515,6 +541,22 @@ class BankDeposit(TimeStampedModel):
     # audience is served a translation of the other's message.
     sap_raw_error = models.TextField(blank=True, default='')
     sap_raw_error_code = models.CharField(max_length=20, blank=True, default='')
+
+    # ---- SAP-side cancellation -------------------------------------------
+    # A document can post successfully and be cancelled IN SAP afterwards.
+    # These fields are SEPARATE from sap_response on purpose: sap_response
+    # records what SAP said about the POSTING, which succeeded and remains
+    # historically true. Overwriting it would destroy that record.
+    #
+    # ORCT.CancelDate, read back during reconciliation. Null until a
+    # cancellation is detected.
+    sap_cancelled_at = models.DateTimeField(null=True, blank=True)
+    # Human-facing explanation of the cancellation, composed by the
+    # reconciliation service. Never SAP's posting response.
+    sap_cancellation_response = models.TextField(blank=True, default='')
+    # When reconciliation last checked this document against SAP, so a stale
+    # 'POSTED' can be told apart from one just verified.
+    sap_reconciled_at = models.DateTimeField(null=True, blank=True)
 
     attachments = GenericRelation('attachments.Attachment',
                                   related_query_name='bank_deposit')
@@ -668,6 +710,7 @@ class PaymentStatusHistory(models.Model):
         SAP_POSTED = 'SAP_POSTED', 'Posted to SAP'
         SAP_FAILED = 'SAP_FAILED', 'SAP posting failed'
         SAP_UNKNOWN = 'SAP_UNKNOWN', 'SAP outcome unknown'
+        SAP_CANCELLED = 'SAP_CANCELLED', 'Cancelled in SAP'
         STATUS_CHANGED = 'STATUS_CHANGED', 'Status changed'
 
     content_type = models.ForeignKey('contenttypes.ContentType',

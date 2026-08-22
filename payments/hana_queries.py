@@ -292,6 +292,66 @@ def fetch_company_banks(*, company):
     return out
 
 
+def invoice_details_sql(schema):
+    """Date and total of each of several invoices, in one round trip.
+
+    OINV is the authoritative record: an invoice lives in SAP, and OMS keeps
+    only a snapshot taken when the user picked it. `DocTotal` is the invoice's
+    own value and is NEVER the amount a payment applied to it — a partial
+    payment leaves the two different, which is exactly what the receipt PDF
+    must show.
+    """
+    return f'''
+        SELECT
+            T0."DocEntry"  AS "doc_entry",
+            T0."DocNum"    AS "doc_num",
+            T0."DocDate"   AS "doc_date",
+            T0."DocTotal"  AS "doc_total",
+            T0."DocCur"    AS "currency"
+        FROM "{schema}"."OINV" AS T0
+        WHERE T0."DocEntry" IN ({{placeholders}})
+    '''
+
+
+def fetch_invoice_details(*, company, doc_entries):
+    """{doc_entry: {doc_num, doc_date, doc_total, currency}} for several invoices.
+
+    ONE query for all of them — never one per allocation.
+
+    Returns {} on any failure. A receipt PDF must still render when SAP is
+    unreachable: the caller falls back to the OMS snapshot and omits only what
+    it genuinely does not know, rather than inventing a date or a total.
+    """
+    entries = [int(d) for d in doc_entries if d]
+    if not entries:
+        return {}
+    try:
+        schema = _schema_for(company)
+        placeholders = ', '.join(['?'] * len(entries))
+        sql = invoice_details_sql(schema).replace('{placeholders}', placeholders)
+        with HANAConnection() as conn:
+            rows = conn.execute(sql, entries)
+    except Exception as error:
+        logger.warning('Could not read invoice details for %s in %s: %s',
+                       entries, company, error)
+        return {}
+
+    details = {}
+    for row in rows:
+        try:
+            key = int(row['doc_entry'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        doc_date = row.get('doc_date')
+        details[key] = {
+            'doc_num': row.get('doc_num'),
+            'doc_date': doc_date.date() if hasattr(doc_date, 'date') else doc_date,
+            'doc_total': row.get('doc_total'),
+            'currency': str(row.get('currency') or '').strip(),
+        }
+    return details
+
+
 def invoice_branches_sql(schema):
     """Branch of each of several invoices, in one round trip."""
     return f'''
@@ -410,6 +470,57 @@ def fetch_incoming_payment_series(*, company, posting_date):
     logger.info('Resolved SAP series company=%s month=%s series=%s',
                 company, name, series)
     return series
+
+
+def payment_cancellation_sql(schema):
+    """ORCT cancellation state for one posted document.
+
+    `Canceled` is the authoritative flag: SAP keeps the original row and marks
+    it, writing a reversing journal rather than deleting anything. `CancelDate`
+    is populated when it happens and is what the UI shows.
+    """
+    return f'''
+        SELECT
+            T0."DocEntry"   AS "doc_entry",
+            T0."DocNum"     AS "doc_num",
+            T0."TransId"    AS "trans_id",
+            T0."Canceled"   AS "canceled",
+            T0."CancelDate" AS "cancel_date"
+        FROM "{schema}"."ORCT" AS T0
+        WHERE T0."DocEntry" = ?
+    '''
+
+
+def fetch_payment_cancellation(*, company, doc_entry):
+    """Whether one posted Incoming Payment has been cancelled in SAP.
+
+    Returns a dict with `canceled` ('Y'/'N'), `cancel_date`, `doc_num` and
+    `trans_id`, or None when the row cannot be read.
+
+    Returning None on ANY failure is deliberate: reconciliation must never
+    downgrade a document because SAP was briefly unreachable. Only an explicit
+    Canceled='Y' read back from ORCT may change OMS state.
+    """
+    try:
+        schema = _schema_for(company)
+        with HANAConnection() as conn:
+            rows = conn.execute(payment_cancellation_sql(schema),
+                                [int(doc_entry)])
+        if not rows:
+            return None
+        row = rows[0]
+        canceled = str(row.get('canceled') or '').strip().upper()
+        return {
+            'doc_entry': row.get('doc_entry'),
+            'doc_num': row.get('doc_num'),
+            'trans_id': row.get('trans_id'),
+            'canceled': canceled,
+            'cancel_date': row.get('cancel_date'),
+        }
+    except Exception as error:
+        logger.warning('Could not read cancellation state for DocEntry %s '
+                       'in %s: %s', doc_entry, company, error)
+        return None
 
 
 def fetch_payment_trans_id(*, company, doc_entry):

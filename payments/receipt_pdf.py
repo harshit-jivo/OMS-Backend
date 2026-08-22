@@ -32,6 +32,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from . import receipt_invoices
+
 # Monochrome, document-style palette — no dashboard colour, matching an SAP
 # printout rather than an app screen.
 _INK = colors.HexColor("#111111")
@@ -402,37 +404,29 @@ def build_receipt_pdf(receipt) -> bytes:
     # The exact invoice lines SAP settled (positive it_Invoice lines). SAP's
     # line has the applied amount but not the invoice date/total, so those two
     # columns are filled from the OMS allocation snapshot when a match exists.
-    sap_invoices = [
-        pi for pi in ((sap or {}).get("PaymentInvoices") or [])
-        if str(pi.get("InvoiceType") or "").lower() in ("it_invoice", "13")
-        and _to_dec(pi.get("SumApplied")) > 0
-    ]
     allocations = list(receipt.allocations.all())
-    alloc_by_num = {str(a.sap_doc_num): a for a in allocations
-                    if a.sap_doc_num is not None}
     story.append(_section_heading("Paid Invoices"))
     story.append(Spacer(1, 3))
     data = None
-    if sap_invoices:
+    # One row per allocation, resolved by the service layer. Previously this
+    # matched SAP's PaymentInvoices[] against allocations by sap_doc_num while
+    # SAP returns DocEntry there, so the match failed, the Date and Total cells
+    # came out blank, and the number printed was SAP's DocEntry for the
+    # PAYMENT rather than the invoice's own number.
+    invoice_rows = receipt_invoices.invoice_rows_for(
+        receipt, allocations=allocations)
+    if invoice_rows:
         data = [["Invoice No.", "Invoice Date", "Invoice Total", "Amount Applied"]]
-        for pi in sap_invoices:
-            num = str(pi.get("DocNum") or pi.get("DocEntry") or "")
-            a = alloc_by_num.get(num)
+        for row in invoice_rows:
+            row_currency = row.get("currency") or currency
             data.append([
-                num,
-                _fmt_date(a.invoice_date) if a else "",
-                _money(a.invoice_total, currency) if a and a.invoice_total else "",
-                _money(_to_dec(pi.get("SumApplied")), currency),
-            ])
-    elif sap is None and allocations:
-        # Only fall back to OMS when SAP is unreachable.
-        data = [["Invoice No.", "Invoice Date", "Invoice Total", "Amount Applied"]]
-        for a in allocations:
-            data.append([
-                str(a.sap_doc_num or a.sap_doc_entry or ""),
-                _fmt_date(a.invoice_date),
-                _money(a.invoice_total, currency) if a.invoice_total else "",
-                _money(a.amount_applied, currency),
+                row["invoice_no"],
+                # Blank rather than invented when the date is unknown.
+                _fmt_date(row["invoice_date"]) if row["invoice_date"] else "",
+                # The INVOICE's own total — never the amount applied.
+                _money(row["invoice_total"], row_currency)
+                if row["invoice_total"] is not None else "",
+                _money(row["amount_applied"], row_currency),
             ])
     if data:
         inv = Table(data, colWidths=[44 * mm, 40 * mm, 45 * mm, 45 * mm],

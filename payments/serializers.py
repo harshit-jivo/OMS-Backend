@@ -289,6 +289,10 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
                   'sap_posted_at',
                   'sap_branch_id', 'sap_branch_name', 'sap_branch',
                   'sap_response', 'sap_raw_error', 'sap_raw_error_code',
+                  # SAP-side cancellation, kept apart from sap_response so the
+                  # original posting confirmation stays readable.
+                  'sap_cancelled_at', 'sap_cancellation_response',
+                  'sap_reconciled_at',
                   'methods', 'allocations', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
                   'created_at', 'updated_at']
@@ -647,6 +651,10 @@ class BankDepositSerializer(serializers.ModelSerializer):
                   'sap_doc_entry', 'sap_doc_num', 'sap_trans_id',
                   'sap_posted_at',
                   'sap_response', 'sap_raw_error', 'sap_raw_error_code',
+                  # SAP-side cancellation, kept apart from sap_response so the
+                  # original posting confirmation stays readable.
+                  'sap_cancelled_at', 'sap_cancellation_response',
+                  'sap_reconciled_at',
                   'lines', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
                   'created_at', 'updated_at']
