@@ -634,11 +634,16 @@ def post_deposit_to_sap(deposit, user=None):
     # (bank_master.cash_gl -> SapCompanyMap.cash_gl_account), so the clearing
     # account provably nets to zero. Fail here rather than post a document
     # with a blank CardCode.
-    source_gl = bank_master.PaymentAccountResolver(deposit.company).cash_gl()
+    # The G/L being emptied. NOT cash_gl(): SAP rejects a cash-flow account
+    # (OACT.Finanse='Y') as the CardCode of a DocType 'A' transfer, and the
+    # cash drawer G/L is exactly that. deposit_source_gl() returns the
+    # configured clearing account, falling back to the cash G/L when unset.
+    source_gl = bank_master.PaymentAccountResolver(
+        deposit.company).deposit_source_gl()
     if not source_gl:
         raise ValidationError(
-            f'No cash G/L is configured for {deposit.company}. Set it on the '
-            f'company mapping before depositing.')
+            f'No deposit source G/L is configured for {deposit.company}. Set '
+            f'it on the company mapping before depositing.')
 
     payload = build_deposit(
         deposit,

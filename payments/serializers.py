@@ -52,12 +52,18 @@ class SapCompanyMapSerializer(serializers.ModelSerializer):
     those as House Bank Accounts (DSC1). Cash lands in a drawer, which is not a
     bank and has no DSC1 row — so there is nothing to pick from and the G/L has
     to be named directly.
+
+    `deposit_source_gl_account` is the account a DEPOSIT credits. It is a
+    second field rather than a reuse of `cash_gl_account` because SAP
+    validates the two roles differently: a receipt's CashAccount must be a
+    cash-flow account (OACT.Finanse='Y'), a deposit's CardCode must not be.
     """
 
     class Meta:
         model = SapCompanyMap
         fields = ['id', 'company', 'display_name', 'company_db', 'hana_schema',
-                  'default_bpl_id', 'cash_gl_account', 'is_active',
+                  'default_bpl_id', 'cash_gl_account',
+                  'deposit_source_gl_account', 'is_active',
                   'sort_order']
 
     def validate_company(self, value):

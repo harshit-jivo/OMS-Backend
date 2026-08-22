@@ -159,6 +159,21 @@ class PaymentAccountResolver:
         return ((getattr(row, 'cash_gl_account', '') or '').strip()
                 if row else '')
 
+    def deposit_source_gl(self):
+        """The G/L a deposit CREDITS — the drawer being emptied.
+
+        Separate from cash_gl() because SAP validates the two roles
+        differently: a receipt's CashAccount must be a cash-flow account
+        (OACT.Finanse='Y'), while a deposit's CardCode must NOT be. Falls back
+        to the cash G/L when unset, which is the pre-existing behaviour.
+        """
+        from .models import SapCompanyMap
+        row = SapCompanyMap.objects.filter(company=self.company).first()
+        if not row:
+            return ''
+        configured = (getattr(row, 'deposit_source_gl_account', '') or '').strip()
+        return configured or (row.cash_gl_account or '').strip()
+
     def resolve(self, payment_method, *, bank_key=None):
         """Our deposit account for one method, or None when nothing is mapped.
 

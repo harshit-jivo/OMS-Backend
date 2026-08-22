@@ -50,6 +50,19 @@ class SapCompanyMap(models.Model):
     # bank account, so SAP has no row for it and it must be named here. Every
     # other G/L is resolved live from the bank the user selected.
     cash_gl_account = models.CharField(max_length=50, blank=True, default='')
+    # SAP G/L credited when collected cash is BANKED (the deposit's CardCode).
+    #
+    # It cannot be `cash_gl_account`. A deposit posts as a DocType 'A' account
+    # transfer, and SAP refuses a cash-flow account (OACT.Finanse='Y') as the
+    # CardCode of one — which is exactly what a cash drawer G/L is. The same
+    # account is required, and valid, as CashAccount on a receipt, so one field
+    # cannot serve both: receipts need Finanse='Y', deposits need Finanse='N'.
+    #
+    # Set this to a clearing account with Finanse='N'. Falls back to
+    # `cash_gl_account` when blank, which preserves the previous behaviour for
+    # any company that has not been configured yet.
+    deposit_source_gl_account = models.CharField(
+        max_length=50, blank=True, default='')
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveSmallIntegerField(default=0)
 
