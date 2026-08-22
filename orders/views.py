@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime
+from decimal import Decimal
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
@@ -18,7 +19,7 @@ from django.utils import timezone
 from collections import defaultdict
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog
+from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog, SalesOrderLog
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
@@ -26,6 +27,7 @@ from .scheme_rules import (
     get_ordered_quantity,
     get_party_product_scheme,
     should_mirror_punjab_combo_scheme_qty)
+from . import scheme_engine
 from users.models import SchemeProduct, User, State
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -376,6 +378,11 @@ def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
+    # The free half of a combo pack is priced at 0 by design, so the 0-vs-0
+    # comparison below must not drag the whole order into rate approval.
+    if str(item.get('is_auto_free', '')).lower() in ('true', '1'):
+        return None
+
     if item.get('qty') not in (None, ''):
         try:
             qty = float(item.get('qty') or 0)
@@ -404,7 +411,72 @@ def _resolve_scheme_by_id(scheme_id):
             return None
     return None
 
-def _extract_order_item_schemes(item, to_float):
+def _scheme_entry(raw, scheme_obj, scheme_qty, to_float, to_bool):
+    """One granted giveaway, in the shape _create_order_item persists.
+
+    `scheme` is the legacy SchemeProduct (kept populated for orders still placed
+    through the old picker). `scheme_v2_id` / `benefit_id` / `benefit_item_code`
+    come from a scheme_engine proposal the client accepted. `benefit_item_code`
+    is a snapshot: the SAP push reads it rather than re-resolving the giveaway
+    item, so editing a scheme cannot change what an approved order ships.
+    """
+    benefit_item_code = (raw.get('benefit_item_code') or '').strip() or None
+    if not benefit_item_code and scheme_obj is not None:
+        benefit_item_code = (getattr(scheme_obj, 'item_code', '') or '').strip() or None
+
+    return {
+        'scheme': scheme_obj,
+        'qty': scheme_qty,
+        'scheme_v2_id': raw.get('scheme_v2_id') or raw.get('scheme_v2'),
+        'benefit_id': raw.get('benefit_id') or raw.get('benefit'),
+        'benefit_item_code': benefit_item_code,
+        'computed_qty': to_float(raw.get('computed_qty', 0)),
+        'is_manual_override': to_bool(raw.get('is_manual_override')),
+        'scope_type': (raw.get('scope_type') or '')[:20],
+        'scope_value': (raw.get('scope_value') or '')[:100],
+    }
+
+
+def _scheme_v2_category_allows(scheme_v2_id, line_category):
+    """Whether a v2 scheme may be persisted against a line of `line_category`.
+
+    Strict mirror of the engine's category wall (scheme_engine.resolve_schemes,
+    strict_category=True) at save time, so a stale or hand-rolled client cannot
+    store a scheme that the UI would never have shown. The product line category
+    and the scheme's own category must both be present and identical — a blank
+    anywhere is treated as a mismatch and the scheme is dropped.
+
+    Legacy schemes (no `scheme_v2_id`) are untouched: the category rule is a v2
+    concept and the old picker keeps behaving exactly as before.
+    """
+    if not scheme_v2_id:
+        return True
+    line_category = str(line_category or '').strip()
+    if not line_category:
+        return False
+    from .models import Scheme
+    try:
+        scheme_category = (
+            Scheme.objects.filter(pk=int(scheme_v2_id))
+            .values_list('category', flat=True)
+            .first()
+        )
+    except (TypeError, ValueError):
+        return False
+    scheme_category = str(scheme_category or '').strip()
+    if not scheme_category:
+        return False
+    return scheme_category.casefold() == line_category.casefold()
+
+
+def _extract_order_item_schemes(item, to_float, to_bool=bool):
+    """Normalise the schemes on one incoming order line.
+
+    A v2 entry qualifies on `scheme_v2_id` alone — it has no legacy
+    SchemeProduct row to point at — while legacy entries still require one, so
+    the old client keeps behaving exactly as before.
+    """
+    line_category = str(item.get('category', '') or '').strip()
     raw_schemes = item.get('schemes')
     if isinstance(raw_schemes, list):
         extracted = []
@@ -412,19 +484,27 @@ def _extract_order_item_schemes(item, to_float):
             if not isinstance(raw_scheme, dict):
                 continue
             scheme_obj = _resolve_scheme_by_id(raw_scheme.get('scheme_id') or raw_scheme.get('scheme'))
+            scheme_v2_id = raw_scheme.get('scheme_v2_id') or raw_scheme.get('scheme_v2')
             scheme_qty = to_float(raw_scheme.get('scheme_qty', raw_scheme.get('qty_scheme', 0)))
-            if scheme_obj and scheme_qty > 0:
-                extracted.append((scheme_obj, scheme_qty))
+            if not _scheme_v2_category_allows(scheme_v2_id, line_category):
+                continue
+            if (scheme_obj or scheme_v2_id) and scheme_qty > 0:
+                extracted.append(_scheme_entry(raw_scheme, scheme_obj, scheme_qty, to_float, to_bool))
         return extracted
 
     scheme_obj = _resolve_scheme_by_id(item.get('scheme_id') or item.get('scheme'))
+    scheme_v2_id = item.get('scheme_v2_id') or item.get('scheme_v2')
     scheme_qty = to_float(item.get('scheme_qty', item.get('qty_scheme', 0)))
-    return [(scheme_obj, scheme_qty)] if scheme_obj and scheme_qty > 0 else []
+    if not _scheme_v2_category_allows(scheme_v2_id, line_category):
+        return []
+    if (scheme_obj or scheme_v2_id) and scheme_qty > 0:
+        return [_scheme_entry(item, scheme_obj, scheme_qty, to_float, to_bool)]
+    return []
 
 def _create_order_item(order, item, to_float, to_bool):
-    item_schemes = _extract_order_item_schemes(item, to_float)
-    first_scheme = item_schemes[0][0] if item_schemes else None
-    total_scheme_qty = sum(qty for _, qty in item_schemes)
+    item_schemes = _extract_order_item_schemes(item, to_float, to_bool)
+    first_scheme = next((e['scheme'] for e in item_schemes if e['scheme']), None)
+    total_scheme_qty = sum(e['qty'] for e in item_schemes)
 
     order_item = OrderItem.objects.create(
         order=order,
@@ -445,14 +525,123 @@ def _create_order_item(order, item, to_float, to_bool):
         scheme=first_scheme,
         qty_scheme=total_scheme_qty,
         is_scheme_visible=to_bool(item.get('is_scheme_visible')) or bool(item_schemes),
+        is_auto_free=to_bool(item.get('is_auto_free')),
+        combo_source_code=item.get('combo_source_code') or '',
     )
 
     OrderItemScheme.objects.bulk_create([
-        OrderItemScheme(order_item=order_item, scheme=scheme_obj, qty_scheme=scheme_qty)
-        for scheme_obj, scheme_qty in item_schemes
+        OrderItemScheme(
+            order_item=order_item,
+            scheme=entry['scheme'],
+            qty_scheme=entry['qty'],
+            scheme_v2_id=entry['scheme_v2_id'],
+            benefit_id=entry['benefit_id'],
+            benefit_item_code=entry['benefit_item_code'],
+            computed_qty=entry['computed_qty'],
+            is_manual_override=entry['is_manual_override'],
+            scope_type=entry['scope_type'],
+            scope_value=entry['scope_value'],
+        )
+        for entry in item_schemes
     ])
 
     return order_item
+
+
+def _apply_engine_schemes(order, items, created_items):
+    """Persist the giveaways the scheme engine resolves for this order.
+
+    The client sends back the proposals it displayed, but it is not the
+    authority on them. An older client, a resumed draft, or an order placed
+    through a screen that never called the preview endpoint would otherwise
+    save no giveaway at all — and since the SAP push builds its free lines from
+    `OrderItemScheme`, the customer's free stock would silently never ship.
+
+    Re-resolving server-side makes the engine the single source of truth for
+    what is owed. Anything the client already sent for the same (line, giveaway
+    item) is left alone, so a hand-typed override is never overwritten.
+    """
+    card_code = getattr(order, 'card_code', '') or ''
+    if not card_code:
+        return
+
+    # Mirrors the preview call: one category for the order, with the engine's
+    # per-line check keeping a mixed-category order honest.
+    category = next(
+        (str(item.get('category') or '').strip() for item in items if item.get('category')),
+        '',
+    )
+
+    try:
+        proposals = scheme_engine.resolve_schemes(card_code, category, items)
+    except Exception:
+        logger.exception(
+            'Scheme engine failed for order %s; no giveaway lines added',
+            getattr(order, 'id', None),
+        )
+        return
+
+    # What the client already sent, so we only fill the gaps.
+    already = defaultdict(set)
+    for row in OrderItemScheme.objects.filter(order_item__in=[i for i in created_items if i]):
+        already[row.order_item_id].add((row.benefit_item_code or '').strip().upper())
+
+    new_rows = []
+    added_qty = defaultdict(Decimal)
+
+    for proposal in proposals:
+        # No rule means the quantity is still the user's to type; proposing a
+        # zero-quantity free line would ship nothing and confuse the picker.
+        if proposal.qty_is_user_supplied or proposal.qty <= 0:
+            continue
+        if not (0 <= proposal.line_index < len(created_items)):
+            continue
+        order_item = created_items[proposal.line_index]
+        if order_item is None:
+            continue
+
+        benefit_item_code = (proposal.benefit_item_code or '').strip()
+        if not benefit_item_code:
+            continue
+        if benefit_item_code.upper() in already[order_item.id]:
+            continue
+        already[order_item.id].add(benefit_item_code.upper())
+
+        new_rows.append(OrderItemScheme(
+            order_item=order_item,
+            scheme=None,
+            scheme_v2_id=proposal.scheme_id,
+            benefit_id=proposal.benefit_id,
+            # Snapshot: the SAP push ships exactly this, so editing the scheme
+            # afterwards cannot change what an approved order sends.
+            benefit_item_code=benefit_item_code,
+            qty_scheme=proposal.qty,
+            computed_qty=proposal.qty,
+            is_manual_override=False,
+            scope_type=proposal.scope_type,
+            scope_value=proposal.scope_value,
+        ))
+        added_qty[order_item.id] += proposal.qty
+
+    if not new_rows:
+        return
+
+    OrderItemScheme.objects.bulk_create(new_rows)
+
+    # Keep the line's own totals in step with what _create_order_item writes.
+    by_id = {item.id: item for item in created_items if item}
+    for order_item_id, qty in added_qty.items():
+        order_item = by_id.get(order_item_id)
+        if order_item is None:
+            continue
+        order_item.qty_scheme = (order_item.qty_scheme or Decimal('0')) + qty
+        order_item.is_scheme_visible = True
+        order_item.save(update_fields=['qty_scheme', 'is_scheme_visible'])
+
+    logger.info(
+        'Scheme engine added %s giveaway line(s) to order %s',
+        len(new_rows), getattr(order, 'id', None),
+    )
 
 
 def _normalize_warehouse_code(value):
@@ -462,7 +651,57 @@ def _normalize_warehouse_code(value):
 
 def _normalize_order_type(value):
     order_type = str(value or 'PARTY').strip().upper()
-    return 'STAFF' if order_type == 'STAFF' else 'PARTY'
+    if order_type == 'STAFF':
+        return 'STAFF'
+    if order_type == 'DISTRIBUTOR':
+        return 'DISTRIBUTOR'
+    return 'PARTY'
+
+
+# Mart / distributor flow constants — kept in one place so the queue, the create
+# branch and the approve/reject endpoints never drift.
+DISTRIBUTOR_COMPANY = '3'                 # every distributor order is company 3 (Mart)
+DISTRIBUTOR_DISPATCH_ID = 2               # distributor orders dispatch from the factory
+DISTRIBUTOR_DISPATCH_NAME = 'FACTORY'
+DISTRIBUTOR_WAREHOUSE_CODE = 'GP-FGM'     # default warehouse for distributor orders
+MART_APPROVER_ROLES = {'mart_approval', 'admin'}
+
+# OrderStatus rows already present in the DB (managed there, not via migration):
+#   Mart Approval = 12 (where a submitted distributor order lands)
+#   Approved      = 6  (on approve)
+#   Rejected      = 7  (on reject)
+MART_STATUS_PENDING_ID = 12
+MART_STATUS_APPROVED_ID = 6
+MART_STATUS_REJECTED_ID = 7
+MART_STATUS_COMPLETED_ID = 9   # set after a successful SAP/HANA push (Phase 2)
+# Tab key (from the Mart Approval queue) -> the status id it maps to.
+MART_TAB_STATUS_IDS = {
+    'pending': MART_STATUS_PENDING_ID,
+    'approved': MART_STATUS_APPROVED_ID,
+    'rejected': MART_STATUS_REJECTED_ID,
+}
+
+
+def _mart_status(status_id):
+    """Fetch a Mart-flow status by id (rows are seeded in the DB, not migrations)."""
+    return OrderStatus.objects.filter(id=status_id).first()
+
+
+def _mart_approver_user():
+    """The user who works the Mart Approval queue. There is a single
+    'mart_approval' user in this deployment, so a freshly submitted distributor
+    order's pending Mart-Approval log row is stamped with that user instead of
+    NULL. Falls back to None if the role/user isn't present."""
+    # Match the role loosely (case / underscore / space insensitive) so a role
+    # stored as 'Mart Approval' or 'mart_approval' both resolve.
+    return (
+        User.objects
+        .filter(is_active=True)
+        .filter(Q(role__name__iexact='mart_approval') |
+                Q(role__name__iexact='mart approval'))
+        .order_by('id')
+        .first()
+    )
 
 
 def _normalize_template_number(value):
@@ -819,6 +1058,10 @@ def _get_base_orders(user):
     """Scope orders by user role:
     - admin: all orders
     - manager: only orders created by this user
+    - distributor: only the distributor's own orders (same scope as manager, so
+      the dashboard shows all sections but only this distributor's data)
+    - mart_approval: all distributor (company-3 / Mart) orders — the Mart queue
+      this role manages end to end
     - auditor: orders currently in or previously routed through auditor review
     - approver: orders pending approval (NEED_APPROVAL, RATE_APPROVAL)
     - billing: orders currently in billing or already handled by this billing user
@@ -827,8 +1070,10 @@ def _get_base_orders(user):
     role_name = getattr(role, 'name', '').lower() if role else ''
     if role_name == 'admin':
         return Order.objects.all()
-    if role_name == 'manager':
+    if role_name in ('manager', 'distributor'):
         return Order.objects.filter(created_by=user.id)
+    if role_name == 'mart_approval':
+        return Order.objects.filter(order_type='DISTRIBUTOR')
     if role_name == 'auditor':
         return Order.objects.filter(
             Q(status__code='AUDITOR_APPROVAL') |
@@ -1917,6 +2162,70 @@ def extract_type_from_name(item_name):
         return result
     return None
 
+def is_combo_item_name(item_name):
+    """Combo packs are named "<paid part> + <free part>" in SAP."""
+    return '+' in str(item_name or '')
+
+
+# One free unit per combo unit: the order form counts pieces, and a combo pack
+# carries one of the free product per piece. The trailing "4 PCS" / "6 PCS" in a
+# combo name is the paid SKU's carton config (it equals sal_factor2), not a free
+# count, so it is deliberately not parsed. Set `free_qty_per_unit` on the
+# assignment for the rare pack that gives away more than one.
+DEFAULT_COMBO_FREE_QTY_PER_UNIT = 1.0
+
+
+def _resolve_combo_free_mapping(assignment):
+    """Return (free_item_code, free_qty_per_unit) for a combo assignment.
+
+    The mapping lives on `party_product_assignments`, so it is nominally
+    per-party. A combo's free half is the same product for everyone, though, so
+    a blank mapping falls back to any other party's row for the same
+    item_code/category — set it once and every party picks it up.
+    """
+    free_item_code = (assignment.free_item_code or '').strip()
+    free_qty = assignment.free_qty_per_unit
+
+    if not free_item_code:
+        donor = PartyProductAssignment.objects.filter(
+            item_code=assignment.item_code,
+            category=assignment.category,
+            is_active=True,
+        ).exclude(free_item_code__isnull=True).exclude(free_item_code='').first()
+        if donor:
+            free_item_code = (donor.free_item_code or '').strip()
+            if free_qty is None:
+                free_qty = donor.free_qty_per_unit
+
+    if not free_item_code:
+        return None, None
+
+    qty_per_unit = float(free_qty) if free_qty is not None else DEFAULT_COMBO_FREE_QTY_PER_UNIT
+    return free_item_code, (qty_per_unit if qty_per_unit > 0 else DEFAULT_COMBO_FREE_QTY_PER_UNIT)
+
+
+def _serialize_free_product(free_item_code, category):
+    product = (
+        SapProduct.objects.filter(active_product_q(), item_code=free_item_code, category=category).first()
+        or SapProduct.objects.filter(active_product_q(), item_code=free_item_code).first()
+    )
+    if not product:
+        return None
+    return {
+        'item_code': product.item_code,
+        'item_name': product.item_name,
+        'category': product.category,
+        'brand': product.brand,
+        'variety': product.sub_group,
+        'sub_group': product.sub_group,
+        'sal_factor2': product.sal_factor2,
+        'sal_pack_unit': product.sal_pack_unit,
+        'tax_rate': product.tax_rate,
+        # Free of cost — the auto-added order line is always zero-priced.
+        'basic_rate': 0,
+    }
+
+
 class PartyProductsView(APIView):
     permission_classes = [AllowAny]
 
@@ -1945,11 +2254,24 @@ class PartyProductsView(APIView):
             if not product:
                 continue
 
+            item_name = getattr(product, 'item_name', None)
+            is_combo = is_combo_item_name(item_name)
+            free_item_code, free_qty_per_unit = (
+                _resolve_combo_free_mapping(assignment) if is_combo else (None, None)
+            )
+            free_product = (
+                _serialize_free_product(free_item_code, assignment.category) if free_item_code else None
+            )
+
             rows.append({
                 'item_code': assignment.item_code,
                 'category': assignment.category,
                 'basic_rate': assignment.basic_rate,
-                'item_name': getattr(product, 'item_name', None),
+                # When this party-product assignment was last updated. The
+                # Distributor page uses it to block ordering products whose
+                # rate/assignment wasn't refreshed in the current month.
+                'updated_at': assignment.updated_at.isoformat() if assignment.updated_at else None,
+                'item_name': item_name,
                 'sal_factor2': getattr(product, 'sal_factor2', None),
                 'tax_rate': getattr(product, 'tax_rate', None),
                 'sal_pack_unit': getattr(product, 'sal_pack_unit', None),
@@ -1960,6 +2282,13 @@ class PartyProductsView(APIView):
                 'sub_group': getattr(product, 'sub_group', None),
                 'combo_scheme_id': assignment.scheme_id,
                 'combo_scheme_name': assignment.scheme.scheme_name if assignment.scheme else None,
+                # Combo pack -> free-of-cost companion line. `free_item` is null
+                # when the combo has no mapping yet, and the UI then behaves as
+                # it always did.
+                'is_combo': is_combo,
+                'free_item_code': free_product['item_code'] if free_product else None,
+                'free_qty_per_unit': free_qty_per_unit if free_product else None,
+                'free_item': free_product,
             })
 
         return Response(rows)
@@ -2277,8 +2606,9 @@ class UpdateOrderView(APIView):
         needs_approval = False
         flagged_items = []
 
+        created_items = []
         for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
+            created_items.append(_create_order_item(order, item, _to_float, _to_bool))
 
             bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
@@ -2286,6 +2616,8 @@ class UpdateOrderView(APIView):
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
+        _apply_engine_schemes(order, items, created_items)
 
         order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
 
@@ -2376,6 +2708,7 @@ class CreateOrderView(APIView):
 
         # ── Edit mode: order_id in payload means update existing order ──────
         order_id = request.data.get('order_id')
+        user = request.user if request.user.is_authenticated else None
         if order_id:
             order = get_object_or_404(Order, id=int(order_id))
             previous_status = order.status
@@ -2412,22 +2745,33 @@ class CreateOrderView(APIView):
             order.delivery_date = data.get('delivery_date') or order.delivery_date
             order.remarks = order_remarks
 
+            # Distributor edit (Mart Approval role adjusting the order): re-save the
+            # lines and keep it in the Mart flow — never route through billing.
+            if order_type == 'DISTRIBUTOR':
+                return self._finalize_distributor_order(
+                    order, items, user, _to_float, _to_bool,
+                    is_edit=True, previous_status=previous_status,
+                )
+
             order.items.all().delete()
 
             needs_approval = False
             flagged_items = []
+            created_items = []
             for item in items:
-                _create_order_item(order, item, _to_float, _to_bool)
+                created_items.append(_create_order_item(order, item, _to_float, _to_bool))
                 bp = _to_float(item.get('price_list_basic', 0))
                 mp = _to_float(item.get('basic_price', 0))
                 rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
+
+            _apply_engine_schemes(order, items, created_items)
             assign_rate_approvers(order)
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
-            user = request.user if request.user.is_authenticated else None
+          
             if order_type == 'STAFF':
                 order.status = previous_status or get_status('Order Created')
                 order.save()
@@ -2559,20 +2903,30 @@ class CreateOrderView(APIView):
             created_by=user,
             delivery_date=data.get('delivery_date'),
             remarks=order_remarks
-            
+
         )
+
+        # ── Distributor (Mart / company 3) orders take their OWN path ────────
+        # They never enter the billing / auditor / rate-approval flow: they are
+        # simply recorded and parked at "Mart Approval" for the Mart Approval
+        # role to review. This keeps the entire billing flow below untouched.
+        if order_type == 'DISTRIBUTOR':
+            return self._finalize_distributor_order(order, items, user, _to_float, _to_bool)
 
         needs_approval = False
         flagged_items = []
 
+        created_items = []
         for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
+            created_items.append(_create_order_item(order, item, _to_float, _to_bool))
             bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
+        _apply_engine_schemes(order, items, created_items)
 
         OrderRateApproval.objects.filter(order=order).delete()
         OrderItemApprovalMapping.objects.filter(order=order).delete()
@@ -2637,7 +2991,71 @@ class CreateOrderView(APIView):
             'remarks': order.remarks or '',
             'message': f"Order sent to {next_status.name.lower()}" if next_status else 'Order created successfully',
         }, status=status.HTTP_201_CREATED)
-    
+
+    def _finalize_distributor_order(self, order, items, user, _to_float, _to_bool,
+                                    is_edit=False, previous_status=None):
+        """Save a distributor order's lines and park it at 'Mart Approval'.
+
+        Deliberately isolated from the billing/auditor/rate-approval machinery:
+        no rate approvers, no templates, no billing notifications. Company is
+        forced to 3 (Mart). Used by both the create and edit paths.
+        """
+        if is_edit:
+            order.items.all().delete()
+
+        # The distributor page now builds full, billing-shaped line items
+        # (brand / variety / type / pcs / boxes / ltrs / tax computed exactly
+        # like Add Sales), so a distributor order stores the SAME data as a
+        # normal order. Use the standard item creator for both create and edit.
+        for item in items:
+            _create_order_item(order, item, _to_float, _to_bool)
+
+        order.company = DISTRIBUTOR_COMPANY
+        # Distributor orders always dispatch from the factory.
+        order.dispatch_from_id = DISTRIBUTOR_DISPATCH_ID
+        order.dispatch_from_name = DISTRIBUTOR_DISPATCH_NAME
+        # Default every distributor order to GP-FGM, regardless of what the client
+        # sent, so the warehouse is always stored. An explicit choice (e.g. Mart
+        # Approval switching to DL-MP on the edit screen) is preserved.
+        if not (order.warehouse_code or '').strip():
+            order.warehouse_code = DISTRIBUTOR_WAREHOUSE_CODE
+        order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
+
+        # Land at the Mart Approval stage (status id 12). On a fresh submit we
+        # always move it there; on an approver edit we only reset it to pending
+        # if it isn't already an approved/rejected order.
+        mart_status = _mart_status(MART_STATUS_PENDING_ID)
+        if mart_status and (not is_edit or order.status_id == MART_STATUS_PENDING_ID):
+            order.status = mart_status
+        order.save()
+
+        if user:
+            mark_order_notifications_read(order, user)
+
+        if not is_edit:
+            # Two-row create log, mirroring the billing flow:
+            #   • 'Order Created' (action_id 1), performed_by = the distributor.
+            #   • the Mart Approval stage (action_id 12), performed_by = the
+            #     Mart Approval user — a "pending" marker showing who the order is
+            #     waiting on. The approve/reject step then adds its own row.
+            log_order_action(order, 'Order Created', user=user,
+                             remarks='Distributor order submitted')
+            if order.status:
+                log_order_action(order, order.status.name,
+                                 user=_mart_approver_user())
+
+        return Response({
+            'id': order.id,
+            'order_number': order.order_number,
+            'total_amount': str(order.total_amount),
+            'status': order.status.name if order.status else '',
+            'order_type': order.order_type,
+            'company': order.company,
+            'needs_approval': False,
+            'message': 'Distributor order updated successfully'
+            if is_edit else 'Distributor order submitted for Mart approval',
+        }, status=status.HTTP_200_OK if is_edit else status.HTTP_201_CREATED)
+
 
 class SchemeListView(APIView):
     permission_classes = [AllowAny]
@@ -2662,8 +3080,27 @@ class SchemeListView(APIView):
                 state_filter |= Q(state_code__iexact=value)
             queryset = queryset.filter(state_filter)
 
-        schemes = queryset.order_by('scheme_name', 'scheme_id','state_code').values('scheme_id', 'scheme_name','state_code').distinct()
-        return Response(list(schemes))
+        schemes = list(
+            queryset
+            .order_by('scheme_name', 'scheme_id', 'state_code')
+            .values('scheme_id', 'scheme_name', 'state_code', 'item_code')
+        )
+
+        # Add Sales renders the giveaway as its own line in the item list, so the
+        # picker has to name the item, not just the offer. One query for the whole
+        # page rather than one per scheme.
+        item_codes = {s['item_code'] for s in schemes if s.get('item_code')}
+        names = {}
+        if item_codes:
+            names = dict(
+                SapProduct.objects
+                .filter(active_product_q(), item_code__in=item_codes)
+                .values_list('item_code', 'item_name')
+            )
+        for scheme in schemes:
+            scheme['item_name'] = names.get(scheme.get('item_code')) or scheme.get('item_code') or ''
+
+        return Response(schemes)
 
 
 class OrderStatusList(APIView):
@@ -3332,10 +3769,30 @@ class OrderDetailsByOrderView(APIView):
         serializer = OrderDetailSerializer(order)
         return Response(serializer.data)
 
+# Roles allowed to view other users' orders. Everyone else (e.g. distributors)
+# is restricted to their own orders regardless of the user_id in the URL.
+ORDERS_CROSS_USER_ROLES = {"admin", "manager", "billing", "approver", "auditor"}
+
+
 class OrdersByUserView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self,request, user_id):
+    def get(self, request, user_id):
+        role_name = getattr(getattr(request.user, "role", None), "name", "")
+        can_view_others = (
+            request.user.is_superuser
+            or request.user.is_staff
+            or str(role_name).strip().lower() in ORDERS_CROSS_USER_ROLES
+        )
+
+        # A distributor (or any non-privileged user) can only ever see the
+        # orders they themselves placed, never another user's.
+        if not can_view_others and request.user.id != user_id:
+            return Response(
+                {"detail": "You can only view your own orders."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         orders = (
             Order.objects.filter(created_by=user_id)
             .select_related("status", "created_by")
@@ -3468,9 +3925,297 @@ class RejectOrderView(APIView):
             'status': order.status,
         })
 
+
+# ── Mart Approval flow (distributor / company 3 orders) ──────────────────────
+def _is_mart_approver(user):
+    """Only the Mart Approval role (or admin) may work the Mart queue."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    if getattr(user, 'is_staff', False):
+        return True
+    role_name = getattr(getattr(user, 'role', None), 'name', '')
+    return str(role_name).strip().lower() in MART_APPROVER_ROLES
+
+
+def _serialize_mart_order(order, *, with_items=False):
+    """Compact serialization for the Mart queue list / detail."""
+    data = {
+        'id': order.id,
+        'order_number': order.order_number,
+        'order_type': order.order_type,
+        'card_code': order.card_code,
+        'card_name': order.card_name,
+        'company': order.company,
+        'total_amount': str(order.total_amount),
+        'status': order.status.code if order.status else '',
+        'status_id': order.status_id,
+        'status_display': order.status.name if order.status else '',
+        'is_pending': order.status_id == MART_STATUS_PENDING_ID,
+        'bill_to_id': order.bill_to_id,
+        'bill_to_address': order.bill_to_address,
+        'ship_to_id': order.ship_to_id,
+        'ship_to_address': order.ship_to_address,
+        'po_number': order.po_number,
+        'delivery_date': order.delivery_date,
+        'created_by': order.created_by.name if order.created_by else None,
+        'created_at': order.created_at,
+        'rejection_reason': order.rejection_reason or '',
+        'items_count': order.items.count(),
+    }
+    if with_items:
+        data['items'] = [{
+            'id': it.id,
+            'item_code': it.item_code,
+            'item_name': it.item_name,
+            'category': it.category,
+            'qty': str(it.qty),
+            'basic_price': str(it.basic_price),
+            'total': str(it.total),
+        } for it in order.items.all()]
+    return data
+
+
+class MartOrderListView(APIView):
+    """All distributor (company 3 / Mart) orders, for the Mart Approval queue.
+    Optional ?status=<code> filter (e.g. MART_APPROVAL)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized for the Mart queue'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        orders = Order.objects.filter(order_type='DISTRIBUTOR')
+        # Filter by the queue tab (pending/approved/rejected) -> status id.
+        tab = (request.query_params.get('tab') or '').strip().lower()
+        if tab == 'approved':
+            # The Approved tab shows both the approved-but-not-yet-in-SAP orders
+            # (SAP push failed, still 'Mart Approved') AND the ones that pushed
+            # successfully (now 'Completed'), so a successful order stays visible.
+            orders = orders.filter(
+                status_id__in=[MART_STATUS_APPROVED_ID, MART_STATUS_COMPLETED_ID]
+            )
+        elif tab in MART_TAB_STATUS_IDS:
+            orders = orders.filter(status_id=MART_TAB_STATUS_IDS[tab])
+
+        orders = (orders
+                  .select_related('status', 'created_by')
+                  .prefetch_related('items')
+                  .order_by('-created_at')
+                  .distinct())
+        return Response([_serialize_mart_order(o) for o in orders])
+
+
+class MartOrderDetailView(APIView):
+    """One distributor order with its items, for the approver's edit screen."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+        return Response(_serialize_mart_order(order, with_items=True))
+
+
+class MartApproveView(APIView):
+    """Approve a distributor order → 'Mart Approved'. (Phase 2 will also push the
+    approved order into SAP/HANA here.)"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+
+        approved = _mart_status(MART_STATUS_APPROVED_ID)
+        if not approved:
+            return Response({'error': f"Approved status (id {MART_STATUS_APPROVED_ID}) is not configured in the DB."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        order.status = approved
+        order.approved_by = request.user if request.user.is_authenticated else None
+        order.approved_at = datetime.now()
+        order.save()
+        log_order_action(order, approved.name, user=request.user, remarks='Mart order approved')
+
+        # Push the approved distributor order into SAP as a Sales Order. The
+        # company DB is resolved from order.company inside the service — a
+        # company-3 (Mart) order books into the Mart company DB.
+        from sap_sync.services.sync_service import SyncService
+
+        try:
+            service = SyncService(triggered_by=getattr(request.user, 'username', None))
+            sap_result = service.create_sales_order(order)
+        except Exception as exc:
+            logger.exception("SAP sales order creation failed for order %s", order.order_number)
+            # Approval stands (already saved); surface the SAP failure so the
+            # operator can retry the push without re-approving.
+            return Response(
+                {
+                    'message': f'Order {order.order_number} approved, but SAP sales order creation failed.',
+                    'order_number': order.order_number,
+                    'status': order.status.name,
+                    'sap_error': str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # SAP order created → move the order to Completed.
+        completed = _mart_status(MART_STATUS_COMPLETED_ID)
+        if completed:
+            order.status = completed
+            order.save(update_fields=['status'])
+            log_order_action(order, completed.name, user=request.user, remarks='SAP sales order created')
+
+        return Response({
+            'message': f'Order {order.order_number} approved and SAP sales order created',
+            'order_number': order.order_number,
+            'status': order.status.name,
+            'sap': {
+                'doc_entry': sap_result.get('DocEntry') if isinstance(sap_result, dict) else None,
+                'doc_num': sap_result.get('DocNum') if isinstance(sap_result, dict) else None,
+            },
+        })
+
+
+class MartRejectView(APIView):
+    """Reject a distributor order with a mandatory reason → 'Mart Rejected'."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        rejected = _mart_status(MART_STATUS_REJECTED_ID)
+        if not rejected:
+            return Response({'error': f"Rejected status (id {MART_STATUS_REJECTED_ID}) is not configured in the DB."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        order.status = rejected
+        order.rejected_by = request.user if request.user.is_authenticated else None
+        order.rejected_at = datetime.now()
+        order.rejection_reason = reason
+        order.save()
+        log_order_action(order, rejected.name, user=request.user, remarks=f'Rejected: {reason}')
+
+        return Response({
+            'message': f'Order {order.order_number} rejected',
+            'order_number': order.order_number,
+            'status': order.status.name,
+        })
+
+
+def _sales_order_sap_entries(order_ids):
+    """Map str(order_id) -> the latest SalesOrderLog for that distributor order.
+
+    A distributor order posts to SAP as a Sales Order (SalesOrderLog, keyed by
+    str(order.id)). We surface the newest attempt per order so the tracking page
+    can show DocEntry/DocNum on success or the SAP error on failure.
+    """
+    str_ids = [str(oid) for oid in order_ids]
+    mapping = {}
+    if not str_ids:
+        return mapping
+    logs = (
+        SalesOrderLog.objects
+        .filter(order_id__in=str_ids)
+        .order_by('order_id', '-created_at')
+        .values('order_id', 'status', 'sap_doc_entry', 'sap_doc_num',
+                'error_message', 'completed_at')
+    )
+    for log in logs:
+        # first row per order is the latest (queryset ordered by -created_at)
+        oid = log['order_id']
+        if oid not in mapping:
+            mapping[oid] = {
+                'status': log['status'],
+                'doc_entry': log['sap_doc_entry'],
+                'doc_num': log['sap_doc_num'],
+                'error_message': log['error_message'],
+                'completed_at': log['completed_at'],
+            }
+    return mapping
+
+
+class SalesOrderSapStatusView(APIView):
+    """Batch lookup of SAP Sales Order status for distributor orders.
+
+    The Distributor Order Tracking page calls this with the ids of the orders it
+    is showing so it can display DocEntry/DocNum (success) or the SAP error
+    (failure). Returns a map keyed by order id (as string)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        raw_ids = request.query_params.get('order_ids', '')
+        order_ids = [oid for oid in (i.strip() for i in raw_ids.split(',')) if oid.isdigit()]
+        return Response({'statuses': _sales_order_sap_entries(order_ids)})
+
+
+class MartResendSapView(APIView):
+    """Retry pushing an already-approved distributor order to SAP as a Sales
+    Order, without re-editing or re-approving it.
+
+    Used when the initial SAP push (at Mart approval) failed: the order is left
+    in 'Mart Approved' and never reached 'Completed'. Mart approver / admin only.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+
+        # A completed order already booked into SAP — nothing to retry.
+        if order.status_id == MART_STATUS_COMPLETED_ID:
+            return Response(
+                {'error': f'Order {order.order_number} is already completed in SAP.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from sap_sync.services.sync_service import SyncService
+
+        try:
+            service = SyncService(triggered_by=getattr(request.user, 'username', None))
+            sap_result = service.create_sales_order(order)
+        except Exception as exc:
+            logger.exception("SAP sales order retry failed for order %s", order.order_number)
+            return Response(
+                {
+                    'message': f'SAP sales order creation failed again for {order.order_number}.',
+                    'order_number': order.order_number,
+                    'sap_error': str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # SAP order created → move the order to Completed (mirrors MartApproveView).
+        completed = _mart_status(MART_STATUS_COMPLETED_ID)
+        if completed:
+            order.status = completed
+            order.save(update_fields=['status'])
+            log_order_action(order, completed.name, user=request.user,
+                             remarks='SAP sales order created (retry)')
+
+        return Response({
+            'message': f'Order {order.order_number} sent to SAP successfully',
+            'order_number': order.order_number,
+            'status': order.status.name,
+            'sap': {
+                'doc_entry': sap_result.get('DocEntry') if isinstance(sap_result, dict) else None,
+                'doc_num': sap_result.get('DocNum') if isinstance(sap_result, dict) else None,
+            },
+        })
+
+
 class OrderListView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         status_filter = request.query_params.get('status', None)
         user_id = request.query_params.get('user_id', None)
@@ -4668,3 +5413,248 @@ class GetOrdersByItemView(APIView):
 
         serializer = OrdersByItemSerializer(orders, many=True)
         return Response(serializer.data)
+
+# ---------------------------------------------------------------------------
+# Scheme engine v2 (see docs/scheme-architecture.md)
+#
+# Permission classes match the existing scheme views (AllowAny) so this lands
+# behind the same gate as SchemeManageListView / SchemeDetailView rather than
+# introducing a second, inconsistent auth story mid-migration.
+# ---------------------------------------------------------------------------
+
+from django.db import transaction as _db_transaction
+
+from .models import Scheme, SchemeAssignment
+from .serializers import SchemeV2Serializer, SchemeAssignmentSerializer
+
+
+class SchemeV2ListCreateView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        queryset = Scheme.objects.prefetch_related('benefits', 'triggers', 'assignments')
+
+        include_inactive = str(
+            request.query_params.get('include_inactive') or ''
+        ).strip().lower() in {'1', 'true', 'yes'}
+        if not include_inactive:
+            queryset = queryset.filter(is_active=True)
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(code__icontains=search) | Q(name__icontains=search))
+
+        # ?category=OIL keeps the uncategorised ("every category") schemes too —
+        # they apply to OIL as much as to anything else.
+        category = (request.query_params.get('category') or '').strip()
+        if category:
+            queryset = queryset.filter(Q(category='') | Q(category__iexact=category))
+
+        # Filter by who a scheme reaches, e.g. ?scope_type=STATE&scope_value=PB
+        scope_type = (request.query_params.get('scope_type') or '').strip()
+        scope_value = (request.query_params.get('scope_value') or '').strip()
+        if scope_type:
+            scope_q = Q(assignments__scope_type=scope_type, assignments__is_active=True)
+            if scope_value:
+                scope_q &= Q(assignments__scope_value__iexact=scope_value)
+            queryset = queryset.filter(scope_q).distinct()
+
+        serializer = SchemeV2Serializer(queryset, many=True)
+        return Response({'success': True, 'data': serializer.data, 'total': len(serializer.data)})
+
+    def post(self, request):
+        serializer = SchemeV2Serializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response({'success': False, 'message': 'Failed to create scheme',
+                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        with _db_transaction.atomic():
+            serializer.save()
+        return Response({'success': True, 'message': 'Scheme created', 'data': serializer.data},
+                        status=status.HTTP_201_CREATED)
+
+
+class SchemeV2DetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def _get_object(self, scheme_id):
+        return (
+            Scheme.objects
+            .prefetch_related('benefits', 'triggers', 'assignments')
+            .filter(pk=scheme_id)
+            .first()
+        )
+
+    def get(self, request, scheme_id):
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': True, 'data': SchemeV2Serializer(scheme).data})
+
+    def patch(self, request, scheme_id):
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        serializer = SchemeV2Serializer(scheme, data=request.data, partial=True,
+                                        context={'request': request})
+        if not serializer.is_valid():
+            return Response({'success': False, 'message': 'Failed to update scheme',
+                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        with _db_transaction.atomic():
+            serializer.save()
+        return Response({'success': True, 'message': 'Scheme updated', 'data': serializer.data})
+
+    def delete(self, request, scheme_id):
+        """Deactivate by default.
+
+        OrderItemScheme.scheme_v2 is PROTECT, so a scheme referenced by any order
+        line cannot be deleted at all -- the giveaway record has to survive.
+        Deactivating removes it from every read path and stays reversible.
+        """
+        scheme = self._get_object(scheme_id)
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        hard = str(request.query_params.get('hard') or '').strip().lower() in {'1', 'true', 'yes'}
+        used_by_orders = OrderItemScheme.objects.filter(scheme_v2_id=scheme_id).count()
+
+        if hard:
+            if used_by_orders:
+                return Response({
+                    'success': False,
+                    'message': (f'Cannot hard-delete: {used_by_orders} order line(s) reference '
+                                'this scheme. Deactivate it instead.'),
+                }, status=status.HTTP_409_CONFLICT)
+            scheme.delete()
+            return Response({'success': True, 'message': 'Scheme deleted', 'deactivated': False})
+
+        scheme.is_active = False
+        scheme.save(update_fields=['is_active', 'updated_at'])
+        return Response({'success': True, 'message': 'Scheme deactivated', 'deactivated': True,
+                         'used_by_order_lines': used_by_orders})
+
+
+class SchemeAssignmentView(APIView):
+    """Target a scheme at a party, a state, a main group, a category, or everyone.
+
+    One STATE row reaches every vendor in that state -- including ones onboarded
+    later -- which is the whole point of separating assignment from the offer.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, scheme_id):
+        if not Scheme.objects.filter(pk=scheme_id).exists():
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        rows = SchemeAssignment.objects.filter(scheme_id=scheme_id).select_related('scheme')
+        return Response({'success': True, 'data': SchemeAssignmentSerializer(rows, many=True).data})
+
+    def post(self, request, scheme_id):
+        scheme = Scheme.objects.filter(pk=scheme_id).first()
+        if not scheme:
+            return Response({'success': False, 'message': 'Scheme not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # Accept a single object or a list, so "assign to these 40 parties" is one call.
+        payload = request.data if isinstance(request.data, list) else [request.data]
+        serializer = SchemeAssignmentSerializer(data=payload, many=True)
+        if not serializer.is_valid():
+            return Response({'success': False, 'message': 'Failed to assign scheme',
+                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user if getattr(request.user, 'is_authenticated', False) else None
+        saved = []
+        with _db_transaction.atomic():
+            for row in serializer.validated_data:
+                row.pop('scheme', None)
+                obj, _created = SchemeAssignment.objects.update_or_create(
+                    scheme=scheme,
+                    scope_type=row['scope_type'],
+                    scope_value=row.get('scope_value', ''),
+                    category=row.get('category', ''),
+                    defaults={
+                        'is_exclusion': row.get('is_exclusion', False),
+                        'valid_from': row.get('valid_from'),
+                        'valid_to': row.get('valid_to'),
+                        'is_active': row.get('is_active', True),
+                        'created_by': user,
+                    },
+                )
+                saved.append(obj)
+
+        return Response({'success': True, 'message': f'{len(saved)} assignment(s) saved',
+                         'data': SchemeAssignmentSerializer(saved, many=True).data},
+                        status=status.HTTP_201_CREATED)
+
+    def delete(self, request, scheme_id):
+        assignment_id = request.query_params.get('assignment_id')
+        if not assignment_id:
+            return Response({'success': False, 'message': 'assignment_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        deleted, _ = SchemeAssignment.objects.filter(scheme_id=scheme_id, pk=assignment_id).delete()
+        if not deleted:
+            return Response({'success': False, 'message': 'Assignment not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': True, 'message': 'Assignment removed'})
+
+
+class SchemePreviewView(APIView):
+    """Dry-run the engine over a draft order.
+
+    Body: {card_code, category, lines: [{item_code, category, sub_group, brand,
+    qty, pcs, boxes, ltrs, is_auto_free, combo_source_code, item_type}, ...]}
+
+    This is what makes state-wide targeting usable -- the salesperson never picks
+    a scheme from a dropdown, the engine proposes and they confirm.
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        card_code = (request.data.get('card_code') or '').strip()
+        if not card_code:
+            return Response({'success': False, 'message': 'card_code is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        lines = request.data.get('lines') or []
+        if not isinstance(lines, list):
+            return Response({'success': False, 'message': 'lines must be a list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        category = (request.data.get('category') or '').strip()
+        ctx = scheme_engine.build_party_context(card_code, category)
+        # Strict category rule for the order flow: a scheme is proposed only when
+        # party category == product category == scheme category, all present.
+        proposals = scheme_engine.resolve_schemes(
+            card_code, category, lines, ctx=ctx, strict_category=True,
+        )
+
+        return Response({
+            'success': True,
+            'context': {
+                'card_code': ctx.card_code,
+                'category': ctx.category,
+                'state_code': ctx.state_code,
+                'main_group': ctx.main_group,
+            },
+            'proposals': [p.as_dict() for p in proposals],
+        })
+
+
+class SchemeApplicableView(APIView):
+    """Everything reaching a vendor, with the scope that let each scheme in --
+    the first question anyone asks about an unexpected giveaway."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        card_code = (request.query_params.get('card_code') or '').strip()
+        if not card_code:
+            return Response({'success': False, 'message': 'card_code is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        category = (request.query_params.get('category') or '').strip()
+        rows = scheme_engine.applicable_schemes(card_code, category)
+        return Response({'success': True, 'data': rows, 'total': len(rows)})

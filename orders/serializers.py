@@ -631,3 +631,144 @@ class OrdersByItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = ['id', 'order', 'item_code', 'item_name', 'category', 'brand', 'sub_group']
+
+# ---------------------------------------------------------------------------
+# Scheme engine v2 (see docs/scheme-architecture.md)
+# ---------------------------------------------------------------------------
+
+from .models import Scheme, SchemeBenefit, SchemeTrigger, SchemeAssignment
+
+
+class SchemeBenefitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchemeBenefit
+        fields = ['id', 'free_item_code', 'free_uom', 'per_qty', 'free_qty', 'max_free_qty']
+
+    def validate(self, attrs):
+        per_qty = attrs.get('per_qty', getattr(self.instance, 'per_qty', 0)) or 0
+        free_qty = attrs.get('free_qty', getattr(self.instance, 'free_qty', 0)) or 0
+        # per_qty is a divisor; a ratio with nothing on the giveaway side would
+        # silently produce zero free stock on every order.
+        if per_qty > 0 and free_qty <= 0:
+            raise serializers.ValidationError({
+                'free_qty': 'A ratio benefit (per_qty > 0) must give away a positive free_qty.'
+            })
+        return attrs
+
+
+class SchemeTriggerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchemeTrigger
+        fields = ['id', 'match_type', 'match_value', 'min_qty', 'min_uom', 'applies_to']
+
+    def validate(self, attrs):
+        match_type = attrs.get('match_type', getattr(self.instance, 'match_type', None))
+        match_value = attrs.get('match_value', getattr(self.instance, 'match_value', '')) or ''
+        if match_type != 'ALL' and not str(match_value).strip():
+            raise serializers.ValidationError({
+                'match_value': f'match_value is required when match_type is {match_type}.'
+            })
+        return attrs
+
+
+class SchemeAssignmentSerializer(serializers.ModelSerializer):
+    scheme_code = serializers.CharField(source='scheme.code', read_only=True)
+
+    class Meta:
+        model = SchemeAssignment
+        fields = [
+            'id', 'scheme', 'scheme_code', 'scope_type', 'scope_value', 'category',
+            'is_exclusion', 'valid_from', 'valid_to', 'is_active', 'created_at',
+        ]
+        # `scheme` is a non-null FK, so DRF would demand it in the request body —
+        # but the parent is always known from context: the URL for the assignments
+        # endpoint, or the enclosing scheme for a nested write. Read-only keeps it
+        # in the response without requiring callers to repeat it.
+        read_only_fields = ['id', 'scheme', 'created_at']
+
+    def validate(self, attrs):
+        scope_type = attrs.get('scope_type', getattr(self.instance, 'scope_type', None))
+        scope_value = attrs.get('scope_value', getattr(self.instance, 'scope_value', '')) or ''
+        if scope_type == SchemeAssignment.SCOPE_ALL:
+            attrs['scope_value'] = ''
+        elif not str(scope_value).strip():
+            raise serializers.ValidationError({
+                'scope_value': f'scope_value is required when scope_type is {scope_type}.'
+            })
+        return attrs
+
+
+class SchemeV2Serializer(serializers.ModelSerializer):
+    """Read/write a scheme together with its benefits, triggers and assignments.
+
+    Children are written wholesale: whatever list arrives replaces what is there.
+    Partial updates that omit a child key leave that child set untouched.
+    """
+
+    benefits = SchemeBenefitSerializer(many=True, required=False)
+    triggers = SchemeTriggerSerializer(many=True, required=False)
+    assignments = SchemeAssignmentSerializer(many=True, required=False)
+
+    class Meta:
+        model = Scheme
+        fields = [
+            'id', 'code', 'name', 'description', 'category',
+            'valid_from', 'valid_to', 'is_active', 'priority', 'stackable',
+            'benefits', 'triggers', 'assignments',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        valid_from = attrs.get('valid_from', getattr(self.instance, 'valid_from', None))
+        valid_to = attrs.get('valid_to', getattr(self.instance, 'valid_to', None))
+        if valid_from and valid_to and valid_to < valid_from:
+            raise serializers.ValidationError({'valid_to': 'valid_to cannot precede valid_from.'})
+        return attrs
+
+    def _write_children(self, scheme, benefits, triggers, assignments):
+        if benefits is not None:
+            # PROTECT on OrderItemScheme.scheme_v2 guards the parent; benefits use
+            # SET_NULL, so replacing them blanks the link on historical rows but
+            # leaves benefit_item_code — the snapshot that actually ships — intact.
+            scheme.benefits.all().delete()
+            SchemeBenefit.objects.bulk_create(
+                [SchemeBenefit(scheme=scheme, **row) for row in benefits]
+            )
+        if triggers is not None:
+            scheme.triggers.all().delete()
+            SchemeTrigger.objects.bulk_create(
+                [SchemeTrigger(scheme=scheme, **row) for row in triggers]
+            )
+        if assignments is not None:
+            scheme.assignments.all().delete()
+            user = getattr(self.context.get('request'), 'user', None)
+            SchemeAssignment.objects.bulk_create([
+                SchemeAssignment(
+                    scheme=scheme,
+                    created_by=user if getattr(user, 'is_authenticated', False) else None,
+                    **{k: v for k, v in row.items() if k != 'scheme'},
+                )
+                for row in assignments
+            ])
+
+    def create(self, validated_data):
+        benefits = validated_data.pop('benefits', [])
+        triggers = validated_data.pop('triggers', [])
+        assignments = validated_data.pop('assignments', [])
+        user = getattr(self.context.get('request'), 'user', None)
+        if getattr(user, 'is_authenticated', False):
+            validated_data['created_by'] = user
+        scheme = Scheme.objects.create(**validated_data)
+        self._write_children(scheme, benefits, triggers, assignments)
+        return scheme
+
+    def update(self, instance, validated_data):
+        benefits = validated_data.pop('benefits', None)
+        triggers = validated_data.pop('triggers', None)
+        assignments = validated_data.pop('assignments', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        self._write_children(instance, benefits, triggers, assignments)
+        return instance

@@ -5,6 +5,8 @@ ENV/
 .env
 .env.*
 .venv/
+.env.test
+.env.production
 
 # Python
 **/__pycache__/
