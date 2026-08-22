@@ -210,9 +210,16 @@ class PaymentMethodEntrySerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {'cheque_date': 'Required for a cheque payment.'})
 
-        # If a cash breakdown is supplied it must equal the cash amount. This
-        # mirrors the rule already enforced in the mobile UI.
+        # The cash breakdown must be present AND equal the cash amount. This
+        # mirrors the rule enforced in the mobile UI.
+        #
+        # It is REQUIRED, not optional: the breakdown is the count of the notes
+        # physically handed over, and a cash receipt without one cannot be
+        # reconciled against what the collector is carrying. Previously the
+        # whole block was skipped when the list was empty, so a cash receipt
+        # could be created for money nobody had counted.
         rows = attrs.get('denominations') or []
+        amount = attrs.get('amount') or Decimal('0')
         if rows:
             if method != PaymentMethodEntry.Method.CASH:
                 raise serializers.ValidationError(
@@ -220,11 +227,15 @@ class PaymentMethodEntrySerializer(serializers.ModelSerializer):
             counted = sum(
                 (Decimal(r['denomination']) * r['quantity'] for r in rows),
                 Decimal('0'))
-            if counted != attrs.get('amount'):
+            if counted != amount:
                 raise serializers.ValidationError({
                     'denominations':
                         f'Denominations total {counted} but the cash amount is '
-                        f'{attrs.get("amount")}.'})
+                        f'{amount}.'})
+        elif method == PaymentMethodEntry.Method.CASH and amount > 0:
+            raise serializers.ValidationError({
+                'denominations':
+                    'The cash note breakdown is required for a cash payment.'})
         return attrs
 
 
@@ -577,8 +588,13 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         instance.save()
 
         from .services import log_status
+        # UPDATED, not STATUS_CHANGED: an edit changes the figures without
+        # changing the status, and the timeline must say WHO altered a
+        # document — an approver correcting a SAP-rejected receipt is a
+        # different event from the status moving on its own.
         log_status(instance, from_status=instance.status,
                    to_status=instance.status, user=user,
+                   action=PaymentStatusHistory.Action.UPDATED,
                    reason='Receipt edited.')
         return instance
 
@@ -924,6 +940,10 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
                 for r in receipts
             ])
 
-        log_status(instance, to_status=instance.status, user=user,
+        # Same reasoning as the receipt edit above: record WHO changed it,
+        # under an action that reads as an edit rather than a status move.
+        log_status(instance, from_status=instance.status,
+                   to_status=instance.status, user=user,
+                   action=PaymentStatusHistory.Action.UPDATED,
                    reason='Deposit updated.')
         return instance

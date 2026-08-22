@@ -194,7 +194,6 @@ DATABASES = {
                 default=config('HANA_COMPANY_DB_BEVERAGES', default=''),
             ),
         ),
-        'BEVERAGE_SCHEMA': config('HANA_DB_BEVERAGE_NAME'),
         'MART_SCHEMA': config('HANA_DB_MART_NAME', default=''),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
@@ -215,7 +214,18 @@ SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
 SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
 
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
-HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+# Same fallback chain as DATABASES['hana']['BEVERAGE_SCHEMA'] above. `.env`
+# carries this value under any of three names and has had each of them
+# commented out at different times, so requiring one outright stops Django
+# booting — which is exactly what a bare config() call here did.
+HANA_BEVERAGE_COMPANY_DB = config(
+    'HANA_BEVERAGE_COMPANY_DB',
+    default=config(
+        'HANA_DB_BEVERAGE_NAME',
+        default=config('HANA_COMPANY_DB_BEVERAGES',
+                       default='JIVO_BEVERAGES_HANADB'),
+    ),
+)
 # Third company (Mart). Blank disables everything Mart-specific.
 # The .env defines this as HANA_DB_MART_NAME (matching HANA_DB_OIL_NAME /
 # HANA_DB_BEVERAGE_NAME); keep the legacy HANA_MART_COMPANY_DB name as a

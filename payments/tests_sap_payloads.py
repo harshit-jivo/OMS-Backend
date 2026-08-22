@@ -490,8 +490,13 @@ class SapPostableAmountTests(TestCase):
 
 class DepositPayloadTests(SimpleTestCase):
     def test_deposit_is_an_account_type_incoming_payment(self):
-        """Verified against TransId 224988: DocType A, CardCode = cash G/L,
-        destination bank in the TRANSFER fields."""
+        """DocType A, source G/L in PaymentAccounts, destination in TRANSFER.
+
+        ORCT stores the source as CardCode (TransId 224988 shows that), but for
+        DocType 'A' the Service Layer takes it in PaymentAccounts and writes
+        CardCode itself. Sending CardCode makes it see an empty array and
+        reject the document with -10 [PaymentAccounts.AccountCode].
+        """
         deposit = SimpleNamespace(
             deposit_no='DEP-1', deposit_date=date(2026, 8, 13),
             currency='INR', bank_gl_account='1104107', remarks='',
@@ -502,10 +507,26 @@ class DepositPayloadTests(SimpleTestCase):
             source_gl='1105003')
 
         self.assertEqual(payload['DocType'], 'A')
-        self.assertEqual(payload['CardCode'], '1105003')
+        self.assertEqual(payload['PaymentAccounts'],
+                         [{'AccountCode': '1105003', 'SumPaid': 50000.0}])
+        # CardCode must NOT be sent — that is the shape SAP rejects.
+        self.assertNotIn('CardCode', payload)
         self.assertEqual(payload['TransferAccount'], '1104107')
         self.assertEqual(payload['TransferSum'], 50000.0)
         self.assertEqual(payload['Series'], 2564)
+
+    def test_payment_accounts_amount_matches_the_cash_share(self):
+        """A mixed deposit posts only its cash share — both figures must agree."""
+        deposit = SimpleNamespace(
+            deposit_no='DEP-3', deposit_date=date(2026, 8, 13),
+            currency='INR', bank_gl_account='1104107', remarks='',
+            slip_number='', deposit_amount=Decimal('50000'))
+
+        payload = sap_payloads.build_deposit(deposit, amount=Decimal('30000'),
+                                             source_gl='1105001')
+
+        self.assertEqual(payload['PaymentAccounts'][0]['SumPaid'], 30000.0)
+        self.assertEqual(payload['TransferSum'], 30000.0)
 
     def test_no_odps_fields_survive(self):
         """ODPS has 0 rows in every company DB — those keys must not be sent."""

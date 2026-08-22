@@ -208,9 +208,24 @@ def build_deposit(deposit, *, bpl_id=None, series=None, amount=None,
         JDT1  DR 1104107 ICICI BANK  186,250
               CR 1105001 CASH SALE   186,250
 
-    So: DocType 'A', CardCode = the cash-sale G/L, and the destination bank in
-    the TRANSFER fields. `CashSum` is not used even though this banks cash —
-    the money moves account-to-account, which SAP models as a transfer.
+    So: DocType 'A', the source G/L in PaymentAccounts, and the destination
+    bank in the TRANSFER fields. `CashSum` is not used even though this banks
+    cash — the money moves account-to-account, which SAP models as a transfer.
+
+    THE SOURCE G/L GOES IN `PaymentAccounts`, NOT `CardCode`.
+
+    ORCT stores it as CardCode — which is what the verified rows above show —
+    but for DocType 'A' that column is an OUTPUT, written by SAP from the
+    PaymentAccounts line. Sending CardCode instead makes the Service Layer see
+    an EMPTY PaymentAccounts array and reject the document with:
+
+        G/L account is not valid [PaymentAccounts.AccountCode][line: 1]   (-10)
+
+    The message names the field precisely: the array is missing, not the G/L
+    wrong. Proved in TEST_JIVO_OIL_HANADB — CardCode failed for every account
+    tried, including pairs with 86 and 35 manual successes, while the same
+    accounts sent as PaymentAccounts posted first time (DocEntry 21960: DR
+    1104107 / CR 1105001, exactly the intended entry).
 
     `amount` is the CASH share only, computed by the caller. A cheque in the
     same deposit is deliberately excluded: it debited the bank when its
@@ -219,7 +234,11 @@ def build_deposit(deposit, *, bpl_id=None, series=None, amount=None,
     total = deposit.deposit_amount if amount is None else amount
     payload = {
         'DocType': 'A',
-        'CardCode': source_gl or '',
+        # The G/L being emptied. SAP mirrors it into ORCT.CardCode itself.
+        'PaymentAccounts': [{
+            'AccountCode': source_gl or '',
+            'SumPaid': money(total),
+        }],
         'DocDate': _iso(deposit.deposit_date),
         'TaxDate': _iso(deposit.deposit_date),
         'DocCurrency': deposit.currency or 'INR',
