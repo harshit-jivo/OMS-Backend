@@ -13,7 +13,7 @@ class SAPConnection:
         return str(value).strip().strip("'").strip('"')
 
     def __init__(self):
-        self.host = self._clean(getattr(settings, 'SAP_DB_HOST', '103.89.45.75'))
+        self.host = self._clean(getattr(settings, 'SAP_DB_HOST', '138.252.101.118'))
         self.port = int(getattr(settings, 'SAP_DB_PORT', 1433))
         self.database = self._clean(getattr(settings, 'SAP_DB_NAME', 'Jivo_All_Branches_Live'))
         self.username = self._clean(getattr(settings, 'SAP_DB_USER', 'ab'))

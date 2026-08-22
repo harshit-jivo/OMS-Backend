@@ -47,7 +47,7 @@ SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['103.89.45.75', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
+ALLOWED_HOSTS = ['138.252.101.118', '10.10.101.118', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
 CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
 # ALLOWED_HOSTS = ['*']
 # Application definition
@@ -185,7 +185,7 @@ DSR_API_BASE = config('JSAP_API_BASE')
 OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
 
 # SAP SQL Server (source for sync)
-SAP_DB_HOST = config('SAP_DB_HOST', default='103.89.45.75')
+SAP_DB_HOST = config('SAP_DB_HOST', default='138.252.101.118')
 SAP_DB_PORT = config('SAP_DB_PORT', default=1433, cast=int)
 SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
 SAP_DB_USER = config('SAP_DB_USER', default='ab')
