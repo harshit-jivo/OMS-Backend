@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
 
 urlpatterns=[
     
@@ -20,6 +20,8 @@ urlpatterns=[
     path('mart/<int:order_id>/', MartOrderDetailView.as_view(), name='mart-order-detail'),
     path('mart/<int:order_id>/approve/', MartApproveView.as_view(), name='mart-approve'),
     path('mart/<int:order_id>/reject/', MartRejectView.as_view(), name='mart-reject'),
+    path('mart/<int:order_id>/resend-sap/', MartResendSapView.as_view(), name='mart-resend-sap'),
+    path('sales-order-status/', SalesOrderSapStatusView.as_view(), name='sales-order-sap-status'),
     path('party-products/<str:card_code>/', PartyProductsView.as_view(), name='party-products'),
     path('schemes/', SchemeListView.as_view(), name='schemes'),
     path('schemes/manage/', SchemeManageListView.as_view(), name='schemes-manage'),
