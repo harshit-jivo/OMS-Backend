@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView
 
 urlpatterns=[
     
@@ -15,6 +15,11 @@ urlpatterns=[
     path('list/', OrderListView.as_view(), name='order_list'),
     path('<int:order_id>/approve/', ApproveOrderView.as_view(), name='approve_list'),
     path('<int:order_id>/reject/', RejectOrderView.as_view(), name='reject_list'),
+    # Mart Approval flow (distributor / company 3 orders)
+    path('mart/list/', MartOrderListView.as_view(), name='mart-order-list'),
+    path('mart/<int:order_id>/', MartOrderDetailView.as_view(), name='mart-order-detail'),
+    path('mart/<int:order_id>/approve/', MartApproveView.as_view(), name='mart-approve'),
+    path('mart/<int:order_id>/reject/', MartRejectView.as_view(), name='mart-reject'),
     path('party-products/<str:card_code>/', PartyProductsView.as_view(), name='party-products'),
     path('schemes/', SchemeListView.as_view(), name='schemes'),
     path('schemes/manage/', SchemeManageListView.as_view(), name='schemes-manage'),

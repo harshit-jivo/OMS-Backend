@@ -121,6 +121,7 @@ class Order(models.Model):
     ORDER_TYPES = (
     ("PARTY", "Party"),
     ("STAFF", "Staff"),
+    ("DISTRIBUTOR", "Distributor"),
     )
 
     order_type = models.CharField(
@@ -190,6 +191,14 @@ class OrderItem(models.Model):
     )
     qty_scheme = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
     is_scheme_visible = models.BooleanField(default=False)
+    # Auto-added free-goods flag. The column already exists in the DB (NOT NULL);
+    # it was missing from the model, so ORM inserts omitted it and Postgres
+    # rejected the null. Default False so every order line supplies a value.
+    is_auto_free = models.BooleanField(default=False)
+    # Combo scheme source item code. DB column is NOT NULL but was missing from
+    # the model; default '' (empty = not part of a combo) so inserts supply a
+    # non-null value.
+    combo_source_code = models.CharField(max_length=50, blank=True, default='')
 
     class Meta:
         db_table = 'order_items'
