@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import GetInventoryReportView , GetPendingDispatchView , GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView , GetSeries , GetDraftVerification , GetInvoiceDrafts
+from .views import GetInventoryReportView , GetPendingDispatchView , GetSalesOrderView , GetOpenPartiesView , GetCustomerDetailsView , GetWarehouseDetailsView , GetSalespersonDetailsView ,GetFreightMastersView , GetAddressView ,GetStateChainView , GetVendorStatesView  , GetAllCustomersView,GetNextDocNumberView , GetFGItemsView  , GetBatchDetailsView ,GetInventoryDetailsView , GetItemPriceView, GetProductStockView, GetProductSalesOrderView , GetSeries , GetDraftVerification , GetInvoiceDrafts, GetWarehousesView
 
 urlpatterns = [
     path('product-stock/' , GetProductStockView.as_view()),
@@ -9,6 +9,7 @@ urlpatterns = [
     path('product-so/' , GetProductSalesOrderView.as_view()),
     path('open-parties/' , GetOpenPartiesView.as_view()),
     path('customer-details/' , GetCustomerDetailsView.as_view()),
+    path('warehouses/' , GetWarehousesView.as_view()),
     path('warehouse-details/' , GetWarehouseDetailsView.as_view()),
     path('salesperson-details/' , GetSalespersonDetailsView.as_view()),
     path('freight-masters/' , GetFreightMastersView.as_view()),

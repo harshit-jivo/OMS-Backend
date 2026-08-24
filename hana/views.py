@@ -210,6 +210,17 @@ class GetCustomerDetailsView(APIView):
         details = SalesOrderService().getCustomerDetails(party_code, branch)
         return Response(details)
 
+class GetWarehousesView(APIView):
+    """Selectable warehouses, for the order-level warehouse picker."""
+
+    def get(self, request):
+        branch, error = get_branch_or_error(request)
+        if error:
+            return error
+
+        return Response(SalesOrderService().getWarehouses(branch))
+
+
 class GetWarehouseDetailsView(APIView):
     def get (self , request):
         warehouse_code = request.query_params.get('whs_code')
