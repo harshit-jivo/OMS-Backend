@@ -1351,7 +1351,7 @@ class SyncService:
         order_password = settings.SALES_ORDER_PASSWORD
 
         try:
-            self._assert_num_at_card_available(quotation_payload, company_db, 'ORDR')
+            self._assert_num_at_card_available(order_payload, company_db, 'ORDR')
 
             if (
                 not hasattr(self, 'sap_session')
