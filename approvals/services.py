@@ -530,6 +530,19 @@ def _validate(request, user, action, remarks):
         raise ValidationError(
             f'This request is {request.get_status_display().lower()}; no action possible.')
 
+    # The DOCUMENT may be finished even while this request still reads PENDING:
+    # a failed SAP post reopens the approval at its final rung, and the retry
+    # that follows posts without walking the ladder again. Deciding again would
+    # either post a second payment for the same money or claim to reverse one
+    # SAP has committed. Hiding the buttons is a courtesy; this is the control.
+    document = getattr(request, 'content_object', None)
+    doc_entry = getattr(document, 'sap_doc_entry', None)
+    if doc_entry:
+        raise ValidationError(
+            f'This document is already posted to SAP as document '
+            f'{getattr(document, "sap_doc_num", None) or doc_entry} and can no '
+            f'longer be approved or rejected.')
+
     level = _level_at(request, request.current_level)
     if level is None:
         raise ValidationError(

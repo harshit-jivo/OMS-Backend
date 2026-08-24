@@ -627,8 +627,19 @@ def _document_permissions(document, user):
     """
     Status = document.__class__.Status
     approval = document.approvals.order_by('-created_at').first()
+    # A document already in SAP is finished, whatever its approval request
+    # still says. Approving it again would post a second payment for the same
+    # money; rejecting it would claim to undo something SAP has committed and
+    # only OMS would believe. The approval row can legitimately still read
+    # PENDING here — a SAP failure reopens it at the final rung, and the retry
+    # that follows posts WITHOUT walking the ladder again — so `can_act` alone
+    # is not enough. The document's own SAP state is the authority.
+    already_in_sap = bool(
+        document.sap_doc_entry
+        or document.status in (Status.POSTED, Status.CANCELLED_IN_SAP))
     can_decide = bool(
-        approval is not None
+        not already_in_sap
+        and approval is not None
         and approval_services.can_act(user, approval))
 
     # Who may still change the figures, and when.
@@ -887,7 +898,11 @@ class BankDepositListCreateView(APIView):
                          then=1),
                     When(status__in=[BankDeposit.Status.REJECTED,
                                      BankDeposit.Status.PENDING_ERROR,
-                                     BankDeposit.Status.SAP_UNKNOWN],
+                                     BankDeposit.Status.SAP_UNKNOWN,
+                                     # Posted then reversed in SAP — it needs a
+                                     # decision, so it ranks with the problems
+                                     # rather than falling to the default.
+                                     BankDeposit.Status.CANCELLED_IN_SAP],
                          then=2),
                     When(status=BankDeposit.Status.POSTED, then=3),
                     default=4,
