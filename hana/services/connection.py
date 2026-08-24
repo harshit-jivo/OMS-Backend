@@ -810,6 +810,8 @@ class Queries():
             s = Queries.OIL_SCHEMA
         elif branch == 'BEVERAGE':
             s = Queries.BEVERAGE_SCHEMA
+        elif branch == 'MART':
+            s = Queries.MART_SCHEMA
         safe_prc_name = str(prc_name).replace("'", "''")
         return f"""
             SELECT TOP 1 T0."PrcCode"
