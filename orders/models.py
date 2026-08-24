@@ -326,6 +326,13 @@ class OrderItemScheme(models.Model):
     # SAP push reads this instead of re-resolving from the scheme tables, so
     # editing a scheme can no longer change what an already-approved order ships.
     benefit_item_code = models.CharField(max_length=50, null=True, blank=True)
+    # `qty_scheme` above is always PIECES, because that is what a SAP
+    # DocumentLine quantity means. The pair below records the giveaway as the
+    # scheme actually spelled it — "1 BOX" — so the UI and any later audit can
+    # show the unit instead of a bare converted number. Also a snapshot: a pack
+    # size changing in SAP must not retroactively alter an approved order.
+    benefit_uom = models.CharField(max_length=10, blank=True, default='')
+    benefit_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
     # What the engine proposed, kept alongside `qty_scheme` (what was actually
     # granted) so a manual override stays visible.
     computed_qty = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -356,19 +363,23 @@ class Categories(models.Model):
 # See docs/scheme-architecture.md.
 # ---------------------------------------------------------------------------
 
+# Schemes are written in pieces or cartons only. Litres is a derived measure
+# (pack_unit x qty) that nobody prices a giveaway in, and a bare "Qty" was just
+# pieces under another name — offering all four only invited picking the wrong one.
 UOM_CHOICES = (
-    ('QTY', 'Qty'),
     ('PCS', 'Pieces'),
     ('BOX', 'Boxes'),
-    ('LTR', 'Litres'),
 )
 
 # UOM code -> the OrderItem field holding that measure.
+#
+# PCS maps to `qty`, NOT to `pcs`: on an order line `qty` is the total pieces
+# (boxes x sal_factor2) while `pcs` is the pack size copied off the product, a
+# constant. Measuring a scheme against `pcs` compared the slab to the carton
+# size instead of to what was ordered.
 UOM_FIELDS = {
-    'QTY': 'qty',
-    'PCS': 'pcs',
+    'PCS': 'qty',
     'BOX': 'boxes',
-    'LTR': 'ltrs',
 }
 
 
@@ -488,7 +499,7 @@ class SchemeTrigger(models.Model):
     match_value = models.CharField(max_length=100, blank=True, default='')
 
     min_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
-    min_uom = models.CharField(max_length=10, choices=UOM_CHOICES, default='QTY')
+    min_uom = models.CharField(max_length=10, choices=UOM_CHOICES, default='PCS')
 
     applies_to = models.CharField(max_length=20, choices=APPLIES_TO_CHOICES, default='PAID_LINE')
 

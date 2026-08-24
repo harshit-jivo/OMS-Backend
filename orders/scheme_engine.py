@@ -43,6 +43,17 @@ def _to_decimal(value, default=ZERO):
         return default
 
 
+def _tidy(value):
+    """Trim a Decimal for display: 4.0000000000 -> 4, 1.5000 -> 1.5.
+
+    `normalize()` alone turns 100 into 1E+2, so whole numbers are quantized
+    instead.
+    """
+    if value == value.to_integral_value():
+        return value.quantize(Decimal('1'))
+    return value.normalize()
+
+
 def _get(line, key, default=None):
     """Read a field off an order line that may be a dict (create payload) or an
     OrderItem instance (re-resolution of a saved order)."""
@@ -60,16 +71,14 @@ def _as_bool(value):
 
 
 def _line_qty(line, uom):
-    """Quantity of `line` measured in `uom`.
+    """Quantity of `line` measured in `uom` (PCS -> total pieces, BOX -> cartons).
 
-    Falls back to the plain `qty` column when the requested measure is absent or
-    zero — most lines only carry `qty` populated.
+    No cross-measure fallback: a "per 10 boxes" slab reading a piece count when
+    `boxes` happens to be blank would hand out roughly a carton's worth of extra
+    free stock per box. An unmeasurable line simply does not qualify.
     """
-    field_name = UOM_FIELDS.get(uom, 'qty')
-    value = _to_decimal(_get(line, field_name, 0))
-    if value <= ZERO and field_name != 'qty':
-        value = _to_decimal(_get(line, 'qty', 0))
-    return value
+    value = _to_decimal(_get(line, UOM_FIELDS.get(uom, 'qty'), 0))
+    return value if value > ZERO else ZERO
 
 
 @dataclass
@@ -94,7 +103,13 @@ class SchemeProposal:
     benefit_id: int
     benefit_item_code: str
     free_uom: str
+    # `qty` is in `free_uom` — what the scheme was written in, and what the UI
+    # shows. `qty_pieces` is the same giveaway expressed in single units, which
+    # is the only thing SAP understands: DocumentLines.Quantity is always pieces,
+    # never cartons. For a PCS benefit the two are equal; for BOX, qty_pieces is
+    # qty x the giveaway item's sal_factor2.
     qty: Decimal
+    qty_pieces: Decimal
     qualifying_qty: Decimal
     scope_type: str
     scope_value: str
@@ -115,7 +130,8 @@ class SchemeProposal:
             'benefit_id': self.benefit_id,
             'benefit_item_code': self.benefit_item_code,
             'free_uom': self.free_uom,
-            'qty': str(self.qty),
+            'qty': str(_tidy(self.qty)),
+            'qty_pieces': str(_tidy(self.qty_pieces)),
             'qualifying_qty': str(self.qualifying_qty),
             'scope_type': self.scope_type,
             'scope_value': self.scope_value,
@@ -384,6 +400,59 @@ def _resolve_conflicts(proposals):
 
 
 # ---------------------------------------------------------------------------
+# Pack factors — turning a BOX giveaway into the pieces SAP ships
+# ---------------------------------------------------------------------------
+
+def _apply_pack_factors(proposals):
+    """Fill in ``qty_pieces`` on every proposal.
+
+    A scheme may be written in cartons ("1 box free"), but a SAP DocumentLine
+    quantity is always in single units — the paid line sends the order's `qty`,
+    which is pieces. Shipping a BOX benefit unconverted therefore under-delivers
+    by the pack size: one carton of a 4-per-carton item arrives as one bottle.
+
+    The factor comes from the *giveaway* item, not the item that earned it. A
+    product with no usable sal_factor2 falls back to 1, which is the same
+    behaviour as before this conversion existed.
+    """
+    box_codes = {
+        p.benefit_item_code
+        for p in proposals
+        if p.free_uom == 'BOX' and p.benefit_item_code
+    }
+    if not box_codes:
+        return proposals
+
+    from django.apps import apps
+
+    factors = {}
+    try:
+        Product = apps.get_model('sap_sync', 'Product')
+    except LookupError:
+        Product = None
+
+    if Product is not None:
+        for item_code, factor in (
+            Product.objects.filter(item_code__in=box_codes)
+            .values_list('item_code', 'sal_factor2')
+        ):
+            value = _to_decimal(factor)
+            # The same item_code exists once per category; the pack size is a
+            # property of the product, so any row with a usable value will do.
+            if value > ZERO and item_code not in factors:
+                factors[item_code] = value
+
+    for proposal in proposals:
+        if proposal.free_uom != 'BOX':
+            continue
+        proposal.qty_pieces = _tidy(
+            proposal.qty * factors.get(proposal.benefit_item_code, Decimal('1'))
+        )
+
+    return proposals
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -449,6 +518,9 @@ def resolve_schemes(card_code, category, lines, on_date=None, ctx=None):
                     benefit_item_code=benefit.free_item_code or line_item_code,
                     free_uom=benefit.free_uom,
                     qty=qty,
+                    # Filled in by _apply_pack_factors below, which needs one
+                    # query for the whole proposal set rather than one per row.
+                    qty_pieces=qty,
                     qualifying_qty=best,
                     scope_type=candidate.scope_type,
                     scope_value=candidate.scope_value,
@@ -457,7 +529,7 @@ def resolve_schemes(card_code, category, lines, on_date=None, ctx=None):
                     qty_is_user_supplied=user_supplied,
                 ))
 
-    return _resolve_conflicts(proposals)
+    return _apply_pack_factors(_resolve_conflicts(proposals))
 
 
 def applicable_schemes(card_code, category='', on_date=None):

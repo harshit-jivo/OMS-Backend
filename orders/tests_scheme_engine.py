@@ -564,3 +564,125 @@ class OrderCreateResolvesSchemesTests(TestCase):
         _apply_engine_schemes(order, lines, created)
 
         self.assertEqual(OrderItemScheme.objects.filter(order_item__order=order).count(), 0)
+
+
+class SchemeUomTests(TestCase):
+    """Schemes measure in pieces or cartons, and never silently swap the two."""
+
+    def setUp(self):
+        State.objects.create(name='Punjab', code='PB')
+        Parties.objects.create(card_code='P1', card_name='Dealer', state='PB')
+
+    def _scheme(self, code, *, min_uom, per_qty):
+        scheme = make_scheme(code)
+        SchemeTrigger.objects.create(scheme=scheme, match_type='ITEM',
+                                     match_value='FG-1', min_uom=min_uom)
+        SchemeBenefit.objects.create(scheme=scheme, free_item_code='FREE-1',
+                                     per_qty=per_qty, free_qty=1)
+        SchemeAssignment.objects.create(scheme=scheme, scope_type='STATE', scope_value='PB')
+        return scheme
+
+    # A real Add Sales line: 120 cartons of a 4-per-carton pack = 480 pieces.
+    LINE = {'item_code': 'FG-1', 'boxes': 120, 'qty': 480, 'pcs': 4, 'ltrs': 2400}
+
+    def test_pcs_measures_the_pieces_ordered_not_the_pack_size(self):
+        """`pcs` on an order line is sal_factor2 — the carton size, a constant.
+        Measuring against it would compare the slab to 4, not to 480."""
+        self._scheme('PER-10-PCS', min_uom='PCS', per_qty=10)
+        proposals = scheme_engine.resolve_schemes('P1', '', [self.LINE])
+        self.assertEqual(proposals[0].qualifying_qty, Decimal('480'))
+        self.assertEqual(proposals[0].qty, Decimal('48'))
+
+    def test_box_measures_cartons(self):
+        self._scheme('PER-10-BOX', min_uom='BOX', per_qty=10)
+        proposals = scheme_engine.resolve_schemes('P1', '', [self.LINE])
+        self.assertEqual(proposals[0].qualifying_qty, Decimal('120'))
+        self.assertEqual(proposals[0].qty, Decimal('12'))
+
+    def test_box_slab_does_not_fall_back_to_pieces(self):
+        """A blank `boxes` must disqualify, not quietly measure 480 pieces as
+        480 cartons and hand out ~40x the intended free stock."""
+        self._scheme('PER-10-BOX', min_uom='BOX', per_qty=10)
+        line = {'item_code': 'FG-1', 'qty': 480}
+        self.assertEqual(scheme_engine.resolve_schemes('P1', '', [line]), [])
+
+    def test_only_pieces_and_boxes_are_offered(self):
+        from orders.models import UOM_CHOICES
+
+        self.assertEqual([code for code, _label in UOM_CHOICES], ['PCS', 'BOX'])
+
+
+class SchemeBoxToPiecesTests(TestCase):
+    """A carton giveaway must reach SAP as pieces.
+
+    A SAP DocumentLine quantity is always single units — the paid line sends the
+    order's `qty`, which is pieces. Shipping "1 BOX" unconverted delivers one
+    bottle instead of one carton.
+    """
+
+    def setUp(self):
+        from sap_sync.models import Product
+
+        State.objects.create(name='Punjab', code='PB')
+        Parties.objects.create(card_code='P1', card_name='Dealer', state='PB')
+        # 4 pieces to a carton, the same shape as POMACE OLIVE 5 LTR TIN 4 PCS.
+        Product.objects.create(item_code='FREE-4PK', item_name='Free 4-pack',
+                               category='OIL', sal_factor2=4, is_active='Y')
+        Product.objects.create(item_code='FREE-LOOSE', item_name='Free single',
+                               category='OIL', sal_factor2=1, is_active='Y')
+
+    def _scheme(self, code, *, free_item, free_uom, free_qty=1):
+        scheme = make_scheme(code)
+        SchemeTrigger.objects.create(scheme=scheme, match_type='ITEM',
+                                     match_value='FG-1', min_uom='PCS')
+        SchemeBenefit.objects.create(scheme=scheme, free_item_code=free_item,
+                                     free_uom=free_uom, per_qty=0, free_qty=free_qty)
+        SchemeAssignment.objects.create(scheme=scheme, scope_type='STATE', scope_value='PB')
+        return scheme
+
+    LINE = {'item_code': 'FG-1', 'qty': 10, 'boxes': 10}
+
+    def test_box_benefit_converts_by_the_giveaway_items_pack_size(self):
+        self._scheme('ONE-BOX', free_item='FREE-4PK', free_uom='BOX')
+        proposal = scheme_engine.resolve_schemes('P1', '', [self.LINE])[0]
+
+        self.assertEqual(proposal.qty, Decimal('1'))          # as written
+        self.assertEqual(proposal.free_uom, 'BOX')
+        self.assertEqual(proposal.qty_pieces, Decimal('4'))   # as shipped
+
+    def test_pcs_benefit_needs_no_conversion(self):
+        self._scheme('TEN-PCS', free_item='FREE-4PK', free_uom='PCS', free_qty=10)
+        proposal = scheme_engine.resolve_schemes('P1', '', [self.LINE])[0]
+        self.assertEqual(proposal.qty, Decimal('10'))
+        self.assertEqual(proposal.qty_pieces, Decimal('10'))
+
+    def test_unknown_product_falls_back_to_one_piece_per_box(self):
+        """Never silently multiply by zero — an unmapped code ships as written."""
+        self._scheme('MYSTERY', free_item='NOT-IN-SAP', free_uom='BOX', free_qty=3)
+        proposal = scheme_engine.resolve_schemes('P1', '', [self.LINE])[0]
+        self.assertEqual(proposal.qty_pieces, Decimal('3'))
+
+    def test_pieces_figure_is_what_reaches_the_sap_mapper(self):
+        from orders.models import Order, OrderItem, OrderItemScheme, OrderStatus
+        from sap_sync.services.sync_service import _get_order_item_scheme_entries
+
+        status = OrderStatus.objects.create(code='CREATED', name='Created')
+        order = Order.objects.create(order_number='SO-BOX', card_code='P1',
+                                     card_name='Dealer', status=status)
+        item = OrderItem.objects.create(order=order, item_code='FG-1', qty=10)
+        OrderItemScheme.objects.create(
+            order_item=item,
+            scheme_v2=make_scheme('BOX-LINE'),
+            benefit_item_code='FREE-4PK',
+            benefit_uom='BOX',
+            benefit_qty=Decimal('1'),
+            qty_scheme=Decimal('4'),   # pieces — what ships
+        )
+
+        entries = _get_order_item_scheme_entries(
+            OrderItem.objects.prefetch_related('schemes').get(pk=item.pk),
+            card_code='P1', item_code='FG-1', category='OIL',
+        )
+        _scheme_id, qty, snapshot = entries[0]
+        self.assertEqual(qty, 4.0)
+        self.assertEqual(snapshot, 'FREE-4PK')

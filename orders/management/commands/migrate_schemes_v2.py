@@ -163,7 +163,7 @@ class Command(BaseCommand):
                     scheme=scheme,
                     match_type=SchemeTrigger.MATCH_ITEM,
                     match_value=item_code,
-                    defaults={'min_qty': 0, 'min_uom': 'QTY', 'applies_to': 'PAID_LINE'},
+                    defaults={'min_qty': 0, 'min_uom': 'PCS', 'applies_to': 'PAID_LINE'},
                 )
                 stats['triggers_created' if created else 'triggers_existing'] += 1
 
