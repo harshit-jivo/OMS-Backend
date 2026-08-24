@@ -102,6 +102,10 @@ class Order(models.Model):
     
     company = models.CharField(max_length=100, blank=True,null=True)
     po_number = models.CharField(max_length=100, blank=True,null=True)
+    # Chosen once for the whole order and stamped on every SAP line, free stock
+    # included. Blank falls back to the per-category default in settings, which
+    # is how every order placed before the picker existed still maps.
+    warehouse_code = models.CharField(max_length=20, blank=True, default='')
     is_foc = models.BooleanField(default=False)
     remarks = models.TextField(blank=True,null=True)
     
@@ -191,14 +195,6 @@ class OrderItem(models.Model):
     )
     qty_scheme = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
     is_scheme_visible = models.BooleanField(default=False)
-    # Auto-added free-goods flag. The column already exists in the DB (NOT NULL);
-    # it was missing from the model, so ORM inserts omitted it and Postgres
-    # rejected the null. Default False so every order line supplies a value.
-    is_auto_free = models.BooleanField(default=False)
-    # Combo scheme source item code. DB column is NOT NULL but was missing from
-    # the model; default '' (empty = not part of a combo) so inserts supply a
-    # non-null value.
-    combo_source_code = models.CharField(max_length=50, blank=True, default='')
 
     class Meta:
         db_table = 'order_items'

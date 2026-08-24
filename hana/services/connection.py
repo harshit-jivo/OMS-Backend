@@ -281,6 +281,27 @@ class Queries():
         """
         
     @staticmethod
+    def get_warehouses(branch):
+        """Every selectable warehouse, for the order-level warehouse picker.
+
+        `Inactive` is left out of the filter deliberately — it is not present on
+        every B1 build, and a missing column fails the whole query rather than
+        degrading. `Locked` is the flag that actually blocks posting.
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+        return f"""
+        SELECT
+            T0."WhsCode",
+            T0."WhsName"
+        FROM "{s}"."OWHS" AS T0
+        WHERE T0."Locked" = 'N'
+        ORDER BY T0."WhsCode"
+        """
+
+    @staticmethod
     def get_warehouse_details(whs_code,branch):
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA

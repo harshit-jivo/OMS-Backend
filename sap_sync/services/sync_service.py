@@ -478,6 +478,18 @@ class SyncService:
 
         return default_company_db
 
+    def resolve_warehouse_code_for_order(self, order, category):
+        """The warehouse every line of this order ships from.
+
+        The order carries one chosen warehouse for all its lines. Only when it
+        has none — orders placed before the picker existed — does the
+        per-category default in settings apply.
+        """
+        chosen = str(getattr(order, "warehouse_code", "") or "").strip()
+        if chosen:
+            return chosen
+        return self.resolve_warehouse_code_for_category(category)
+
     def resolve_warehouse_code_for_category(self, category):
         normalized_category = self._normalize_order_category(category)
         default_warehouse_code = str(
@@ -1002,8 +1014,10 @@ class SyncService:
             card_code = getattr(order, "card_code", "")
             item_code = getattr(item, "item_code", "")
             category = getattr(item, "category", "")
+            
             sub_group = getattr(item, "sub_group", "")
-            warehouse_code = self.resolve_warehouse_code_for_category(category)
+            
+            warehouse_code = self.resolve_warehouse_code_for_order(order, category)
             scheme_entries = _get_order_item_scheme_entries(
                 item,
                 card_code=card_code,
