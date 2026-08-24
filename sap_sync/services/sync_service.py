@@ -1176,8 +1176,17 @@ class SyncService:
             "DocDueDate": due_date,
             "TaxDate": posting_date.isoformat(),
             "Comments": " ",
-            "ShipToCode": order.ship_to_address,
-            "PayToCode": order.bill_to_address,
+            # SAP wants the CRD1 Address *name* (a short code, max 50 chars), not
+            # the full address text. The order-entry page happens to store the
+            # name in ship_to_address/bill_to_address, so sending those worked --
+            # but the Distributor page stores the real street address there, and
+            # SAP rejects it with "Value too long in property 'PayToCode'".
+            # Resolving from the id is identical for party orders (the stored
+            # text already IS the name) and correct for Mart. Falls back to the
+            # stored text when the id resolves to nothing, so behaviour is
+            # unchanged wherever it cannot be resolved.
+            "ShipToCode": self._resolve_address_code(order.ship_to_id) or order.ship_to_address,
+            "PayToCode": self._resolve_address_code(order.bill_to_id) or order.bill_to_address,
             #=-===============================================================================
             # CHANGE AND MAP THE SALES PERSON
             #=-===============================================================================
