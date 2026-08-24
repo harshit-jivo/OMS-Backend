@@ -288,8 +288,12 @@ class Queries():
         every B1 build, and a missing column fails the whole query rather than
         degrading. `Locked` is the flag that actually blocks posting.
         """
+        # MART matters here: the picker is shown on Mart orders, and falling
+        # through to OIL would offer warehouses from the wrong company DB.
         if branch == 'BEVERAGE':
             s = Queries.BEVERAGE_SCHEMA
+        elif branch == 'MART':
+            s = Queries.MART_SCHEMA
         else:
             s = Queries.OIL_SCHEMA
         return f"""
