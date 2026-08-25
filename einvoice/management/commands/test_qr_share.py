@@ -51,8 +51,11 @@ class Command(BaseCommand):
             if user:
                 import ntpath
                 import smbclient
+                from einvoice.services import smb_username_for
                 server = directory.strip("\\/").replace("/", "\\").split("\\")[0]
-                smbclient.register_session(server, username=user,
+                # Same qualification the real save uses — an unqualified name
+                # passes here but fails under the service's SYSTEM account.
+                smbclient.register_session(server, username=smb_username_for(server, user),
                                            password=getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "")
                 path = ntpath.join(directory, name)
                 with smbclient.open_file(path, mode="wb") as fh:
