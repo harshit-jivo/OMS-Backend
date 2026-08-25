@@ -167,7 +167,79 @@ Note: Service Layer **blocks `DELETE` on `Attachments2`** (error 220), so an
 attachment row created in error cannot be removed through the API — only the
 physical file can be cleaned up, leaving the DB row orphaned.
 
-## 5. Notes for the OMS frontend
+## 5. OMS implementation
+
+Backend — `serviceLayer/ap_views.py`, routed in `serviceLayer/urls.py`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/service-layer/ap/open-grpos/?branch=OIL` | List open GRPOs (optional `vendor`, `search`) |
+| `GET /api/service-layer/ap/grpo/?branch=OIL&doc_num=` | One GRPO + its **open lines only** (also accepts `doc_entry`) |
+| `GET /api/service-layer/ap/vendor-tds/?branch=OIL&card_code=` | Vendor WT flag + active TDS code master |
+| `POST /api/service-layer/ap/invoice/?branch=OIL` | Create the A/P invoice |
+
+The POST takes **friendly fields, not a raw SAP payload** (unlike the older
+`SAPInvoiceCreateView`), and builds the SAP body server-side — so the client can
+never send a malformed `BaseType`/`BaseEntry`. Body:
+
+```json
+{"grpo_entry": 25771, "num_at_card": "INV/2026/01",
+ "doc_date": "2026-08-25", "due_date": "2026-09-15", "comments": "…",
+ "attachment_entry": 170738,
+ "tds": {"liable": true, "wt_code": "TDS"},
+ "lines": [{"base_line": 0, "quantity": 42, "unit_price": 5.0}]}
+```
+
+`quantity`/`unit_price` are **optional per line** — omit them and SAP copies the
+GRPO values. The frontend only sends them when the user actually changed the
+value. Posts as `SAP_APPROVER_USER` so SAP doesn't intercept into a draft.
+
+Frontend — `pages/Ap_Invoice_Entry.tsx`, `services/apInvoiceService.ts`,
+`styles/Ap_Invoice_Entry.css`, route `/Ap_Invoice_Entry` in `App.tsx`.
+
+### Access — the `tracker_ap` role
+
+AP entry is a tracker sub-role, so tracker admins manage these users with the
+same screen they already use (Tracker Config → Users).
+
+| Role | Sees AP Invoice Entry |
+|---|---|
+| `tracker_ap` | Yes — and nothing else; AP entry is their whole job |
+| `tracker_admin` | Yes, plus every tracker page (and manages AP users) |
+| `tracker_entry` / `tracker_user` | No |
+
+Defined once per side and mirrored: `ROLE_PAGE_MAP` in `tracker/permissions.py`
+(page key `Ap_Invoice_Entry`, enforced by `IsTrackerAP` on all four endpoints)
+and `TRACKER_ROLE_PAGES` in `src/config/pageAccess.ts` (drives the sidebar link,
+the in-page guard and the post-login landing page). `TRACKER_ROLE_NAMES` derives
+from `ROLE_PAGE_MAP`, so the tracker-admin user management picked the role up
+automatically.
+
+The role row itself is seeded by migration `tracker/0020_seed_tracker_ap_role`
+(roles are `users.UserRole` rows, so it must exist in every environment). Its
+reverse refuses to delete the role while any user still holds it.
+
+Note `Ap_Invoice_Entry` is also in the `LANDING_ORDER` list — it is the only page
+a `tracker_ap` user can open, so omitting it would land them on a forbidden page
+after login.
+
+**Editable vs copied** (the core UX rule — `.ap-edit` marks every editable
+control white, copied fields are grey and inert):
+
+| Editable by the user | Copied from the GRPO (read-only) |
+|---|---|
+| Vendor Invoice No. (`NumAtCard`) — required | Vendor (`CardCode`/name) |
+| Invoice Date, Payment Due Date | Item code & description |
+| Remarks (`Comments`) | Warehouse, Tax code, UoM |
+| TDS on/off + TDS code | Line totals, document total, VAT |
+| Per-line **Quantity** and **Unit Price** | Which GRPO / `BaseEntry` / `BaseLine` |
+| Whether to attach the GRPO's document | |
+
+Verified against `TEST_JIVO_OIL_HANADB` on 2026-08-25: the payload this code
+builds posted as DocEntry 49574 / DocNum 626084132 (total 253,110 = the GRPO's),
+with DocDate/DocDueDate/Comments/NumAtCard all applied and the GRPO closed.
+
+## 6. Notes for the OMS frontend
 
 - Users pick a **GRPO**, not lines: fetch it, show the open lines read-only, and
   let them edit only `NumAtCard`, dates, TDS and (where short-billing) qty/price.
@@ -180,7 +252,7 @@ physical file can be cleaned up, leaving the DB row orphaned.
 - Surface `-5002` as "attachment could not be stored" rather than a raw code; it
   is an infrastructure fault, not user error.
 
-## 6. Test scripts
+## 7. Test scripts
 
 Working scripts from the verification run (session scratchpad, `ap/`):
 `sl.py` (Service Layer client **pinned to TEST**, refuses any DB not prefixed
