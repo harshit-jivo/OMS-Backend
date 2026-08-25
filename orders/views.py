@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime
+from decimal import Decimal
 from functools import lru_cache
 from rest_framework.permissions import IsAdminUser
 import calendar
@@ -18,7 +19,7 @@ from django.utils import timezone
 from collections import defaultdict
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog
+from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog, SalesOrderLog
 from sap_sync.services.connection import SAPConnection
 from .models import Order, OrderStatus
 from .models import PartyProductAssignment
@@ -455,9 +456,64 @@ def _create_order_item(order, item, to_float, to_bool):
     return order_item
 
 
+def _normalize_warehouse_code(value):
+    """One warehouse for the whole order. SAP codes are short and upper-case."""
+    return str(value or '').strip().upper()[:20]
+
+
 def _normalize_order_type(value):
     order_type = str(value or 'PARTY').strip().upper()
-    return 'STAFF' if order_type == 'STAFF' else 'PARTY'
+    if order_type == 'STAFF':
+        return 'STAFF'
+    if order_type == 'DISTRIBUTOR':
+        return 'DISTRIBUTOR'
+    return 'PARTY'
+
+
+# Mart / distributor flow constants — kept in one place so the queue, the create
+# branch and the approve/reject endpoints never drift.
+DISTRIBUTOR_COMPANY = '3'                 # every distributor order is company 3 (Mart)
+DISTRIBUTOR_DISPATCH_ID = 2               # distributor orders dispatch from the factory
+DISTRIBUTOR_DISPATCH_NAME = 'FACTORY'
+DISTRIBUTOR_WAREHOUSE_CODE = 'GP-FGM'     # default warehouse for distributor orders
+MART_APPROVER_ROLES = {'mart_approval', 'admin'}
+
+# OrderStatus rows already present in the DB (managed there, not via migration):
+#   Mart Approval = 12 (where a submitted distributor order lands)
+#   Approved      = 6  (on approve)
+#   Rejected      = 7  (on reject)
+MART_STATUS_PENDING_ID = 12
+MART_STATUS_APPROVED_ID = 6
+MART_STATUS_REJECTED_ID = 7
+MART_STATUS_COMPLETED_ID = 9   # set after a successful SAP/HANA push (Phase 2)
+# Tab key (from the Mart Approval queue) -> the status id it maps to.
+MART_TAB_STATUS_IDS = {
+    'pending': MART_STATUS_PENDING_ID,
+    'approved': MART_STATUS_APPROVED_ID,
+    'rejected': MART_STATUS_REJECTED_ID,
+}
+
+
+def _mart_status(status_id):
+    """Fetch a Mart-flow status by id (rows are seeded in the DB, not migrations)."""
+    return OrderStatus.objects.filter(id=status_id).first()
+
+
+def _mart_approver_user():
+    """The user who works the Mart Approval queue. There is a single
+    'mart_approval' user in this deployment, so a freshly submitted distributor
+    order's pending Mart-Approval log row is stamped with that user instead of
+    NULL. Falls back to None if the role/user isn't present."""
+    # Match the role loosely (case / underscore / space insensitive) so a role
+    # stored as 'Mart Approval' or 'mart_approval' both resolve.
+    return (
+        User.objects
+        .filter(is_active=True)
+        .filter(Q(role__name__iexact='mart_approval') |
+                Q(role__name__iexact='mart approval'))
+        .order_by('id')
+        .first()
+    )
 
 
 def _normalize_template_number(value):
@@ -814,6 +870,10 @@ def _get_base_orders(user):
     """Scope orders by user role:
     - admin: all orders
     - manager: only orders created by this user
+    - distributor: only the distributor's own orders (same scope as manager, so
+      the dashboard shows all sections but only this distributor's data)
+    - mart_approval: all distributor (company-3 / Mart) orders — the Mart queue
+      this role manages end to end
     - auditor: orders currently in or previously routed through auditor review
     - approver: orders pending approval (NEED_APPROVAL, RATE_APPROVAL)
     - billing: orders currently in billing or already handled by this billing user
@@ -822,8 +882,10 @@ def _get_base_orders(user):
     role_name = getattr(role, 'name', '').lower() if role else ''
     if role_name == 'admin':
         return Order.objects.all()
-    if role_name == 'manager':
+    if role_name in ('manager', 'distributor'):
         return Order.objects.filter(created_by=user.id)
+    if role_name == 'mart_approval':
+        return Order.objects.filter(order_type='DISTRIBUTOR')
     if role_name == 'auditor':
         return Order.objects.filter(
             Q(status__code='AUDITOR_APPROVAL') |
@@ -1944,6 +2006,10 @@ class PartyProductsView(APIView):
                 'item_code': assignment.item_code,
                 'category': assignment.category,
                 'basic_rate': assignment.basic_rate,
+                # When this party-product assignment was last updated. The
+                # Distributor page uses it to block ordering products whose
+                # rate/assignment wasn't refreshed in the current month.
+                'updated_at': assignment.updated_at.isoformat() if assignment.updated_at else None,
                 'item_name': getattr(product, 'item_name', None),
                 'sal_factor2': getattr(product, 'sal_factor2', None),
                 'tax_rate': getattr(product, 'tax_rate', None),
@@ -2260,6 +2326,8 @@ class UpdateOrderView(APIView):
         order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
         order.company = data.get('company', order.company)
         order.po_number = data.get('po_number', order.po_number)
+        order.warehouse_code = _normalize_warehouse_code(
+            data.get('warehouse_code', order.warehouse_code))
         order.is_foc = data.get('is_foc', order.is_foc)
         order.delivery_date = data.get('delivery_date') or order.delivery_date
         order.remarks = order_remarks
@@ -2270,8 +2338,9 @@ class UpdateOrderView(APIView):
         needs_approval = False
         flagged_items = []
 
+        created_items = []
         for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
+            created_items.append(_create_order_item(order, item, _to_float, _to_bool))
 
             bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
@@ -2279,6 +2348,7 @@ class UpdateOrderView(APIView):
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
 
         order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
 
@@ -2369,6 +2439,7 @@ class CreateOrderView(APIView):
 
         # ── Edit mode: order_id in payload means update existing order ──────
         order_id = request.data.get('order_id')
+        user = request.user if request.user.is_authenticated else None
         if order_id:
             order = get_object_or_404(Order, id=int(order_id))
             previous_status = order.status
@@ -2399,26 +2470,38 @@ class CreateOrderView(APIView):
             order.dispatch_from_name = data.get('dispatch_from_name', order.dispatch_from_name)
             order.company = data.get('company', order.company)
             order.po_number = data.get('po_number', order.po_number)
+            order.warehouse_code = _normalize_warehouse_code(
+                data.get('warehouse_code', order.warehouse_code))
             order.is_foc = data.get('is_foc', order.is_foc)
             order.delivery_date = data.get('delivery_date') or order.delivery_date
             order.remarks = order_remarks
+
+            # Distributor edit (Mart Approval role adjusting the order): re-save the
+            # lines and keep it in the Mart flow — never route through billing.
+            if order_type == 'DISTRIBUTOR':
+                return self._finalize_distributor_order(
+                    order, items, user, _to_float, _to_bool,
+                    is_edit=True, previous_status=previous_status,
+                )
 
             order.items.all().delete()
 
             needs_approval = False
             flagged_items = []
+            created_items = []
             for item in items:
-                _create_order_item(order, item, _to_float, _to_bool)
+                created_items.append(_create_order_item(order, item, _to_float, _to_bool))
                 bp = _to_float(item.get('price_list_basic', 0))
                 mp = _to_float(item.get('basic_price', 0))
                 rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
+
             assign_rate_approvers(order)
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
-            user = request.user if request.user.is_authenticated else None
+          
             if order_type == 'STAFF':
                 order.status = previous_status or get_status('Order Created')
                 order.save()
@@ -2543,26 +2626,36 @@ class CreateOrderView(APIView):
             dispatch_from_name=data.get('dispatch_from_name', ''),
             company=data.get('company', ''),
             po_number=data.get('po_number', ''),
+            warehouse_code=_normalize_warehouse_code(data.get('warehouse_code')),
             is_foc=data.get('is_foc', False),
             total_amount=total_amount,
             status=get_status('Order Created'),
             created_by=user,
             delivery_date=data.get('delivery_date'),
             remarks=order_remarks
-            
+
         )
+
+        # ── Distributor (Mart / company 3) orders take their OWN path ────────
+        # They never enter the billing / auditor / rate-approval flow: they are
+        # simply recorded and parked at "Mart Approval" for the Mart Approval
+        # role to review. This keeps the entire billing flow below untouched.
+        if order_type == 'DISTRIBUTOR':
+            return self._finalize_distributor_order(order, items, user, _to_float, _to_bool)
 
         needs_approval = False
         flagged_items = []
 
+        created_items = []
         for item in items:
-            _create_order_item(order, item, _to_float, _to_bool)
+            created_items.append(_create_order_item(order, item, _to_float, _to_bool))
             bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
             rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
+
 
         OrderRateApproval.objects.filter(order=order).delete()
         OrderItemApprovalMapping.objects.filter(order=order).delete()
@@ -2627,7 +2720,71 @@ class CreateOrderView(APIView):
             'remarks': order.remarks or '',
             'message': f"Order sent to {next_status.name.lower()}" if next_status else 'Order created successfully',
         }, status=status.HTTP_201_CREATED)
-    
+
+    def _finalize_distributor_order(self, order, items, user, _to_float, _to_bool,
+                                    is_edit=False, previous_status=None):
+        """Save a distributor order's lines and park it at 'Mart Approval'.
+
+        Deliberately isolated from the billing/auditor/rate-approval machinery:
+        no rate approvers, no templates, no billing notifications. Company is
+        forced to 3 (Mart). Used by both the create and edit paths.
+        """
+        if is_edit:
+            order.items.all().delete()
+
+        # The distributor page now builds full, billing-shaped line items
+        # (brand / variety / type / pcs / boxes / ltrs / tax computed exactly
+        # like Add Sales), so a distributor order stores the SAME data as a
+        # normal order. Use the standard item creator for both create and edit.
+        for item in items:
+            _create_order_item(order, item, _to_float, _to_bool)
+
+        order.company = DISTRIBUTOR_COMPANY
+        # Distributor orders always dispatch from the factory.
+        order.dispatch_from_id = DISTRIBUTOR_DISPATCH_ID
+        order.dispatch_from_name = DISTRIBUTOR_DISPATCH_NAME
+        # Default every distributor order to GP-FGM, regardless of what the client
+        # sent, so the warehouse is always stored. An explicit choice (e.g. Mart
+        # Approval switching to DL-MP on the edit screen) is preserved.
+        if not (order.warehouse_code or '').strip():
+            order.warehouse_code = DISTRIBUTOR_WAREHOUSE_CODE
+        order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
+
+        # Land at the Mart Approval stage (status id 12). On a fresh submit we
+        # always move it there; on an approver edit we only reset it to pending
+        # if it isn't already an approved/rejected order.
+        mart_status = _mart_status(MART_STATUS_PENDING_ID)
+        if mart_status and (not is_edit or order.status_id == MART_STATUS_PENDING_ID):
+            order.status = mart_status
+        order.save()
+
+        if user:
+            mark_order_notifications_read(order, user)
+
+        if not is_edit:
+            # Two-row create log, mirroring the billing flow:
+            #   • 'Order Created' (action_id 1), performed_by = the distributor.
+            #   • the Mart Approval stage (action_id 12), performed_by = the
+            #     Mart Approval user — a "pending" marker showing who the order is
+            #     waiting on. The approve/reject step then adds its own row.
+            log_order_action(order, 'Order Created', user=user,
+                             remarks='Distributor order submitted')
+            if order.status:
+                log_order_action(order, order.status.name,
+                                 user=_mart_approver_user())
+
+        return Response({
+            'id': order.id,
+            'order_number': order.order_number,
+            'total_amount': str(order.total_amount),
+            'status': order.status.name if order.status else '',
+            'order_type': order.order_type,
+            'company': order.company,
+            'needs_approval': False,
+            'message': 'Distributor order updated successfully'
+            if is_edit else 'Distributor order submitted for Mart approval',
+        }, status=status.HTTP_200_OK if is_edit else status.HTTP_201_CREATED)
+
 
 class SchemeListView(APIView):
     permission_classes = [AllowAny]
@@ -3322,10 +3479,30 @@ class OrderDetailsByOrderView(APIView):
         serializer = OrderDetailSerializer(order)
         return Response(serializer.data)
 
+# Roles allowed to view other users' orders. Everyone else (e.g. distributors)
+# is restricted to their own orders regardless of the user_id in the URL.
+ORDERS_CROSS_USER_ROLES = {"admin", "manager", "billing", "approver", "auditor"}
+
+
 class OrdersByUserView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self,request, user_id):
+    def get(self, request, user_id):
+        role_name = getattr(getattr(request.user, "role", None), "name", "")
+        can_view_others = (
+            request.user.is_superuser
+            or request.user.is_staff
+            or str(role_name).strip().lower() in ORDERS_CROSS_USER_ROLES
+        )
+
+        # A distributor (or any non-privileged user) can only ever see the
+        # orders they themselves placed, never another user's.
+        if not can_view_others and request.user.id != user_id:
+            return Response(
+                {"detail": "You can only view your own orders."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         orders = (
             Order.objects.filter(created_by=user_id)
             .select_related("status", "created_by")
@@ -3458,9 +3635,297 @@ class RejectOrderView(APIView):
             'status': order.status,
         })
 
+
+# ── Mart Approval flow (distributor / company 3 orders) ──────────────────────
+def _is_mart_approver(user):
+    """Only the Mart Approval role (or admin) may work the Mart queue."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    if getattr(user, 'is_staff', False):
+        return True
+    role_name = getattr(getattr(user, 'role', None), 'name', '')
+    return str(role_name).strip().lower() in MART_APPROVER_ROLES
+
+
+def _serialize_mart_order(order, *, with_items=False):
+    """Compact serialization for the Mart queue list / detail."""
+    data = {
+        'id': order.id,
+        'order_number': order.order_number,
+        'order_type': order.order_type,
+        'card_code': order.card_code,
+        'card_name': order.card_name,
+        'company': order.company,
+        'total_amount': str(order.total_amount),
+        'status': order.status.code if order.status else '',
+        'status_id': order.status_id,
+        'status_display': order.status.name if order.status else '',
+        'is_pending': order.status_id == MART_STATUS_PENDING_ID,
+        'bill_to_id': order.bill_to_id,
+        'bill_to_address': order.bill_to_address,
+        'ship_to_id': order.ship_to_id,
+        'ship_to_address': order.ship_to_address,
+        'po_number': order.po_number,
+        'delivery_date': order.delivery_date,
+        'created_by': order.created_by.name if order.created_by else None,
+        'created_at': order.created_at,
+        'rejection_reason': order.rejection_reason or '',
+        'items_count': order.items.count(),
+    }
+    if with_items:
+        data['items'] = [{
+            'id': it.id,
+            'item_code': it.item_code,
+            'item_name': it.item_name,
+            'category': it.category,
+            'qty': str(it.qty),
+            'basic_price': str(it.basic_price),
+            'total': str(it.total),
+        } for it in order.items.all()]
+    return data
+
+
+class MartOrderListView(APIView):
+    """All distributor (company 3 / Mart) orders, for the Mart Approval queue.
+    Optional ?status=<code> filter (e.g. MART_APPROVAL)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized for the Mart queue'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        orders = Order.objects.filter(order_type='DISTRIBUTOR')
+        # Filter by the queue tab (pending/approved/rejected) -> status id.
+        tab = (request.query_params.get('tab') or '').strip().lower()
+        if tab == 'approved':
+            # The Approved tab shows both the approved-but-not-yet-in-SAP orders
+            # (SAP push failed, still 'Mart Approved') AND the ones that pushed
+            # successfully (now 'Completed'), so a successful order stays visible.
+            orders = orders.filter(
+                status_id__in=[MART_STATUS_APPROVED_ID, MART_STATUS_COMPLETED_ID]
+            )
+        elif tab in MART_TAB_STATUS_IDS:
+            orders = orders.filter(status_id=MART_TAB_STATUS_IDS[tab])
+
+        orders = (orders
+                  .select_related('status', 'created_by')
+                  .prefetch_related('items')
+                  .order_by('-created_at')
+                  .distinct())
+        return Response([_serialize_mart_order(o) for o in orders])
+
+
+class MartOrderDetailView(APIView):
+    """One distributor order with its items, for the approver's edit screen."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+        return Response(_serialize_mart_order(order, with_items=True))
+
+
+class MartApproveView(APIView):
+    """Approve a distributor order → 'Mart Approved'. (Phase 2 will also push the
+    approved order into SAP/HANA here.)"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+
+        approved = _mart_status(MART_STATUS_APPROVED_ID)
+        if not approved:
+            return Response({'error': f"Approved status (id {MART_STATUS_APPROVED_ID}) is not configured in the DB."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        order.status = approved
+        order.approved_by = request.user if request.user.is_authenticated else None
+        order.approved_at = datetime.now()
+        order.save()
+        log_order_action(order, approved.name, user=request.user, remarks='Mart order approved')
+
+        # Push the approved distributor order into SAP as a Sales Order. The
+        # company DB is resolved from order.company inside the service — a
+        # company-3 (Mart) order books into the Mart company DB.
+        from sap_sync.services.sync_service import SyncService
+
+        try:
+            service = SyncService(triggered_by=getattr(request.user, 'username', None))
+            sap_result = service.create_sales_order(order)
+        except Exception as exc:
+            logger.exception("SAP sales order creation failed for order %s", order.order_number)
+            # Approval stands (already saved); surface the SAP failure so the
+            # operator can retry the push without re-approving.
+            return Response(
+                {
+                    'message': f'Order {order.order_number} approved, but SAP sales order creation failed.',
+                    'order_number': order.order_number,
+                    'status': order.status.name,
+                    'sap_error': str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # SAP order created → move the order to Completed.
+        completed = _mart_status(MART_STATUS_COMPLETED_ID)
+        if completed:
+            order.status = completed
+            order.save(update_fields=['status'])
+            log_order_action(order, completed.name, user=request.user, remarks='SAP sales order created')
+
+        return Response({
+            'message': f'Order {order.order_number} approved and SAP sales order created',
+            'order_number': order.order_number,
+            'status': order.status.name,
+            'sap': {
+                'doc_entry': sap_result.get('DocEntry') if isinstance(sap_result, dict) else None,
+                'doc_num': sap_result.get('DocNum') if isinstance(sap_result, dict) else None,
+            },
+        })
+
+
+class MartRejectView(APIView):
+    """Reject a distributor order with a mandatory reason → 'Mart Rejected'."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        rejected = _mart_status(MART_STATUS_REJECTED_ID)
+        if not rejected:
+            return Response({'error': f"Rejected status (id {MART_STATUS_REJECTED_ID}) is not configured in the DB."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        order.status = rejected
+        order.rejected_by = request.user if request.user.is_authenticated else None
+        order.rejected_at = datetime.now()
+        order.rejection_reason = reason
+        order.save()
+        log_order_action(order, rejected.name, user=request.user, remarks=f'Rejected: {reason}')
+
+        return Response({
+            'message': f'Order {order.order_number} rejected',
+            'order_number': order.order_number,
+            'status': order.status.name,
+        })
+
+
+def _sales_order_sap_entries(order_ids):
+    """Map str(order_id) -> the latest SalesOrderLog for that distributor order.
+
+    A distributor order posts to SAP as a Sales Order (SalesOrderLog, keyed by
+    str(order.id)). We surface the newest attempt per order so the tracking page
+    can show DocEntry/DocNum on success or the SAP error on failure.
+    """
+    str_ids = [str(oid) for oid in order_ids]
+    mapping = {}
+    if not str_ids:
+        return mapping
+    logs = (
+        SalesOrderLog.objects
+        .filter(order_id__in=str_ids)
+        .order_by('order_id', '-created_at')
+        .values('order_id', 'status', 'sap_doc_entry', 'sap_doc_num',
+                'error_message', 'completed_at')
+    )
+    for log in logs:
+        # first row per order is the latest (queryset ordered by -created_at)
+        oid = log['order_id']
+        if oid not in mapping:
+            mapping[oid] = {
+                'status': log['status'],
+                'doc_entry': log['sap_doc_entry'],
+                'doc_num': log['sap_doc_num'],
+                'error_message': log['error_message'],
+                'completed_at': log['completed_at'],
+            }
+    return mapping
+
+
+class SalesOrderSapStatusView(APIView):
+    """Batch lookup of SAP Sales Order status for distributor orders.
+
+    The Distributor Order Tracking page calls this with the ids of the orders it
+    is showing so it can display DocEntry/DocNum (success) or the SAP error
+    (failure). Returns a map keyed by order id (as string)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        raw_ids = request.query_params.get('order_ids', '')
+        order_ids = [oid for oid in (i.strip() for i in raw_ids.split(',')) if oid.isdigit()]
+        return Response({'statuses': _sales_order_sap_entries(order_ids)})
+
+
+class MartResendSapView(APIView):
+    """Retry pushing an already-approved distributor order to SAP as a Sales
+    Order, without re-editing or re-approving it.
+
+    Used when the initial SAP push (at Mart approval) failed: the order is left
+    in 'Mart Approved' and never reached 'Completed'. Mart approver / admin only.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        if not _is_mart_approver(request.user):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
+
+        # A completed order already booked into SAP — nothing to retry.
+        if order.status_id == MART_STATUS_COMPLETED_ID:
+            return Response(
+                {'error': f'Order {order.order_number} is already completed in SAP.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from sap_sync.services.sync_service import SyncService
+
+        try:
+            service = SyncService(triggered_by=getattr(request.user, 'username', None))
+            sap_result = service.create_sales_order(order)
+        except Exception as exc:
+            logger.exception("SAP sales order retry failed for order %s", order.order_number)
+            return Response(
+                {
+                    'message': f'SAP sales order creation failed again for {order.order_number}.',
+                    'order_number': order.order_number,
+                    'sap_error': str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # SAP order created → move the order to Completed (mirrors MartApproveView).
+        completed = _mart_status(MART_STATUS_COMPLETED_ID)
+        if completed:
+            order.status = completed
+            order.save(update_fields=['status'])
+            log_order_action(order, completed.name, user=request.user,
+                             remarks='SAP sales order created (retry)')
+
+        return Response({
+            'message': f'Order {order.order_number} sent to SAP successfully',
+            'order_number': order.order_number,
+            'status': order.status.name,
+            'sap': {
+                'doc_entry': sap_result.get('DocEntry') if isinstance(sap_result, dict) else None,
+                'doc_num': sap_result.get('DocNum') if isinstance(sap_result, dict) else None,
+            },
+        })
+
+
 class OrderListView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         status_filter = request.query_params.get('status', None)
         user_id = request.query_params.get('user_id', None)

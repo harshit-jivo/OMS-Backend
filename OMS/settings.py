@@ -138,6 +138,7 @@ DATABASES = {
         'PORT': config('HANA_DB_PORT'),
         'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
         'BEVERAGE_SCHEMA': config('HANA_DB_BEVERAGE_NAME'),
+        'MART_SCHEMA': config('HANA_DB_MART_NAME', default=''),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     }
@@ -159,7 +160,18 @@ SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
 HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
 # Third company (Mart). Blank disables everything Mart-specific.
-HANA_MART_COMPANY_DB = config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB')
+# The .env defines this as HANA_DB_MART_NAME (matching HANA_DB_OIL_NAME /
+# HANA_DB_BEVERAGE_NAME); keep the legacy HANA_MART_COMPANY_DB name as a
+# fallback so older environments keep working.
+HANA_MART_COMPANY_DB = config(
+    'HANA_DB_MART_NAME',
+    default=config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB'),
+)
+# Profit center (OPRC.PrcCode) to stamp on Mart sales-order lines. Mart does not
+# use per-sub_group profit centers like Oil/Beverage, so this is a single code.
+# Blank (default) omits CostingCode entirely, letting SAP apply its own default
+# profit center (General Center). Set e.g. 'Centr_z' to force an explicit one.
+HANA_MART_COSTING_CODE = config('HANA_MART_COSTING_CODE', default='')
 
 # --- JSAP (budget approval) SQL Server -------------------------------------
 # Read-only source for budget-approval status of a SAP *draft* document.

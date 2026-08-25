@@ -9,14 +9,21 @@ from sap_sync.models import SalesOrderLog
 from .services.services import SalesOrderService
 from .utils import build_inventory_report, build_pending_dispatch, group_sales_orders
 
+# Deliberately narrower than hana.utils.VALID_BRANCHES, which includes MART.
+# Most Queries.* methods here have no MART arm and fall through to the OIL
+# schema, so letting MART past this gate globally would quietly serve Oil data
+# for a Mart request. Views whose query genuinely handles MART opt in by passing
+# `allowed=BRANCHES_WITH_MART`.
 VALID_BRANCHES = ('OIL', 'BEVERAGE')
+BRANCHES_WITH_MART = ('OIL', 'BEVERAGE', 'MART')
 
 
-def get_branch_or_error(request):
+def get_branch_or_error(request, allowed=VALID_BRANCHES):
     branch = request.query_params.get('branch')
-    if branch not in VALID_BRANCHES:
+    if branch not in allowed:
         return None, Response(
-            {"error": "branch is required and must be one of: OIL, BEVERAGE"},
+            {"error": "branch is required and must be one of: "
+                      + ", ".join(allowed)},
             status=status.HTTP_400_BAD_REQUEST
         )
     return branch, None
@@ -209,6 +216,21 @@ class GetCustomerDetailsView(APIView):
 
         details = SalesOrderService().getCustomerDetails(party_code, branch)
         return Response(details)
+
+class GetWarehousesView(APIView):
+    """Selectable warehouses, for the order-level warehouse picker.
+
+    MART is allowed here: Queries.get_warehouses resolves the Mart schema, and
+    Mart orders are the ones that actually pick a warehouse.
+    """
+
+    def get(self, request):
+        branch, error = get_branch_or_error(request, allowed=BRANCHES_WITH_MART)
+        if error:
+            return error
+
+        return Response(SalesOrderService().getWarehouses(branch))
+
 
 class GetWarehouseDetailsView(APIView):
     def get (self , request):

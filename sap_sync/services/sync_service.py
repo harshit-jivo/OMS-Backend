@@ -449,8 +449,71 @@ class SyncService:
     def _normalize_order_category(value):
         return str(value or "").strip().upper()
 
+    def _resolve_item_sub_group(self, item):
+        """The line's profit-center (sub_group). Prefer the value stored on the
+        order item; when blank, fall back to the synced product master
+        (sap_products) by item_code + category. Because MART products are stored
+        under category='MART', a Mart line resolves its sub_group against MART
+        products — exactly the way OIL/BEVERAGE lines do.
+        """
+        stored = str(getattr(item, "sub_group", "") or "").strip()
+        if stored:
+            return stored
+
+        item_code = str(getattr(item, "item_code", "") or "").strip()
+        if not item_code:
+            return ""
+
+        product_query = Product.objects.filter(item_code__iexact=item_code)
+        category = str(getattr(item, "category", "") or "").strip()
+        if category:
+            product_query = product_query.filter(category__iexact=category)
+        product = product_query.first()
+        return str(getattr(product, "sub_group", "") or "").strip() if product else ""
+
+    @staticmethod
+    def _resolve_address_code(address_id):
+        """SAP's ShipToCode / PayToCode is the CRD1 Address *name* (a short code,
+        e.g. 'SHIP1'), not the full address text. The order stores the
+        sap_party_addresses PK in ship_to_id / bill_to_id, so resolve the name
+        from there. Returns None when there's no id/match (SAP then uses the BP's
+        default address).
+        """
+        try:
+            address_id = int(address_id or 0)
+        except (TypeError, ValueError):
+            return None
+        if not address_id:
+            return None
+        return (
+            PartyAddress.objects.filter(id=address_id)
+            .values_list("address_name", flat=True)
+            .first()
+        ) or None
+
+    # Order.company == '3' means the Mart company (distributor orders). See
+    # DISTRIBUTOR_COMPANY in orders/views.py.
+    MART_COMPANY_CODE = "3"
+
     def resolve_company_db_for_order(self, order):
         default_company_db = settings.HANA_OIL_COMPANY_DB
+
+        # Company 3 (Mart / distributor) is a separate SAP company. Route it to
+        # the Mart CompanyDB based purely on the order's company code, before any
+        # item-category logic — a company-3 order always books into Mart.
+        order_company = str(getattr(order, "company", "") or "").strip()
+        if order_company == self.MART_COMPANY_CODE:
+            mart_company_db = getattr(settings, "HANA_MART_COMPANY_DB", "")
+            if mart_company_db:
+                return mart_company_db
+            logger.warning(
+                "Order %s is company 3 (Mart) but HANA_MART_COMPANY_DB is not "
+                "configured; falling back to default CompanyDB=%s",
+                getattr(order, "id", None),
+                default_company_db,
+            )
+            return default_company_db
+
         beverages_company_db = (
             getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or default_company_db
         )
@@ -477,6 +540,18 @@ class SyncService:
             return beverages_company_db
 
         return default_company_db
+
+    def resolve_warehouse_code_for_order(self, order, category):
+        """The warehouse every line of this order ships from.
+
+        The order carries one chosen warehouse for all its lines. Only when it
+        has none — orders placed before the picker existed — does the
+        per-category default in settings apply.
+        """
+        chosen = str(getattr(order, "warehouse_code", "") or "").strip()
+        if chosen:
+            return chosen
+        return self.resolve_warehouse_code_for_category(category)
 
     def resolve_warehouse_code_for_category(self, category):
         normalized_category = self._normalize_order_category(category)
@@ -950,11 +1025,18 @@ class SyncService:
                     return fallback.isoformat()
             return fallback.isoformat()
 
-        # The order can belong to either JIVO_OIL_HANADB or JIVO_BEVERAGES_HANADB;
-        # resolve which so the OPRC (costing code) lookup hits the right schema.
+        # The order can belong to the OIL, BEVERAGE or MART company; resolve which
+        # so the OPRC (costing code) lookup hits the right schema. Company '3' is
+        # the Mart company (distributor orders).
         company_db = self.resolve_company_db_for_order(order)
         beverages_company_db = getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or None
-        branch = "BEVERAGE" if (beverages_company_db and company_db == beverages_company_db) else "OIL"
+        order_company = str(getattr(order, "company", "") or "").strip()
+        if order_company == self.MART_COMPANY_CODE:
+            branch = "MART"
+        elif beverages_company_db and company_db == beverages_company_db:
+            branch = "BEVERAGE"
+        else:
+            branch = "OIL"
 
         sales_service = SalesOrderService()
         costing_code_cache = {}
@@ -990,6 +1072,10 @@ class SyncService:
                 costing_code_cache[prc_name] = resolved
             return costing_code_cache[prc_name]
 
+        # Mart lines don't resolve a profit center per sub_group (its OPRC has
+        # only the default General Center); use a single configured code, or none.
+        mart_costing_code = str(getattr(settings, "HANA_MART_COSTING_CODE", "") or "").strip()
+
         document_lines = []
 
         for item in order.items.all():
@@ -1002,8 +1088,23 @@ class SyncService:
             card_code = getattr(order, "card_code", "")
             item_code = getattr(item, "item_code", "")
             category = getattr(item, "category", "")
-            sub_group = getattr(item, "sub_group", "")
-            warehouse_code = self.resolve_warehouse_code_for_category(category)
+
+            # Prefer the item's stored sub_group; fall back to the product master
+            # by item_code + category (MART products for a Mart line).
+            sub_group = self._resolve_item_sub_group(item)
+
+            # CostingCode = the profit-center dimension SAP labels the "Variety"
+            # column in the Mart company (a mandatory line field there). For every
+            # company it resolves from the line's sub_group via OPRC — the Mart
+            # profit centers are named by sub_group (e.g. CANOLA/MUSTARD -> PrcCode
+            # CANOLA/MUSTARD). Mart may pin an explicit code via
+            # HANA_MART_COSTING_CODE when set.
+            if branch == "MART" and mart_costing_code:
+                line_costing_code = mart_costing_code
+            else:
+                line_costing_code = _resolve_costing_code(sub_group)
+
+            warehouse_code = self.resolve_warehouse_code_for_order(order, category)
             scheme_entries = _get_order_item_scheme_entries(
                 item,
                 card_code=card_code,
@@ -1021,10 +1122,8 @@ class SyncService:
                     "UnitPrice": item_unit_price,
                     "U_SchemeAgst": sub_group,
                 }
-                # Omitted entirely when unresolved — see _resolve_costing_code.
-                costing_code = _resolve_costing_code(sub_group)
-                if costing_code:
-                    line["CostingCode"] = costing_code
+                if line_costing_code:
+                    line["CostingCode"] = line_costing_code
                 if warehouse_code:
                     line["WarehouseCode"] = warehouse_code
                 document_lines.append(line)
@@ -1061,10 +1160,8 @@ class SyncService:
                         "UnitPrice": 0.0,
                         "U_SchemeAgst": sub_group,
                     }
-                    # Cached from the paid line above; omitted when unresolved.
-                    costing_code = _resolve_costing_code(sub_group)
-                    if costing_code:
-                        line["CostingCode"] = costing_code
+                    if line_costing_code:
+                        line["CostingCode"] = line_costing_code
                     if warehouse_code:
                         line["WarehouseCode"] = warehouse_code
                     document_lines.append(line)
@@ -1079,8 +1176,17 @@ class SyncService:
             "DocDueDate": due_date,
             "TaxDate": posting_date.isoformat(),
             "Comments": " ",
-            "ShipToCode": order.ship_to_address,
-            "PayToCode": order.bill_to_address,
+            # SAP wants the CRD1 Address *name* (a short code, max 50 chars), not
+            # the full address text. The order-entry page happens to store the
+            # name in ship_to_address/bill_to_address, so sending those worked --
+            # but the Distributor page stores the real street address there, and
+            # SAP rejects it with "Value too long in property 'PayToCode'".
+            # Resolving from the id is identical for party orders (the stored
+            # text already IS the name) and correct for Mart. Falls back to the
+            # stored text when the id resolves to nothing, so behaviour is
+            # unchanged wherever it cannot be resolved.
+            "ShipToCode": self._resolve_address_code(order.ship_to_id) or order.ship_to_address,
+            "PayToCode": self._resolve_address_code(order.bill_to_id) or order.bill_to_address,
             #=-===============================================================================
             # CHANGE AND MAP THE SALES PERSON
             #=-===============================================================================
@@ -1240,21 +1346,21 @@ class SyncService:
 
 
     def create_sales_order(self, order):
-       
-        quotation_payload = self.map_order_to_sap(order)
+
+        order_payload = self.map_order_to_sap(order)
         company_db = self.resolve_company_db_for_order(order)
 
         log = SalesOrderLog.objects.create(
             order_id=order.id,
             status='STARTED',
-            request_data=quotation_payload
+            request_data=order_payload
         )
 
         order_user = settings.SALES_ORDER_USER
         order_password = settings.SALES_ORDER_PASSWORD
 
         try:
-            self._assert_num_at_card_available(quotation_payload, company_db, 'ORDR')
+            self._assert_num_at_card_available(order_payload, company_db, 'ORDR')
 
             if (
                 not hasattr(self, 'sap_session')
@@ -1271,8 +1377,8 @@ class SyncService:
             print(f"SAP order URL: {url}")
             logger.warning("SAP order URL: %s", url)
 
-            print(quotation_payload)
-            response = self._post_with_ssl_fallback(url, quotation_payload)
+            print(order_payload)
+            response = self._post_with_ssl_fallback(url, order_payload)
             logger.info(
                 "SAP Orders response | status=%s | body=%s",
                 response.status_code,
@@ -1281,9 +1387,8 @@ class SyncService:
             if response.status_code == 201:
                 response_data = response.json()
 
-                # order.status = 6
-                order.save(update_fields=['status'])  
-               
+                # The order's status transition (→ Completed) is owned by the
+                # caller (MartApproveView); here we only record the SAP result.
                 order.sap_created = True
                 order.save(update_fields=['sap_created'])
 
