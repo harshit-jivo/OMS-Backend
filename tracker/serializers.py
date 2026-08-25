@@ -111,14 +111,48 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
         value = (value or '').strip()
         if not value:
             raise serializers.ValidationError('Invoice number is required.')
-        # all_objects: a soft-deleted invoice still reserves its number (the DB
-        # unique constraint covers deleted rows too), so check against every row.
-        qs = Invoice.all_objects.filter(invoice_number__iexact=value)
+        return value
+
+    def validate(self, attrs):
+        """Duplicate check, scoped to the vendor.
+
+        Object-level rather than field-level because the vendor is part of the
+        key, and a field validator only sees its own value. Mirrors the
+        `uniq_live_vendor_invoice_number` partial index exactly:
+
+          * LIVE rows only — a soft-deleted invoice releases its number
+            (deletion is capped at stage 6, so it was never saved in SAP or
+            paid, and re-entry is how a bad entry gets corrected);
+          * vendor key = party_code, falling back to party_name when the vendor
+            was hand-typed rather than picked from SAP;
+          * case-insensitive on both parts.
+        """
+        attrs = super().validate(attrs)
+
+        def field(name):
+            # On PATCH the field may be absent — fall back to the stored value.
+            if name in attrs:
+                return (attrs.get(name) or '').strip()
+            return (getattr(self.instance, name, '') or '').strip() if self.instance else ''
+
+        number, code, name = field('invoice_number'), field('party_code'), field('party_name')
+        if not number:
+            return attrs
+
+        qs = Invoice.objects.filter(invoice_number__iexact=number)
+        # Same fallback the index uses, so the two can never disagree.
+        if code:
+            qs = qs.filter(party_code__iexact=code)
+        else:
+            qs = qs.filter(party_code='', party_name__iexact=name)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('This invoice number already exists.')
-        return value
+            raise serializers.ValidationError({
+                'invoice_number': f'Invoice {number} already exists for '
+                                  f'{name or code}.',
+            })
+        return attrs
 
     class Meta:
         model = Invoice
