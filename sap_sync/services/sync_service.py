@@ -22,15 +22,6 @@ from hana.services.services import SalesOrderService
 logger = logging.getLogger(__name__)
 
 
-class DuplicateCustomerReference(Exception):
-    """The document's NumAtCard is already on another document for this BP.
-
-    Raised before posting so the caller gets the reference and the blocking
-    document number, instead of SAP's opaque "-5002 ... duplicated
-    customer/vendor reference number".
-    """
-
-
 def get_scheme_item_code_raw(scheme_id):
     if not scheme_id:
         return None
@@ -1053,16 +1044,10 @@ class SyncService:
         def _resolve_costing_code(prc_name):
             """Map a profit-center name (sub_group) to its SAP CostingCode (PrcCode).
 
-            Returns None when the name cannot be resolved, and the caller then
-            OMITS CostingCode from the line. Falling back to the raw name (as
-            this used to) is worse than sending nothing: a name over 8 chars is
-            rejected outright by SAP ("Value too long in property 'CostingCode'",
-            e.g. SUNFLOWER), and one *under* 8 chars is accepted and books the
-            line to a profit center that may not be the intended one. Never
-            raises -- an unresolvable name must not fail the whole mapping.
+            Falls back to the raw name if the lookup fails so mapping never crashes.
             """
             if not prc_name:
-                return None
+                return prc_name
             if prc_name not in costing_code_cache:
                 try:
                     resolved = sales_service.get_costing_code(prc_name, branch)
@@ -1074,11 +1059,11 @@ class SyncService:
                     resolved = None
                 if resolved is None:
                     logger.warning(
-                        "No active PrcCode found in OPRC dimension 1 for profit "
-                        "center %r (%s); sending the line with NO CostingCode.",
+                        "No PrcCode found in OPRC for profit center %r (%s); "
+                        "sending raw name as CostingCode.",
                         prc_name, branch,
                     )
-                costing_code_cache[prc_name] = resolved
+                costing_code_cache[prc_name] = resolved if resolved is not None else prc_name
             return costing_code_cache[prc_name]
 
         # Mart lines don't resolve a profit center per sub_group (its OPRC has
@@ -1162,13 +1147,6 @@ class SyncService:
                         "no free line will be sent.",
                         raw_scheme_id, getattr(item, "id", None),
                     )
-                    
-                if not scheme_item_codes:
-                    logger.warning(
-                        "Scheme %r on order item %s resolved to NO giveaway item; "
-                        "no free line will be sent.",
-                        raw_scheme_id, getattr(item, "id", None),
-                    )
 
                 for scheme_item_code in scheme_item_codes:
                     # A scheme whose giveaway IS the ordered item ("buy 3 boxes, get
@@ -1196,31 +1174,18 @@ class SyncService:
             "DocDate": posting_date.isoformat(),
             "DocDueDate": due_date,
             "TaxDate": posting_date.isoformat(),
-            "Comments": " ",
-            # SAP wants the CRD1 Address *name* (a short code, max 50 chars), not
-            # the full address text. The order-entry page happens to store the
-            # name in ship_to_address/bill_to_address, so sending those worked --
-            # but the Distributor page stores the real street address there, and
-            # SAP rejects it with "Value too long in property 'PayToCode'".
-            # Resolving from the id is identical for party orders (the stored
-            # text already IS the name) and correct for Mart. Falls back to the
-            # stored text when the id resolves to nothing, so behaviour is
-            # unchanged wherever it cannot be resolved.
-            "ShipToCode": self._resolve_address_code(order.ship_to_id) or order.ship_to_address,
-            "PayToCode": self._resolve_address_code(order.bill_to_id) or order.bill_to_address,
-            #=-===============================================================================
-            # CHANGE AND MAP THE SALES PERSON
-            #=-===============================================================================
-            
-            #=================================================================================
+            # Not mandatory — sent as null; SAP fills its own defaults.
+            "Comments": None,
+            # SAP expects the CRD1 Address *name* (short code), not the full
+            # address text — resolve it from the stored address id.
+            "ShipToCode": self._resolve_address_code(order.ship_to_id),
+            "PayToCode": self._resolve_address_code(order.bill_to_id),
+            # Salesperson is optional and not mapped from a table yet — send null.
+            "U_SALES_PERSON": None,
             "BPL_IDAssignedToInvoice": order.dispatch_from_id,
             "DocumentLines": document_lines,
         }
-        # Uppercased because SBO_SP_TransactionNotification rejects a document
-        # whose NumAtCard differs from its own uppercase ("Vendor Reff should be
-        # in Upper Case", error 1713256). Most references are numeric, where this
-        # is a no-op, but ~39% carry letters.
-        po_number = str(getattr(order, "po_number", "") or "").strip().upper()
+        po_number = str(getattr(order, "po_number", "") or "").strip()
         if po_number:
             payload["NumAtCard"] = po_number
 
@@ -1255,51 +1220,8 @@ class SyncService:
 
     # ---------------- CREATE SALES QUOTATION ---------------- #
 
-    def _branch_for_company_db(self, company_db):
-        """'OIL' or 'BEVERAGE' for a resolved company DB (the HANA query key)."""
-        beverages_company_db = getattr(settings, "HANA_COMPANY_DB_BEVERAGES", "") or None
-        return "BEVERAGE" if (beverages_company_db and company_db == beverages_company_db) else "OIL"
-
-    def _assert_num_at_card_available(self, payload, company_db, table):
-        """Fail before posting if this customer reference is already taken.
-
-        SAP rejects a duplicate with a bare "-5002 ... duplicated customer/vendor
-        reference number" that names neither the reference nor the document
-        holding it, which makes the real cause (usually a retry of a submission
-        that actually succeeded) hard to see. Checking first lets us say exactly
-        which document is in the way.
-
-        Scoped to one document type and one business partner -- see
-        Queries.get_duplicate_num_at_card for why a wider check would be wrong.
-        Never blocks on a lookup failure: HANA being unreachable must not stop a
-        posting that SAP would have accepted.
-        """
-        num_at_card = str(payload.get("NumAtCard") or "").strip()
-        card_code = payload.get("CardCode")
-        if not num_at_card or not card_code:
-            return
-
-        try:
-            existing = SalesOrderService().find_duplicate_num_at_card(
-                num_at_card, card_code, self._branch_for_company_db(company_db), table,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Could not pre-check NumAtCard %r for %s in %s: %s",
-                num_at_card, card_code, table, exc,
-            )
-            return
-
-        if existing:
-            doc_nums = ", ".join(str(row.get("DocNum")) for row in existing)
-            raise DuplicateCustomerReference(
-                f"Customer reference {num_at_card!r} is already used by {card_code} "
-                f"on {table} document(s) {doc_nums}. SAP will reject a duplicate. "
-                f"If this is a retry, that document is the one already created."
-            )
-
     def create_sales_quotation(self, order):
-
+       
         quotation_payload = self.map_order_to_sap(order)
         company_db = self.resolve_company_db_for_order(order)
 
@@ -1310,10 +1232,6 @@ class SyncService:
         )
 
         try:
-            # Before the login round trip: a duplicate reference is a certain
-            # rejection, and failing here names the document in the way.
-            self._assert_num_at_card_available(quotation_payload, company_db, 'OQUT')
-
             if (
                 not hasattr(self, 'sap_session')
                 or getattr(self, 'sap_company_db', None) != company_db
@@ -1381,8 +1299,6 @@ class SyncService:
         order_password = settings.SALES_ORDER_PASSWORD
 
         try:
-            self._assert_num_at_card_available(order_payload, company_db, 'ORDR')
-
             if (
                 not hasattr(self, 'sap_session')
                 or getattr(self, 'sap_company_db', None) != company_db

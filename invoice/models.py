@@ -17,6 +17,15 @@ class InvocieHistory(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.CharField(max_length=125 , null=True , blank=True)
 
+    # The device the action was taken from, resolved from the caller's
+    # X-Device-Id header and snapshotted as text (not FK'd) so the audit line
+    # still reads the same after that device is renamed or deactivated.
+    # Corroborating evidence only: device_id is client-reported telemetry, so it
+    # backs up "who approved this", it does not by itself prove it.
+    device_id = models.CharField(max_length=64, blank=True, default='')
+    device_name = models.CharField(max_length=150, blank=True, default='')
+
+
     class Meta:
         db_table = 'invoice_history'
         
@@ -36,13 +45,7 @@ class InvoiceLog(models.Model):
         ('POSTED_TO_SAP' , 'Posted to SAP'),
         ('CL_RAISED' , 'CL Raised')
     ]
-
-    # Statuses a reviewer may clear off the review screen. Everything else —
-    # APPROVED and POSTED_TO_SAP — is a decision already acted on downstream (a
-    # real SAP document, in the POSTED_TO_SAP case), so removing it would leave
-    # OMS disagreeing with SAP about what happened.
-    DELETABLE_STATUSES = ('PENDING', 'ERROR', 'REJECTED', 'EDITED', 'CL_RAISED')
-
+    
     so_number = models.CharField(max_length=100)
     party_name = models.CharField(max_length=255)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -74,22 +77,6 @@ class InvoiceLog(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='invoice_logs')
-
-    # Soft delete. The review screen hides these rows, but the log and its
-    # history survive: an invoice log is an audit record, and a reviewer
-    # clearing clutter must not be able to destroy the trail of who submitted
-    # what and why it was turned down. deleted_by is SET_NULL rather than
-    # CASCADE so removing a user account does not take the deleted rows with it.
-    is_deleted = models.BooleanField(default=False)
-    deleted_at = models.DateTimeField(null=True, blank=True)
-    deleted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='deleted_invoice_logs',
-    )
-    delete_reason = models.TextField(blank=True, null=True)
 
     class Meta:
         db_table = 'invoice_log'

@@ -9,7 +9,6 @@ import requests
 from django.conf import settings
 from django.db import transaction, IntegrityError
 from django.shortcuts import render
-from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -26,64 +25,8 @@ from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
-from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_item_name_map
 
 logger = logging.getLogger(__name__)
-
-
-def _wants_deleted(request):
-    """True when the caller explicitly asked to see soft-deleted entries.
-
-    Off by default, so every existing caller of the list endpoints keeps getting
-    only live rows without changing anything.
-    """
-    return str(request.query_params.get('include_deleted', '')).lower() in ('1', 'true', 'yes')
-
-
-# The two company databases an invoice can belong to, keyed by the product
-# category a user is assigned. MART lives in the oil company alongside OIL,
-# which is the same split `resolve_company_db_for_order` makes.
-CATEGORY_BRANCHES = {
-    'OIL': 'OIL',
-    'MART': 'OIL',
-    'BEVERAGES': 'BEVERAGE',
-}
-
-
-def branches_for_user(user):
-    """Which invoice branches this user may see, or None for "all of them".
-
-    An OIL user has no business reviewing beverage bills and vice versa, so the
-    review screens are scoped to the branches behind the user's own categories.
-
-    None — meaning unrestricted — is returned for superusers and for anyone with
-    no category assigned at all. That last case matters: admins and auditors are
-    set up without categories, and scoping them to nothing would empty the
-    review screen for the very people who have to work it.
-    """
-    if not user or not getattr(user, 'is_authenticated', False):
-        return None
-    if getattr(user, 'is_superuser', False):
-        return None
-
-    names = {
-        str(name or '').strip().upper()
-        for name in user.categories.values_list('category', flat=True)
-    }
-    primary = getattr(getattr(user, 'category', None), 'category', '')
-    if primary:
-        names.add(str(primary).strip().upper())
-
-    branches = {CATEGORY_BRANCHES[name] for name in names if name in CATEGORY_BRANCHES}
-    return branches or None
-
-
-def scope_logs_to_user(invoice_logs, request):
-    """Narrow an InvoiceLog queryset to the branches the caller may see."""
-    branches = branches_for_user(getattr(request, 'user', None))
-    if branches is None:
-        return invoice_logs
-    return invoice_logs.filter(branch__in=branches)
 
 
 
@@ -146,9 +89,8 @@ class InvoiceLogCreateView(APIView):
         except (InvoiceLog.DoesNotExist, ValueError, TypeError):
             return None
         # Only a rejected invoice can be reworked; anything else (approved, already
-        # posted to SAP, or removed from the review screen) must not be moved by a
-        # resubmission.
-        if source.status != 'REJECTED' or source.is_deleted:
+        # posted to SAP) must not be moved by a resubmission.
+        if source.status != 'REJECTED':
             return None
 
         source.status = 'EDITED'
@@ -176,17 +118,9 @@ class InvoicelogStatusUpdateView(APIView):
         except InvoiceLog.DoesNotExist:
             return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # A deleted entry is off the review screen; it must not be approvable,
-        # rejectable or postable to SAP until someone restores it.
-        if invoice_log.is_deleted:
-            return Response(
-                {'error': 'This invoice has been deleted. Restore it before changing its status.'},
-                status=status.HTTP_409_CONFLICT,
-            )
-
         new_status = request.data.get('status')
         user = request.data.get('user')
-
+        
         if new_status not in dict(InvoiceLog.STATUS_CHOICES):
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
         if new_status == 'REJECTED' and not request.data.get('rejection_reason'):
@@ -230,122 +164,8 @@ class InvoicelogStatusUpdateView(APIView):
         return Response({'message': 'Status updated successfully'}, status=status.HTTP_200_OK)
     
     
-class InvoiceLogDeleteView(APIView):
-    """Soft-delete a review entry, and restore one.
-
-    Only the statuses in ``InvoiceLog.DELETABLE_STATUSES`` may be removed —
-    an APPROVED or POSTED_TO_SAP log corresponds to a decision already acted on
-    (a real SAP document, in the posted case), so it stays on the screen.
-
-    Nothing is erased: the row is stamped and hidden, its history is untouched,
-    and a DELETED entry is appended to the timeline so the removal is itself
-    part of the audit trail.
-    """
-
-    def delete(self, request, pk):
-        try:
-            invoice_log = InvoiceLog.objects.get(pk=pk)
-        except InvoiceLog.DoesNotExist:
-            return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        # Idempotent: a double-click or a retry on a row the client has already
-        # dropped from its list must not read as a failure.
-        if invoice_log.is_deleted:
-            return Response(
-                {'message': 'Invoice already deleted', 'id': invoice_log.pk},
-                status=status.HTTP_200_OK,
-            )
-
-        if invoice_log.status not in InvoiceLog.DELETABLE_STATUSES:
-            return Response(
-                {
-                    'error': f'An invoice marked "{invoice_log.get_status_display()}" cannot be deleted.',
-                    'detail': (
-                        'Only '
-                        + ', '.join(InvoiceLog.DELETABLE_STATUSES)
-                        + ' entries can be removed from the review screen.'
-                    ),
-                    'status': invoice_log.status,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        reason = (request.data.get('delete_reason') or '').strip() or None
-
-        with transaction.atomic():
-            invoice_log.is_deleted = True
-            invoice_log.deleted_at = timezone.now()
-            invoice_log.deleted_by = request.user
-            invoice_log.delete_reason = reason
-            invoice_log.save(
-                update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'delete_reason']
-            )
-            # Status on the log itself is left alone — the entry was PENDING or
-            # ERROR when it was removed and that is what the record should say.
-            # The history row carries DELETED so the timeline shows the removal,
-            # with the reason in the same field a rejection reason is archived in.
-            InvocieHistory.objects.create(
-                invoice_log=invoice_log,
-                so_number=invoice_log.so_number,
-                party_name=invoice_log.party_name,
-                total_amount=invoice_log.total_amount,
-                status='DELETED',
-                rejection_reason=reason,
-                error_message=invoice_log.error_message,
-                invoice_payload=invoice_log.invoice_payload,
-                created_by=request.user,
-            )
-
-        return Response(
-            {
-                'message': 'Invoice deleted successfully',
-                'id': invoice_log.pk,
-                'deleted_at': invoice_log.deleted_at,
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    def post(self, request, pk):
-        """Restore a soft-deleted entry — the undo for a mistaken delete."""
-        try:
-            invoice_log = InvoiceLog.objects.get(pk=pk)
-        except InvoiceLog.DoesNotExist:
-            return Response({'error': 'Invoice log not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        if not invoice_log.is_deleted:
-            return Response(
-                {'message': 'Invoice is not deleted', 'id': invoice_log.pk},
-                status=status.HTTP_200_OK,
-            )
-
-        with transaction.atomic():
-            invoice_log.is_deleted = False
-            invoice_log.deleted_at = None
-            invoice_log.deleted_by = None
-            invoice_log.delete_reason = None
-            invoice_log.save(
-                update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'delete_reason']
-            )
-            InvocieHistory.objects.create(
-                invoice_log=invoice_log,
-                so_number=invoice_log.so_number,
-                party_name=invoice_log.party_name,
-                total_amount=invoice_log.total_amount,
-                status='RESTORED',
-                rejection_reason=invoice_log.rejection_reason,
-                error_message=invoice_log.error_message,
-                invoice_payload=invoice_log.invoice_payload,
-                created_by=request.user,
-            )
-
-        return Response(
-            {'message': 'Invoice restored successfully', 'id': invoice_log.pk},
-            status=status.HTTP_200_OK,
-        )
-
-
 class InvoiceLogListView(APIView):
-
+    
   def get(self, request):
     inv_status = request.query_params.get('status')
     warehouse = request.query_params.get('whs')
@@ -361,13 +181,6 @@ class InvoiceLogListView(APIView):
         .filter(warehouse=warehouse)
     )
 
-    # An OIL user sees oil bills, a beverage user sees beverage bills.
-    invoice_logs = scope_logs_to_user(invoice_logs, request)
-
-    # Soft-deleted entries are off the review screen unless asked for by name.
-    if not _wants_deleted(request):
-        invoice_logs = invoice_logs.filter(is_deleted=False)
-
     if inv_status:
         invoice_logs = invoice_logs.filter(status=inv_status)
 
@@ -377,10 +190,7 @@ class InvoiceLogListView(APIView):
     serializer = InvoiceLogSerializer(
         invoice_logs,
         many=True,
-        context={
-            FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs),
-            ITEM_NAME_CONTEXT_KEY: build_item_name_map(invoice_logs),
-        },
+        context={FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs)},
     )
     return Response(serializer.data)
 
@@ -462,9 +272,7 @@ class InvoiceRefLogCreateView(CreateAPIView):
 
 
 class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
-    # Deleted entries are excluded rather than merely hidden: editing one would
-    # write a history entry against a log nobody can see.
-    queryset = InvoiceLog.objects.filter(is_deleted=False)
+    queryset = InvoiceLog.objects.all()
     serializer_class = InvoiceLogSerializer
     lookup_field = 'id'
 
@@ -526,15 +334,6 @@ class CreditLimitRequestView(APIView):
             return Response(
                 {'error': f'No invoice log found with id {invoice_log_id}.'},
                 status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Raising a credit-limit document in JSAP for an invoice that has been
-        # removed from the review screen would leave a real approval request
-        # pointing at nothing.
-        if invoice_log.is_deleted:
-            return Response(
-                {'error': 'This invoice has been deleted. Restore it before raising a credit-limit request.'},
-                status=status.HTTP_409_CONFLICT,
             )
 
         # credit_limit_logs is keyed by invoice_log_id (one request per invoice).
@@ -690,13 +489,10 @@ class GetPrintReport(APIView):
     # Characters Windows/macOS refuse in a filename, plus control chars.
     _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
-    # Each company is rendered through its own path on the Crystal service,
-    # which maps it to that company's ODBC DSN and HANA schema.
-    # 'api/billprint/{DocEntry}' (no company) is the service's legacy OIL route.
+    # Each company has its own Crystal report, reached through its own path.
     _CRYSTAL_PATHS = {
         'OIL': 'api/billprint',
         'BEVERAGE': 'api/billprint/bev',
-        'MART': 'api/billprint/mart',
     }
 
     @classmethod
@@ -718,11 +514,9 @@ class GetPrintReport(APIView):
         # is resolved against and the Crystal path the PDF is rendered from.
         # Defaults to OIL so existing callers keep working unchanged.
         branch = normalize_branch(request.query_params.get('branch'))
-        if branch is None or branch not in self._CRYSTAL_PATHS:
-            return Response(
-                {'error': 'branch must be one of: '
-                          + ', '.join(sorted(self._CRYSTAL_PATHS))},
-                status=status.HTTP_400_BAD_REQUEST)
+        if branch is None:
+            return Response({'error': 'branch must be one of: OIL, BEVERAGE'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         # The caller may already know the internal OINV key (the review screen
         # keeps it from the SAP post response). Using it skips the DocNum ->
@@ -778,9 +572,6 @@ class InvoiceLogListwoWhsView(APIView):
     # select_related/prefetch_related keep the lineage fields on the serializer
     # from costing a query per row.
     invoice_logs = InvoiceLog.objects.select_related('supersedes').prefetch_related('superseded_by')
-    invoice_logs = scope_logs_to_user(invoice_logs, request)
-    if not _wants_deleted(request):
-        invoice_logs = invoice_logs.filter(is_deleted=False)
     if inv_status:
         invoice_logs = invoice_logs.filter(status=inv_status)
 
@@ -788,147 +579,6 @@ class InvoiceLogListwoWhsView(APIView):
     serializer = InvoiceLogSerializer(
         invoice_logs,
         many=True,
-        context={
-            FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs),
-            ITEM_NAME_CONTEXT_KEY: build_item_name_map(invoice_logs),
-        },
+        context={FG_STOCK_CONTEXT_KEY: build_fg_stock_map(invoice_logs)},
     )
     return Response(serializer.data)
-
-class UsedSalesOrdersView(APIView):
-    """Which sales orders already appear on an invoice log.
-
-    The Sales Invoice screen lists a customer's open SOs from SAP, which has no
-    idea an OMS invoice is already in flight against one — SAP only closes the
-    order once the invoice actually posts, so a second user can pick the same SO
-    and invoice it twice. This is what lets the picker mark those SOs.
-
-    `so_number` holds the comma-joined DocNums of every line on the log, so it
-    is split back out here rather than matched as a string.
-
-    Rejected and soft-deleted logs are left out: neither blocks re-invoicing, so
-    flagging them would train people to ignore the badge.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    BLOCKING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
-
-    def get(self, request):
-        logs = (
-            InvoiceLog.objects
-            .filter(is_deleted=False, status__in=self.BLOCKING_STATUSES)
-            .order_by('-created_at')
-            .values('id', 'so_number', 'status', 'sap_doc_num', 'created_at')
-        )
-
-        card_code = (request.query_params.get('card_code') or '').strip()
-        branch = (request.query_params.get('branch') or '').strip()
-        if branch:
-            logs = logs.filter(branch=branch)
-
-        used = {}
-        for log in logs:
-            for raw in str(log['so_number'] or '').split(','):
-                so_number = raw.strip()
-                if not so_number or so_number in used:
-                    continue
-                # Ordered newest first, so the first row wins — the most recent
-                # attempt is the one worth showing.
-                used[so_number] = {
-                    'so_number': so_number,
-                    'log_id': log['id'],
-                    'status': log['status'],
-                    'sap_doc_num': log['sap_doc_num'] or '',
-                    'created_at': log['created_at'],
-                }
-
-        return Response({
-            'success': True,
-            'card_code': card_code,
-            'data': list(used.values()),
-            'total': len(used),
-        })
-
-
-class ReservedBatchesView(APIView):
-    """How much of each batch an in-flight invoice log has already committed.
-
-    SAP does not know a batch is spoken for until the invoice actually posts, so
-    the batch picker keeps offering that stock and two drafts happily allocate
-    the same pieces. This covers exactly that window.
-
-    A QUANTITY per batch, not a flag: one batch holds thousands of pieces and is
-    normally split across many invoices, so the caller subtracts what is held
-    and keeps the rest usable. Treating a batch as taken outright meant twenty
-    pieces on someone else's draft locked the whole batch.
-
-    Keyed by item and warehouse as well as batch number: the same batch number
-    can exist for a different item, and holding it everywhere would block stock
-    nothing has claimed.
-
-    A REJECTED log releases its batches — that invoice is not going to post, so
-    its stock is free again. Soft-deleted logs release theirs for the same
-    reason.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    # Statuses that have NOT reached SAP. POSTED_TO_SAP is deliberately absent:
-    # once the invoice posts, SAP has already taken the stock out of the batch,
-    # so OIBT reports the reduced quantity. Holding it here as well would
-    # subtract the same pieces twice and make a batch look emptier than it is --
-    # harmless when a hold merely hid the batch, wrong now that the quantity is
-    # netted off. This endpoint exists only for the window before SAP knows.
-    HOLDING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED')
-
-    def get(self, request):
-        logs = (
-            InvoiceLog.objects
-            .filter(is_deleted=False, status__in=self.HOLDING_STATUSES)
-            .order_by('-created_at')
-        )
-
-        branch = normalize_branch(request.query_params.get('branch'), default=None)
-        if branch:
-            logs = logs.filter(branch=branch)
-
-        # Scoped like the review screens, so a beverage user is not blocked by
-        # an oil draft they cannot even see.
-        logs = scope_logs_to_user(logs, request)
-
-        reserved = {}
-        for log in logs.values('id', 'status', 'invoice_payload'):
-            for line in ((log['invoice_payload'] or {}).get('DocumentLines') or []):
-                if not isinstance(line, dict):
-                    continue
-                item_code = str(line.get('ItemCode') or '').strip().upper()
-                warehouse = str(line.get('WarehouseCode') or '').strip().upper()
-                for batch in (line.get('BatchNumbers') or []):
-                    if not isinstance(batch, dict):
-                        continue
-                    number = str(batch.get('BatchNumber') or '').strip()
-                    if not (item_code and number):
-                        continue
-                    key = (item_code, warehouse, number.upper())
-                    entry = reserved.get(key)
-                    if entry is None:
-                        entry = {
-                            'item_code': item_code,
-                            'warehouse_code': warehouse,
-                            'batch_number': number,
-                            'quantity': 0.0,
-                            'log_id': log['id'],
-                            'status': log['status'],
-                        }
-                        reserved[key] = entry
-                    try:
-                        entry['quantity'] += float(batch.get('Quantity') or 0)
-                    except (TypeError, ValueError):
-                        pass
-
-        return Response({
-            'success': True,
-            'data': list(reserved.values()),
-            'total': len(reserved),
-        })

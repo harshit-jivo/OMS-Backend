@@ -11,30 +11,6 @@ class SalesOrderService():
 
         return result
 
-    def getInventoryReport(self, branch, whs_codes=None):
-        with HANAConnection() as conn:
-            query = Queries.get_inventory_report(branch, whs_codes)
-            result = conn.execute(query)
-
-        return result
-
-    def getPendingDispatch(self, branch, from_date=None, to_date=None):
-        """Open sales-order lines and the invoices raised against their orders.
-
-        Both queries ride on one HANA connection: they are two halves of the
-        same report, and opening a second connection for the invoice half would
-        double the connect cost for no gain.
-        """
-        with HANAConnection() as conn:
-            lines = conn.execute(
-                Queries.get_pending_dispatch(branch, from_date, to_date)
-            )
-            invoices = conn.execute(
-                Queries.get_order_invoices(branch, from_date, to_date)
-            )
-
-        return lines, invoices
-
     def syncSalesOrder(self, party_code,branch):
         with HANAConnection() as conn:
             query = Queries.get_sales_orders_for_party(party_code,branch)

@@ -12,7 +12,7 @@ from tracker.models import (
     Branch, Category, GstRate, GstType, InvoiceMode, Stage, Unit,
 )
 
-# --- The flow (Bilty/GRPO merged with Tiwari ji receiving) ---
+# --- The 7-stage flow (Bilty/GRPO merged with Tiwari ji receiving) ---
 STAGES = [
     dict(code='entry',        name='Invoice Entry',      order=1,
          status_choices=[],                                   requires_status=False,

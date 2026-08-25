@@ -2271,7 +2271,7 @@ class PartyProductsView(APIView):
                 # Distributor page uses it to block ordering products whose
                 # rate/assignment wasn't refreshed in the current month.
                 'updated_at': assignment.updated_at.isoformat() if assignment.updated_at else None,
-                'item_name': getattr(product, 'item_name', None),
+                'item_name': item_name,
                 'sal_factor2': getattr(product, 'sal_factor2', None),
                 'tax_rate': getattr(product, 'tax_rate', None),
                 'sal_pack_unit': getattr(product, 'sal_pack_unit', None),
@@ -2617,6 +2617,7 @@ class UpdateOrderView(APIView):
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
 
+        _apply_engine_schemes(order, items, created_items)
 
         order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
 
@@ -2766,6 +2767,7 @@ class CreateOrderView(APIView):
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
 
+            _apply_engine_schemes(order, items, created_items)
             assign_rate_approvers(order)
 
             order.total_amount = sum(_to_float(item.get('total', 0)) for item in items)
@@ -2924,6 +2926,7 @@ class CreateOrderView(APIView):
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
 
+        _apply_engine_schemes(order, items, created_items)
 
         OrderRateApproval.objects.filter(order=order).delete()
         OrderItemApprovalMapping.objects.filter(order=order).delete()
