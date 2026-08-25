@@ -7,11 +7,28 @@ invoice dict plus a resolved {HSNEntry: hsn_code} map and returns the IRN payloa
 The SAP fetch + HSN resolution live in `einvoice.sap` so this stays testable.
 
 Field sources (see docs/NIC_EINVOICE_EWAYBILL_REFERENCE.md §5, §10):
-  SellerDtls  <- EWayBillDetails.BillFrom* / DispatchFrom* (+ VATRegNum fallback)
+  SellerDtls  <- VATRegNum (issuing branch GSTIN) + EWayBillDetails.DispatchFrom*
   BuyerDtls   <- EWayBillDetails.BillTo*  + AddressExtension.BillTo* / PlaceOfSupply
   ShipDtls    <- EWayBillDetails.ShipTo*  (only when Ship-to GSTIN differs from buyer)
-  ItemList    <- DocumentLines (HSN via IndiaHsn, IGST vs CGST+SGST by jurisdiction)
+
+The buyer/ship-to GSTINs are read straight off EWayBillDetails here. SAP leaves
+BillToGSTIN as the literal "URP" when the document was added without its
+INV12."BpGSTN" stamp, and this Service Layer version has no ShipToGSTIN property
+at all, so einvoice.sap.normalize_buyer_gstin fills both from the BP address
+master at fetch time — matched on the document's own PayToCode/ShipToCode, the
+same join the bill print and the GSTR-1 extracts use. Mapping a raw SAP dict
+without that repair still works; it just yields URP (B2C_NOT_ELIGIBLE) and no
+ShipDtls.
+  ItemList    <- DocumentLines (HSN via IndiaHsn, IGST vs CGST+SGST per SAP tax code)
   ValDtls     <- summed over items
+
+The seller GSTIN comes from the document's own `VATRegNum` — the registration of
+the branch (BPL) that issued the invoice — NOT from EWayBillDetails.BillFromGSTIN.
+SAP fills the BillFrom* block from the MAIN business place, so on a branch-to-branch
+document (customer = another registration of the same legal entity) it echoes the
+RECIPIENT's GSTIN and the invoice is rejected as NIC 2211 "supplier and recipient
+GSTIN must not be the same". einvoice.sap.normalize_seller_branch repairs the whole
+block at fetch time; the fallbacks here keep a raw SAP dict mapping correctly too.
 
 NIC caps Addr1/Addr2 at 100 chars each, so long dispatch addresses are split
 across Addr1 + Addr2 (error 5002 otherwise).
@@ -88,6 +105,35 @@ def _int_or_none(v):
         return None
 
 
+def gstin(v):
+    """Normalise a GSTIN, or None when the value is not one (15 chars, numeric
+    state prefix). Lets the caller prefer one SAP source over another safely."""
+    v = str(v or "").strip().upper()
+    return v if len(v) == 15 and v[:2].isdigit() else None
+
+
+def _sap_tax_kind(lines):
+    """'INTER' when SAP posted the document under IGST, 'INTRA' when under
+    CGST+SGST, None when it carries no tax code.
+
+    SAP's own tax codes are authoritative for the jurisdiction: comparing the
+    seller state against the place of supply silently produces CGST+SGST on a
+    document SAP taxed as IGST whenever the seller state is misread (see the
+    BillFromGSTIN note in the module docstring).
+    """
+    codes = []
+    for ln in lines:
+        codes.append(str(ln.get("TaxCode") or "").upper())
+        for j in (ln.get("LineTaxJurisdictions") or []):
+            codes.append(str(j.get("JurisdictionCode") or "").upper())
+    if any("IGST" in c for c in codes):
+        return "INTER"
+    # SAP names the paired code 'CG+SG@18' and the jurisdictions 'CGST@9'/'SGST@9'.
+    if any("CGST" in c or "SGST" in c or "CG+SG" in c for c in codes):
+        return "INTRA"
+    return None
+
+
 def _line_tax_inr(ln):
     """Line tax in INR (system currency), summed from LineTaxJurisdictions.
     Used for foreign-currency export invoices where TaxTotal is in the doc currency."""
@@ -116,7 +162,11 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None) -> dict:
     axe = sap_invoice.get("AddressExtension") or {}
     lines = sap_invoice.get("DocumentLines") or []
 
-    seller_state = ewb.get("BillFromStateGSTCode") or (sap_invoice.get("VATRegNum") or "")[:2]
+    # The invoice's own VATRegNum is the GSTIN of the branch that issued it and
+    # wins over EWayBillDetails.BillFromGSTIN, which SAP fills from the main
+    # business place (module docstring). The state always follows the GSTIN.
+    seller_gstin = gstin(sap_invoice.get("VATRegNum")) or gstin(ewb.get("BillFromGSTIN"))
+    seller_state = seller_gstin[:2] if seller_gstin else ewb.get("BillFromStateGSTCode")
     buyer_state = ewb.get("BillToStateGSTCode")
 
     # Export detection: a non-IN Bill-to country. Exports are always inter-state
@@ -130,7 +180,13 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None) -> dict:
     use_sc = is_export and doc_currency != "INR"
 
     pos_code = "96" if is_export else (buyer_state or seller_state)
-    intra = (not is_export) and str(seller_state) == str(pos_code)
+    # Follow the tax SAP actually posted; only guess from the states when the
+    # lines carry no tax code at all.
+    tax_kind = None if is_export else _sap_tax_kind(lines)
+    if tax_kind:
+        intra = tax_kind == "INTRA"
+    else:
+        intra = (not is_export) and str(seller_state) == str(pos_code)
 
     item_list = []
     ass_total = cgst_total = sgst_total = igst_total = tot_inv = 0.0
@@ -180,7 +236,23 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None) -> dict:
     else:
         sup_typ = "B2B"
 
-    seller_a1, seller_a2 = _split_addr(ewb.get("DispatchFromAddress1"))
+    # DispatchFrom* belongs to the same registration as BillFromGSTIN, so it is
+    # only usable once its state agrees with the seller GSTIN — sending a
+    # wrong-state address under a correct GSTIN is rejected by NIC (2258 state
+    # mismatch / 2231 PIN does not belong to the state). Dropping the address
+    # instead surfaces a FIELD_REQUIRED from the pre-submit validator, which is a
+    # far more useful failure than a plausible-looking wrong one.
+    disp_state = str(ewb.get("DispatchFromStateGSTCode") or "").zfill(2)
+    if seller_state and disp_state and disp_state != str(seller_state).zfill(2):
+        seller_a1 = seller_a2 = seller_pin = None
+        seller_loc = _loc(state_code=seller_state)
+    else:
+        seller_a1, seller_a2 = _split_addr(ewb.get("DispatchFromAddress1"))
+        # No ShipToCity fallback here: that is the RECIPIENT's city and would put
+        # the seller in the wrong state.
+        seller_loc = _loc(ewb.get("DispatchFromPlace"), state_code=seller_state)
+        seller_pin = _int_or_none(ewb.get("DispatchFromZipCode"))
+
     buyer_a1, buyer_a2 = _split_addr(
         axe.get("BillToBlock") or axe.get("BillToAddress2") or axe.get("BillToStreet")
         or sap_invoice.get("Address"))
@@ -210,11 +282,11 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None) -> dict:
         },
         "SellerDtls": _party(
             ("Gstin", "LglNm", "Addr1", "Addr2", "Loc", "Pin", "Stcd"),
-            (ewb.get("BillFromGSTIN") or sap_invoice.get("VATRegNum"),
+            (seller_gstin,
              _clean(ewb.get("BillFromName")),
              seller_a1, seller_a2,
-             _loc(ewb.get("DispatchFromPlace"), axe.get("ShipToCity"), state_code=seller_state),
-             _int_or_none(ewb.get("DispatchFromZipCode")),
+             seller_loc,
+             seller_pin,
              str(seller_state) if seller_state else None)),
         "BuyerDtls": _party(
             ("Gstin", "LglNm", "Pos", "Addr1", "Addr2", "Loc", "Pin", "Stcd"),
