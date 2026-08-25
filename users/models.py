@@ -53,12 +53,19 @@ class PartyProductAssignment(models.Model):
     is_active = models.BooleanField(default=True)
     is_scheme = models.BooleanField(default=False)
 
-    # Combo packs ("COLD PRESS 5 LTR + EXTRA LIGHT OLIVE 1 LTR 4 PCS") ship a
-    # second product free of cost. `free_item_code` names that product; adding
-    # the combo to a sales order auto-appends a zero-priced line for it.
-    # `free_qty_per_unit` is how many free units ride along per combo unit —
-    # left blank it falls back to the piece count parsed out of the segment
-    # after the "+" in the combo's item name.
+    # Combo packs ("COLD PRESS 5 LTR + EXTRA LIGHT OLIVE 1 LTR 4 PCS") are a
+    # wrapper around two real products: the paid half before the "+" and the
+    # free half after it. Both are mapped explicitly on the Combo Mapping page
+    # rather than parsed out of the name -- the names are inconsistent enough
+    # that guessing gets it wrong.
+    #
+    # Ordering a mapped combo puts BOTH halves on the order as separate lines
+    # (parent priced, free at zero) and the combo's own item_code never reaches
+    # SAP. An unmapped combo still behaves the old way: the combo line itself.
+    #
+    # `free_qty_per_unit` is how many free units ride along per combo unit --
+    # left blank it falls back to DEFAULT_COMBO_FREE_QTY_PER_UNIT.
+    parent_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     free_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     free_qty_per_unit = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 

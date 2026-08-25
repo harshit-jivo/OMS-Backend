@@ -174,6 +174,53 @@ def get_party_combo_component_item_codes(card_code, item_name, category=None, ex
     return item_codes
 
 
+def _resolve_combo_parent_item_code(item):
+    """The paid product a mapped combo bills as, or None.
+
+    A combo pack ("A + B") is a wrapper around two real products. OMS keeps the
+    combo itself on the order -- it is what the customer bought, what the order
+    history shows, and what scheme triggers match on -- while SAP is sent the
+    products the pack actually consists of. Swapping the code here, at the
+    boundary, is the only place that needs to know the two representations
+    differ.
+
+    Quantity and price are deliberately untouched: the customer agreed the
+    combo's rate, so the parent line carries it and the SAP document total still
+    matches the order.
+
+    Returns None when the combo has no parent mapped, in which case its own code
+    goes to SAP exactly as before -- so an unmapped combo is unaffected.
+
+    Gated on the "+" in the stored line name so an order without a combo never
+    queries the mapping table: this runs per line on every SAP post, and
+    map_order_to_sap is otherwise pure for orders that carry no combo.
+    """
+    if "+" not in str(getattr(item, "item_name", "") or ""):
+        return None
+
+    code = str(getattr(item, "item_code", "") or "").strip()
+    if not code:
+        return None
+    category = getattr(item, "category", "")
+
+    mapped = PartyProductAssignment.objects.filter(
+        item_code=code, is_active=True,
+    ).exclude(parent_item_code__isnull=True).exclude(parent_item_code="")
+
+    # A combo maps to the same two products for every party, so any row will do.
+    # Prefer the line's own category, then fall back across categories the same
+    # way the order path's donor lookup does.
+    parent = None
+    if category:
+        parent = mapped.filter(category=category).values_list(
+            "parent_item_code", flat=True).first()
+    if not parent:
+        parent = mapped.values_list("parent_item_code", flat=True).first()
+
+    parent = str(parent or "").strip()
+    return parent or None
+
+
 def print_sap_payload(label, payload):
     formatted_payload = json.dumps(payload, indent=2, default=str)
     print(f"{label}\n{formatted_payload}")
@@ -1021,10 +1068,19 @@ class SyncService:
 
             is_scheme_line = getattr(item, 'item_type', '') == 'SCHEME'
 
+            # A mapped combo reaches SAP as the product it actually is; the
+            # combo code stays on the OMS order and never leaves it.
+            sap_item_code = _resolve_combo_parent_item_code(item) or item_code
+            if sap_item_code != item_code:
+                logger.info(
+                    "Combo %s posted to SAP as its parent %s (order %s)",
+                    item_code, sap_item_code, getattr(order, "id", None),
+                )
+
             # Line 1: always the ordered item at its price
             if not is_scheme_line and (order_qty > 0 or item_unit_price > 0):
                 line = {
-                    "ItemCode": item_code,
+                    "ItemCode": sap_item_code,
                     "Quantity": order_qty,
                     "UnitPrice": item_unit_price,
                     "U_SchemeAgst": sub_group,
