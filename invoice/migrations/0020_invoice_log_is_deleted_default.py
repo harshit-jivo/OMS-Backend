@@ -19,10 +19,17 @@ class Migration(migrations.Migration):
     field the tree no longer carries: an INSERT that omits the column now stores
     false, which is what a newly created log means. Guarded so it is a no-op on
     a database that never grew the column.
+
+    Re-parented onto 0021 when the branches were merged (2026-08-26). The
+    docstring above was written while `0021_invoicelog_delete_reason_...` was
+    missing from the tree; it is now present, and it is what creates
+    `is_deleted`. Depending on it means the column exists before this ALTER runs
+    on a database built from scratch, instead of relying on the graph ordering
+    two siblings of 0019 favourably. The `IF EXISTS` guard is kept anyway.
     """
 
     dependencies = [
-        ('invoice', '0019_invociehistory_device_id_invociehistory_device_name'),
+        ('invoice', '0021_invoicelog_delete_reason_invoicelog_deleted_at_and_more'),
     ]
 
     operations = [

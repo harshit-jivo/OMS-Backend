@@ -16,6 +16,19 @@ class InvocieHistory(models.Model):
     invoice_payload = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.CharField(max_length=125 , null=True , blank=True)
+    # Which device the reviewer acted from, so the trail still reads the same
+    # after that device is renamed or deactivated. Corroborating evidence only:
+    # device_id is client-reported telemetry, so it backs up "who approved this",
+    # it does not by itself prove it.
+    #
+    # These are written on every history row by `**describe_request_device(request)`
+    # in invoice/views.py (three call sites), which is why migration
+    # 0024_restore_invocie_history_device_columns puts them back after 0022
+    # dropped them. Removing the fields while views.py still passes them raises
+    #     TypeError: InvocieHistory() got unexpected keyword arguments:
+    #     'device_id', 'device_name'
+    device_id = models.CharField(max_length=64, blank=True, default='')
+    device_name = models.CharField(max_length=150, blank=True, default='')
 
     class Meta:
         db_table = 'invoice_history'

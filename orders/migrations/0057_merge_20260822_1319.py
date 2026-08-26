@@ -8,6 +8,13 @@ class Migration(migrations.Migration):
     dependencies = [
         ("orders", "0052_order_items_orphan_column_defaults"),
         ("orders", "0056_order_warehouse_code"),
+        # Added 2026-08-26: the branch merge brought in a third lineage off 0051
+        # (0052_order_warehouse_code -> 0053_alter_order_order_type, both now
+        # no-ops -- see their files). Folding it in here rather than leaving it
+        # dangling keeps the graph to a single leaf and guarantees those two are
+        # ordered before 0058_alter_order_order_type, which makes the same
+        # AlterField for real.
+        ("orders", "0053_alter_order_order_type"),
     ]
 
     operations = []

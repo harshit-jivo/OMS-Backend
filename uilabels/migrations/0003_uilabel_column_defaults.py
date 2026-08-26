@@ -16,10 +16,20 @@ class Migration(migrations.Migration):
                             silently make the field it names mandatory.
 
     Guarded so it is a no-op on a database without these columns.
+
+    Re-parented onto 0004_seed_po_number when the branches were merged
+    (2026-08-26). This was written as a sibling of 0002 because
+    `0003_uilabel_is_enabled_uilabel_is_required` — the migration that actually
+    creates both columns — was missing from the tree at the time; the branch
+    merge brought it back, leaving `uilabels` with two leaves and Django
+    refusing to run. Depending on the tip of that chain restores a single leaf
+    and means the columns exist before this ALTER runs on a database built from
+    scratch. The number reads out of order, which Django does not mind: the
+    graph is built from `dependencies`, not filenames.
     """
 
     dependencies = [
-        ('uilabels', '0002_seed_price_list'),
+        ('uilabels', '0004_seed_po_number'),
     ]
 
     operations = [
