@@ -7,6 +7,14 @@ open.
 
 Written so the decisions can be audited or reversed by someone who was not there.
 
+Companion to [`OMS-Frontend/docs/BRANCH_MERGE_2026-08-26.md`](../../OMS-Frontend/docs/BRANCH_MERGE_2026-08-26.md),
+which covers the same four branch names on the frontend. The two were done on the
+same day but are independent repositories with independent histories. One
+decision does cross over: the frontend's `Invoice_Report` page was settled by
+reading `invoice/views.GetPrintReport` in this repository, which turned out to be
+a strict superset of the direct-to-Crystal-service call the `Mukesh` frontend
+branch used.
+
 ---
 
 ## 0. Summary
