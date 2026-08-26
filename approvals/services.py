@@ -179,6 +179,12 @@ def can_act(user, request):
     """Whether `user` may decide `request` at its current level."""
     if not user or not user.is_authenticated or request.status != ApprovalRequest.Status.PENDING:
         return False
+    # A retired workflow grants nobody anything. Its levels and approver rows
+    # survive deactivation untouched, so without this an old approver keeps
+    # every right they had — matching the inbox filter in _actionable_pair_q,
+    # and closing the direct-API path that hiding the button does not.
+    if not request.workflow.is_active:
+        return False
     if request.workflow.forbid_self_approval and request.submitted_by_id == user.id:
         return False
     if not has_approve_permission(user, request.workflow.document_type):
@@ -592,12 +598,19 @@ def _actionable_pair_q(user):
     breaks the moment a workflow's numbering does not start at 1 (see
     _level_at), and pairing with the workflow stops a level-2 grant in one
     workflow exposing level 2 of every other.
+
+    Only ACTIVE workflows are considered. Deactivating a workflow does not
+    deactivate its levels — the rows stay exactly as they were — so filtering
+    on `ApprovalLevel.is_active` alone kept every retired ladder live and its
+    old approvers kept seeing work. `resolve_workflow` already refuses to
+    submit into an inactive workflow, so a request parked on one has nobody
+    who should be acting on it.
     """
     pair_q = Q()
     matched = False
 
     workflow_ids = (
-        ApprovalLevel.objects.filter(is_active=True)
+        ApprovalLevel.objects.filter(is_active=True, workflow__is_active=True)
         .values_list('workflow_id', flat=True)
         .distinct()
     )
