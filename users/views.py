@@ -704,10 +704,20 @@ class UpdateProductRateView(APIView):
         except PartyProductAssignment.DoesNotExist:
             return Response({'success': False, 'message': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
 
+# A "+" in the SAP name is what marks a combo pack, but it also catches bundles
+# that are not 1+1 combos and must stay off the Combo Mapping page:
+#   * "... COMBO 10 SET"   -- multi-set cartons
+#   * "... 3 PCS SHRINKED" -- shrink-wrapped multipacks
+# Matched case-insensitively as substrings. 'SHRINK' rather than 'SHRINKED' on
+# purpose: one item is named "... SHRINKED 1 PCS" and another just "SHRINK".
+COMBO_NAME_EXCLUDE_TERMS = ('COMBO', 'SHRINK')
+
+
 class ComboMappingsView(APIView):
     """Combo packs and the free-of-cost item each one carries.
 
-    A combo is any assigned product whose SAP name contains a "+". The mapping
+    A combo is any assigned product whose SAP name contains a "+", minus the
+    bundles listed in COMBO_NAME_EXCLUDE_TERMS above. The mapping
     itself lives on `party_product_assignments`, so this view collapses the
     per-party rows into one entry per item_code/category and writes a change
     back to every one of them at once — combos give away the same product for
@@ -715,17 +725,17 @@ class ComboMappingsView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def _free_product_payload(self, free_item_code, category):
-        if not free_item_code:
+    def _product_payload(self, item_code, category):
+        if not item_code:
             return None
         product = (
-            Product.objects.filter(active_product_q(), item_code=free_item_code, category=category).first()
-            or Product.objects.filter(active_product_q(), item_code=free_item_code).first()
+            Product.objects.filter(active_product_q(), item_code=item_code, category=category).first()
+            or Product.objects.filter(active_product_q(), item_code=item_code).first()
         )
         if not product:
             # Mapped to something SAP no longer lists — surface the raw code so
             # the page can show it as broken rather than silently as "unmapped".
-            return {'item_code': free_item_code, 'item_name': None, 'sal_factor2': None}
+            return {'item_code': item_code, 'item_name': None, 'sal_factor2': None}
         return {
             'item_code': product.item_code,
             'item_name': product.item_name,
@@ -733,9 +743,12 @@ class ComboMappingsView(APIView):
         }
 
     def get(self, request):
+        combo_candidates = Product.objects.filter(active_product_q(), item_name__contains='+')
+        for term in COMBO_NAME_EXCLUDE_TERMS:
+            combo_candidates = combo_candidates.exclude(item_name__icontains=term)
         combo_products = {
             (p.item_code, p.category): p
-            for p in Product.objects.filter(active_product_q(), item_name__contains='+')
+            for p in combo_candidates
         }
         if not combo_products:
             return Response({'success': True, 'data': {'combos': []}})
@@ -759,14 +772,22 @@ class ComboMappingsView(APIView):
                 'sal_factor2': product.sal_factor2,
                 'party_count': 0,
                 'mapped_party_count': 0,
+                'parent_item_code': None,
                 'free_item_code': None,
                 'free_qty_per_unit': None,
             })
             entry['party_count'] += 1
 
+            parent_item_code = (assignment.parent_item_code or '').strip()
+            if parent_item_code and not entry['parent_item_code']:
+                entry['parent_item_code'] = parent_item_code
+
             free_item_code = (assignment.free_item_code or '').strip()
-            if free_item_code:
+            # Both halves are required: the split needs a parent to price and a
+            # free item to give away, so a half-filled row is not "mapped".
+            if parent_item_code and free_item_code:
                 entry['mapped_party_count'] += 1
+            if free_item_code:
                 if not entry['free_item_code']:
                     entry['free_item_code'] = free_item_code
                     entry['free_qty_per_unit'] = (
@@ -777,7 +798,8 @@ class ComboMappingsView(APIView):
 
         combos = []
         for entry in grouped.values():
-            entry['free_item'] = self._free_product_payload(entry['free_item_code'], entry['category'])
+            entry['parent_item'] = self._product_payload(entry['parent_item_code'], entry['category'])
+            entry['free_item'] = self._product_payload(entry['free_item_code'], entry['category'])
             # Flags a combo whose parties disagree, e.g. after a partial update.
             entry['is_partially_mapped'] = (
                 0 < entry['mapped_party_count'] < entry['party_count']
@@ -790,6 +812,7 @@ class ComboMappingsView(APIView):
     def post(self, request):
         item_code = str(request.data.get('item_code') or '').strip()
         category = _normalize_category(request.data.get('category'))
+        parent_item_code = str(request.data.get('parent_item_code') or '').strip()
         free_item_code = str(request.data.get('free_item_code') or '').strip()
         raw_qty = request.data.get('free_qty_per_unit')
 
@@ -808,10 +831,39 @@ class ComboMappingsView(APIView):
                     'message': f'Free item {free_item_code} not found or inactive',
                 }, status=status.HTTP_404_NOT_FOUND)
 
+        if parent_item_code and not _active_product_exists(parent_item_code, category):
+            if not Product.objects.filter(active_product_q(), item_code=parent_item_code).exists():
+                return Response({
+                    'success': False,
+                    'message': f'Parent item {parent_item_code} not found or inactive',
+                }, status=status.HTTP_404_NOT_FOUND)
+
         if free_item_code and free_item_code == item_code:
             return Response({
                 'success': False,
                 'message': 'A combo cannot give away itself',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if parent_item_code and parent_item_code == item_code:
+            return Response({
+                'success': False,
+                'message': 'A combo cannot be its own parent item',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if parent_item_code and parent_item_code == free_item_code:
+            return Response({
+                'success': False,
+                'message': 'The parent and free item must be different products',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Ordering splits a mapped combo into both halves, so half a mapping
+        # would produce a priced line with no giveaway (or the reverse). Save
+        # both or clear both.
+        if bool(parent_item_code) != bool(free_item_code):
+            missing = 'parent_item_code' if not parent_item_code else 'free_item_code'
+            return Response({
+                'success': False,
+                'message': f'Both halves are required to map a combo; {missing} is missing',
             }, status=status.HTTP_400_BAD_REQUEST)
 
         free_qty_per_unit = None
@@ -832,6 +884,7 @@ class ComboMappingsView(APIView):
         updated = PartyProductAssignment.objects.filter(
             item_code=item_code, category=category, is_active=True,
         ).update(
+            parent_item_code=parent_item_code or None,
             free_item_code=free_item_code or None,
             free_qty_per_unit=free_qty_per_unit,
         )
@@ -851,6 +904,7 @@ class ComboMappingsView(APIView):
             'data': {
                 'item_code': item_code,
                 'category': category,
+                'parent_item_code': parent_item_code or None,
                 'free_item_code': free_item_code or None,
                 'free_qty_per_unit': float(free_qty_per_unit) if free_qty_per_unit is not None else None,
                 'party_count': updated,

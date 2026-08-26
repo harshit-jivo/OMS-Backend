@@ -424,12 +424,20 @@ def _scheme_entry(raw, scheme_obj, scheme_qty, to_float, to_bool):
     if not benefit_item_code and scheme_obj is not None:
         benefit_item_code = (getattr(scheme_obj, 'item_code', '') or '').strip() or None
 
+    # `qty` is what ships, and a SAP DocumentLine quantity is always pieces.
+    # A BOX benefit therefore arrives already converted (scheme_qty), with the
+    # unit it was written in kept alongside so the UI can still say "1 box".
+    benefit_uom = (raw.get('benefit_uom') or '')[:10]
+    benefit_qty = to_float(raw.get('benefit_qty', 0)) or scheme_qty
+
     return {
         'scheme': scheme_obj,
         'qty': scheme_qty,
         'scheme_v2_id': raw.get('scheme_v2_id') or raw.get('scheme_v2'),
         'benefit_id': raw.get('benefit_id') or raw.get('benefit'),
         'benefit_item_code': benefit_item_code,
+        'benefit_uom': benefit_uom,
+        'benefit_qty': benefit_qty,
         'computed_qty': to_float(raw.get('computed_qty', 0)),
         'is_manual_override': to_bool(raw.get('is_manual_override')),
         'scope_type': (raw.get('scope_type') or '')[:20],
@@ -537,6 +545,8 @@ def _create_order_item(order, item, to_float, to_bool):
             scheme_v2_id=entry['scheme_v2_id'],
             benefit_id=entry['benefit_id'],
             benefit_item_code=entry['benefit_item_code'],
+            benefit_uom=entry['benefit_uom'],
+            benefit_qty=entry['benefit_qty'],
             computed_qty=entry['computed_qty'],
             is_manual_override=entry['is_manual_override'],
             scope_type=entry['scope_type'],
