@@ -85,8 +85,6 @@ INSTALLED_APPS = [
     'tracker',
     # Dynamic UI labels — admin-editable field labels served to web + mobile
     'uilabels',
-    # HAIS — Hardware Asset Identification Software (own `hais` Postgres schema)
-    'HAIS',
 ]
 
 MIDDLEWARE = [
