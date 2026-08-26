@@ -27,7 +27,6 @@ from .scheme_rules import (
     get_ordered_quantity,
     get_party_product_scheme,
     should_mirror_punjab_combo_scheme_qty)
-from . import scheme_engine
 from users.models import SchemeProduct, User, State
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -411,72 +410,12 @@ def _resolve_scheme_by_id(scheme_id):
             return None
     return None
 
-def _scheme_entry(raw, scheme_obj, scheme_qty, to_float, to_bool):
-    """One granted giveaway, in the shape _create_order_item persists.
-
-    `scheme` is the legacy SchemeProduct (kept populated for orders still placed
-    through the old picker). `scheme_v2_id` / `benefit_id` / `benefit_item_code`
-    come from a scheme_engine proposal the client accepted. `benefit_item_code`
-    is a snapshot: the SAP push reads it rather than re-resolving the giveaway
-    item, so editing a scheme cannot change what an approved order ships.
-    """
-    benefit_item_code = (raw.get('benefit_item_code') or '').strip() or None
-    if not benefit_item_code and scheme_obj is not None:
-        benefit_item_code = (getattr(scheme_obj, 'item_code', '') or '').strip() or None
-
-    return {
-        'scheme': scheme_obj,
-        'qty': scheme_qty,
-        'scheme_v2_id': raw.get('scheme_v2_id') or raw.get('scheme_v2'),
-        'benefit_id': raw.get('benefit_id') or raw.get('benefit'),
-        'benefit_item_code': benefit_item_code,
-        'computed_qty': to_float(raw.get('computed_qty', 0)),
-        'is_manual_override': to_bool(raw.get('is_manual_override')),
-        'scope_type': (raw.get('scope_type') or '')[:20],
-        'scope_value': (raw.get('scope_value') or '')[:100],
-    }
-
-
-def _scheme_v2_category_allows(scheme_v2_id, line_category):
-    """Whether a v2 scheme may be persisted against a line of `line_category`.
-
-    Strict mirror of the engine's category wall (scheme_engine.resolve_schemes,
-    strict_category=True) at save time, so a stale or hand-rolled client cannot
-    store a scheme that the UI would never have shown. The product line category
-    and the scheme's own category must both be present and identical — a blank
-    anywhere is treated as a mismatch and the scheme is dropped.
-
-    Legacy schemes (no `scheme_v2_id`) are untouched: the category rule is a v2
-    concept and the old picker keeps behaving exactly as before.
-    """
-    if not scheme_v2_id:
-        return True
-    line_category = str(line_category or '').strip()
-    if not line_category:
-        return False
-    from .models import Scheme
-    try:
-        scheme_category = (
-            Scheme.objects.filter(pk=int(scheme_v2_id))
-            .values_list('category', flat=True)
-            .first()
-        )
-    except (TypeError, ValueError):
-        return False
-    scheme_category = str(scheme_category or '').strip()
-    if not scheme_category:
-        return False
-    return scheme_category.casefold() == line_category.casefold()
-
-
-def _extract_order_item_schemes(item, to_float, to_bool=bool):
+def _extract_order_item_schemes(item, to_float):
     """Normalise the schemes on one incoming order line.
 
-    A v2 entry qualifies on `scheme_v2_id` alone — it has no legacy
-    SchemeProduct row to point at — while legacy entries still require one, so
-    the old client keeps behaving exactly as before.
+    Returns (SchemeProduct, qty) pairs. A scheme only counts when it resolves to
+    a real SchemeProduct row and carries a positive quantity.
     """
-    line_category = str(item.get('category', '') or '').strip()
     raw_schemes = item.get('schemes')
     if isinstance(raw_schemes, list):
         extracted = []
@@ -484,27 +423,20 @@ def _extract_order_item_schemes(item, to_float, to_bool=bool):
             if not isinstance(raw_scheme, dict):
                 continue
             scheme_obj = _resolve_scheme_by_id(raw_scheme.get('scheme_id') or raw_scheme.get('scheme'))
-            scheme_v2_id = raw_scheme.get('scheme_v2_id') or raw_scheme.get('scheme_v2')
             scheme_qty = to_float(raw_scheme.get('scheme_qty', raw_scheme.get('qty_scheme', 0)))
-            if not _scheme_v2_category_allows(scheme_v2_id, line_category):
-                continue
-            if (scheme_obj or scheme_v2_id) and scheme_qty > 0:
-                extracted.append(_scheme_entry(raw_scheme, scheme_obj, scheme_qty, to_float, to_bool))
+            if scheme_obj and scheme_qty > 0:
+                extracted.append((scheme_obj, scheme_qty))
         return extracted
 
     scheme_obj = _resolve_scheme_by_id(item.get('scheme_id') or item.get('scheme'))
-    scheme_v2_id = item.get('scheme_v2_id') or item.get('scheme_v2')
     scheme_qty = to_float(item.get('scheme_qty', item.get('qty_scheme', 0)))
-    if not _scheme_v2_category_allows(scheme_v2_id, line_category):
-        return []
-    if (scheme_obj or scheme_v2_id) and scheme_qty > 0:
-        return [_scheme_entry(item, scheme_obj, scheme_qty, to_float, to_bool)]
-    return []
+    return [(scheme_obj, scheme_qty)] if scheme_obj and scheme_qty > 0 else []
+
 
 def _create_order_item(order, item, to_float, to_bool):
-    item_schemes = _extract_order_item_schemes(item, to_float, to_bool)
-    first_scheme = next((e['scheme'] for e in item_schemes if e['scheme']), None)
-    total_scheme_qty = sum(e['qty'] for e in item_schemes)
+    item_schemes = _extract_order_item_schemes(item, to_float)
+    first_scheme = next((scheme_obj for scheme_obj, _ in item_schemes), None)
+    total_scheme_qty = sum(scheme_qty for _, scheme_qty in item_schemes)
 
     order_item = OrderItem.objects.create(
         order=order,
@@ -530,118 +462,11 @@ def _create_order_item(order, item, to_float, to_bool):
     )
 
     OrderItemScheme.objects.bulk_create([
-        OrderItemScheme(
-            order_item=order_item,
-            scheme=entry['scheme'],
-            qty_scheme=entry['qty'],
-            scheme_v2_id=entry['scheme_v2_id'],
-            benefit_id=entry['benefit_id'],
-            benefit_item_code=entry['benefit_item_code'],
-            computed_qty=entry['computed_qty'],
-            is_manual_override=entry['is_manual_override'],
-            scope_type=entry['scope_type'],
-            scope_value=entry['scope_value'],
-        )
-        for entry in item_schemes
+        OrderItemScheme(order_item=order_item, scheme=scheme_obj, qty_scheme=scheme_qty)
+        for scheme_obj, scheme_qty in item_schemes
     ])
 
     return order_item
-
-
-def _apply_engine_schemes(order, items, created_items):
-    """Persist the giveaways the scheme engine resolves for this order.
-
-    The client sends back the proposals it displayed, but it is not the
-    authority on them. An older client, a resumed draft, or an order placed
-    through a screen that never called the preview endpoint would otherwise
-    save no giveaway at all — and since the SAP push builds its free lines from
-    `OrderItemScheme`, the customer's free stock would silently never ship.
-
-    Re-resolving server-side makes the engine the single source of truth for
-    what is owed. Anything the client already sent for the same (line, giveaway
-    item) is left alone, so a hand-typed override is never overwritten.
-    """
-    card_code = getattr(order, 'card_code', '') or ''
-    if not card_code:
-        return
-
-    # Mirrors the preview call: one category for the order, with the engine's
-    # per-line check keeping a mixed-category order honest.
-    category = next(
-        (str(item.get('category') or '').strip() for item in items if item.get('category')),
-        '',
-    )
-
-    try:
-        proposals = scheme_engine.resolve_schemes(card_code, category, items)
-    except Exception:
-        logger.exception(
-            'Scheme engine failed for order %s; no giveaway lines added',
-            getattr(order, 'id', None),
-        )
-        return
-
-    # What the client already sent, so we only fill the gaps.
-    already = defaultdict(set)
-    for row in OrderItemScheme.objects.filter(order_item__in=[i for i in created_items if i]):
-        already[row.order_item_id].add((row.benefit_item_code or '').strip().upper())
-
-    new_rows = []
-    added_qty = defaultdict(Decimal)
-
-    for proposal in proposals:
-        # No rule means the quantity is still the user's to type; proposing a
-        # zero-quantity free line would ship nothing and confuse the picker.
-        if proposal.qty_is_user_supplied or proposal.qty <= 0:
-            continue
-        if not (0 <= proposal.line_index < len(created_items)):
-            continue
-        order_item = created_items[proposal.line_index]
-        if order_item is None:
-            continue
-
-        benefit_item_code = (proposal.benefit_item_code or '').strip()
-        if not benefit_item_code:
-            continue
-        if benefit_item_code.upper() in already[order_item.id]:
-            continue
-        already[order_item.id].add(benefit_item_code.upper())
-
-        new_rows.append(OrderItemScheme(
-            order_item=order_item,
-            scheme=None,
-            scheme_v2_id=proposal.scheme_id,
-            benefit_id=proposal.benefit_id,
-            # Snapshot: the SAP push ships exactly this, so editing the scheme
-            # afterwards cannot change what an approved order sends.
-            benefit_item_code=benefit_item_code,
-            qty_scheme=proposal.qty,
-            computed_qty=proposal.qty,
-            is_manual_override=False,
-            scope_type=proposal.scope_type,
-            scope_value=proposal.scope_value,
-        ))
-        added_qty[order_item.id] += proposal.qty
-
-    if not new_rows:
-        return
-
-    OrderItemScheme.objects.bulk_create(new_rows)
-
-    # Keep the line's own totals in step with what _create_order_item writes.
-    by_id = {item.id: item for item in created_items if item}
-    for order_item_id, qty in added_qty.items():
-        order_item = by_id.get(order_item_id)
-        if order_item is None:
-            continue
-        order_item.qty_scheme = (order_item.qty_scheme or Decimal('0')) + qty
-        order_item.is_scheme_visible = True
-        order_item.save(update_fields=['qty_scheme', 'is_scheme_visible'])
-
-    logger.info(
-        'Scheme engine added %s giveaway line(s) to order %s',
-        len(new_rows), getattr(order, 'id', None),
-    )
 
 
 def _normalize_warehouse_code(value):
@@ -5410,248 +5235,3 @@ class GetOrdersByItemView(APIView):
 
         serializer = OrdersByItemSerializer(orders, many=True)
         return Response(serializer.data)
-
-# ---------------------------------------------------------------------------
-# Scheme engine v2 (see docs/scheme-architecture.md)
-#
-# Permission classes match the existing scheme views (AllowAny) so this lands
-# behind the same gate as SchemeManageListView / SchemeDetailView rather than
-# introducing a second, inconsistent auth story mid-migration.
-# ---------------------------------------------------------------------------
-
-from django.db import transaction as _db_transaction
-
-from .models import Scheme, SchemeAssignment
-from .serializers import SchemeV2Serializer, SchemeAssignmentSerializer
-
-
-class SchemeV2ListCreateView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        queryset = Scheme.objects.prefetch_related('benefits', 'triggers', 'assignments')
-
-        include_inactive = str(
-            request.query_params.get('include_inactive') or ''
-        ).strip().lower() in {'1', 'true', 'yes'}
-        if not include_inactive:
-            queryset = queryset.filter(is_active=True)
-
-        search = (request.query_params.get('search') or '').strip()
-        if search:
-            queryset = queryset.filter(Q(code__icontains=search) | Q(name__icontains=search))
-
-        # ?category=OIL keeps the uncategorised ("every category") schemes too —
-        # they apply to OIL as much as to anything else.
-        category = (request.query_params.get('category') or '').strip()
-        if category:
-            queryset = queryset.filter(Q(category='') | Q(category__iexact=category))
-
-        # Filter by who a scheme reaches, e.g. ?scope_type=STATE&scope_value=PB
-        scope_type = (request.query_params.get('scope_type') or '').strip()
-        scope_value = (request.query_params.get('scope_value') or '').strip()
-        if scope_type:
-            scope_q = Q(assignments__scope_type=scope_type, assignments__is_active=True)
-            if scope_value:
-                scope_q &= Q(assignments__scope_value__iexact=scope_value)
-            queryset = queryset.filter(scope_q).distinct()
-
-        serializer = SchemeV2Serializer(queryset, many=True)
-        return Response({'success': True, 'data': serializer.data, 'total': len(serializer.data)})
-
-    def post(self, request):
-        serializer = SchemeV2Serializer(data=request.data, context={'request': request})
-        if not serializer.is_valid():
-            return Response({'success': False, 'message': 'Failed to create scheme',
-                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-        with _db_transaction.atomic():
-            serializer.save()
-        return Response({'success': True, 'message': 'Scheme created', 'data': serializer.data},
-                        status=status.HTTP_201_CREATED)
-
-
-class SchemeV2DetailView(APIView):
-    permission_classes = [AllowAny]
-
-    def _get_object(self, scheme_id):
-        return (
-            Scheme.objects
-            .prefetch_related('benefits', 'triggers', 'assignments')
-            .filter(pk=scheme_id)
-            .first()
-        )
-
-    def get(self, request, scheme_id):
-        scheme = self._get_object(scheme_id)
-        if not scheme:
-            return Response({'success': False, 'message': 'Scheme not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-        return Response({'success': True, 'data': SchemeV2Serializer(scheme).data})
-
-    def patch(self, request, scheme_id):
-        scheme = self._get_object(scheme_id)
-        if not scheme:
-            return Response({'success': False, 'message': 'Scheme not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-        serializer = SchemeV2Serializer(scheme, data=request.data, partial=True,
-                                        context={'request': request})
-        if not serializer.is_valid():
-            return Response({'success': False, 'message': 'Failed to update scheme',
-                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-        with _db_transaction.atomic():
-            serializer.save()
-        return Response({'success': True, 'message': 'Scheme updated', 'data': serializer.data})
-
-    def delete(self, request, scheme_id):
-        """Deactivate by default.
-
-        OrderItemScheme.scheme_v2 is PROTECT, so a scheme referenced by any order
-        line cannot be deleted at all -- the giveaway record has to survive.
-        Deactivating removes it from every read path and stays reversible.
-        """
-        scheme = self._get_object(scheme_id)
-        if not scheme:
-            return Response({'success': False, 'message': 'Scheme not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-
-        hard = str(request.query_params.get('hard') or '').strip().lower() in {'1', 'true', 'yes'}
-        used_by_orders = OrderItemScheme.objects.filter(scheme_v2_id=scheme_id).count()
-
-        if hard:
-            if used_by_orders:
-                return Response({
-                    'success': False,
-                    'message': (f'Cannot hard-delete: {used_by_orders} order line(s) reference '
-                                'this scheme. Deactivate it instead.'),
-                }, status=status.HTTP_409_CONFLICT)
-            scheme.delete()
-            return Response({'success': True, 'message': 'Scheme deleted', 'deactivated': False})
-
-        scheme.is_active = False
-        scheme.save(update_fields=['is_active', 'updated_at'])
-        return Response({'success': True, 'message': 'Scheme deactivated', 'deactivated': True,
-                         'used_by_order_lines': used_by_orders})
-
-
-class SchemeAssignmentView(APIView):
-    """Target a scheme at a party, a state, a main group, a category, or everyone.
-
-    One STATE row reaches every vendor in that state -- including ones onboarded
-    later -- which is the whole point of separating assignment from the offer.
-    """
-
-    permission_classes = [AllowAny]
-
-    def get(self, request, scheme_id):
-        if not Scheme.objects.filter(pk=scheme_id).exists():
-            return Response({'success': False, 'message': 'Scheme not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-        rows = SchemeAssignment.objects.filter(scheme_id=scheme_id).select_related('scheme')
-        return Response({'success': True, 'data': SchemeAssignmentSerializer(rows, many=True).data})
-
-    def post(self, request, scheme_id):
-        scheme = Scheme.objects.filter(pk=scheme_id).first()
-        if not scheme:
-            return Response({'success': False, 'message': 'Scheme not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-
-        # Accept a single object or a list, so "assign to these 40 parties" is one call.
-        payload = request.data if isinstance(request.data, list) else [request.data]
-        serializer = SchemeAssignmentSerializer(data=payload, many=True)
-        if not serializer.is_valid():
-            return Response({'success': False, 'message': 'Failed to assign scheme',
-                             'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-
-        user = request.user if getattr(request.user, 'is_authenticated', False) else None
-        saved = []
-        with _db_transaction.atomic():
-            for row in serializer.validated_data:
-                row.pop('scheme', None)
-                obj, _created = SchemeAssignment.objects.update_or_create(
-                    scheme=scheme,
-                    scope_type=row['scope_type'],
-                    scope_value=row.get('scope_value', ''),
-                    category=row.get('category', ''),
-                    defaults={
-                        'is_exclusion': row.get('is_exclusion', False),
-                        'valid_from': row.get('valid_from'),
-                        'valid_to': row.get('valid_to'),
-                        'is_active': row.get('is_active', True),
-                        'created_by': user,
-                    },
-                )
-                saved.append(obj)
-
-        return Response({'success': True, 'message': f'{len(saved)} assignment(s) saved',
-                         'data': SchemeAssignmentSerializer(saved, many=True).data},
-                        status=status.HTTP_201_CREATED)
-
-    def delete(self, request, scheme_id):
-        assignment_id = request.query_params.get('assignment_id')
-        if not assignment_id:
-            return Response({'success': False, 'message': 'assignment_id is required'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        deleted, _ = SchemeAssignment.objects.filter(scheme_id=scheme_id, pk=assignment_id).delete()
-        if not deleted:
-            return Response({'success': False, 'message': 'Assignment not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-        return Response({'success': True, 'message': 'Assignment removed'})
-
-
-class SchemePreviewView(APIView):
-    """Dry-run the engine over a draft order.
-
-    Body: {card_code, category, lines: [{item_code, category, sub_group, brand,
-    qty, pcs, boxes, ltrs, is_auto_free, combo_source_code, item_type}, ...]}
-
-    This is what makes state-wide targeting usable -- the salesperson never picks
-    a scheme from a dropdown, the engine proposes and they confirm.
-    """
-
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        card_code = (request.data.get('card_code') or '').strip()
-        if not card_code:
-            return Response({'success': False, 'message': 'card_code is required'},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        lines = request.data.get('lines') or []
-        if not isinstance(lines, list):
-            return Response({'success': False, 'message': 'lines must be a list'},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        category = (request.data.get('category') or '').strip()
-        ctx = scheme_engine.build_party_context(card_code, category)
-        # Strict category rule for the order flow: a scheme is proposed only when
-        # party category == product category == scheme category, all present.
-        proposals = scheme_engine.resolve_schemes(
-            card_code, category, lines, ctx=ctx, strict_category=True,
-        )
-
-        return Response({
-            'success': True,
-            'context': {
-                'card_code': ctx.card_code,
-                'category': ctx.category,
-                'state_code': ctx.state_code,
-                'main_group': ctx.main_group,
-            },
-            'proposals': [p.as_dict() for p in proposals],
-        })
-
-
-class SchemeApplicableView(APIView):
-    """Everything reaching a vendor, with the scope that let each scheme in --
-    the first question anyone asks about an unexpected giveaway."""
-
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        card_code = (request.query_params.get('card_code') or '').strip()
-        if not card_code:
-            return Response({'success': False, 'message': 'card_code is required'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        category = (request.query_params.get('category') or '').strip()
-        rows = scheme_engine.applicable_schemes(card_code, category)
-        return Response({'success': True, 'data': rows, 'total': len(rows)})
