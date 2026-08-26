@@ -1197,14 +1197,23 @@ class SyncService:
             "DocDate": posting_date.isoformat(),
             "DocDueDate": due_date,
             "TaxDate": posting_date.isoformat(),
-            # Not mandatory — sent as null; SAP fills its own defaults.
-            "Comments": None,
-            # SAP expects the CRD1 Address *name* (short code), not the full
-            # address text — resolve it from the stored address id.
-            "ShipToCode": self._resolve_address_code(order.ship_to_id),
-            "PayToCode": self._resolve_address_code(order.bill_to_id),
-            # Salesperson is optional and not mapped from a table yet — send null.
-            "U_SALES_PERSON": None,
+            "Comments": " ",
+            # SAP wants the CRD1 Address *name* (a short code, max 50 chars), not
+            # the full address text. The order-entry page happens to store the
+            # name in ship_to_address/bill_to_address, so sending those worked --
+            # but the Distributor page stores the real street address there, and
+            # SAP rejects it with "Value too long in property 'PayToCode'".
+            # Resolving from the id is identical for party orders (the stored
+            # text already IS the name) and correct for Mart. Falls back to the
+            # stored text when the id resolves to nothing, so behaviour is
+            # unchanged wherever it cannot be resolved.
+            "ShipToCode": self._resolve_address_code(order.ship_to_id) or order.ship_to_address,
+            "PayToCode": self._resolve_address_code(order.bill_to_id) or order.bill_to_address,
+            #=-===============================================================================
+            # CHANGE AND MAP THE SALES PERSON
+            #=-===============================================================================
+            
+            #=================================================================================
             "BPL_IDAssignedToInvoice": order.dispatch_from_id,
             "DocumentLines": document_lines,
         }

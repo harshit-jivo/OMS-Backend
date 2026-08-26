@@ -1,6 +1,6 @@
 # Document Tracker — System Reference
 
-*Last verified: 2026-07-29*
+*Last verified: 2026-08-13*
 
 The Document Tracker follows a purchase invoice from the moment it reaches the
 head office until it is paid, recording **who held it, for how long, and what
@@ -156,7 +156,7 @@ actions (`apply_bulk`) call it per invoice, so no rule can be bypassed in bulk.
 | Status | Effect |
 |---|---|
 | `OK` / none | Advance |
-| `HOLD` + `FULL` | **Stays put.** Annotated with an immutable note; the dwell clock keeps running |
+| `HOLD` + `FULL` | **Stays put.** Annotated with an immutable note; the dwell clock keeps running. Released from the Hold tab (§11) |
 | `HOLD` + `PARTIAL` | **Advances**, withholding `amount` into `Invoice.hold_amount` |
 | `DEBIT` | **Advances**, adding `amount` to `Invoice.debit_amount` permanently |
 | `RETURN` | Back one stage along the route |
@@ -386,9 +386,10 @@ stage they are mapped to, **or** (entry-desk users) anything at `entry`.
 
 ### Deletion
 
-Soft delete only. Tracker admins may delete up to **stage order ≤ 6**
-(`DELETE_ADMIN_MAX_ORDER`) — nothing at Save-in-SAP or Payment. Entry users may
-delete only an unlocked invoice still at the entry desk.
+Soft delete only. Tracker admins may delete up to **stage order ≤ 7**
+(`DELETE_ADMIN_MAX_ORDER`, i.e. through JSAP Approval) — nothing at Save-in-SAP
+or Payment. Entry users may delete only an unlocked invoice still at the entry
+desk. **The constant tracks the stage numbering**: inserting a stage shifts it.
 
 ---
 
@@ -409,6 +410,8 @@ All under `/api/tracker/`.
 | POST | `jsap/sync/` | user | Pull decisions from JSAP (`{invoice_id}` or whole desk) |
 | GET | `my-queue/` | user | The actionable inbox + stage tabs with counts |
 | GET | `stage-advanced/?stage=` | user | Read-only history of what left a desk |
+| GET | `stage-decisions/?stage=&decision=` | user | A desk's decision log — `OK` · `HOLD` · `DEBIT` · `APPROVED` · `REJECTED` · `RETURN` (comma-separated; omit for all). `&include_resolved=1` keeps send-backs the invoice has since come back from |
+| GET | `stage-export/?stage=&tab=&ids=` | user | One queue tab as Excel, in the All-Invoices register layout |
 | POST | `actions/bulk/` | user | Apply one action to many invoices |
 | GET | `reports/` | reports | Turnaround analytics |
 | GET | `alerts/` | alerts | Active stuck alerts |
@@ -518,9 +521,76 @@ styles in `src/styles/Tracker.css`.
 |---|---|
 | Current | Normal arrivals |
 | Returned | Arrived via RETURN — shows who sent it back and why |
-| Rejected | `rejection_pending` — supply remarks to send back (SAP/JSAP desks) |
+| Awaiting Remarks | `rejection_pending` — rejected here, reason still owed; supply remarks to send it back (SAP/JSAP desks) |
 | Partial | Part-paid invoices (terminal stage), kept out of Current |
 | Advanced | Read-only history of what left this desk (entry desk) |
+| Hold · OK · Debit | The desk's **decision log** — Pre-Audit |
+| Approved · Rejected | Verdict log — SAP / JSAP |
+| Sent Back | What this desk returned — Pre-Audit |
+
+Which of these appear is driven by the stage's own `status_choices`, so retuning
+a stage in Admin picks them up without a code change.
+
+> **"Awaiting Remarks" vs "Rejected".** They are different questions. The first
+> is the live queue: rejected here, still sitting here, reason not written yet.
+> The second is the log: what this desk actually sent back, and to whom.
+
+### The decision-log tabs
+
+Every history tab reads `stage-decisions/`, not the live queue. They **have
+to**: only a FULL hold keeps an invoice at Pre-Audit — OK, DEBIT and a PARTIAL
+hold all advance it — so filtering the queue would leave the OK and Debit tabs
+permanently empty.
+
+They are logs of **events**, not invoices: an invoice debited twice appears
+twice, each row with its own amount, reason, handler and timestamp, plus where
+the invoice sits *now* (`still here` marks a full hold that never left).
+
+**The Hold tab is the one that can act.** A FULL hold is still parked at the
+desk, so those rows carry a checkbox and a **Release as OK** button (plus
+*Release for transport approval* at Pre-Audit). It posts the ordinary bulk
+action, so every rule still applies — the invoice advances exactly as if it had
+been dispositioned from the Current tab, and a Transport invoice released as OK
+still detours to the approval desk. The hold row stays in the log as history,
+now showing where the invoice went. Every other row in every other log tab is
+read-only, because the invoice has already moved on.
+
+**Verdicts collapse per visit.** APPROVED / REJECTED / RETURN are one decision
+per stage visit, so the note row a reason-less rejection writes and the row that
+closes the visit when the reason arrives are the *same* decision — they merge
+into one row (the closed one wins, since it carries the reason). Reject the same
+invoice twice, with a return to the desk in between, and you get two rows.
+
+> ### A send-back drops off once the invoice comes back
+> The Rejected and Sent Back tabs answer "what is still out there", not "what
+> did I ever reject". A row is dropped once the invoice has **arrived at this
+> desk again** after the decision — `came_back`, computed by comparing each
+> later `StageEvent.entered_at` at this stage against the decision time. The
+> desk is looking at it again, so the rejection is answered.
+>
+> Tick **"Also show ones that came back"** (`?include_resolved=1`) to see the
+> full history; those rows are flagged *came back since*. Note rows written
+> during a visit share that visit's `entered_at`, so they can never trigger the
+> flag by themselves.
+
+### Per-tab Excel export
+
+Every sub-tab has its own **Export Excel** button, which writes exactly what the
+tab is showing — **including the omni-search filter**, so a search for one party
+exports just that party's rows.
+
+> The sheet is the **same register layout as the All-Invoices export** — same
+> columns, same order, same styling. `stage-export/` hands the ids straight to
+> `exports.build_workbook()`, the one used by `all-invoices/export/`, so the two
+> sheets match column for column and a desk's sheet drops into the office
+> workbook unchanged.
+
+The client sends the visible row ids; the server does **not** trust them for
+access — they are intersected with the invoices reachable from that stage (any
+it has ever handled, which is exactly what its tabs can show), and a user not
+assigned to the stage gets a 403. A decision log can list one invoice twice (it
+was debited twice); the register is one row per invoice, so ids are
+de-duplicated.
 
 The JSAP desk additionally shows a **JSAP Status** column (verdict, the
 approver's reason, the draft DocEntry — or why it could not be linked) and the
@@ -577,6 +647,9 @@ everyone but superusers** — the usual cause of "the new desk isn't showing".
 | JSAP status never changes on its own | `run_jsap_sync.bat` is not registered in Task Scheduler (§9) |
 | JSAP lookups return nothing at all | Querying `dbo.*` instead of `bud.*`, or joining `jsDocEntry` to `OPCH` instead of `ODRF` (§6) |
 | Wrong company's approval attached | The `bud.jsBudgetTable.Branch` cross-check was bypassed — draft DocEntry repeats across companies |
+| Pre-Audit's OK / Debit tabs look "wrong" | They are logs of past decisions, not the queue — those invoices have moved on (§11) |
+| A rejection vanished from the Rejected tab | The invoice came back to this desk, so it is no longer outstanding. Tick "Also show ones that came back" (§11) |
+| Two tabs both look like "rejected" | **Awaiting Remarks** = rejected here, reason still owed, still sitting here. **Rejected** = the log of what was actually sent back (§11) |
 | Invoice fully paid but still OPEN | An un-released hold. `open_balance` is against `total_owed`, which always includes the hold (§4) |
 | Discount looks "wrong" after a hold | Intended — discount is on the net invoice value **including** the hold |
 | Invoice number rejected as duplicate but not visible | A **soft-deleted** invoice still reserves its number (`all_objects`) |
@@ -621,6 +694,15 @@ front made approvers write "-" — so the two-step exists deliberately.
 
 **The tracker never writes to SAP or JSAP.** Both are systems of record; this is
 a mirror. The only thing that flows back is a human's decision, recorded here.
+
+**The Transport Approval desk (added 2026-08-11, removed 2026-08-13).** A
+Transport-only approval branch off Pre-Audit, live for two days. Migration `0017`
+deleted it and **re-pointed its 18 stage events at Pre-Audit**, so those invoices
+keep an unbroken timeline — which is why a handful of Pre-Audit visits carry an
+`APPROVED` / `REJECTED` status Pre-Audit itself never issues, and why 13 carry a
+`TRANSPORT_APPROVAL` status no longer offered anywhere. Read them as the approval
+trip that used to be its own desk. `0015`/`0016` are kept (they were applied on
+production); `0017` undoes them.
 
 **The 2026-07-29 SAP/JSAP split.** These were one desk ("SAP / JSAP Approval").
 Migration `0014` renamed it **in place** so its id, history and user mappings

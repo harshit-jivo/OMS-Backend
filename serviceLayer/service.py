@@ -10,11 +10,17 @@ class SAPServiceLayerManager():
 
     @classmethod
     def schema_for(cls, branch):
-        """Company DB for a branch code. Accepts both 'BEVERAGE' and 'BEVERAGES'
-        (both spellings are used across the codebase); anything else -> OIL, so a
-        missing/unknown branch can never leave the schema undefined."""
-        if str(branch or '').upper().startswith('BEVERAGE'):
+        """Company DB for a branch code — OIL, BEVERAGE(S) or MART.
+
+        Accepts both 'BEVERAGE' and 'BEVERAGES' (both spellings are used across
+        the codebase); anything else -> OIL, so a missing/unknown branch can
+        never leave the schema undefined."""
+        code = str(branch or '').upper()
+        if code.startswith('BEVERAGE'):
             return settings.HANA_BEVERAGE_COMPANY_DB
+        if code.startswith('MART'):
+            return getattr(settings, 'HANA_MART_COMPANY_DB', '') \
+                or settings.HANA_OIL_COMPANY_DB
         return settings.HANA_OIL_COMPANY_DB
 
     # Backwards-compatible alias (was private before the branch rollout).
@@ -24,8 +30,12 @@ class SAPServiceLayerManager():
     def branch_for(cls, company_db):
         """Inverse of schema_for: company DB -> branch code. Used when a caller
         already knows the company DB (e.g. an IRN request) and needs a branch."""
-        if company_db and company_db == getattr(settings, 'HANA_BEVERAGE_COMPANY_DB', None):
+        if not company_db:
+            return 'OIL'
+        if company_db == getattr(settings, 'HANA_BEVERAGE_COMPANY_DB', None):
             return 'BEVERAGE'
+        if company_db == getattr(settings, 'HANA_MART_COMPANY_DB', None):
+            return 'MART'
         return 'OIL'
 
     @classmethod
@@ -110,7 +120,8 @@ class SAPServiceLayerManager():
         """Drop the cached session for `branch` (all companies when omitted)."""
         schemas = ([cls.schema_for(branch)] if branch is not None
                    else [settings.HANA_OIL_COMPANY_DB,
-                         getattr(settings, 'HANA_BEVERAGE_COMPANY_DB', '')])
+                         getattr(settings, 'HANA_BEVERAGE_COMPANY_DB', ''),
+                         getattr(settings, 'HANA_MART_COMPANY_DB', '')])
         for schema in filter(None, schemas):
             session_key, route_key = cls._cache_keys(schema)
             cache.delete(session_key)
