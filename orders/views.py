@@ -377,11 +377,6 @@ def _get_rate_approval_reason(item, price_list_basic, basic_price):
     if item.get('item_type') == 'SCHEME':
         return None
 
-    # The free half of a combo pack is priced at 0 by design, so the 0-vs-0
-    # comparison below must not drag the whole order into rate approval.
-    if str(item.get('is_auto_free', '')).lower() in ('true', '1'):
-        return None
-
     if item.get('qty') not in (None, ''):
         try:
             qty = float(item.get('qty') or 0)
@@ -457,8 +452,6 @@ def _create_order_item(order, item, to_float, to_bool):
         scheme=first_scheme,
         qty_scheme=total_scheme_qty,
         is_scheme_visible=to_bool(item.get('is_scheme_visible')) or bool(item_schemes),
-        is_auto_free=to_bool(item.get('is_auto_free')),
-        combo_source_code=item.get('combo_source_code') or '',
     )
 
     OrderItemScheme.objects.bulk_create([
@@ -1987,70 +1980,6 @@ def extract_type_from_name(item_name):
         return result
     return None
 
-def is_combo_item_name(item_name):
-    """Combo packs are named "<paid part> + <free part>" in SAP."""
-    return '+' in str(item_name or '')
-
-
-# One free unit per combo unit: the order form counts pieces, and a combo pack
-# carries one of the free product per piece. The trailing "4 PCS" / "6 PCS" in a
-# combo name is the paid SKU's carton config (it equals sal_factor2), not a free
-# count, so it is deliberately not parsed. Set `free_qty_per_unit` on the
-# assignment for the rare pack that gives away more than one.
-DEFAULT_COMBO_FREE_QTY_PER_UNIT = 1.0
-
-
-def _resolve_combo_free_mapping(assignment):
-    """Return (free_item_code, free_qty_per_unit) for a combo assignment.
-
-    The mapping lives on `party_product_assignments`, so it is nominally
-    per-party. A combo's free half is the same product for everyone, though, so
-    a blank mapping falls back to any other party's row for the same
-    item_code/category — set it once and every party picks it up.
-    """
-    free_item_code = (assignment.free_item_code or '').strip()
-    free_qty = assignment.free_qty_per_unit
-
-    if not free_item_code:
-        donor = PartyProductAssignment.objects.filter(
-            item_code=assignment.item_code,
-            category=assignment.category,
-            is_active=True,
-        ).exclude(free_item_code__isnull=True).exclude(free_item_code='').first()
-        if donor:
-            free_item_code = (donor.free_item_code or '').strip()
-            if free_qty is None:
-                free_qty = donor.free_qty_per_unit
-
-    if not free_item_code:
-        return None, None
-
-    qty_per_unit = float(free_qty) if free_qty is not None else DEFAULT_COMBO_FREE_QTY_PER_UNIT
-    return free_item_code, (qty_per_unit if qty_per_unit > 0 else DEFAULT_COMBO_FREE_QTY_PER_UNIT)
-
-
-def _serialize_free_product(free_item_code, category):
-    product = (
-        SapProduct.objects.filter(active_product_q(), item_code=free_item_code, category=category).first()
-        or SapProduct.objects.filter(active_product_q(), item_code=free_item_code).first()
-    )
-    if not product:
-        return None
-    return {
-        'item_code': product.item_code,
-        'item_name': product.item_name,
-        'category': product.category,
-        'brand': product.brand,
-        'variety': product.sub_group,
-        'sub_group': product.sub_group,
-        'sal_factor2': product.sal_factor2,
-        'sal_pack_unit': product.sal_pack_unit,
-        'tax_rate': product.tax_rate,
-        # Free of cost — the auto-added order line is always zero-priced.
-        'basic_rate': 0,
-    }
-
-
 class PartyProductsView(APIView):
     permission_classes = [AllowAny]
 
@@ -2080,13 +2009,6 @@ class PartyProductsView(APIView):
                 continue
 
             item_name = getattr(product, 'item_name', None)
-            is_combo = is_combo_item_name(item_name)
-            free_item_code, free_qty_per_unit = (
-                _resolve_combo_free_mapping(assignment) if is_combo else (None, None)
-            )
-            free_product = (
-                _serialize_free_product(free_item_code, assignment.category) if free_item_code else None
-            )
 
             rows.append({
                 'item_code': assignment.item_code,
@@ -2107,13 +2029,6 @@ class PartyProductsView(APIView):
                 'sub_group': getattr(product, 'sub_group', None),
                 'combo_scheme_id': assignment.scheme_id,
                 'combo_scheme_name': assignment.scheme.scheme_name if assignment.scheme else None,
-                # Combo pack -> free-of-cost companion line. `free_item` is null
-                # when the combo has no mapping yet, and the UI then behaves as
-                # it always did.
-                'is_combo': is_combo,
-                'free_item_code': free_product['item_code'] if free_product else None,
-                'free_qty_per_unit': free_qty_per_unit if free_product else None,
-                'free_item': free_product,
             })
 
         return Response(rows)

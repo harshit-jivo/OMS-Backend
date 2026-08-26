@@ -195,14 +195,6 @@ class OrderItem(models.Model):
     )
     qty_scheme = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
     is_scheme_visible = models.BooleanField(default=False)
-    # Set on the zero-priced line auto-added for the free half of a combo pack.
-    # `combo_source_code` is the item_code of the combo that generated it; NULL/''
-    # both mean "not part of a combo" (scheme_engine treats them identically). The
-    # column is nullable (migration 0055_fix_combo_source_code_nullable drops the
-    # stray NOT NULL that survived on some databases); the create path still writes
-    # '' rather than NULL for tidiness.
-    is_auto_free = models.BooleanField(default=False)
-    combo_source_code = models.CharField(max_length=50, null=True, blank=True)
 
     class Meta:
         db_table = 'order_items'

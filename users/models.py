@@ -53,15 +53,6 @@ class PartyProductAssignment(models.Model):
     is_active = models.BooleanField(default=True)
     is_scheme = models.BooleanField(default=False)
 
-    # Combo packs ("COLD PRESS 5 LTR + EXTRA LIGHT OLIVE 1 LTR 4 PCS") ship a
-    # second product free of cost. `free_item_code` names that product; adding
-    # the combo to a sales order auto-appends a zero-priced line for it.
-    # `free_qty_per_unit` is how many free units ride along per combo unit —
-    # left blank it falls back to the piece count parsed out of the segment
-    # after the "+" in the combo's item name.
-    free_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
-    free_qty_per_unit = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
     scheme = models.ForeignKey(
         'users.SchemeProduct',
         on_delete=models.SET_NULL,

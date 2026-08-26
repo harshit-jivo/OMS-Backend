@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView,PagePermissionsView,ComboMappingsView
+from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView,PagePermissionsView
 from django.views.decorators.csrf import csrf_exempt
 
 
@@ -36,7 +36,6 @@ urlpatterns = [
 
     # Combo pack -> free-of-cost item mapping (one entry per combo, applied to
     # every party that has the combo assigned).
-    path('combo-mappings/', ComboMappingsView.as_view(), name='combo-mappings'),
 
     path('users/<int:user_id>/', UserDetailView.as_view(), name='user-detail'),
     path('users/<int:user_id>/delete/', DeleteUserView.as_view(), name='delete-user'),
