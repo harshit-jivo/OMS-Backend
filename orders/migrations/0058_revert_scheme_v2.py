@@ -25,11 +25,16 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # MUST come first: clearing unique_together resolves the old field names
+        # ('scheme', 'scope_type', 'scope_value', 'category') against the current
+        # model state, so it fails with FieldDoesNotExist if the `scheme` field
+        # has already been removed. The autodetector emitted it after the
+        # RemoveField, which is why this is hand-ordered.
+        migrations.AlterUniqueTogether(name="schemeassignment", unique_together=None),
         migrations.RemoveField(model_name="scheme", name="created_by"),
         migrations.RemoveField(model_name="orderitemscheme", name="scheme_v2"),
         migrations.RemoveField(model_name="schemebenefit", name="scheme"),
         migrations.RemoveField(model_name="schemeassignment", name="scheme"),
-        migrations.AlterUniqueTogether(name="schemeassignment", unique_together=None),
         migrations.RemoveField(model_name="schemeassignment", name="created_by"),
         migrations.RemoveField(model_name="orderitemscheme", name="benefit"),
         migrations.RemoveField(model_name="orderitemscheme", name="benefit_item_code"),
