@@ -5282,11 +5282,11 @@ class CancelSalesQuotationView(APIView):
 
         cancel_url = f"{settings.HANA_SERVICE_LAYER_URL}/Quotations({int(doc_entry)})/Cancel"
         try:
-            session = SAPServiceLayerManager.get_session()
+            session = SAPServiceLayerManager.get_session('OIL')
             sap_response = session.post(cancel_url, timeout=20)
             if sap_response.status_code == 401:
                 SAPServiceLayerManager.clear_session()
-                session = SAPServiceLayerManager.get_session()
+                session = SAPServiceLayerManager.get_session('OIL')
                 sap_response = session.post(cancel_url, timeout=20)
         except Exception as exc:
             return Response(

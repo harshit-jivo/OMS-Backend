@@ -553,7 +553,7 @@ PAYMENTS_SMB_PASSWORD = config(
     'PAYMENTS_SMB_PASSWORD', default=config('EINV_QR_SMB_PASSWORD', default=''))
 
 # Company DBs scanned when looking up an invoice by DocNum (the configured
-# HANA_COMPANY_DB is always tried first). Comma-separated in .env.
+# HANA_OIL_COMPANY_DB is always tried first). Comma-separated in .env.
 EINV_COMPANY_DBS = [d.strip() for d in config(
     'EINV_COMPANY_DBS',
     default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,JIVO_MART_HANADB,'

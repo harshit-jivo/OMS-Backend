@@ -4,11 +4,12 @@ Access is decided in ONE place — `tracker_pages_for(user)` — driven entirely
 the user's role. Every view (and, mirrored, the frontend) reads from it, so to
 change who sees what you change a user's role, never page code.
 
-Three tracker sub-roles:
+Four tracker sub-roles:
 
-  * tracker_admin  -> ALL tracker pages (incl. Invoice Entry + Stuck Alerts)
+  * tracker_admin  -> ALL tracker pages (incl. Invoice Entry + Stuck Alerts + AP)
   * tracker_entry  -> Invoice Entry + My Stage Queue
   * tracker_user   -> My Stage Queue
+  * tracker_ap     -> AP Invoice Entry (vendor invoices copied from a GRPO)
 
 Stuck Alerts is admin-only. Superusers and the OMS 'admin' role see every
 tracker page. Non-tracker OMS users see none of them.
@@ -22,17 +23,21 @@ PAGE_ALERTS = 'Tracker_Alerts'
 PAGE_REPORTS = 'Tracker_Reports'
 PAGE_ADMIN = 'Tracker_Admin'
 PAGE_INVOICES = 'Tracker_Invoices'  # admin master list of every invoice
+PAGE_AP = 'Ap_Invoice_Entry'        # A/P vendor invoice entry (copy from GRPO)
 
 ALL_TRACKER_PAGES = {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS,
-                     PAGE_ADMIN, PAGE_INVOICES}
+                     PAGE_ADMIN, PAGE_INVOICES, PAGE_AP}
 
 # The single source of truth: tracker sub-role -> visible pages.
 # Stuck Alerts and the all-invoices list are admin-only.
 ROLE_PAGE_MAP = {
     'tracker_admin': {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS,
-                      PAGE_ADMIN, PAGE_INVOICES},
+                      PAGE_ADMIN, PAGE_INVOICES, PAGE_AP},
     'tracker_entry': {PAGE_ENTRY, PAGE_QUEUE},
     'tracker_user': {PAGE_QUEUE},
+    # AP data entry is a distinct job from document tracking: these users post
+    # vendor invoices into SAP and have no reason to see the tracker queues.
+    'tracker_ap': {PAGE_AP},
 }
 
 
@@ -85,3 +90,9 @@ class IsTrackerAdmin(_BaseTrackerPermission):
     """Manage tracker configuration (stages, lookups, stage assignments)."""
     required_page = PAGE_ADMIN
     message = 'Tracker administration is restricted to tracker admins.'
+
+
+class IsTrackerAP(_BaseTrackerPermission):
+    """Post A/P (vendor) invoices into SAP — tracker_ap and tracker_admin."""
+    required_page = PAGE_AP
+    message = 'AP invoice entry is restricted to AP users.'

@@ -343,6 +343,16 @@ become a production integration they still need:
   `validation.validate_invoice`; `validation.validate_ewb_by_irn` enforces `ExpShipDtls.Gstin`
   (5001/4074); `ewaybill.close_ewb` (`CLOSEEWB`) at `/api/ewaybill/close/`. The *caller* must
   still populate `ShipDtls.Gstin` / `ExpShipDtls.Gstin` in payloads (enforced by validation).
+- ✅ **Buyer / ship-to GSTIN recovery** — `sap.normalize_buyer_gstin` fills a blank
+  `BillToGSTIN` (SAP's `"URP"`) and the entirely absent `ShipToGSTIN` from the BP address
+  master, gated on address match + registered `GstType` + state agreement (§12.5).
+- ⬜ **Catch a missing document GSTIN at invoice creation.** §12.5 fixes the IRN, not the SAP
+  document — `INV12."BpGSTN"` stays blank and is not patchable on a posted invoice. Add a
+  post-create check in `serviceLayer.SAPInvoiceCreateView`: if the created invoice comes back
+  with `BillToGSTIN` `URP`/blank while the BP's bill-to address is registered, flag it before
+  auto-IRN is queued, so it is cancelled and re-raised rather than discovered at IRN time.
+- ⬜ **Fix the `AdresType`/`ShipToCode` mismatch** in `OMS_SP_GST_INVOICE.BillToName` and
+  `GSTR1_B2B`'s INV3 branch (see the note at the end of §12.5).
 
 ---
 
@@ -401,6 +411,12 @@ Generate-EWB-by-IRN, Bill-to/Ship-to, and Combination transactions.
 - **B2B / SEZ:** Ship details from IRN **cannot be replaced**; but if GSTIN was absent at IRN time it
   may be supplied at EWB-by-IRN. Old IRNs where Bill-to == Ship-to GSTIN → a *regular* EWB is generated.
 
+> **Where ours comes from.** Our Service Layer's `EWayBillDetails` carries **no `ShipToGSTIN`
+> property at all**, so before §12.5 `mapping` could never emit `ShipDtls` and nothing here was
+> reachable. It is now resolved from the BP address master, matched on the document's
+> `ShipToCode`. JIVO's usual case is ship-to == bill-to, which stays *correctly* omitted
+> (row 3 above → NIC 2323).
+
 ### 11.3 New validations / error codes
 **Generate IRN + EWB together:** `5002` Ship-to GSTIN mandatory when Ship details present ·
 `2323` Bill-to and Ship-to GSTIN must differ · `2325` Ship-to state code must match GSTIN state ·
@@ -451,14 +467,14 @@ Maps a SAP Business One Service Layer **`Invoices`** (OINV) document straight to
 | `DocDtls.No` / `.Dt` | `DocNum` / `DocDate` (→ `dd/mm/yyyy`); `Typ`=`INV` |
 | `SellerDtls.Gstin/LglNm` | `EWayBillDetails.BillFromGSTIN`/`BillFromName` (GSTIN falls back to `VATRegNum`) |
 | `SellerDtls.Addr1/Addr2/Loc/Pin/Stcd` | `EWayBillDetails.DispatchFromAddress1` (split at 100), `DispatchFromPlace`, `DispatchFromZipCode`, `BillFromStateGSTCode` |
-| `BuyerDtls.Gstin/LglNm` | `EWayBillDetails.BillToGSTIN` / `CardName` |
+| `BuyerDtls.Gstin/LglNm` | `EWayBillDetails.BillToGSTIN` / `CardName` — GSTIN falls back to the **BP address master** when the document carries none (§12.5) |
 | `BuyerDtls.Pos/Stcd` | `EWayBillDetails.BillToStateGSTCode` |
 | `BuyerDtls.Addr1/Addr2/Loc/Pin` | `AddressExtension.BillToBlock`/`BillToAddress2`/`BillToStreet`/`Address` (split), `BillToCity`, `BillToZipCode` |
 | `ItemList[].HsnCd` | `DocumentLines[].HSNEntry` → **`/IndiaHsn(<entry>)`** → `ChapterID` with dots stripped (`1514.99.90`→`15149990`) |
 | `ItemList[].AssAmt/TotAmt` | `DocumentLines[].LineTotal` · `GstRt`←`TaxPercentagePerRow` · `Qty`/`Unit`/`UnitPrice`←`Quantity`/`MeasureUnit`/`Price` |
 | item tax split | intra-state (seller Stcd == POS): `Cgst=Sgst=TaxTotal/2`; inter-state: `Igst=TaxTotal` |
 | `ValDtls.*` | summed over items |
-| `ShipDtls` | `EWayBillDetails.ShipTo*` — **only when `ShipToGSTIN` differs from the buyer GSTIN** (a same-GSTIN ship-to → NIC 2323, so it's omitted → a regular invoice) |
+| `ShipDtls` | `EWayBillDetails.ShipTo*` — **only when `ShipToGSTIN` differs from the buyer GSTIN** (a same-GSTIN ship-to → NIC 2323, so it's omitted → a regular invoice). Our Service Layer has **no `ShipToGSTIN` property at all**, so it comes from the BP address master (§12.5) |
 
 ### 12.3 Notes / gotchas
 - **`Addr1`/`Addr2` are capped at 100 chars each** by NIC (error **5002**). SAP dispatch
@@ -478,7 +494,9 @@ Maps a SAP Business One Service Layer **`Invoices`** (OINV) document straight to
 - **B2C / unregistered buyers are not eligible.** When the SAP buyer GSTIN is `URP` on a
   **domestic** supply (cash sales, free samples), `validation` returns **`B2C_NOT_ELIGIBLE`** and
   the invoice is *not* sent to NIC — the IRP handles B2B/SEZ/Export only. The OMS caller should
-  skip IRN for these.
+  skip IRN for these. **`URP` does not always mean the buyer is unregistered** — SAP also
+  returns it when the document simply missed its GSTIN stamp. See §12.5 before treating a
+  `B2C_NOT_ELIGIBLE` as final.
 - **Exports are mapped** (buyer `BillToCountry` ≠ `IN`):
   - `TranDtls.SupTyp` = **`EXPWP`** if any IGST was charged, else **`EXPWOP`** (LUT/bond).
   - `BuyerDtls`: `Gstin`=**`URP`**, `Pos`=**`96`**, `Stcd`=**`96`**, `Pin`=**`999999`**
@@ -503,6 +521,76 @@ Ran live invoices end-to-end through the wired backend against the NIC sandbox:
 
 Mapping fixes shipped from these runs: `Addr1`/`Addr2` 100-char split (5002); `Loc` state-name
 fallback (5002); export buyer PIN `999999` (5002); required-field + B2C pre-submit checks.
+
+### 12.5 Buyer / ship-to GSTIN recovery from the BP address master
+
+`einvoice.sap.normalize_buyer_gstin()` (runs inside `fetch_invoice_for_irn`, right after
+`normalize_seller_branch`). **The document always wins**; this only fills what SAP left blank.
+
+**Why it exists — two independent holes:**
+
+1. **`BillToGSTIN` comes back as the literal `"URP"`.** SAP derives it from `INV12."BpGSTN"`,
+   which is stamped onto the invoice when it is *added*. A document that missed the stamp
+   reads as an unregistered buyer, so `validation` refuses a perfectly good B2B invoice as
+   `B2C_NOT_ELIGIBLE`. **Diagnosed on DocNum 626080524** (2026-08-25, CUSTA000394 DEEPAK
+   TRADING COMPANY PATIALA): `INV12."BpGSTN"` null, while `CRD1."GSTRegnNo"` held
+   `03ACXPC8880D1ZE` on *both* the `B` and `S` rows. The sibling invoice **626080521**, same
+   customer and same sales order (BaseEntry 30508), 96 minutes earlier, was stamped correctly —
+   every other `INV12` column on the two documents is byte-identical. Rate: **1 of 1,608**
+   invoices since 2026-06-01 (216 have no document GSTIN; 215 of those are genuinely
+   unregistered buyers).
+2. **`ShipToGSTIN` does not exist.** Our Service Layer's `EWayBillDetails` has
+   `ShipToAddress1/2`, `ShipToPlace`, `ShipToStateGSTCode`, `ShipToZipCode` — but **no
+   `ShipToGSTIN` property at all** (it returns explicit nulls for fields it does have, so the
+   absence is real, not a null). `mapping` could therefore never emit `ShipDtls`. The master is
+   the only source, which matters for the §11 advisory (mandatory from 01/08/2026).
+
+**How the lookup is scoped.** `GET /BusinessPartners('<CardCode>')?$select=BPAddresses`, then
+match on the **document's own** `PayToCode` / `ShipToCode` against `AddressName` +
+`AddressType` (`bo_BillTo` / `bo_ShipTo`) — never "some GSTIN on this card". A customer
+registered in several states has one address per registration.
+
+**Three gates, all must pass, else it refuses and logs:**
+
+| gate | why |
+|---|---|
+| well-formed GSTIN (`mapping.gstin`) | 15 chars, numeric state prefix |
+| `GstType` ∈ `{gstRegularTDSISD}` | see the census below — a **UIN** is 15 chars and would pass the format check |
+| GSTIN state prefix == document's `BillToStateGSTCode` / `ShipToStateGSTCode` | a mismatch means the address match went wrong; sending it earns NIC **2265** anyway |
+
+Exports (`AddressExtension.BillToCountry` ≠ `IN`) short-circuit before any of it — `URP` is
+correct there. A genuinely unregistered address has no GSTIN, so `URP` survives and
+`B2C_NOT_ELIGIBLE` still fires as it should.
+
+**`GstType` census, live `JIVO_OIL_HANADB`.`CRD1` (2026-08-25):**
+
+| `GSTType` | addresses | with GSTIN | meaning |
+|---|---|---|---|
+| `1` (`gstRegularTDSISD`) | 9,189 | 9,189, all well-formed | Regular/TDS/ISD — **the only accepted type** |
+| null | 3,719 | 0 | genuinely unregistered → `URP` is right |
+| `6` | 2 | 2 | **UIN** (`0717CAN00024UN9`, High Commission of Canada) — deliberately excluded; asserting a UIN as a B2B recipient GSTIN is a human call |
+
+**Reading the master here does not put the IRN out of step with the books** — it is where the
+rest of the stack already looks:
+
+| consumer | recipient GSTIN source |
+|---|---|
+| Crystal bill print `OMS_SP_GST_INVOICE` / `_SAP` | `CRD1."GSTRegnNo"` joined on `CardCode` + `ShipToCode`/`PayToCode` + `AdresType`. **Neither proc mentions `INV12` or `BpGSTN` at all.** 626080524 prints as `TAX INVOICE` with the GSTIN on both parties |
+| `GSTR1_B2B` | `CRD1."GSTRegnNo"` direct (`INV12."BpGSTN"` only in the E-COMMERCE branch, and there as `IFNULL(BpGSTN, GSTRegnNo)`) |
+| `GSTR1_B2CS` / `_B2CL` | `IFNULL(INV12."BpGSTN", CRD1."GSTRegnNo")`, then `WHERE recipient GSTIN IS NULL OR = ''` → a blank `BpGSTN` falls through to CRD1, is non-blank, and the invoice is **excluded from B2CS** |
+
+So a blank `INV12."BpGSTN"` cannot misclassify the print or the return; the IRN mapper was the
+only consumer without a master fallback.
+
+**This does not repair the SAP document.** `INV12."BpGSTN"` stays blank and is not patchable on
+a posted invoice — cancel and re-raise. Recovery is logged at WARNING saying exactly that, and
+`normalize_buyer_gstin` returns `{field: gstin}` for whatever it recovered, for audit.
+
+> **Latent bugs spotted in the GST procs while confirming the above** (not fixed, not ours):
+> `OMS_SP_GST_INVOICE`'s `BillToName` selects `FROM CRD1 WHERE "AdresType"='B' AND
+> "Address"=OINV."ShipToCode"` — bill-to type matched against the **ship-to** code, so it
+> returns NULL whenever the two addresses differ. `GSTR1_B2B`'s second `UNION ALL` (the INV3
+> freight branch) has the same mismatch, while its first branch correctly uses `PayToCode`.
 
 ---
 

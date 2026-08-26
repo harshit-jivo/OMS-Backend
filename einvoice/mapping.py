@@ -13,6 +13,15 @@ Field sources (see docs/NIC_EINVOICE_EWAYBILL_REFERENCE.md §5, §10):
   ItemList    <- DocumentLines (HSN via IndiaHsn, IGST vs CGST+SGST per SAP tax code)
   ValDtls     <- summed over items
 
+The buyer/ship-to GSTINs are read straight off EWayBillDetails here. SAP leaves
+BillToGSTIN as the literal "URP" when the document was added without its
+INV12."BpGSTN" stamp, and this Service Layer version has no ShipToGSTIN property
+at all, so einvoice.sap.normalize_buyer_gstin fills both from the BP address
+master at fetch time — matched on the document's own PayToCode/ShipToCode, the
+same join the bill print and the GSTR-1 extracts use. Mapping a raw SAP dict
+without that repair still works; it just yields URP (B2C_NOT_ELIGIBLE) and no
+ShipDtls.
+
 The seller GSTIN comes from the document's own `VATRegNum` — the registration of
 the branch (BPL) that issued the invoice — NOT from EWayBillDetails.BillFromGSTIN.
 SAP fills the BillFrom* block from the MAIN business place, so on a branch-to-branch

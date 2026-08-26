@@ -64,11 +64,36 @@ class Queries():
     MART_SCHEMA = getattr(settings, 'HANA_MART_COMPANY_DB', '')
 
     @staticmethod
+    def _open_so_schemas():
+        """All configured SAP company DBs (OIL / BEVERAGES / MART), de-duplicated.
+
+        Open sales orders live in a different company DB per category, so any
+        query that looks up open SOs must search across all of them. Still used
+        by the open-SO lookups further down this class.
+        """
+        configured = [
+            getattr(settings, 'HANA_OIL_COMPANY_DB', '') or Queries.OIL_SCHEMA,
+            getattr(settings, 'HANA_BEVERAGE_COMPANY_DB', '') or Queries.BEVERAGE_SCHEMA,
+            getattr(settings, 'HANA_COMPANY_DB_MART', ''),
+        ]
+        schemas = []
+        seen = set()
+        for schema in configured:
+            schema = str(schema or '').strip()
+            if schema and schema not in seen:
+                seen.add(schema)
+                schemas.append(schema)
+        return schemas
+
+    @staticmethod
     def get_product_stock(branch):
-        if branch == 'OIL':
-            s = Queries.OIL_SCHEMA
-        elif branch == 'BEVERAGE':
-            s = Queries.BEVERAGE_SCHEMA
+        # Branch-scoped: one company DB per call ('OIL' / 'BEVERAGE'), as called
+        # from hana/services/services.py. Kept as a (schema, category) list so the
+        # query body below is unchanged.
+        if branch == 'BEVERAGE':
+            unique_schemas = [(Queries.BEVERAGE_SCHEMA, 'BEVERAGES')]
+        else:
+            unique_schemas = [(Queries.OIL_SCHEMA, 'OIL')]
 
         item_filter = """
             (
@@ -180,7 +205,8 @@ class Queries():
         Returns DocStatus ('O' = open, 'C' = closed) and CANCELED ('Y'/'N') so
         the caller can decide whether a quotation is still open / cancellable.
         """
-        s = str(company_db or Queries.SCHEMA).strip().replace('"', '""')
+        # An explicit company_db wins; otherwise use the branch-derived schema above.
+        s = str(company_db or s).strip().replace('"', '""')
         safe_entries = [str(int(entry)) for entry in doc_entries]
         if not safe_entries:
             return None
