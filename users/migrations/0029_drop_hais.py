@@ -22,12 +22,38 @@ from django.db import migrations
 
 
 def remove_hais_role(apps, schema_editor):
-    """Drop the 'hais' role added by 0026_hais_role."""
+    """Retire the 'hais' role added by 0026_hais_role.
+
+    Deleted outright when nobody holds it. `User.role` is on_delete=PROTECT, so
+    when it IS held a delete raises ProtectedError and aborts the whole
+    migration -- and reassigning someone's role is an administrator's decision,
+    not a schema migration's. In that case the role is deactivated and left for
+    a human, with the holders named so they are easy to find.
+    """
     UserRole = apps.get_model("users", "UserRole")
-    UserRole.objects.filter(name="hais").delete()
+    User = apps.get_model("users", "User")
+
+    role = UserRole.objects.filter(name="hais").first()
+    if role is None:
+        return
+
+    holders = list(User.objects.filter(role=role).values_list("username", flat=True))
+    if holders:
+        role.is_active = False
+        role.save(update_fields=["is_active"])
+        print(
+            f"    ! 'hais' role is still held by {len(holders)} user(s): "
+            f"{', '.join(holders)}. Deactivated rather than deleted -- reassign "
+            f"them to a real role, then delete it by hand."
+        )
+        return
+
+    role.delete()
 
 
 def restore_hais_role(apps, schema_editor):
+    """Re-activate (or re-create) the role. The `hais` schema is NOT restored --
+    see the module docstring."""
     UserRole = apps.get_model("users", "UserRole")
     UserRole.objects.update_or_create(
         name="hais",
