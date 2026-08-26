@@ -114,6 +114,11 @@ class LookupsView(APIView):
         })
 
 
+def _flag_true(value):
+    """Query-param truthiness: ?x=1 / true / yes."""
+    return str(value or '').strip().lower() in ('1', 'true', 'yes')
+
+
 def _can_use_entry(user):
     """True for users who work the head-office / entry desk (entry-page role)."""
     return user.is_superuser or PAGE_ENTRY in tracker_pages_for(user)
@@ -226,7 +231,7 @@ class InvoiceDetailView(APIView):
         """Soft-delete an invoice (row kept, hidden everywhere).
 
         Two paths:
-          * Tracker admin  -> may delete an invoice up to stage 5 (order <= 5),
+          * Tracker admin  -> may delete an invoice up to DELETE_ADMIN_MAX_ORDER,
             regardless of lock state or stage-assignment scope.
           * Entry-desk user -> may delete only while it is still unlocked at the
             entry (head-office) stage.
@@ -368,6 +373,209 @@ class StageAdvancedView(APIView):
             r['advanced_at'] = advanced_at.get(r['id'])
         rows.sort(key=lambda r: r['advanced_at'] or '', reverse=True)
         return Response(rows)
+
+
+class StageDecisionsView(APIView):
+    """The decision log of a stage: what this desk decided, and what became of it.
+
+    Every history tab reads this — Pre-Audit's Hold / OK / Debit / Sent Back,
+    SAP's Approved / Rejected. It is a log of *events*, not of invoices: only a
+    FULL hold keeps the invoice here (OK, DEBIT and a PARTIAL hold all advance
+    it), so filtering the live queue would show almost nothing. An invoice
+    debited twice appears twice, each row carrying its own amount, reason and
+    handler, plus where the invoice sits now.
+
+        ?stage=pre_audit                     OK + HOLD + DEBIT + verdicts
+        ?stage=pre_audit&decision=HOLD,DEBIT
+        ?stage=pre_audit&decision=RETURN     what this desk sent back
+        ?stage=sap_approval&decision=APPROVED
+        &include_resolved=1                  keep send-backs that came back
+
+    Newest decision first.
+    """
+    permission_classes = [IsTrackerUser]
+
+    # Dispositions worth logging.
+    DECISIONS = ['OK', 'HOLD', 'DEBIT', 'APPROVED', 'REJECTED', 'RETURN']
+    # Verdicts — one per stage *visit*, unlike OK/HOLD/DEBIT which can repeat.
+    # A rejection parked for remarks writes a note row and then closes the same
+    # visit when the remarks arrive; both describe one decision, so they collapse.
+    VERDICTS = {'APPROVED', 'REJECTED', 'RETURN'}
+    # Verdicts that sent the invoice back. Once it returns to this desk the
+    # rejection is answered, so these drop out of the tab (`?include_resolved=1`
+    # keeps them, flagged `came_back`).
+    SENT_BACK = {'REJECTED', 'RETURN'}
+
+    def _invoice_fields(self, inv, stage):
+        return {
+            'invoice_id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'invoice_date': inv.invoice_date,
+            'party_name': inv.party_name,
+            'invoice_value': str(inv.invoice_value),
+            'net_invoice_value': str(inv.net_invoice_value),
+            'category_name': inv.category.name if inv.category_id else '',
+            'unit_name': inv.unit.name if inv.unit_id else '',
+            'branch_name': inv.branch.name if inv.branch_id else '',
+            # Where it went: a full hold is still parked at this desk.
+            'is_still_here': inv.current_stage_id == stage.id,
+            'current_stage_code': inv.current_stage.code,
+            'current_stage_name': inv.current_stage.name,
+            'invoice_status': inv.status,
+            # Running totals on the invoice, for context on repeat decisions.
+            'total_debit_amount': str(inv.debit_amount or 0),
+            'total_hold_amount': str(inv.hold_amount or 0),
+        }
+
+    def get(self, request):
+        stage = Stage.objects.filter(code=request.query_params.get('stage')).first()
+        if not stage:
+            return Response({'detail': 'Unknown stage.'}, status=http.HTTP_400_BAD_REQUEST)
+        entry_shared = stage.code == 'entry' and _can_use_entry(request.user)
+        if not request.user.is_superuser and not entry_shared and \
+                stage.id not in services.accessible_stage_ids(request.user):
+            return Response({'detail': 'You are not assigned to this stage.'},
+                            status=http.HTTP_403_FORBIDDEN)
+
+        wanted = [d.strip().upper()
+                  for d in (request.query_params.get('decision') or '').split(',')
+                  if d.strip()]
+        decisions = [d for d in wanted if d in self.DECISIONS] or self.DECISIONS
+
+        rows = []
+        if decisions:
+            match = Q(stage_status__in=decisions)
+            if 'RETURN' in decisions:
+                # A desk with no status list sends back with the plain Return
+                # button, which leaves stage_status empty — still a send-back.
+                match |= Q(event_type=StageEvent.EventType.RETURN, stage_status='')
+            events = (StageEvent.objects
+                      .filter(match, stage=stage, invoice__is_deleted=False)
+                      .select_related('invoice', 'invoice__current_stage',
+                                      'invoice__category', 'invoice__unit',
+                                      'invoice__branch', 'acted_by'))
+
+            visits = {}     # (invoice, entered_at, decision) -> collapsed verdict
+            for ev in events:
+                inv = ev.invoice
+                decision = ev.stage_status or 'RETURN'
+                # A full hold is an in-place note (never exits), so fall back to
+                # when the row was written.
+                row = {
+                    **self._invoice_fields(inv, stage),
+                    'event_id': ev.id,
+                    'decision': decision,
+                    'hold_type': ev.hold_type,
+                    'amount': str(ev.amount) if ev.amount is not None else None,
+                    'remarks': ev.remarks,
+                    'acted_by_name': ev.acted_by.username if ev.acted_by_id else None,
+                    'decided_at': ev.exited_at or ev.created_at,
+                    'days_spent': (str(ev.days_spent)
+                                   if ev.days_spent is not None else None),
+                    # Parked here awaiting the written reason (SAP/JSAP two-step).
+                    'awaiting_remarks': bool(
+                        decision == 'REJECTED' and ev.exited_at is None),
+                }
+                if decision not in self.VERDICTS:
+                    rows.append(row)
+                    continue
+                key = (inv.id, ev.entered_at, decision)
+                prev = visits.get(key)
+                # The closed row wins: it carries the reason and the real time.
+                if prev is None or (ev.exited_at and not prev['_closed']):
+                    row['_closed'] = ev.exited_at is not None
+                    visits[key] = row
+            rows += list(visits.values())
+
+        rows = self._flag_return_visits(rows, stage)
+        if not _flag_true(request.query_params.get('include_resolved')):
+            rows = [r for r in rows
+                    if not (r['decision'] in self.SENT_BACK and r['came_back'])]
+
+        rows.sort(key=lambda r: r['decided_at'], reverse=True)
+        for r in rows:
+            r.pop('_closed', None)
+        return Response(rows)
+
+    def _flag_return_visits(self, rows, stage):
+        """Mark every row whose invoice came BACK to this desk after the decision.
+
+        This is what keeps a send-back tab honest: a rejected invoice that has
+        since returned here is no longer outstanding — the desk is looking at it
+        again — so it drops out of the tab instead of lingering forever.
+
+        "Came back" means an arrival at this stage later than the decision, which
+        is exactly a `StageEvent.entered_at` after it. Note rows written during a
+        visit share that visit's `entered_at`, so they can't trigger it.
+        """
+        ids = {r['invoice_id'] for r in rows}
+        arrivals = {}
+        for inv_id, entered_at in (StageEvent.objects
+                                   .filter(stage=stage, invoice_id__in=ids)
+                                   .values_list('invoice_id', 'entered_at')):
+            arrivals.setdefault(inv_id, set()).add(entered_at)
+        for r in rows:
+            seen = arrivals.get(r['invoice_id'], ())
+            r['came_back'] = any(a > r['decided_at'] for a in seen)
+        return rows
+
+
+class StageExportView(APIView):
+    """Excel export of one queue tab, in the SAME register layout as the
+    All-Invoices export (`exports.build_workbook`) — same columns, same order,
+    same styling, so a desk's sheet drops straight into the office's workbook.
+
+        GET stage-export/?stage=pre_audit&tab=hold&ids=4,9,12
+
+    `ids` is exactly what the tab is showing (so the omni-search filter carries
+    through) and the order is preserved. It is not trusted for access: the ids
+    are intersected with the invoices reachable from that stage — anything the
+    desk has ever handled, which is precisely what its tabs can show. A decision
+    log can list one invoice twice (debited twice); the register is one row per
+    invoice, so duplicates collapse.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def get(self, request):
+        from django.http import HttpResponse
+        from .exports import build_workbook
+
+        stage = Stage.objects.filter(code=request.query_params.get('stage')).first()
+        if not stage:
+            return Response({'detail': 'Unknown stage.'}, status=http.HTTP_400_BAD_REQUEST)
+        entry_shared = stage.code == 'entry' and _can_use_entry(request.user)
+        if not request.user.is_superuser and not entry_shared and \
+                stage.id not in services.accessible_stage_ids(request.user):
+            return Response({'detail': 'You are not assigned to this stage.'},
+                            status=http.HTTP_403_FORBIDDEN)
+
+        ids = []
+        for part in (request.query_params.get('ids') or '').split(','):
+            part = part.strip()
+            if part.isdigit():
+                ids.append(int(part))
+        if not ids:
+            return Response({'detail': 'Nothing to export.'},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        qs = (Invoice.objects
+              .filter(pk__in=ids, events__stage=stage)
+              .distinct()
+              .select_related('current_stage', 'gst_type', 'gst_rate', 'category',
+                              'unit', 'branch', 'mode', 'payment')
+              .prefetch_related('events__stage'))
+        by_id = {inv.pk: inv for inv in qs}
+        invoices = [by_id[i] for i in dict.fromkeys(ids) if i in by_id]
+
+        buf = build_workbook(invoices)
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        tab = (request.query_params.get('tab') or 'invoices').strip().lower()
+        name = f'{stage.code}-{tab}-register.xlsx'
+        resp['Content-Disposition'] = f'attachment; filename="{name}"'
+        return resp
 
 
 class BulkActionView(APIView):

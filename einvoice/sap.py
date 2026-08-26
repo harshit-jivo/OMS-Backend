@@ -43,13 +43,15 @@ def _timeout():
 def get_session(company_db: str | None = None) -> requests.Session:
     """Return a logged-in Service Layer session for `company_db`.
 
-    Known company DBs (OIL / BEVERAGE) go through SAPServiceLayerManager, whose
-    session cache is keyed PER COMPANY — so an OIL session is never handed to a
-    BEVERAGE caller. Any other company DB gets a dedicated, uncached login.
+    Known company DBs (OIL / BEVERAGE / MART) go through SAPServiceLayerManager,
+    whose session cache is keyed PER COMPANY — so an OIL session is never handed
+    to a BEVERAGE caller. Any other company DB (a TEST_* copy, say) gets a
+    dedicated, uncached login.
     """
     known = {
         settings.HANA_OIL_COMPANY_DB: "OIL",
         getattr(settings, "HANA_BEVERAGE_COMPANY_DB", None): "BEVERAGE",
+        getattr(settings, "HANA_MART_COMPANY_DB", None): "MART",
     }
     known.pop(None, None)
     if not company_db:
@@ -80,12 +82,14 @@ def get_session(company_db: str | None = None) -> requests.Session:
 
 
 def company_choices() -> list[dict]:
-    """Selectable companies: [{label, company_db}] — the OIL/BEVERAGE company DBs
-    actually configured in settings. Drives the UI's company picker so the user
-    can choose which DB an IRN is generated against and mirrored into."""
+    """Selectable companies: [{label, company_db}] — the OIL / BEVERAGE / MART
+    company DBs actually configured in settings. Drives the UI's company picker
+    so the user can choose which DB an IRN is generated against and mirrored
+    into. A company with no DB configured simply doesn't appear."""
     pairs = [
         ("OIL", getattr(settings, "HANA_OIL_COMPANY_DB", "")),
         ("BEVERAGE", getattr(settings, "HANA_BEVERAGE_COMPANY_DB", "")),
+        ("MART", getattr(settings, "HANA_MART_COMPANY_DB", "")),
     ]
     out, seen = [], set()
     for label, db in pairs:

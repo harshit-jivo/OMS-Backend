@@ -59,7 +59,9 @@ class HANAConnection:
 class Queries():
     OIL_SCHEMA = settings.DATABASES['hana']['OIL_SCHEMA']
     BEVERAGE_SCHEMA = settings.DATABASES['hana']['BEVERAGE_SCHEMA']
-    MART_SCHEMA = settings.DATABASES['hana'].get('MART_SCHEMA', '')
+    # Third company. Only the DocNum -> DocEntry lookup (bill print) is wired for
+    # it so far; the other queries below are still OIL/BEVERAGE only.
+    MART_SCHEMA = getattr(settings, 'HANA_MART_COMPANY_DB', '')
 
     @staticmethod
     def get_product_stock(branch):
@@ -263,12 +265,17 @@ class Queries():
             s = Queries.BEVERAGE_SCHEMA
         return f"""
         SELECT
-            T0."CardCode" , 
-            T0."CardName" , 
-            T0."State1" ,  
-            T0."U_Chain" ,  
-            T0."BillToDef" , 
-            T0."ShipToDef" 	 
+            T0."CardCode" ,
+            T0."CardName" ,
+            T0."State1" ,
+            T0."U_Chain" ,
+            T0."BillToDef" ,
+            T0."ShipToDef" ,
+            -- What the customer still owes: OCRD."Balance" is the running AR
+            -- balance, already net of payments and credit memos. Positive means
+            -- they owe us. Rides along here so the invoice screen needs no
+            -- second round trip.
+            T0."Balance"
         FROM "{s}"."OCRD" AS T0
         WHERE T0."CardCode" = '{party_code}'
         """
@@ -281,8 +288,12 @@ class Queries():
         every B1 build, and a missing column fails the whole query rather than
         degrading. `Locked` is the flag that actually blocks posting.
         """
+        # MART matters here: the picker is shown on Mart orders, and falling
+        # through to OIL would offer warehouses from the wrong company DB.
         if branch == 'BEVERAGE':
             s = Queries.BEVERAGE_SCHEMA
+        elif branch == 'MART':
+            s = Queries.MART_SCHEMA
         else:
             s = Queries.OIL_SCHEMA
         return f"""
@@ -494,6 +505,238 @@ class Queries():
         """
 
     @staticmethod
+    def get_inventory_report(branch, whs_codes=None):
+        """Per-warehouse on-hand stock for every FG item, for the Inventory Report.
+
+        One row per item/warehouse; the pivot into warehouse columns and the
+        per-variety subtotals happen in `hana.utils.build_inventory_report`.
+        Doing it there rather than in SQL keeps the warehouse list dynamic --
+        a new warehouse in SAP shows up as a new column with no code change.
+
+        Rows with no stock are dropped: OITW carries a row for every item in
+        every warehouse (~450 items x 58 warehouses), and all but a few hundred
+        of those are zeros that would only be summed back to nothing.
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+
+        filters = [
+            'T0."ItemCode" LIKE \'FG%\'',
+            'T1."OnHand" <> 0',
+        ]
+        if whs_codes:
+            safe_codes = ",".join(
+                "'" + str(code).replace("'", "''") + "'" for code in whs_codes
+            )
+            filters.append(f'T1."WhsCode" IN ({safe_codes})')
+        where = " AND ".join(filters)
+
+        return f"""
+            SELECT
+                T0."ItemCode"      AS "item_code",
+                T0."ItemName"      AS "item_name",
+                T0."U_SKU"         AS "sku",
+                T0."U_Sub_Group"   AS "sub_group",
+                T0."U_Variety"     AS "variety",
+                T0."U_Brand"       AS "brand",
+                T1."WhsCode"       AS "warehouse_code",
+                T2."WhsName"       AS "warehouse_name",
+                T1."OnHand"        AS "on_hand"
+            FROM "{s}"."OITM" AS T0
+            INNER JOIN "{s}"."OITW" AS T1
+                ON T0."ItemCode" = T1."ItemCode"
+            INNER JOIN "{s}"."OWHS" AS T2
+                ON T1."WhsCode" = T2."WhsCode"
+            WHERE {where}
+            ORDER BY T0."U_Sub_Group", T0."ItemCode", T1."WhsCode"
+        """
+
+    @staticmethod
+    def get_pending_dispatch(branch, from_date=None, to_date=None):
+        """Open sales-order lines and what has been invoiced against them.
+
+        The "Sales Order vs AR Invoice" report: one row per open SO line, with
+        the quantity ordered, the quantity already billed, and what is still
+        pending -- plus the packaging figures (case pack, litres per piece) the
+        dispatch team works in.
+
+        Invoices are matched on INV1."BaseType" = 17 (Sales Order), which is how
+        this company bills: of the AR-invoice lines raised in the last three
+        months, ~91% are drawn straight from a sales order and only ~1% come
+        via a delivery note. A line billed through a delivery therefore shows a
+        blank invoice number here, while SAP's own "OpenQty" still reports the
+        pending quantity correctly -- so the pending column stays right either
+        way. Cancelled invoices are excluded.
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+
+        # Every line of an open order, not just the open ones: a line already
+        # billed in full closes and would otherwise vanish, leaving the order's
+        # ordered/invoiced/pending totals unable to add up. Lines with nothing
+        # left to send come back with a pending quantity of zero, and the
+        # caller decides whether to list them.
+        filters = [
+            'T0."DocStatus" = \'O\'',
+            'T0."CANCELED" = \'N\'',
+        ]
+        if from_date:
+            filters.append(f'T0."DocDate" >= \'{str(from_date)[:10]}\'')
+        if to_date:
+            filters.append(f'T0."DocDate" <= \'{str(to_date)[:10]}\'')
+        where = " AND ".join(filters)
+
+        return f"""
+            SELECT
+                T0."DocEntry"        AS "so_doc_entry",
+                T0."DocNum"          AS "sales_order",
+                T0."DocDate"         AS "order_date",
+                T0."DocDueDate"      AS "delivery_date",
+                T0."CardCode"        AS "card_code",
+                T0."CardName"        AS "party_name",
+                T0."NumAtCard"       AS "po_number",
+                T0."U_OMS_REF"       AS "oms_ref",
+                T0."U_OMS_Order_No"  AS "oms_order_no",
+                T5."SlpName"         AS "so_name",
+                T4."U_Chain"         AS "chain",
+                T6."Name"            AS "location",
+                T1."LineNum"         AS "line_num",
+                T1."ItemCode"        AS "item_code",
+                T1."Dscription"      AS "item_name",
+                T1."WhsCode"         AS "warehouse_code",
+                T1."Quantity"        AS "qty_ordered",
+                T1."OpenQty"         AS "qty_pending",
+                T1."LineStatus"      AS "line_status",
+                T1."LineTotal"       AS "line_total",
+                T3."U_SKU"           AS "sku",
+                T3."SalFactor2"      AS "case_pack",
+                T3."SalPackUn"       AS "ltr_per_pc",
+                T3."U_Brand"         AS "brand",
+                T3."U_Variety"       AS "oil_category",
+                T3."U_Sub_Group"     AS "variety",
+                T3."U_TYPE"          AS "category",
+                T3."U_PACK_TYPE"     AS "case_pack_type",
+                IFNULL(T2."InvQty", 0) AS "qty_invoiced",
+                T2."InvNums"           AS "invoice_numbers",
+                T7."InvNums"           AS "order_invoice_numbers"
+            FROM "{s}"."ORDR" AS T0
+            INNER JOIN "{s}"."RDR1" AS T1
+                ON T0."DocEntry" = T1."DocEntry"
+            LEFT JOIN (
+                -- What has already been billed against each SO line. Grouped
+                -- to one row per (SO line) so the join cannot multiply the
+                -- order lines when a line was billed on several invoices.
+                SELECT
+                    I1."BaseEntry",
+                    I1."BaseLine",
+                    SUM(I1."Quantity") AS "InvQty",
+                    STRING_AGG(TO_VARCHAR(I0."DocNum"), ', ') AS "InvNums"
+                FROM "{s}"."INV1" AS I1
+                INNER JOIN "{s}"."OINV" AS I0
+                    ON I1."DocEntry" = I0."DocEntry"
+                WHERE I1."BaseType" = 17
+                  AND I0."CANCELED" = 'N'
+                GROUP BY I1."BaseEntry", I1."BaseLine"
+            ) AS T2
+                ON T2."BaseEntry" = T1."DocEntry"
+                AND T2."BaseLine" = T1."LineNum"
+            LEFT JOIN (
+                -- Every invoice raised against the ORDER, whichever of its
+                -- lines they billed. Without this a line reads as "nothing
+                -- invoiced" when its order has in fact been part-billed on a
+                -- sibling line -- the dispatch desk needs to see that invoice
+                -- before shipping the rest.
+                -- One invoice usually bills several lines of the same order,
+                -- so the DISTINCT pass runs first: HANA's STRING_AGG takes no
+                -- DISTINCT of its own, and without it an invoice number would
+                -- be repeated once per line it covers.
+                SELECT
+                    "BaseEntry",
+                    STRING_AGG("InvNum", ', ') AS "InvNums"
+                FROM (
+                    SELECT DISTINCT
+                        I1."BaseEntry",
+                        TO_VARCHAR(I0."DocNum") AS "InvNum"
+                    FROM "{s}"."INV1" AS I1
+                    INNER JOIN "{s}"."OINV" AS I0
+                        ON I1."DocEntry" = I0."DocEntry"
+                    WHERE I1."BaseType" = 17
+                      AND I0."CANCELED" = 'N'
+                )
+                GROUP BY "BaseEntry"
+            ) AS T7
+                ON T7."BaseEntry" = T1."DocEntry"
+            LEFT JOIN "{s}"."OITM" AS T3
+                ON T1."ItemCode" = T3."ItemCode"
+            LEFT JOIN "{s}"."OCRD" AS T4
+                ON T0."CardCode" = T4."CardCode"
+            LEFT JOIN "{s}"."OSLP" AS T5
+                ON T0."SlpCode" = T5."SlpCode"
+            LEFT JOIN "{s}"."OCST" AS T6
+                ON T4."State1" = T6."Code"
+                AND T6."Country" = 'IN'
+            WHERE {where}
+            ORDER BY T0."DocDate", T0."DocNum", T1."LineNum"
+        """
+
+    @staticmethod
+    def get_order_invoices(branch, from_date=None, to_date=None):
+        """AR invoices raised against each still-open sales order.
+
+        This is SAP's own relationship map, read straight out of the tables:
+        an invoice line records the order it was drawn from in
+        INV1."BaseEntry" (with "BaseType" = 17), so grouping those lines by
+        invoice gives the document flow SO -> invoice(s), including how much of
+        that invoice came off this order.
+
+        Scoped by the ORDER's date, not the invoice's, so it lines up row for
+        row with `get_pending_dispatch` over the same range.
+        """
+        if branch == 'BEVERAGE':
+            s = Queries.BEVERAGE_SCHEMA
+        else:
+            s = Queries.OIL_SCHEMA
+
+        filters = [
+            'I1."BaseType" = 17',
+            'I0."CANCELED" = \'N\'',
+            'O."DocStatus" = \'O\'',
+            'O."CANCELED" = \'N\'',
+        ]
+        if from_date:
+            filters.append(f'O."DocDate" >= \'{str(from_date)[:10]}\'')
+        if to_date:
+            filters.append(f'O."DocDate" <= \'{str(to_date)[:10]}\'')
+        where = " AND ".join(filters)
+
+        return f"""
+            SELECT
+                I1."BaseEntry"   AS "so_doc_entry",
+                I0."DocEntry"    AS "invoice_entry",
+                I0."DocNum"      AS "invoice_num",
+                I0."DocDate"     AS "invoice_date",
+                I0."DocStatus"   AS "invoice_status",
+                I0."DocTotal"    AS "invoice_total",
+                SUM(I1."Quantity")  AS "qty",
+                SUM(I1."LineTotal") AS "amount",
+                COUNT(*)            AS "line_count"
+            FROM "{s}"."INV1" AS I1
+            INNER JOIN "{s}"."OINV" AS I0
+                ON I1."DocEntry" = I0."DocEntry"
+            INNER JOIN "{s}"."ORDR" AS O
+                ON O."DocEntry" = I1."BaseEntry"
+            WHERE {where}
+            GROUP BY
+                I1."BaseEntry", I0."DocEntry", I0."DocNum",
+                I0."DocDate", I0."DocStatus", I0."DocTotal"
+            ORDER BY I0."DocDate", I0."DocNum"
+        """
+
+    @staticmethod
     def get_batch_details(item_code, whs_code,branch):
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
@@ -555,9 +798,17 @@ class Queries():
     def get_costing_code(prc_name, branch):
         """Resolve a Profit Center code (OPRC."PrcCode") from its name.
 
-        SAP document lines expect the numeric ``CostingCode`` (PrcCode), not the
-        human-readable profit-center name. Looks the name up in the correct
-        company DB schema (OIL vs BEVERAGE vs MART).
+        SAP document lines expect the short ``CostingCode`` (PrcCode, max 8
+        chars), not the human-readable profit-center name -- e.g. the variety
+        "SUNFLOWER" is PrcCode "SUNFLOWR". Sending the name works only for the
+        varieties where the two happen to be identical; anything longer than 8
+        chars is rejected by SAP with "Value too long in property 'CostingCode'".
+
+        Scoped to dimension 1 and active rows: PrcName is NOT unique across
+        dimensions (e.g. "KARNATAKA" exists twice under DimCode 5, one of them
+        inactive), so an unscoped TOP 1 can return another dimension's code --
+        which SAP accepts and books to the wrong profit center. Product
+        varieties always live in dimension 1.
         """
         if branch == 'OIL':
             s = Queries.OIL_SCHEMA
@@ -570,6 +821,8 @@ class Queries():
             SELECT TOP 1 T0."PrcCode"
             FROM "{s}"."OPRC" AS T0
             WHERE T0."PrcName" = '{safe_prc_name}'
+              AND T0."DimCode" = 1
+              AND T0."Active" = 'Y'
         """
 
     @staticmethod
@@ -672,12 +925,18 @@ class Queries():
         """Resolve an invoice's internal key (OINV."DocEntry") from its DocNum.
 
         DocNum is only unique within a company database, so the branch decides
-        which schema is searched (OIL vs BEVERAGE).
+        which schema is searched (OIL / BEVERAGE / MART).
         """
-        if branch == 'OIL':
-            s = Queries.OIL_SCHEMA
-        elif branch == 'BEVERAGE':
-            s = Queries.BEVERAGE_SCHEMA
+        schemas = {
+            'OIL': Queries.OIL_SCHEMA,
+            'BEVERAGE': Queries.BEVERAGE_SCHEMA,
+            'MART': Queries.MART_SCHEMA,
+        }
+        s = schemas.get(branch)
+        if not s:
+            # Better a clear error than an f-string with an undefined schema —
+            # that used to raise UnboundLocalError deep in the query builder.
+            raise ValueError(f'No HANA schema configured for branch {branch!r}.')
         return f"""
             SELECT
                 "DocEntry"
