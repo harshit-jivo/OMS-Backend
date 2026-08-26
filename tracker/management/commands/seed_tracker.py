@@ -14,7 +14,12 @@ from tracker.models import (
 
 # --- The flow (Bilty/GRPO merged with Tiwari ji receiving) ---
 STAGES = [
-    dict(code='entry',        name='Invoice Entry',      order=1,
+    # "Head Office In", not "Invoice Entry": this is what the stage has been
+    # called on the live database since it was renamed in the UI, and what the
+    # export workbook's first column is built around (see exports.py). The seed
+    # carries the full defaults dict, so leaving the old name here meant any
+    # re-run silently renamed the stage back. Aligned 2026-08-26.
+    dict(code='entry',        name='Head Office In',     order=1,
          status_choices=[],                                   requires_status=False,
          can_return=False, is_terminal=False, threshold_days=2),
     dict(code='bilty_grpo',   name='Bilty / GRPO',       order=2,

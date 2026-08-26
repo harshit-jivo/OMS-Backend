@@ -11,8 +11,12 @@ Four tracker sub-roles:
   * tracker_user   -> My Stage Queue
   * tracker_ap     -> AP Invoice Entry (vendor invoices copied from a GRPO)
 
-Stuck Alerts is admin-only. Superusers and the OMS 'admin' role see every
-tracker page. Non-tracker OMS users see none of them.
+Stuck Alerts is admin-only. Access is decided by the tracker sub-role and
+nothing else: `is_superuser` and the OMS 'admin' role are NOT special-cased, so
+a superuser whose role is 'admin' sees no tracker pages at all. To give someone
+tracker access, set their role — granting superuser does nothing here.
+(Corrected 2026-08-26; this paragraph previously claimed the opposite, which
+`tracker_pages_for` below has never done.)
 """
 from rest_framework.permissions import BasePermission
 
