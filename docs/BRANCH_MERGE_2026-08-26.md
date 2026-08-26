@@ -29,7 +29,7 @@ branch used.
 | Merges | 4 |
 | Conflicted files resolved | 7 |
 | Migration files changed | 8 (+2 new) |
-| Migrations run | **none** |
+| Migrations run | 2, on 2026-08-26 11:08 UTC — see §10 |
 | Pushed | **no** |
 
 Full revert: `git reset --hard pre-merge-20260826`
@@ -495,7 +495,7 @@ Nothing below was done, deliberately.
 
 | item | why it was left |
 |---|---|
-| **`migrate` has not been run** | The `invoice` chain churns the device columns (0022 drops, 0024 re-adds) against whatever state the shared database is actually in. That is a live-database decision. |
+| ~~**`migrate` has not been run**~~ | **Done 2026-08-26 11:08 UTC — see §10.** Only 2 migrations were ever pending, and neither altered the schema. The `invoice` device-column churn was never a risk here: 0020–0024 were already applied to the shared database by their authors. |
 | **Nothing pushed** | `test` is a shared branch and this is 4 merges plus a migration rewrite. Tell the team first. |
 | **`git add --renormalize .`** | Would rewrite line endings across hundreds of files and conflict with every open branch. Own commit, quiet moment. |
 | **`origin/production` not merged** | 35 ahead / 31 behind `test`. Out of scope here; the divergence remains. |
@@ -527,3 +527,113 @@ PY
 # undo everything
 git reset --hard pre-merge-20260826
 ```
+
+---
+
+## 10. Applying the migrations — 2026-08-26 11:08 UTC
+
+Run against `order_management` on `138.252.101.117` (PostgreSQL 16.15), after a
+`pg_dump` was taken and verified.
+
+### 10.1 Only two migrations were ever pending
+
+The merge added 19 migration files, but `migrate --plan` reported just two:
+
+```
+orders.0059_merge_20260826_branches               <- operations = [], bookkeeping
+users.0030_partyproductassignment_parent_item_code
+```
+
+Everything else — `invoice` 0020–0024, `orders` 0052–0058, `tracker` 0015–0020,
+`uilabels` 0003 — was **already applied** to the shared database by the branch
+authors. The merge brought the *files* into `test`; the *schema* had been there
+for weeks.
+
+That retires the largest worry in §8. The `invoice` device-column churn
+(0022 drops, 0024 re-adds) was never going to run: both were long since applied,
+so there was no drop-then-restore cycle to survive.
+
+### 10.2 `users.0030` would have failed on first contact
+
+It was written during the merge as a plain `AddField`. It would have died:
+
+```
+ProgrammingError: column "parent_item_code" of relation
+"party_product_assignments" already exists
+```
+
+`parent_item_code` was **already on the database** — `varchar(50)` NULL, with
+both `party_product_assignments_parent_item_code_2eeb8c2d` and its `_like`
+counterpart — while `django_migrations` held no row for the migration.
+
+The cause is the same defect §4.3 already records, one step further along.
+harshit's `de95c81` added the field to `users/models.py` without committing its
+migration. What §4.3 did not know is that he had also **applied** that
+uncommitted migration to the shared database. So the schema ran ahead of the
+tree, and the migration written to close the gap collided with his column.
+
+Fixed in `f8f99a9` by splitting it into `SeparateDatabaseAndState` with guarded
+DDL — the pattern `orders/0056` already uses for exactly this reason. The SQL
+reproduces what `AddField(db_index=True)` emits on PostgreSQL (column, btree
+index, and the `varchar_pattern_ops` index backing `LIKE`), with Django's own
+deterministic index names hardcoded so a database built from scratch ends up
+identical to the one that already has them.
+
+```sql
+ALTER TABLE party_product_assignments
+  ADD COLUMN IF NOT EXISTS parent_item_code varchar(50) NULL;
+CREATE INDEX IF NOT EXISTS party_product_assignments_parent_item_code_2eeb8c2d
+  ON party_product_assignments (parent_item_code);
+CREATE INDEX IF NOT EXISTS party_product_assignments_parent_item_code_2eeb8c2d_like
+  ON party_product_assignments (parent_item_code varchar_pattern_ops);
+```
+
+Every statement is guarded, so the migration is a no-op where the column exists
+and correct where it does not.
+
+> **How it was caught.** By the `pg_dump` verification step, not by any migration
+> check. `pg_restore -l` on the backup listed indexes on `parent_item_code` — in
+> a dump taken *before* the migration ran. Graph validation had passed cleanly
+> at every stage, because `MigrationLoader(None)` never opens a database
+> connection and therefore cannot see a schema that has drifted ahead of the
+> tree. **A migration graph that validates is not a migration that will run.**
+
+### 10.3 Result
+
+```
+orders.0059_merge_20260826_branches                 applied 11:08:05.283 UTC
+users.0030_partyproductassignment_parent_item_code   applied 11:08:05.420 UTC
+```
+
+Neither changed the schema; both simply brought `django_migrations` into line
+with what the database already had.
+
+Verified afterwards:
+
+| check | result |
+|---|---|
+| `migrate --plan` | `No planned migration operations.` |
+| `parent_item_code` | `varchar(50)`, nullable — intact |
+| indexes | both present — intact |
+| `party_product_assignments` | 13,423 rows, 24 with a non-null `parent_item_code` |
+| `makemigrations --check --dry-run` | `No changes detected`, exit 0 |
+
+### 10.4 Reversing, and why `--fake` is now the right tool
+
+§8's revert advice no longer applies as written. Reversing `users.0030` would
+drop `parent_item_code` — and that column is **not** the migration's to destroy.
+It predates the migration and holds 24 live combo-parent mappings written by
+harshit's work.
+
+```bash
+# unwinds the bookkeeping only, leaves the column and its data alone
+python manage.py migrate users 0029_merge_combo_free_item_roles --fake
+```
+
+Leave `orders.0059` applied either way: it has `operations = []`, so unapplying
+it achieves nothing while forcing a target of one of its two parents, which
+would take a real `0058` branch down with it.
+
+The backup remains the safer instrument:
+`backups/order_management_pre-merge-20260826.dump`, custom format, all three
+schemas (`public`, `payments`, `hais`), 118 tables with data.
