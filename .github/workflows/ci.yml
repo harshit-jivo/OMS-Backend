@@ -67,3 +67,24 @@ jobs:
 
       - name: Test suite
         run: python manage.py test --settings=OMS.test_settings --verbosity=2
+
+      - name: OpenAPI schema generates and validates
+        # A view that breaks generation breaks it for EVERY view — the command
+        # produces one document or none — so this is worth its own step rather
+        # than being folded into the suite, where the failure would read as
+        # "one test failed".
+        #
+        # Not --fail-on-warn: there is a real backlog of views that build their
+        # Response by hand and so have no describable body. The suite tracks
+        # that count and fails when it grows; blocking on it here would gate
+        # every change on a pre-existing backlog instead.
+        run: |
+          python manage.py spectacular             --settings=OMS.test_settings             --validate --file /tmp/openapi-schema.yml
+
+      - name: Upload the schema
+        # Makes the generated contract downloadable from the run, so a reviewer
+        # can diff what an API change did without running anything.
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-schema
+          path: /tmp/openapi-schema.yml

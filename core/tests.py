@@ -59,11 +59,17 @@ PUBLIC_ROUTES = {
 
 OPEN_PERMISSION_NAMES = {'AllowAny'}
 
-LOCAL_APP_PREFIXES = (
-    'users', 'orders', 'sap_sync', 'hana', 'SKU', 'serviceLayer', 'einvoice',
-    'ewaybill', 'invoice', 'legal', 'audit', 'devices', 'tracker', 'uilabels',
-    'core', 'approvals', 'attachments', 'payments', 'notifications', 'HAIS',
-)
+#: Route prefixes that are not part of the API surface this audit covers.
+#: Django's admin has its own authentication, and the static/media handlers
+#: serve files by design.
+#:
+#: This replaced a filter that listed the project's own app modules and skipped
+#: everything else — which meant a THIRD-PARTY view mounted in the URLconf was
+#: invisible to the audit. That was not hypothetical: drf-spectacular's three
+#: schema routes are AllowAny by default, and mounting them added three public
+#: endpoints that this test, whose whole job is to notice public endpoints,
+#: did not see. Auditing by route rather than by module has no such blind spot.
+NON_API_PREFIXES = ('/admin/', '/static/', '/media/', '/api-auth/')
 
 
 def _walk(resolver, prefix=''):
@@ -90,10 +96,11 @@ def _permission_names(cb):
 
 
 def _local_routes():
+    """Every routable path on the API, whoever wrote the view."""
     for path, cb in _walk(get_resolver()):
-        mod = getattr(cb, '__module__', '') or ''
-        if mod.startswith(LOCAL_APP_PREFIXES):
-            yield '/' + path, cb
+        full = '/' + path
+        if not full.startswith(NON_API_PREFIXES):
+            yield full, cb
 
 
 class PublicEndpointAllowlistTests(TestCase):
@@ -132,8 +139,6 @@ class PublicEndpointAllowlistTests(TestCase):
         plain = sorted(
             path for path, cb in _local_routes()
             if _permission_names(cb) is None
-            # Django's own admin and static/media handlers are not API routes.
-            and not path.startswith(('/admin/', '/static/', '/media/'))
         )
         self.assertEqual(plain, [], (
             'Plain Django views on the API — convert to @api_view/APIView so a '
@@ -435,3 +440,102 @@ class NoCommittedCredentialsTests(TestCase):
                     len(assignments), 1,
                     f'{key} is assigned {len(assignments)} times; the last '
                     f'assignment silently wins')
+
+
+class OpenAPISchemaTests(TestCase):
+    """The generated OpenAPI schema (Phase 0.6).
+
+    The value here is that the schema is derived from the code, so it cannot
+    drift from it the way the hand-written documents in `docs/` did. It also
+    answers Phase 0.5 — who may call what — because every operation carries the
+    permission classes of the view behind it.
+    """
+
+    #: Views drf-spectacular cannot describe a request/response body for,
+    #: because they subclass APIView and build their Response by hand rather
+    #: than declaring a serializer. The path is still documented; only the body
+    #: is missing.
+    #:
+    #: This is a CEILING, not an expected value. It fails only when the number
+    #: GROWS — that is, when a new undescribed view is added — so the backlog
+    #: can be worked down without touching this test, and the intended
+    #: direction is down. Lower it as views gain a `serializer_class` or an
+    #: `@extend_schema`.
+    MAX_UNDESCRIBED_VIEWS = 297
+
+    def _generate(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        return SchemaGenerator().get_schema(request=None, public=True)
+
+    def test_the_schema_generates(self):
+        """A view that breaks generation breaks it for every other view too —
+        the command produces one document or none."""
+        schema = self._generate()
+        self.assertEqual(schema['openapi'][:2], '3.')
+        self.assertGreater(len(schema['paths']), 200,
+                           'far fewer paths than the URLconf has routes')
+
+    def test_only_api_routes_are_described(self):
+        """SCHEMA_PATH_PREFIX keeps the Django admin out of the API document."""
+        schema = self._generate()
+        stray = [p for p in schema['paths'] if not p.startswith('/api/')]
+        self.assertEqual(stray, [], f'non-API paths in the schema: {stray}')
+
+    def test_undescribed_views_do_not_increase(self):
+        """See MAX_UNDESCRIBED_VIEWS. Counted from the schema rather than from
+        the command's stderr, so it measures the artefact, not the log."""
+        schema = self._generate()
+        undescribed = 0
+        for operations in schema['paths'].values():
+            for method, operation in operations.items():
+                if method not in {'get', 'post', 'put', 'patch', 'delete'}:
+                    continue
+                responses = operation.get('responses', {})
+                if not any(r.get('content') for r in responses.values()):
+                    undescribed += 1
+        self.assertLessEqual(
+            undescribed, self.MAX_UNDESCRIBED_VIEWS,
+            f'{undescribed} operations have no described response body, up '
+            f'from {self.MAX_UNDESCRIBED_VIEWS}. A new APIView needs a '
+            f'serializer_class or an @extend_schema.')
+
+
+class SchemaEndpointTests(TestCase):
+    """The three schema routes must not be public.
+
+    A schema is a complete map of the API — every endpoint, every field name,
+    every enum. That is reconnaissance. These routes declare no permission
+    classes, so they inherit DEFAULT_PERMISSION_CLASSES; this test is what
+    notices if that ever stops being true.
+    """
+
+    ROUTES = ('/api/schema/', '/api/schema/swagger-ui/', '/api/schema/redoc/')
+
+    def test_anonymous_access_is_refused(self):
+        for route in self.ROUTES:
+            with self.subTest(route=route):
+                response = self.client.get(route)
+                self.assertIn(
+                    response.status_code, (401, 403),
+                    f'{route} answered {response.status_code} to an anonymous '
+                    f'request')
+
+    def test_an_authenticated_user_can_read_the_schema(self):
+        """Locked down, not switched off — the pair matters. A schema route
+        that 403s for everyone would also pass the test above.
+
+        APIClient rather than Django's test client: DEFAULT_AUTHENTICATION_
+        CLASSES is JWT only, so a session login leaves DRF seeing an anonymous
+        request and this would fail with a misleading 401.
+        """
+        from rest_framework.test import APIClient
+
+        role, _ = UserRole.objects.get_or_create(name='sales')
+        user = User.objects.create_user(
+            username='schema-reader', password='pw-for-tests-only', role=role)
+        client = APIClient()
+        client.force_authenticate(user)
+        response = client.get('/api/schema/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'openapi', response.content[:200].lower())

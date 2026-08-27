@@ -120,6 +120,9 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_apscheduler',
+    # OpenAPI schema at /api/schema/ (Phase 0.6). Already a pinned dependency
+    # before this line; it was simply never installed.
+    'drf_spectacular',
     # Local apps
     'users',
     'orders',
@@ -418,6 +421,51 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 
 # REST Framework
+# ---------------------------------------------------------------------------
+# OpenAPI schema (drf-spectacular) — Phase 0.6
+#
+# The schema is generated from the code, so it cannot drift from it the way the
+# hand-written docs in `docs/` did. It also answers Phase 0.5's question — who
+# may call what — because each operation carries the view's permission classes.
+#
+# The three routes it serves must not be public. They do NOT inherit
+# DEFAULT_PERMISSION_CLASSES: SpectacularAPIView sets its own
+# `permission_classes` from SERVE_PERMISSIONS, which defaults to AllowAny — so
+# installing this app without the setting below publishes a complete map of the
+# API (every endpoint, every field name, every enum) to anonymous callers.
+# `core.tests.SchemaEndpointTests` is what caught that.
+# ---------------------------------------------------------------------------
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'OMS API',
+    'DESCRIPTION': (
+        'Order Management System — orders, schemes, invoices, payments, '
+        'e-invoicing (NIC IRN/e-Way Bill) and the document tracker. '
+        'Generated from the source; see docs/CODEBASE_AND_REFACTOR_PLAN.md '
+        'for the system overview.'
+    ),
+    'VERSION': '1.0.0',
+
+    # The schema endpoint should describe the API, not appear in it.
+    'SERVE_INCLUDE_SCHEMA': False,
+
+    # See the note above: without this the schema routes are AllowAny.
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.IsAuthenticated'],
+
+    # Every route in this project is under /api/. Without this, `spectacular`
+    # would also try to describe the Django admin.
+    'SCHEMA_PATH_PREFIX': r'/api/',
+
+    # Warnings are noisy on a codebase this size — mostly views whose
+    # serializer cannot be inferred. They are worth fixing view by view, not
+    # worth blocking the schema over, so they are collected rather than raised.
+    'DISABLE_ERRORS_AND_WARNINGS': False,
+
+    'SWAGGER_UI_SETTINGS': {
+        'persistAuthorization': True,
+    },
+}
+
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -443,6 +491,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+
+    # Generates the OpenAPI 3 schema served at /api/schema/. Setting this
+    # replaces DRF's own AutoSchema for every view at once; it changes no
+    # runtime behaviour, only what `manage.py spectacular` can describe.
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 
     # Rate limiting. Login was brute-forceable at unlimited speed: no
     # throttling existed anywhere, and `LoginView` is necessarily AllowAny.
