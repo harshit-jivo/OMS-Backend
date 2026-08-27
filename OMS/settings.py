@@ -300,6 +300,22 @@ JSAP_DB_NAME = config('JSAP_DB_NAME', default='')
 JSAP_DB_USER = config('JSAP_DB_USER', default='')
 JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='')
 
+# Blank means disabled, and that is a supported mode — but blank-in-PART is a
+# typo, not a decision. Without this, setting the host and forgetting the
+# password gives `is_configured()` a true answer and every JSAP lookup fails at
+# connect time, which reads as "JSAP is down" rather than "JSAP is misspelt".
+if JSAP_DB_HOST and not (JSAP_DB_NAME and JSAP_DB_USER and JSAP_DB_PASSWORD):
+    _missing = [name for name, value in (
+        ('JSAP_DB_NAME', JSAP_DB_NAME),
+        ('JSAP_DB_USER', JSAP_DB_USER),
+        ('JSAP_DB_PASSWORD', JSAP_DB_PASSWORD),
+    ) if not value]
+    raise ImproperlyConfigured(
+        'JSAP_DB_HOST is set but ' + ', '.join(_missing) + ' is not. Either '
+        'set all four, or clear JSAP_DB_HOST to disable JSAP lookups (the '
+        'tracker then reports budget status as "unknown", which is the '
+        'documented off state).')
+
 
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
@@ -315,21 +331,26 @@ DSR_API_BASE = config('JSAP_API_BASE')
 # Fixed OMS user id stamped as createdBy on DSR credit-limit requests.
 OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
 
-# SAP SQL Server (source for sync)
-SAP_DB_HOST = config('SAP_DB_HOST', default='138.252.101.118')
+# --- SAP SQL Server (source for sap_sync) — REQUIRED ------------------------
+# No defaults. These used to carry the production host, database, user and
+# password as literals, so anyone with repo access had the SAP service
+# account and the app would happily connect to production from a laptop.
+#
+# Required rather than blank-defaulted because there is no meaningful
+# "disabled" mode here: sap_sync exists to read this database. An unset value
+# should stop the process at startup, not surface later as a connection error
+# against an empty host.
+SAP_DB_HOST = config('SAP_DB_HOST')
 SAP_DB_PORT = config('SAP_DB_PORT', default=1433, cast=int)
-SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
-SAP_DB_USER = config('SAP_DB_USER', default='ab')
-SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
+SAP_DB_NAME = config('SAP_DB_NAME')
+SAP_DB_USER = config('SAP_DB_USER')
+SAP_DB_PASSWORD = config('SAP_DB_PASSWORD')
 
-# JSAP SQL Server — the DSR/JSAP application's own database. Read-only here; used
-# to resolve a credit-limit document to its approval flow id without paging the
-# DSR document-list API. Same host as the SAP box, different database.
-JSAP_DB_HOST = config('JSAP_DB_HOST', default='103.89.45.75')
-JSAP_DB_PORT = config('JSAP_DB_PORT', default=1433, cast=int)
-JSAP_DB_NAME = config('JSAP_DB_NAME', default='jsaplive3')
-JSAP_DB_USER = config('JSAP_DB_USER', default='ab')
-JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='Jivo@!@#$')
+# JSAP SQL Server is configured ~30 lines above, with blank defaults. A SECOND
+# copy of that block used to sit here carrying the production host, database,
+# user and password as literals. Being later in the file, it won overwrite —
+# so the documented "blank host disables every JSAP lookup" behaviour was
+# unreachable, and JSAP was permanently on, against a committed password.
 
 # VAPID (Web Push) keys are configured lower down in this file — see the
 # "Web Push (VAPID)" section near the bottom.

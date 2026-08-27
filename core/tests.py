@@ -323,3 +323,115 @@ class EnvExampleTests(TestCase):
                  for ln in self._example_path().read_text(encoding='utf-8').splitlines()]
         self.assertIn('SECRET_KEY=', lines,
                       'SECRET_KEY must be present and blank')
+
+
+class NoCommittedCredentialsTests(TestCase):
+    """No credential may have a value baked into the source.
+
+    settings.py carried the production SAP and JSAP host, database, user and
+    password as `config(..., default='<literal>')`, and the same values again
+    as `getattr(settings, ..., '<literal>')` fallbacks in
+    sap_sync/services/connection.py and invoice/services/jsap_db.py. The
+    duplication is what made this dangerous rather than merely untidy: removing
+    the settings defaults alone would have changed nothing, and clearing the
+    .env would have silently reconnected to production instead of failing.
+
+    No secret appears in this file. The tests look for the SHAPE of a committed
+    credential — a key whose name says it is one, holding a non-empty literal —
+    so they keep working after the exposed values are rotated, which writing
+    the values down here would not.
+    """
+
+    #: A key is a credential if its name ends in one of these. USER is included
+    #: because a service account name is half of a credential and names the
+    #: privilege level; HOST and NAME are not — those are topology, and
+    #: ALLOWED_HOSTS legitimately lists this server's own address.
+    CREDENTIAL_SUFFIXES = ('PASSWORD', 'SECRET', 'TOKEN', 'KEY', 'USER')
+
+    #: Not credentials despite matching the suffixes above. Kept as an
+    #: explicit list rather than a cleverer rule: every entry here is a
+    #: decision someone should have to write down.
+    EXEMPT = {
+        # A rate limit ("2000/hour"). Matches only because of the USER suffix.
+        'THROTTLE_USER',
+        'THROTTLE_ANON',
+        'THROTTLE_LOGIN',
+        # An integer id stamped on DSR requests, not a secret.
+        'OMS_JSAP_USER_ID',
+        # A contact address sent to push services, published by design.
+        'VAPID_ADMIN_EMAIL',
+    }
+
+    def _settings_source(self):
+        import OMS
+
+        return (Path(OMS.__file__).resolve().parent / 'settings.py').read_text(
+            encoding='utf-8')
+
+    def test_no_credential_setting_has_a_committed_default(self):
+        source = self._settings_source()
+        # config('X', default='literal') / default="literal" — non-empty only.
+        pattern = re.compile(
+            r"config\(\s*'([A-Z0-9_]+)'\s*,\s*default\s*=\s*(['\"])([^'\"]+)\2")
+        offenders = [
+            key for key, _q, _value in pattern.findall(source)
+            if key not in self.EXEMPT
+            and key.endswith(self.CREDENTIAL_SUFFIXES)
+        ]
+        self.assertEqual(
+            offenders, [],
+            'these settings ship a working credential to anyone who can read '
+            'the repo: ' + ', '.join(sorted(set(offenders))))
+
+    def test_the_sap_connection_reads_settings_with_no_fallback(self):
+        """`getattr(settings, 'SAP_DB_PASSWORD', '<literal>')` is the same leak
+        one layer down, and it survives any cleanup of settings.py."""
+        import invoice.services.jsap_db as jsap_db
+        import sap_sync.services.connection as sap_connection
+
+        pattern = re.compile(
+            r"getattr\(\s*settings\s*,\s*'([A-Z0-9_]+)'\s*,\s*(['\"])([^'\"]+)\2")
+        for module in (sap_connection, jsap_db):
+            source = Path(module.__file__).read_text(encoding='utf-8')
+            offenders = [key for key, _q, _v in pattern.findall(source)]
+            self.assertEqual(
+                offenders, [],
+                f'{module.__name__} falls back to a hardcoded value for: '
+                + ', '.join(sorted(set(offenders))))
+
+    def test_the_sap_credentials_are_required_not_blank_defaulted(self):
+        """A blank default would be quieter but wrong: sap_sync has no
+        meaningful disabled mode, so an unset key should stop the process at
+        startup, not surface later as a connection failure to ''."""
+        source = self._settings_source()
+        for key in ('SAP_DB_HOST', 'SAP_DB_NAME', 'SAP_DB_USER',
+                    'SAP_DB_PASSWORD'):
+            with self.subTest(setting=key):
+                self.assertIn(
+                    f"config('{key}')", source,
+                    f'{key} should be read with no default at all')
+
+    def test_jsap_is_configured_all_or_nothing(self):
+        """JSAP is optional, so it is blank-defaulted rather than required —
+        but a half-set block is a typo, and settings.py refuses to start on it
+        rather than let `is_configured()` return true for a broken config."""
+        source = self._settings_source()
+        self.assertIn('if JSAP_DB_HOST and not (JSAP_DB_NAME', source)
+
+    def test_settings_defines_each_credential_setting_exactly_once(self):
+        """The JSAP block was defined TWICE. The second copy, 30 lines below
+        the first, carried the real password and — being later in the file —
+        silently won, making the documented "blank host disables JSAP" mode
+        unreachable. A redefinition is invisible to every other test here,
+        because the module imports cleanly and only the last value survives.
+        """
+        source = self._settings_source()
+        for key in ('JSAP_DB_HOST', 'JSAP_DB_NAME', 'JSAP_DB_USER',
+                    'JSAP_DB_PASSWORD', 'SAP_DB_HOST', 'SAP_DB_PASSWORD'):
+            with self.subTest(setting=key):
+                assignments = re.findall(
+                    rf'^{key}\s*=', source, flags=re.MULTILINE)
+                self.assertEqual(
+                    len(assignments), 1,
+                    f'{key} is assigned {len(assignments)} times; the last '
+                    f'assignment silently wins')

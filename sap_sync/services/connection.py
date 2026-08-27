@@ -13,11 +13,19 @@ class SAPConnection:
         return str(value).strip().strip("'").strip('"')
 
     def __init__(self):
-        self.host = self._clean(getattr(settings, 'SAP_DB_HOST', '138.252.101.118'))
-        self.port = int(getattr(settings, 'SAP_DB_PORT', 1433))
-        self.database = self._clean(getattr(settings, 'SAP_DB_NAME', 'Jivo_All_Branches_Live'))
-        self.username = self._clean(getattr(settings, 'SAP_DB_USER', 'ab'))
-        self.password = self._clean(getattr(settings, 'SAP_DB_PASSWORD', 'Jivo@!@#$'))
+        # Read straight off settings, with no `getattr` fallback. Every one of
+        # these used to carry the production host, database, user and password
+        # as a literal default here AS WELL AS in settings.py — so removing them
+        # from settings alone would have changed nothing, and clearing the .env
+        # would have silently reconnected to production instead of failing.
+        #
+        # settings.py declares all five without a default, so they are always
+        # present; an unset one stops the process at startup with the key named.
+        self.host = self._clean(settings.SAP_DB_HOST)
+        self.port = int(settings.SAP_DB_PORT)
+        self.database = self._clean(settings.SAP_DB_NAME)
+        self.username = self._clean(settings.SAP_DB_USER)
+        self.password = self._clean(settings.SAP_DB_PASSWORD)
         self.connection = None
         self.cursor = None
     
