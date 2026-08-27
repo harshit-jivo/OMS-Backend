@@ -323,6 +323,24 @@ class StageEvent(models.Model):
         RECEIVE = 'RECEIVE', 'Received'
         ADVANCE = 'ADVANCE', 'Advanced'
         RETURN = 'RETURN', 'Returned'
+        # An in-place annotation, not an occupancy: a full HOLD or a rejection
+        # parked awaiting its written reason. The invoice does NOT move and the
+        # dwell clock keeps running on the real visit row.
+        #
+        # Before this existed, notes were written as RECEIVE with `entered_at`
+        # copied from the visit and no `exited_at` — so a stage had two rows
+        # that both looked like an open visit, tied on the only column anything
+        # ordered by. `_open_event` picks with
+        # `.order_by('-entered_at').first()`, and which of the two a later
+        # advance closed was left to the database. The other was stranded open
+        # at a stage the invoice had left, where every queue count and dwell
+        # report still saw it.
+        #
+        # `exited_at` could NOT be the discriminator: `tracker/views.py` reads
+        # `exited_at is None` on a rejection note to mean "awaiting the written
+        # reason" in the SAP/JSAP two-step, so closing notes would silently
+        # clear every pending rejection.
+        NOTE = 'NOTE', 'Note'
 
     class ReceivingNote(models.TextChoices):
         ON_TIME = 'ON_TIME', 'On time'
@@ -372,6 +390,26 @@ class StageEvent(models.Model):
         indexes = [
             models.Index(fields=['invoice', 'stage']),
             models.Index(fields=['stage', 'event_type']),
+        ]
+        constraints = [
+            # An invoice can be at one stage at a time, so it can have at most
+            # one OPEN visit there. That was always true and was enforced only
+            # by `services.apply_action` being the single entry point — which
+            # is exactly the kind of invariant that holds until the day
+            # something writes a StageEvent directly.
+            #
+            # NOTE rows are excluded because they are annotations, not
+            # occupancies: a stage can carry several (a hold, then a rejection
+            # awaiting its reason) and they deliberately keep `exited_at` NULL.
+            #
+            # Verified satisfiable against production before adding: 68 events,
+            # 13 open, 0 (invoice, stage) pairs with more than one open row.
+            models.UniqueConstraint(
+                fields=['invoice', 'stage'],
+                condition=(models.Q(exited_at__isnull=True)
+                           & ~models.Q(event_type='NOTE')),
+                name='tracker_stage_event_one_open_visit_per_stage',
+            ),
         ]
 
     def __str__(self):

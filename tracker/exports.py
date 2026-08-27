@@ -12,6 +12,8 @@ from django.utils import timezone
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from tracker.models import StageEvent
+
 HEADERS = [
     'Sr no.', 'Invoice date', 'Party name', 'GST Number', 'Invoice no.',
     'Taxable value', 'Gst', 'Rate of GST', 'Additional Charge',
@@ -51,12 +53,24 @@ def _recv(note):
 
 
 def _latest_by_stage(invoice):
-    """Most recent visit per stage code (final pass wins for bounced invoices)."""
+    """Most recent VISIT per stage code (final pass wins for bounced invoices).
+
+    Notes are skipped. They carry `entered_at` copied from the visit, so with a
+    strict `>` comparison a note and its visit tied and whichever the queryset
+    happened to yield first won — meaning a held stage could export the note's
+    blank `days_spent` and `receiving_note` instead of the real visit's. Same
+    root cause as `services._open_event`, in the export.
+
+    The `id` tie-break makes the remaining comparison deterministic for the
+    legitimate case of two visits to one stage after a RETURN.
+    """
     latest = {}
     for ev in invoice.events.all():
+        if ev.event_type == StageEvent.EventType.NOTE:
+            continue
         code = ev.stage.code
         cur = latest.get(code)
-        if cur is None or ev.entered_at > cur.entered_at:
+        if cur is None or (ev.entered_at, ev.id) > (cur.entered_at, cur.id):
             latest[code] = ev
     return latest
 

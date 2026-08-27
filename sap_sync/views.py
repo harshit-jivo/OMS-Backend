@@ -24,6 +24,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from core.permissions import IsAdminRole
 from django.db.models import Q
+from core.pagination import OptInPagination
 from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q  , SalesOrderLog
 from .serializers import (ProductSerializer, PartySerializer, PartyListSerializer,
     PartyAddressSerializer, SyncLogSerializer, SyncScheduleSerializer,BranchSerializer)
@@ -152,6 +153,7 @@ class SyncPartyAddressesView(APIView):
 
 class ProductListView(ListAPIView):
     serializer_class = ProductSerializer
+    pagination_class = OptInPagination   # 4,162 rows
 
     def get_queryset(self):
         queryset = Product.objects.filter(active_product_q())
@@ -222,6 +224,7 @@ class ProductByCodeView(RetrieveAPIView):
 
 class PartyListView(ListAPIView):
     serializer_class = PartyListSerializer
+    pagination_class = OptInPagination   # 3,357 rows
 
     def get_queryset(self):
         # Return all parties; filtering is handled on the client or via query params
@@ -267,6 +270,9 @@ class PartyByCodeView(RetrieveAPIView):
 class PartyAddressListView(ListAPIView):
     """List all party addresses with optional filter"""
     serializer_class = PartyAddressSerializer
+    # 35,719 rows unfiltered. Opt-in, so today's callers are unaffected;
+    # see core/pagination.OptInPagination.
+    pagination_class = OptInPagination
     
     def get_queryset(self):
         queryset = PartyAddress.objects.all()

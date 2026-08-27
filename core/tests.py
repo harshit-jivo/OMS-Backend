@@ -56,6 +56,18 @@ PUBLIC_ROUTES = {
     # Removing this entry requires OMS-Frontend's QrViewer to fetch through
     # axios and render an object URL first.
     '/api/einvoice/irn/<str:irn>/qr.png',
+
+    # Liveness and readiness. The callers are a load balancer, an uptime
+    # monitor and a container orchestrator, none of which hold a credential —
+    # and a health check that needs one cannot report the failure mode where
+    # authentication itself is broken.
+    #
+    # Both are deliberately terse: component names and up/down, never an error
+    # string, so an anonymous caller learns that something is wrong and
+    # nothing about the host, port or driver involved. `/detail/`, which does
+    # carry the diagnosis, is admin-only and correctly absent from this list.
+    '/api/health/live/',
+    '/api/health/ready/',
 }
 
 OPEN_PERMISSION_NAMES = {'AllowAny'}
@@ -96,12 +108,34 @@ def _permission_names(cb):
     return None
 
 
+#: Phase 6.2 mounts every API route at BOTH `/api/...` and `/api/v1/...`.
+#: They are the same view with the same permission classes, so the audit
+#: judges each route ONCE, under its unversioned path.
+#:
+#: Normalising rather than listing every allowlist entry twice is the point:
+#: two lists would be free to drift, and a route made public under only one
+#: prefix would then pass the audit. One canonical form cannot drift.
+VERSION_PREFIX = '/api/v1/'
+
+
+def _canonical(path):
+    if path.startswith(VERSION_PREFIX):
+        return '/api/' + path[len(VERSION_PREFIX):]
+    return path
+
+
 def _local_routes():
-    """Every routable path on the API, whoever wrote the view."""
+    """Every routable path on the API, whoever wrote the view.
+
+    Yields each route once, under its unversioned path — see `_canonical`.
+    """
+    seen = set()
     for path, cb in _walk(get_resolver()):
-        full = '/' + path
-        if not full.startswith(NON_API_PREFIXES):
-            yield full, cb
+        full = _canonical('/' + path)
+        if full.startswith(NON_API_PREFIXES) or full in seen:
+            continue
+        seen.add(full)
+        yield full, cb
 
 
 class PublicEndpointAllowlistTests(TestCase):

@@ -533,6 +533,7 @@ Nothing else is safe without this.
 | 0.2 | Characterisation tests for `users` auth: login, token refresh, user CRUD, role assignment | 0 tests today, and Phase 1 rewrites its permissions |
 | 0.3 | Characterisation tests for `tracker` stage transitions | 3,905 LOC, 0 tests, `apply_action()` is the only movement entry point |
 | 0.4 | A **staging database** — a `pg_dump` restore of `order_management` | Currently everything is tested against live `.117` |
+| | `scripts/make_staging.py` + `OMS/staging_settings.py` + `scripts/scrub_staging.py`. **Blocked on one grant** — see below. | |
 | 0.5 | Endpoint inventory: all 298 routes → auth requirement, roles, callers | Phase 1 cannot be done safely without knowing who calls what |
 | 0.6 | Wire up `drf-spectacular` at `/api/schema/` | Already a dependency; gives 0.5 for free and documents the API |
 
@@ -623,17 +624,192 @@ attempted as one change; as ten changes it is routine.
 | 4.6 | Consider squashing migrations per app once the graph is stable — this is what finally retires 4.1 |
 | 4.7 | Connection pooling (`CONN_MAX_AGE`) and a HANA connection-pool review |
 
+### What Phase 4 measurement actually showed
+
+The plan's performance items were written before anyone measured. The database
+is **61 MB**, and the tables 4.2/4.3 target are tiny:
+
+| table | rows |
+|---|---|
+| `sap_party_addresses` | 35,719 |
+| `audit_log` | 14,047 |
+| `party_product_assignments` | 13,423 |
+| **`orders`** | **131** |
+| **`order_items`** | **159** |
+
+All 11 unindexed foreign keys are on tables under 88 kB — Postgres will
+sequential-scan those faster than it can consult an index, and would ignore one
+if added. The tables that *do* have volume are already covered:
+`sap_party_addresses` has a `card_code` index, which is the column its endpoint
+filters on.
+
+So **4.3 was not done** — adding those indexes would be cargo-culting. **4.4**
+(move `tracker` to its own schema) was not done either: 15 tables and a
+`search_path` change for organisational tidiness, against invariant #10.
+**4.6** (squash) buys nothing at this size.
+
+### 4.1 — the one orphan row that was not inert
+
+Of the 44 orphan `django_migrations` rows, 43 are harmless history. One is not:
+**`hana` had zero migration files on disk and an applied `0001_initial` row**.
+The day someone added the first model there, Django would write
+`0001_initial.py`, find the row already recorded, and **silently skip it** —
+the model changes, the table never appears, and it surfaces later as a column
+that does not exist.
+
+Fixed by adding `hana/migrations/0001_initial.py` with `operations = []`,
+taking the name. **Zero database writes** — the alternative, deleting the row,
+destroys the evidence for no gain. The other 43 rows were left alone.
+
+### 4.5 — the tracker HOLD defect, and the constraint that pins it
+
+Found by the Phase 0.3 characterisation tests. A full HOLD (and a rejection
+awaiting its reason) was written as a `RECEIVE` row with `entered_at` copied
+from the visit and no `exited_at` — so a held stage carried two rows that both
+looked like an open visit and **tied on the only column anything ordered by**.
+`_open_event` picks with `.order_by('-entered_at').first()`, so which one a
+later advance closed was left to the database, and the other was stranded open
+at a stage the invoice had left. `tracker/exports.py:_latest_by_stage` had the
+same tie, with a strict `>`.
+
+The obvious fix — stamp `exited_at` on notes — would have been **wrong**:
+`tracker/views.py` reads `exited_at is None` on a rejection note to mean
+"awaiting the written reason", so closing notes would have silently cleared
+every pending rejection in the SAP/JSAP two-step.
+
+The fix is a new `EventType.NOTE`. A choices change emits **no SQL**
+(`sqlmigrate` prints `-- (no-op)`), so no column was created. `_open_event` and
+`_latest_by_stage` now exclude notes and tie-break on `id`.
+
+Backfill required: **none**. Production holds 68 events, and zero note-shaped
+rows — no full HOLD or pending rejection has ever been written there. The
+defect was latent, not manifest.
+
+The invariant is then enforced rather than merely intended:
+
+```sql
+CREATE UNIQUE INDEX tracker_stage_event_one_open_visit_per_stage
+  ON tracker_stage_event (invoice_id, stage_id)
+  WHERE exited_at IS NULL AND NOT (event_type = 'NOTE');
+```
+
+Verified satisfiable against production before adding: 0 `(invoice, stage)`
+pairs with more than one open row.
+
+### 4.7 — connection reuse
+
+`CONN_MAX_AGE` was **unset**, i.e. Django's default of 0: a fresh Postgres
+connection opened and torn down on every single request. Now 60s with
+`CONN_HEALTH_CHECKS = True`, which validates a reused connection at the start
+of each request rather than letting a server-side close surface as an
+`InterfaceError` on a random query. Safe only since 5.1 moved the scheduler out
+of the web process — a background thread in a web worker could otherwise hold a
+connection open with no request boundary to close it.
+
 ---
 
 ## Phase 5 — Operations *(~1 week)*
 
 | # | task |
 |---|---|
-| 5.1 | Move APScheduler out of the web process into a dedicated worker (or Celery) — today jobs duplicate under multiple workers |
+| 5.1 | Move APScheduler out of the web process into a dedicated worker (or Celery) — ~~today jobs duplicate under multiple workers~~ see the correction below |
 | 5.2 | Structured logging with request IDs; the `audit` middleware already gives a hook |
 | 5.3 | Health/readiness endpoints covering Postgres, HANA and Service Layer |
 | 5.4 | Error tracking (Sentry or equivalent) |
 | 5.5 | Externalise remaining hardcoded hosts (`SAP_DB_HOST`, `JSAP_DB_HOST` have IP defaults in `settings.py`) |
+
+### 5.1 — correction to the premise
+
+The line above says jobs duplicate under multiple workers. They did not,
+because they never ran at all. `SapSyncConfig.ready()` gated the start on
+`os.environ.get('RUN_MAIN') == 'true'`, and `RUN_MAIN` is set by the Django
+dev-server **autoreloader** and by nothing else — not waitress, not gunicorn,
+not IIS. Under every production server the condition was false.
+
+The database confirms it: 0 rows in `SyncSchedule`, 0 in `django_apscheduler`'s
+job and execution tables, and of 372 rows in `sap_sync_logs` not one carries
+`triggered_by='scheduled'`. APScheduler has never run a single job in the
+lifetime of this system. The bare `except` printing to stdout is why that was
+silent.
+
+Two further defects were found alongside it:
+
+* `add_schedule_job` / `refresh_schedules` were reachable only from
+  `start_scheduler`. **No view ever called them**, so creating, editing or
+  deactivating a schedule through `/api/sap-sync/schedules/` wrote a row and
+  changed nothing about what was scheduled.
+* `IntervalTrigger(minutes=0)` raises, and `custom_interval_minutes` is an
+  `IntegerField` with no validator, so a `CUSTOM` schedule saved with 0 would
+  have taken down reconciliation for every other schedule too.
+
+Both readings of 5.1 — "runs twice" and "never runs" — argue for the same fix,
+so the task stands as written. Scheduling now lives in
+`manage.py run_scheduler`, a dedicated process holding a Postgres **session
+advisory lock** so a second copy exits rather than double-running. Schedule
+changes reach it by reconciliation from the table every 60s, which is the only
+channel that survives a worker restart. See `run_scheduler.bat`.
+
+### 5.3 — what was built
+
+`/api/health/live/` (public, no I/O), `/api/health/ready/` (public, terse) and
+`/api/health/detail/` (admin only, carries the error text). Postgres is the
+only **critical** dependency: HANA and the Service Layer are **degraded**, so
+a SAP outage does not empty the load-balancer pool while orders, tracker,
+approvals and payments — all Postgres — keep working. The Service Layer probe
+deliberately does not log in, because a login per poll would consume SAP's
+concurrent-session licence.
+
+### 5.2 — what was built
+
+`core/request_context.py` holds a request ID in a **`ContextVar`** (not a
+thread-local: only a ContextVar survives `async def` views, and its reset token
+restores the previous value exactly rather than leaving the last request's ID
+in a pooled worker). `core.logging.RequestContextFilter` is attached to the
+**handlers**, so all several hundred existing `logger.*` calls — plus Django's
+own loggers and third-party libraries — gain correlation without one call site
+changing.
+
+`X-Request-ID` is accepted from the caller, **validated against
+`[A-Za-z0-9._-]{1,64}`**, and echoed on the response. The validation is a
+security control, not tidiness: the value is written verbatim into every log
+line of the request, so an unvalidated one is a log-forgery primitive. A
+rejected value is replaced, never repaired.
+
+`LOG_FORMAT=json` switches the file handlers to one JSON object per line; text
+stays the default because these logs are read directly, by a person, on the
+Windows box that produces them.
+
+Found on the way: the hand-maintained app-logger list had dropped **`HAIS`,
+`SKU`, `audit` and `notifications`**, so their INFO records fell through to
+root (level WARNING) and were discarded. `audit` is the one that mattered — it
+logs the failures of the audit trail itself. The list is now derived from
+`INSTALLED_APPS`.
+
+### 5.4 — what was built
+
+Sentry, **entirely opt-in**: with `SENTRY_DSN` unset — the default, and what CI
+and every developer machine run under — nothing initialises and nothing leaves
+the process.
+
+The scrubber is the load-bearing part, because requests here carry SAP Service
+Layer credentials, GSTINs, party master data and NIC e-invoice tokens.
+`send_default_pii=False` (so no Authorization header, cookies, body or IP), the
+query string and request body are **dropped rather than scrubbed**, and
+`before_send` redacts by key name and by value shape — JWTs, `B1SESSION=`
+cookies and inline `password=` / `"password":` assignments — *before* anything
+crosses the network. Verified against the real `SAP_DB_PASSWORD` in four
+shapes; all four redacted. Tracing defaults to 0.0 because it samples SQL text
+and is billed per event.
+
+`init` catches everything: `sentry_sdk.init` raises `BadDsn` on a malformed
+DSN, and it runs at import time in `settings.py`, so a typo in `.env` would
+otherwise have stopped the whole deployment from booting.
+
+### 5.5 — done earlier
+
+Completed during the credential removal: `SAP_DB_*` and `JSAP_DB_*` now read
+from the environment with no defaults, and `settings.py` raises
+`ImproperlyConfigured` on a partial JSAP config.
 
 ---
 
@@ -645,6 +821,84 @@ attempted as one change; as ten changes it is routine.
 | 6.2 | Version the API (`/api/v1/`) before changing response shapes |
 | 6.3 | Standardise pagination, filtering, ordering via `django-filter` |
 | 6.4 | Deprecation policy for the mobile client — `devices.VersionPolicy` already provides the enforcement mechanism |
+
+### 6.2 — versioning, added additively
+
+Every API route is now reachable at **both** prefixes:
+
+```
+/api/<app>/...        what every existing client calls today — unchanged
+/api/v1/<app>/...     the same routes, under an explicit version
+```
+
+Same view object behind each, asserted route by route (`assertIs` on the
+callback), so the two cannot fork. The versioning had to happen before any
+response shape changes and could not break the live web and mobile clients, so
+it was added alongside rather than in place of.
+
+The v1 mount is **namespaced**. Including the same patterns twice registers
+every route name twice, and `reverse('health-live')` would then resolve to
+whichever was registered last — silently, since `reverse` cannot fail here.
+With the namespace, `reverse('health-live')` still means the unversioned path
+and `reverse('v1:health-live')` the versioned one.
+
+The published OpenAPI schema describes **only** `/api/v1/`
+(`core/schema.py:only_versioned_routes`). Describing both would list every
+endpoint twice and collide every `operationId` — drf-spectacular resolves those
+with numeric suffixes, so the contract would name operations
+`orders_submit_create` and `orders_submit_create_2` with nothing to say which
+is which.
+
+The route audit in `core/tests.py` normalises the two prefixes to one
+canonical path rather than duplicating the allowlist, because two lists would
+be free to drift; `core/tests_api_contract.py` separately asserts the two
+prefixes carry **identical permission classes**, which the normalised audit by
+construction cannot see.
+
+### 6.3 — pagination, opt-in
+
+The problem is real and measured: `GET /api/sap/addresses/` serialises all
+**35,719** rows of `sap_sync.PartyAddress` on every call, unfiltered.
+
+The obvious fix is not available. `DEFAULT_PAGINATION_CLASS` turns a JSON array
+into an object, and the live clients index straight into the array — it would
+break every list endpoint at once, which is the exact class of change 6.2
+exists to prevent.
+
+So `core.pagination.OptInPagination` paginates **only when asked**. No `?page=`
+or `?page_size=` and the response is byte-for-byte what it is today; a client
+that passes `?page=1` gets the envelope and can migrate on its own schedule.
+Applied to the three largest list endpoints (`addresses`, `products`,
+`parties`). `max_page_size=200` stops the unbounded response being
+reintroduced through `?page_size=99999`.
+
+Nothing is truncated — that would be a correctness bug dressed up as a
+performance fix. Instead an unpaginated response over 1,000 rows is logged with
+its size and the **calling client**, which is the fact that says when
+pagination can become the default.
+
+`django-filter` was deliberately not adopted. The filtering these endpoints
+need already exists and works; converting it would be a rewrite with no
+behaviour change plus a new dependency. `ordering_from`'s allow-list is the
+part that mattered for safety, and it now has tests.
+
+### 6.4 — deprecation mechanism
+
+`core/deprecation.py` marks a route deprecated, tells the caller in the
+standard fields — `Deprecation`, `Sunset` (RFC 8594) and
+`Link: rel="successor-version"` — and logs each call with the platform,
+version and build that made it.
+
+Headers, never the body: a new body field would change the response shape of
+exactly the endpoints being retired.
+
+Applied first to `orders.NotificationListView`, which unblocks **3.5**. That
+item has been stuck on a question nobody could answer — is the old endpoint
+still called, and by whom? It now answers itself. **No sunset date is set**,
+deliberately: the date belongs to whoever owns the client migration.
+
+The removal sequence is: mark here → read the usage log → set a sunset →
+let `devices.VersionPolicy` enforce the client floor (HTTP 426) → delete.
 
 ---
 

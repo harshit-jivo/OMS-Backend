@@ -25,6 +25,8 @@ from django.db import transaction
 import logging
 from orders.notifications import NotificationEvents, NotificationPlan, NotificationTemplates, NotificationTypes, deactivate_push_token, deliver_notification_to_many
 from orders.webpush import get_vapid_public_key
+from core.deprecation import deprecated
+
 from ._shared import (
     _assigned_rate_approvers_for_order,
     _build_iexact_filter,
@@ -272,6 +274,18 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
         title=plan.title,
     ))
 
+@deprecated(
+    successor='/api/v1/notifications/',
+    note=(
+        'Superseded by the reusable `notifications` app. This view reads '
+        '`orders.Notification` (table `notifications`), which plan item 3.5 '
+        'retires in favour of `notifications.Notification` (table '
+        '`notifications_notification`). No sunset date is set: the mobile '
+        'client still calls this, and the date belongs to whoever owns that '
+        'migration. The header and the usage log exist so the decision can be '
+        'made from evidence rather than from a guess.'
+    ),
+)
 class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
 

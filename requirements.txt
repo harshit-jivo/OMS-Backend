@@ -113,3 +113,7 @@ yarl==1.24.2
 zstandard==0.25.0
 
 smbprotocol==1.15.0
+
+# Error tracking (Phase 5.4). Inert unless SENTRY_DSN is set — see
+# core/error_tracking.py for why the defaults there are restrictive.
+sentry-sdk==2.42.1

@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 from corsheaders.defaults import default_headers as cors_default_headers
@@ -159,6 +160,13 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # FIRST, and it has to be. Middleware wraps inward, so only the outermost
+    # entry sees every request — including the ones SecurityMiddleware
+    # redirects, CorsMiddleware answers as a preflight, or VersionPolicy
+    # rejects with 426. Any later position leaves exactly those requests
+    # without a request ID, and they are disproportionately the ones being
+    # investigated. See core/middleware.py.
+    'core.middleware.RequestContextMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -218,6 +226,28 @@ DATABASES = {
             # there. Dropping public would break every cross-schema join.
             'options': '-c search_path=payments,public',
         },
+
+        # Phase 4.7 — connection reuse.
+        #
+        # This was unset, which means Django's default of 0: a fresh Postgres
+        # connection opened and torn down on EVERY request. A connection costs
+        # a TCP round trip, a TLS handshake and a backend fork on the server,
+        # and this API's endpoints are mostly small queries — so the connection
+        # was routinely more expensive than the work it carried.
+        #
+        # 60s rather than a large number or None (persist for ever): the value
+        # must stay comfortably BELOW any idle-connection timeout on the
+        # Postgres side, or Django hands out a socket the server has already
+        # closed. CONN_HEALTH_CHECKS covers the remaining race by validating a
+        # reused connection at the start of each request and reconnecting if it
+        # is dead — without it, a connection dropped between requests surfaces
+        # as an InterfaceError on a random query rather than as a reconnect.
+        #
+        # Safe now in a way it was not before 5.1: while the scheduler ran
+        # inside the web process, a long-lived background thread could hold a
+        # connection open indefinitely with no request boundary to close it.
+        'CONN_MAX_AGE': config('CONN_MAX_AGE', default=60, cast=int),
+        'CONN_HEALTH_CHECKS': True,
     },
     'hana': {
         'ENGINE': 'django.db.backends.dummy',
@@ -460,6 +490,11 @@ SPECTACULAR_SETTINGS = {
     # would also try to describe the Django admin.
     'SCHEMA_PATH_PREFIX': r'/api/',
 
+    # Phase 6.2 mounts the whole API at BOTH /api/... and /api/v1/..., so
+    # without this hook every path — and every operationId — appears twice.
+    # See core/schema.py for why the versioned prefix is the documented one.
+    'PREPROCESSING_HOOKS': ['core.schema.only_versioned_routes'],
+
     # Warnings are noisy on a codebase this size — mostly views whose
     # serializer cannot be inferred. They are worth fixing view by view, not
     # worth blocking the schema over, so they are collected rather than raised.
@@ -629,6 +664,9 @@ TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
 # Only affects browsers: the React Native client is not subject to CORS.
 CORS_ALLOW_HEADERS = (
     *cors_default_headers,
+    # Lets a browser client SEND its own correlation ID, so one ID spans the
+    # front end and the API.
+    'x-request-id',
     'x-app-version',
     'x-build-number',
     'x-platform',
@@ -636,6 +674,18 @@ CORS_ALLOW_HEADERS = (
     'x-os-version',
     'x-device-id',
 )
+
+# A response header is invisible to browser JavaScript unless it is listed
+# here — the browser receives it and refuses to expose it. Without this the
+# front end cannot show the user a request ID to quote in a bug report, which
+# is most of the point of having one.
+CORS_EXPOSE_HEADERS = ('x-request-id',)
+
+# Whether a reverse proxy sets X-Forwarded-For. Off by default: the header is
+# caller-supplied, so trusting it without a proxy in front lets any client
+# write any address into the access log. See core/middleware.py:_client_ip.
+USE_X_FORWARDED_FOR = _parse_bool(
+    config('USE_X_FORWARDED_FOR', default='false'), default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -957,26 +1007,75 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # environment without a code change.
 APP_LOG_LEVEL = config("APP_LOG_LEVEL", default="DEBUG" if DEBUG else "INFO")
 
+# Phase 5.2 — request correlation.
+#
+# `core.logging.RequestContextFilter` attaches the request ID to every record,
+# so the several hundred existing `logger.*` calls gain correlation without one
+# of them changing. It is attached to the HANDLERS rather than to our own
+# loggers, which is what makes it cover Django's loggers and third-party
+# libraries too.
+#
+# `LOG_FORMAT=json` switches the FILE handlers to one JSON object per line.
+# Text stays the default because these logs are read directly today — by a
+# person, in an editor, on the Windows box that produces them — and JSON is
+# worse for that. The console is always text: it exists to be read by a human
+# standing in front of it.
+LOG_FORMAT = config("LOG_FORMAT", default="text").strip().lower()
+_FILE_FORMATTER = "json" if LOG_FORMAT == "json" else "standard"
+
+# Derived from INSTALLED_APPS rather than listed by hand.
+#
+# The hand-written list had drifted: `HAIS`, `SKU`, `audit` and `notifications`
+# were missing, so their INFO and DEBUG records fell through to root, whose
+# level is WARNING — they were discarded. `audit` is the one that mattered,
+# because it logs the failures of the audit trail itself.
+#
+# A list that must be edited whenever an app is added WILL be missed again,
+# and the symptom is silence, which nobody notices. Deriving it means a new
+# app is configured the moment it is installed.
+_THIRD_PARTY_PREFIXES = (
+    "django", "rest_framework", "corsheaders", "whitenoise", "drf_",
+)
+_LOCAL_APP_LOGGERS = sorted({
+    app.split(".")[0] for app in INSTALLED_APPS
+    if not app.startswith(_THIRD_PARTY_PREFIXES)
+})
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "request_context": {
+            "()": "core.logging.RequestContextFilter",
+        },
+    },
     "formatters": {
         # Structured-ish and greppable. The notification code already emits
         # `key=value` pairs in the message itself, so the prefix only has to
-        # supply time, level and origin.
+        # supply time, level, origin — and now the request ID.
+        #
+        # `context_tag` is the first 8 characters of the request ID in
+        # brackets, or `[-]` outside a request. Short because it prefixes
+        # every line and a full 32-character UUID would push the message off
+        # the readable width; 8 hex characters is 4 billion values, which is
+        # ample for telling apart the requests in flight at one moment.
         "standard": {
-            "format": "{asctime} {levelname:<8} {name}: {message}",
+            "format": "{asctime} {levelname:<8} {context_tag} {name}: {message}",
             "style": "{",
         },
         "console": {
-            "format": "{levelname:<8} {name}: {message}",
+            "format": "{levelname:<8} {context_tag} {name}: {message}",
             "style": "{",
+        },
+        "json": {
+            "()": "core.logging.JsonFormatter",
         },
     },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "console",
+            "filters": ["request_context"],
         },
         "app_file": {
             "class": "logging.handlers.RotatingFileHandler",
@@ -984,7 +1083,8 @@ LOGGING = {
             "maxBytes": 10 * 1024 * 1024,   # 10 MB
             "backupCount": 5,               # ~50 MB ceiling
             "encoding": "utf-8",
-            "formatter": "standard",
+            "formatter": _FILE_FORMATTER,
+            "filters": ["request_context"],
         },
         "error_file": {
             "class": "logging.handlers.RotatingFileHandler",
@@ -993,7 +1093,8 @@ LOGGING = {
             "backupCount": 5,
             "encoding": "utf-8",
             "level": "WARNING",
-            "formatter": "standard",
+            "formatter": _FILE_FORMATTER,
+            "filters": ["request_context"],
         },
     },
     "root": {
@@ -1008,11 +1109,7 @@ LOGGING = {
             "level": APP_LOG_LEVEL,
             "propagate": False,
         }
-        for app in (
-            "orders", "payments", "approvals", "attachments", "core",
-            "devices", "einvoice", "ewaybill", "hana", "invoice", "legal",
-            "sap_sync", "serviceLayer", "tracker", "uilabels", "users",
-        )
+        for app in _LOCAL_APP_LOGGERS
     },
 }
 
@@ -1023,3 +1120,39 @@ LOGGING["loggers"]["django.request"] = {
     "level": "ERROR",
     "propagate": False,
 }
+
+
+# ---------------------------------------------------------------------------
+# Error tracking (Sentry) — Phase 5.4.
+#
+# Entirely opt-in. With SENTRY_DSN unset — the default, and what CI and every
+# developer machine run under — nothing initialises and nothing is sent
+# anywhere.
+#
+# The restrictive defaults are in core/error_tracking.py along with the
+# reasoning: an error tracker posts the contents of a failing request to a
+# third party, and requests here carry SAP credentials, GSTINs, party master
+# data and NIC e-invoice tokens. `send_default_pii` stays False and a
+# `before_send` scrubber runs before anything leaves the process.
+# ---------------------------------------------------------------------------
+SENTRY_DSN = config('SENTRY_DSN', default='')
+
+# Separates production events from staging ones in the Sentry UI. Defaults
+# from DEBUG so a developer who does set a DSN does not pollute production.
+SENTRY_ENVIRONMENT = config(
+    'SENTRY_ENVIRONMENT', default='development' if DEBUG else 'production')
+
+# Optional. Lets Sentry attribute an error to a deploy; blank is fine.
+SENTRY_RELEASE = config('SENTRY_RELEASE', default='')
+
+# Performance tracing: samples spans (including SQL text) from live requests
+# and is billed per event. Off unless asked for.
+SENTRY_TRACES_SAMPLE_RATE = config(
+    'SENTRY_TRACES_SAMPLE_RATE', default=0.0, cast=float)
+
+# Initialised here rather than in an AppConfig.ready() so that errors raised
+# during app loading — the ones hardest to diagnose from a stack trace alone —
+# are already captured. Never raises; see core/error_tracking.init.
+from core.error_tracking import init as _init_error_tracking  # noqa: E402
+
+_init_error_tracking(sys.modules[__name__])

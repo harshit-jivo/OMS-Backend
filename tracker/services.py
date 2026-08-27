@@ -170,11 +170,26 @@ def _route_neighbour(invoice, step):
 
 
 def _open_event(invoice):
-    """The still-open visit row for the invoice's current stage."""
+    """The still-open VISIT row for the invoice's current stage.
+
+    `NOTE` rows are excluded, and that exclusion is the whole point. A note —
+    a full HOLD, or a rejection parked awaiting its reason — is written with
+    `entered_at` copied from the visit and no `exited_at`, so before it had its
+    own event type a held stage had two rows that both looked open and tied on
+    the only column this orders by. Which one a later advance closed was left
+    to the database; the other stayed open at a stage the invoice had left,
+    where every queue count and dwell report still counted it.
+
+    The tie-break on `id` is belt and braces. A re-entry after a RETURN can
+    legitimately open a second visit at the same stage, and `entered_at` is a
+    timestamp two rows can share; without a deterministic second key the pick
+    would be arbitrary again in exactly the case that is hardest to reproduce.
+    """
     return (
         invoice.events
         .filter(stage=invoice.current_stage, exited_at__isnull=True)
-        .order_by('-entered_at')
+        .exclude(event_type=StageEvent.EventType.NOTE)
+        .order_by('-entered_at', '-id')
         .first()
     )
 
@@ -316,9 +331,13 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
     if kind == 'HOLD':
         # Annotate in place — the invoice does not move, dwell clock keeps
         # running. Recorded as its own immutable note row.
+        #
+        # NOTE, not RECEIVE: this row is an annotation, not an occupancy. As a
+        # RECEIVE it was indistinguishable from the open visit beside it — see
+        # `_open_event` and `StageEvent.EventType.NOTE`.
         StageEvent.objects.create(
             invoice=invoice, stage=stage,
-            event_type=StageEvent.EventType.RECEIVE,
+            event_type=StageEvent.EventType.NOTE,
             stage_status=status, hold_type=hold_type, remarks=remarks,
             acted_by=user, entered_at=invoice.current_stage_entered_at,
         )
@@ -329,9 +348,13 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         # An immutable note records the rejection; remarks follow when returned.
         invoice.rejection_pending = True
         invoice.save(update_fields=['rejection_pending', 'updated_at'])
+        # NOTE for the same reason as the HOLD branch above. `exited_at` stays
+        # NULL deliberately — `tracker/views.py` reads exactly that to mean
+        # "awaiting the written reason", which is what makes the SAP/JSAP
+        # two-step rejection work.
         StageEvent.objects.create(
             invoice=invoice, stage=stage,
-            event_type=StageEvent.EventType.RECEIVE,
+            event_type=StageEvent.EventType.NOTE,
             stage_status='REJECTED', remarks='',
             acted_by=user, entered_at=invoice.current_stage_entered_at,
         )
