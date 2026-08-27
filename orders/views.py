@@ -354,30 +354,44 @@ def _pending_log_user_for_status(status_obj, actor_user=None):
 def _rate_approval_remarks(flagged_items):
     return '; '.join(flagged_items) or 'Rate approval required by admin price condition'
 
-def _get_rate_approval_reason(item, price_list_basic, basic_price):
-    if item.get('item_type') == 'SCHEME':
+# Rates are stored to 4dp, and a tax-inclusive round trip lands on 3549.9999
+# rather than 3550, so an exact comparison misfires on correctly-priced lines.
+RATE_APPROVAL_TOLERANCE = 0.05
+
+
+def _authorised_basic_rate(card_code, item_code, category):
+    """The basic rate this party is authorised to be charged for this item.
+
+    Returns None when no active assignment exists. One query per line; orders
+    average two or three lines, so this is not worth batching yet.
+    """
+    if not (card_code and item_code):
         return None
-    
+    return (
+        PartyProductAssignment.objects
+        .filter(card_code=card_code, item_code=item_code, category=category, is_active=True)
+        .values_list('basic_rate', flat=True)
+        .first()
+    )
+
+
+def _get_rate_approval_reason(item, authorised_rate, basic_price):
+    """Why this line needs rate approval, or None.
+
+    Approval means one thing: the line is being sold BELOW the rate agreed with
+    this party on `party_product_assignments`. Selling at or above it is not a
+    concession and needs nobody's signature.
+
+    It deliberately does NOT compare against the `price_list_basic` the form
+    sends. That field is built two different ways -- sometimes the agreed rate,
+    sometimes that rate plus tax (`computeLandingPrice`) -- so comparing a
+    tax-inclusive figure against a pre-tax one flagged every correctly-priced
+    order. Between 28 Jul and 27 Aug that was 94% of orders (613 of 647). The
+    assignment is also the real authority: the form's Price List field can be
+    edited by the salesperson.
+    """
     if item.get('qty') not in (None, ''):
-        qty = float(item.get('qty') or 0)
-        if qty <= 0:
-            return None
-
-    item_name = item.get('item_name') or item.get('item_code') or 'Item'
-
-    # if price_list_basic == 0:
-    #     return f"{item_name}: Price List (Basic) is 0 (Basic ₹{basic_price})"
-
-    if basic_price > 0 and basic_price < price_list_basic:
-        return f"{item_name}: Basic ₹{basic_price} < Price List (Basic) ₹{price_list_basic}"
-
-    return None
-
-def _get_rate_approval_reason(item, price_list_basic, basic_price):
-    if item.get('item_type') == 'SCHEME':
-        return None
-
-    if item.get('qty') not in (None, ''):
+        # Guarded parse: a malformed qty must not 500 the whole order-create.
         try:
             qty = float(item.get('qty') or 0)
         except (TypeError, ValueError):
@@ -385,17 +399,31 @@ def _get_rate_approval_reason(item, price_list_basic, basic_price):
         if qty <= 0:
             return None
 
-    item_name = item.get('item_name') or item.get('item_code') or 'Item'
+    # A zero-priced line is a giveaway -- a scheme companion, or an FOC order.
+    # There is no discount to approve. This also covers what the old
+    # `item_type == 'SCHEME'` guard was reaching for; that check never fired,
+    # because item_type holds the pack size ('1 LTR', '5 LTR', ...), never
+    # 'SCHEME'.
+    if basic_price <= 0:
+        return None
 
-    if price_list_basic == 0 and basic_price == 0:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} = Basic Rs {basic_price}"
-    if price_list_basic == 0 and basic_price > 0:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
-    if price_list_basic > basic_price:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} > Basic Rs {basic_price}"
-    if price_list_basic < basic_price:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
+    # No rate agreed for this party and item. Nothing to measure against, so
+    # nothing to approve -- these are unmapped master data rather than
+    # discounts, and at ~43% of lines they buried the real ones. They want a
+    # report of unmapped party/item pairs, not an approval queue.
+    if authorised_rate is None:
+        return None
+    authorised_rate = float(authorised_rate)
+    if authorised_rate <= 0:
+        return None
+
+    if basic_price < authorised_rate - RATE_APPROVAL_TOLERANCE:
+        item_name = item.get('item_name') or item.get('item_code') or 'Item'
+        return (f"{item_name}: Basic Rs {basic_price} < agreed rate "
+                f"Rs {authorised_rate}")
+
     return None
+
 
 def _resolve_scheme_by_id(scheme_id):
     if scheme_id:
@@ -2350,9 +2378,10 @@ class UpdateOrderView(APIView):
         for item in items:
             created_items.append(_create_order_item(order, item, _to_float, _to_bool))
 
-            bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
-            rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+            authorised_rate = _authorised_basic_rate(
+                order.card_code, item.get('item_code', ''), item.get('category', ''))
+            rate_approval_reason = _get_rate_approval_reason(item, authorised_rate, mp)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
@@ -2499,9 +2528,10 @@ class CreateOrderView(APIView):
             created_items = []
             for item in items:
                 created_items.append(_create_order_item(order, item, _to_float, _to_bool))
-                bp = _to_float(item.get('price_list_basic', 0))
                 mp = _to_float(item.get('basic_price', 0))
-                rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+                authorised_rate = _authorised_basic_rate(
+                    order.card_code, item.get('item_code', ''), item.get('category', ''))
+                rate_approval_reason = _get_rate_approval_reason(item, authorised_rate, mp)
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
@@ -2657,9 +2687,10 @@ class CreateOrderView(APIView):
         created_items = []
         for item in items:
             created_items.append(_create_order_item(order, item, _to_float, _to_bool))
-            bp = _to_float(item.get('price_list_basic', 0))
             mp = _to_float(item.get('basic_price', 0))
-            rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+            authorised_rate = _authorised_basic_rate(
+                order.card_code, item.get('item_code', ''), item.get('category', ''))
+            rate_approval_reason = _get_rate_approval_reason(item, authorised_rate, mp)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
