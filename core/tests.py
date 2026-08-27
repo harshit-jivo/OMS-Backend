@@ -539,3 +539,42 @@ class SchemaEndpointTests(TestCase):
         response = client.get('/api/schema/')
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'openapi', response.content[:200].lower())
+
+
+class ModelTableOwnershipTests(TestCase):
+    """No two models may map to the same database table.
+
+    `orders.Branches` and `sap_sync.Branch` both mapped to `branches`, and the
+    two disagreed about it: bpl_id was CharField(50) in one and IntegerField in
+    the other, against a column that is `integer`. So the same 22 rows came
+    back as JSON strings through /api/orders/branch/ and as numbers through
+    every sap_sync endpoint, and neither model was obviously the wrong one to
+    read from.
+
+    Nothing catches this on its own. Both models were `managed = False`, so
+    Django never issued DDL from either and never had cause to compare them;
+    `makemigrations --check` is satisfied, the app imports, and the tests pass.
+    It is only visible by looking for it, which is what this does.
+    """
+
+    def test_no_two_models_share_a_table(self):
+        import collections
+
+        from django.apps import apps
+
+        by_table = collections.defaultdict(list)
+        for model in apps.get_models():
+            table = (model._meta.db_table or '').lower()
+            label = f'{model._meta.app_label}.{model.__name__}'
+            if not model._meta.managed:
+                label += ' (unmanaged)'
+            by_table[table].append(label)
+
+        shared = {t: sorted(m) for t, m in by_table.items() if len(m) > 1}
+        self.assertEqual(shared, {}, (
+            'Two models on one table. Pick the one that matches the column '
+            'types and delete the other; if both are genuinely needed, a proxy '
+            'model (Meta.proxy = True) says so explicitly and shares the '
+            'field definitions instead of duplicating them:\n  '
+            + '\n  '.join(f'{t}: {", ".join(m)}' for t, m in sorted(shared.items()))
+        ))

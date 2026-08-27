@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice, OrderRateApproval, OrderItemApprovalMapping
+from sap_sync.models import Branch
+from .models import Parties,DispatchLocation,ProductDetails,OrderItem,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice, OrderRateApproval, OrderItemApprovalMapping
 from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
@@ -120,8 +121,27 @@ class CreateOrderSerializer(serializers.Serializer):
    
 
 class BranchSerializer(serializers.ModelSerializer):
+    """The `branches` table, as `/api/orders/branch/` has always returned it.
+
+    `sap_sync.Branch` replaces the local `orders.Branches`, which was a second
+    model on the same table and wrong about every column. sap_sync already has
+    a serializer of this name, but it exposes seven fields; this one stays at
+    three because that is the response this endpoint has always sent.
+    """
+
+    # The column is `integer`, and sap_sync.Branch declares it as one — so
+    # switching models would silently change this field in the JSON from "5"
+    # to 5. `orders.Branches` read it through a CharField, so every existing
+    # client of THIS endpoint has only ever seen a string.
+    #
+    # Kept as a string deliberately. OMS-Frontend wraps it in String() at each
+    # of its nine use sites and would not notice, but the React Native client
+    # is a separate repository that is not in this workspace and cannot be
+    # checked. A refactor should not be the thing that finds out.
+    bpl_id = serializers.CharField()
+
     class Meta:
-        model = Branches
+        model = Branch
         fields = ['bpl_id', 'bpl_name', 'category']
 
 class OrderStatusUpdateSerializer(serializers.Serializer):

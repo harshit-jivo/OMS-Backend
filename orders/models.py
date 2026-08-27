@@ -77,16 +77,22 @@ class ProductDetails(models.Model):
     class Meta:
         db_table = 'product_details'
 
-class Branches(models.Model):
-    bpl_id = models.CharField(max_length=50, blank=True, null=True)
-    bpl_name = models.CharField(max_length=100, blank=True, null=True)
-    category = models.CharField(max_length=50, blank=True, null=True)
+# `Branches` used to be declared here: a second unmanaged model on the SAME
+# `branches` table that `sap_sync.Branch` owns, and wrong about it in every
+# column. The live table is (bpl_id integer, bpl_name varchar(200), category
+# varchar(20), is_active, created_at, updated_at); this model declared bpl_id
+# as CharField(50), bpl_name as 100, category as 50, and omitted the last
+# three entirely.
+#
+# Nothing wrote through it, so the wrong lengths never truncated anything — but
+# reading an integer column through a CharField is why GET /api/orders/branch/
+# returns bpl_id as a JSON string while every sap_sync endpoint returns it as a
+# number, from the same 22 rows.
+#
+# Use `sap_sync.Branch`. It is the model the sync writes and it matches the
+# table. Removing this changes no data and no schema: both models were
+# `managed = False`, so Django never created or altered `branches` from either.
 
-    class Meta:
-        db_table = 'branches'
-        managed = False
-        verbose_name_plural = "Branches"
-    
 class Order(models.Model):
     order_number = models.CharField(max_length=50, unique=True)
     card_code = models.CharField(max_length=50)

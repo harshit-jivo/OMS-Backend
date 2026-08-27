@@ -1,8 +1,9 @@
 from urllib import request
 from django.shortcuts import render
 import re
+from sap_sync.models import Branch
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,SchemeWriteSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
-from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
+from .models import PartyProductAssignment,OrdersLog,Parties, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -3339,9 +3340,22 @@ class SchemeProductView(APIView):
 
 
 class BranchView(APIView):
+    """Factory dispatch locations, for the "dispatch from" selector.
+
+    Reads `sap_sync.Branch` — the model the SAP sync writes and the one that
+    matches the table. It used to read `orders.Branches`, a second unmanaged
+    model on the same table that declared every column wrongly.
+
+    `distinct('bpl_name')` is deliberate and Postgres-specific (DISTINCT ON):
+    the table is unique on (bpl_id, category), so one physical factory appears
+    once per company DB it exists in, and the selector wants it once.
+    """
 
     def get(self, request):
-        branches = Branches.objects.filter(bpl_name__icontains='FACTORY').order_by("bpl_name").distinct('bpl_name')
+        branches = (Branch.objects
+                    .filter(bpl_name__icontains='FACTORY')
+                    .order_by("bpl_name")
+                    .distinct('bpl_name'))
         serializer = BranchSerializer(branches, many=True)
         return Response(serializer.data)
 
