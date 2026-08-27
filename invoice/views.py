@@ -21,7 +21,6 @@ from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
 from django.http import HttpResponse
 
-from devices.context import describe_request_device
 from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
@@ -97,10 +96,6 @@ class InvoiceLogCreateView(APIView):
         if isinstance(edited_from, (list, tuple)):
             edited_from = edited_from[0] if edited_from else None
 
-        # Resolved once per request: both history rows written below describe the
-        # same submission from the same machine.
-        device = describe_request_device(request)
-
         serializer = InvoiceLogSerializer(data=data)
         if serializer.is_valid():
             with transaction.atomic():
@@ -115,9 +110,8 @@ class InvoiceLogCreateView(APIView):
                     error_message=invoice_log_instance.error_message,
                     invoice_payload=invoice_log_instance.invoice_payload,
                     created_by=request.user,
-                    **device,
                 )
-                source = self._close_edited_source(edited_from, request.user, device)
+                source = self._close_edited_source(edited_from, request.user)
                 if source is not None:
                     # Link the replacement to the version it grew out of, so the
                     # approver of this log can see (and trace) the rejection
@@ -130,7 +124,7 @@ class InvoiceLogCreateView(APIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def _close_edited_source(self, edited_from, user, device):
+    def _close_edited_source(self, edited_from, user):
         """Retire the rejected log this submission replaces, and return it.
 
         Only runs once the replacement exists, so an edit that is started and then
@@ -163,7 +157,6 @@ class InvoiceLogCreateView(APIView):
             error_message=source.error_message,
             invoice_payload=source.invoice_payload,
             created_by=user,
-            **device,
         )
         return source
 
@@ -220,9 +213,6 @@ class InvoicelogStatusUpdateView(APIView):
                     error_message=invoice_log.error_message,
                     invoice_payload=invoice_log.invoice_payload,
                     created_by=user,
-                    # The approve/reject path: this is the row an approver would
-                    # later dispute, so stamp the machine the decision came from.
-                    **describe_request_device(request),
         )
         print(f"Creator{invoice_log.created_by}")
         print(f"Approver{request.user}")
@@ -481,7 +471,6 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
             error_message=invoice_log_instance.error_message,
             invoice_payload=invoice_log_instance.invoice_payload,
             created_by=self.request.user,
-            **describe_request_device(self.request),
         )
 
 
