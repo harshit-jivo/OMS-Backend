@@ -30,6 +30,13 @@ from users.models import User, UserRole
 
 from . import notifications as notif
 from . import views
+# Recipient resolution moved to `orders.views.notifications` when views.py was
+# split (plan item 3.1). Patch against THAT module, not the `orders.views`
+# package: the package re-exports these names, so `patch.object(views, ...)`
+# finds an attribute, succeeds, and stubs a binding `_resolve_notification_
+# recipients` never reads — which is precisely the false green the module
+# docstring above warns about. It caught three tests during the split.
+from .views import notifications as views_notifications
 from . import webpush as webpush_module
 from .models import Notification, Order, OrderStatus, PushToken, WebPushSubscription
 from .serializers import NotificationSerializer
@@ -480,7 +487,7 @@ class RecipientResolutionTests(_Base):
     # --- forward transitions: notify whoever owns the NEXT action ----------
 
     def test_rate_approval_notifies_assigned_approvers(self):
-        with patch.object(views, "_assigned_rate_approvers_for_order",
+        with patch.object(views_notifications, "_assigned_rate_approvers_for_order",
                           return_value=[self.approver]):
             plan = self._resolve("Rate Approval")
 
@@ -491,7 +498,7 @@ class RecipientResolutionTests(_Base):
 
     def test_need_approval_is_an_alias_for_rate_approval(self):
         """Both status names must route identically — they are one branch."""
-        with patch.object(views, "_assigned_rate_approvers_for_order",
+        with patch.object(views_notifications, "_assigned_rate_approvers_for_order",
                           return_value=[self.approver]):
             self.assertEqual(
                 self._resolve("Need Approval").event_type,
@@ -499,7 +506,7 @@ class RecipientResolutionTests(_Base):
             )
 
     def test_billing_notifies_billing_users(self):
-        with patch.object(views, "_billing_users_for_order",
+        with patch.object(views_notifications, "_billing_users_for_order",
                           return_value=[self.other]):
             plan = self._resolve("Billing")
 
@@ -555,7 +562,7 @@ class RecipientResolutionTests(_Base):
 
     def test_no_assigned_approver_notifies_nobody(self):
         """MUST NOT fall back to every approver — that leaks order details."""
-        with patch.object(views, "_assigned_rate_approvers_for_order",
+        with patch.object(views_notifications, "_assigned_rate_approvers_for_order",
                           return_value=[]):
             plan = self._resolve("Rate Approval")
 
@@ -563,7 +570,7 @@ class RecipientResolutionTests(_Base):
         self.assertEqual(plan.message, "")
 
     def test_no_billing_user_notifies_nobody(self):
-        with patch.object(views, "_billing_users_for_order", return_value=[]):
+        with patch.object(views_notifications, "_billing_users_for_order", return_value=[]):
             plan = self._resolve("Billing")
 
         self.assertEqual(plan.recipients, [])

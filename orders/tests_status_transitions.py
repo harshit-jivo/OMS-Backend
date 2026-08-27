@@ -179,9 +179,9 @@ class NotificationDeferralTests(_StatusTestCase):
         """
         self._assign(self.approver_a)
 
-        with patch('orders.views._resolve_notification_recipients',
+        with patch('orders.views.notifications._resolve_notification_recipients',
                    return_value=self._plan()):
-            with patch('orders.views.deliver_notification_to_many') as deliver:
+            with patch('orders.views.notifications.deliver_notification_to_many') as deliver:
                 self._submit(self.approver_a, RATE_APPROVED_ID)
                 # TestCase never commits, so a correctly-deferred callback has
                 # not run at this point. A failure here means delivery is
@@ -201,9 +201,9 @@ class NotificationDeferralTests(_StatusTestCase):
             recipients=[self.approver_b], message='rate approved',
             event_type=None, notification_type=None, title=None)
 
-        with patch('orders.views._resolve_notification_recipients',
+        with patch('orders.views.notifications._resolve_notification_recipients',
                    return_value=plan):
-            with patch('orders.views.deliver_notification_to_many') as deliver:
+            with patch('orders.views.notifications.deliver_notification_to_many') as deliver:
                 with self.captureOnCommitCallbacks(execute=False) as callbacks:
                     send_order_notifications(self.order, 'Approved')
 
@@ -221,7 +221,7 @@ class NotificationDeferralTests(_StatusTestCase):
             username='ra-out2', password='pw', name='Outsider',
             role=_role('approver'))
 
-        with patch('orders.views.deliver_notification_to_many') as deliver:
+        with patch('orders.views.notifications.deliver_notification_to_many') as deliver:
             with self.captureOnCommitCallbacks(execute=True):
                 res = self._submit(outsider, RATE_APPROVED_ID)
 
