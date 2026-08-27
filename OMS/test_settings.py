@@ -87,3 +87,20 @@ PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 REST_FRAMEWORK = {**REST_FRAMEWORK, 'DEFAULT_THROTTLE_RATES': {
     'anon': None, 'user': None, 'login': None,
 }}
+
+
+# --- Transport security: off for the test client -----------------------------
+# `SECURE_SSL_REDIRECT` defaults to true whenever DEBUG is false, which is
+# correct for a deployed server and impossible for the test client: it issues
+# plain HTTP and sets no X-Forwarded-Proto, so Django's SecurityMiddleware
+# answers 301 before any view runs. Sixty-six tests then assert on a redirect
+# instead of on the API — `301 != 200`, `301 != 403`, and
+# `Content-Type header is "text/html", not "application/json"`.
+#
+# This was invisible until CI, because a developer .env sets DEBUG=true and the
+# whole block above is skipped. Forcing it off here is what lets the suite run
+# under the PRODUCTION configuration — permission classes, ALLOWED_HOSTS, CORS
+# and the security headers are all still exercised with DEBUG false. Only the
+# transport redirect, which no test can satisfy and no test asserts on, is
+# disabled.
+SECURE_SSL_REDIRECT = False

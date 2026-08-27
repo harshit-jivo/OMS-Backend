@@ -9,11 +9,16 @@ Two things are asserted here that no per-app test can:
    is `IsAuthenticated`, so a view that declares nothing is closed. Before that
    setting existed, DRF's own default (`AllowAny`) meant it was public — which
    is how 57 routes came to answer anonymous requests without anyone deciding.
+3. **That `.env.example` is complete.** settings.py reads 18 keys with no
+   default, and until now the example file documented none of them, so a fresh
+   clone could not import settings at all.
 
 This file lives in `core` rather than an app because the property it protects
 belongs to the project: the routing table as a whole, not any one app's views.
 """
 import inspect
+import re
+from pathlib import Path
 
 from django.test import TestCase
 from django.urls import get_resolver
@@ -224,3 +229,97 @@ class AdminDefinitionTests(TestCase):
 
     def test_a_plain_user_is_not_an_admin(self):
         self.assertFalse(is_admin(self._user('c-plain', 'salesman')))
+
+
+class EnvExampleTests(TestCase):
+    """`.env.example` must document every setting that has no default.
+
+    This is not documentation hygiene. A `config('X')` with no default raises
+    `UndefinedValueError` at import, before Django's logging exists, so the
+    symptom is a stack trace out of settings.py on a server that will not
+    start — and the only way to learn which key is missing is to read
+    settings.py. Seventeen keys were in that state when this test was written:
+    the example file listed the twelve security settings added during this
+    refactor and none of the connection settings the app has always required.
+
+    settings.py is parsed as TEXT rather than imported, because importing it is
+    exactly what fails when a key is missing.
+    """
+
+    #: Required, but must NOT appear with a value in the example file: these
+    #: are generated secrets. Committing one is worse than omitting it —
+    #: SECRET_KEY signs every JWT, and a shared VAPID private key lets anyone
+    #: push notifications to this app's subscribers.
+    GENERATED_SECRETS = {'SECRET_KEY', 'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY'}
+
+    def _example_path(self):
+        from django.conf import settings as dj_settings
+
+        path = Path(dj_settings.BASE_DIR) / '.env.example'
+        self.assertTrue(path.exists(), '.env.example is missing')
+        return path
+
+    def _example_keys(self):
+        """(assigned, mentioned-in-a-comment). Only the first kind survives a
+        `cp .env.example .env`, which is why they are counted separately."""
+        assigned, commented = set(), set()
+        for line in self._example_path().read_text(encoding='utf-8').splitlines():
+            stripped = line.strip()
+            body = stripped.lstrip('#').strip()
+            if '=' not in body:
+                continue
+            key = body.split('=', 1)[0].strip()
+            if not key or not key.isupper() or not key.replace('_', '').isalnum():
+                continue
+            (commented if stripped.startswith('#') else assigned).add(key)
+        return assigned, commented
+
+    def test_every_key_without_a_default_is_documented(self):
+        import OMS
+
+        source = (Path(OMS.__file__).resolve().parent / 'settings.py').read_text(
+            encoding='utf-8')
+        # config('X') with no default argument — raises when the key is absent.
+        required = set(re.findall(r"config\(\s*'([A-Z0-9_]+)'\s*\)", source))
+        self.assertTrue(required, 'the settings.py scan matched nothing')
+
+        assigned, commented = self._example_keys()
+        undocumented = required - assigned - commented - self.GENERATED_SECRETS
+        self.assertEqual(
+            undocumented, set(),
+            'settings.py requires these and .env.example never mentions them, '
+            'so a fresh clone cannot start: ' + ', '.join(sorted(undocumented)))
+
+    def test_a_required_key_is_assigned_not_merely_commented(self):
+        """A commented `# DB_HOST=` documents the key but does not survive the
+        copy, so the clone still fails to boot. Generated secrets are the
+        deliberate exception."""
+        import OMS
+
+        source = (Path(OMS.__file__).resolve().parent / 'settings.py').read_text(
+            encoding='utf-8')
+        required = set(re.findall(r"config\(\s*'([A-Z0-9_]+)'\s*\)", source))
+        assigned, _ = self._example_keys()
+        missing = required - assigned - self.GENERATED_SECRETS
+        self.assertEqual(
+            missing, set(),
+            'documented only as a comment, so `cp .env.example .env` still '
+            'produces an unbootable file: ' + ', '.join(sorted(missing)))
+
+    def test_generated_secrets_are_not_committed(self):
+        """A placeholder value for these would be worse than nothing: the app
+        boots, so nobody notices, and it runs on a key that is public in git."""
+        assigned, _ = self._example_keys()
+        leaked = assigned & self.GENERATED_SECRETS
+        self.assertEqual(
+            leaked - {'SECRET_KEY'}, set(),
+            f'.env.example assigns a value to {sorted(leaked)}')
+
+    def test_the_secret_key_entry_is_present_and_empty(self):
+        """SECRET_KEY is the one secret that must still APPEAR, so the copied
+        file has an obvious blank to fill rather than a key the reader has to
+        already know about."""
+        lines = [ln.strip()
+                 for ln in self._example_path().read_text(encoding='utf-8').splitlines()]
+        self.assertIn('SECRET_KEY=', lines,
+                      'SECRET_KEY must be present and blank')
