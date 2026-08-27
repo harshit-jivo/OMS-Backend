@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from core.permissions import IsAdminRole, is_admin
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
@@ -1021,7 +1022,22 @@ class UserPartiesView(APIView):
         })
 
 class LoginView(APIView):
+    """Exchange credentials for a JWT pair.
+
+    Necessarily `AllowAny`, and therefore the one endpoint that most needs a
+    rate limit: nothing throttled it, so passwords could be guessed at whatever
+    speed the network allowed. `ScopedRateThrottle` applies the `login` rate
+    from settings (10/min per IP by default) rather than the looser `anon` one.
+
+    Keyed by IP, which is the only identifier available before authentication.
+    A shared office NAT therefore shares one bucket — the rate is set high
+    enough that ordinary humans never reach it and low enough that guessing is
+    hopeless.
+    """
+
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -1089,6 +1105,10 @@ class AuthTokenRefreshView(TokenRefreshView):
 
     permission_classes = [AllowAny]
     serializer_class = ActiveUserTokenRefreshSerializer
+    # Also credential-checking and also unauthenticated: the body carries a
+    # refresh token, so an unthrottled endpoint is a token-guessing oracle.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
 
 class LogoutView(APIView):

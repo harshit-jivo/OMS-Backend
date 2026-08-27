@@ -75,3 +75,15 @@ def _flatten_schema_qualified_tables(sender, **kwargs):
         sender._meta.db_table = table.replace('"."', '_')
 MIGRATION_MODULES = _SkipMigrations()
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
+
+# --- Throttling off by default -------------------------------------------
+# The throttle cache is process-global and does NOT reset between tests, so
+# leaving the real rates on makes a suite's Nth anonymous request fail with 429
+# for reasons that have nothing to do with the test — and the failure moves as
+# tests are added or reordered.
+#
+# Tests that verify throttling re-enable it for themselves with
+# @override_settings; see users.tests.LoginThrottleTests.
+REST_FRAMEWORK = {**REST_FRAMEWORK, 'DEFAULT_THROTTLE_RATES': {
+    'anon': None, 'user': None, 'login': None,
+}}

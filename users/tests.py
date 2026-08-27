@@ -21,11 +21,15 @@ Run with::
 
     python manage.py test users --settings=OMS.test_settings
 """
+from pathlib import Path
+
+from django.conf import settings
 from django.contrib.auth.hashers import identify_hasher
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from OMS.settings import _parse_bool
 from users.models import User, UserPartyAssignment, UserRole
 
 
@@ -308,6 +312,94 @@ class ScopedAccessTests(_ApiTestCase):
         self.assertEqual(res.status_code, 403)
         self.staff.refresh_from_db()
         self.assertFalse(self.staff.extra_pages)
+
+
+class LoginThrottleTests(_ApiTestCase):
+    """Login had no rate limit of any kind, so passwords could be guessed as
+    fast as the network allowed — on an AllowAny endpoint reachable from the
+    internet.
+
+    Rates are disabled in `OMS/test_settings.py` (a process-global throttle
+    cache makes every other test order-dependent), so this class turns them
+    back on for itself and clears the cache, which persists across tests.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from django.core.cache import cache
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    @override_settings(REST_FRAMEWORK={
+        **settings.REST_FRAMEWORK,
+        'DEFAULT_THROTTLE_RATES': {'anon': None, 'user': None, 'login': '3/min'},
+    })
+    def test_repeated_failed_logins_are_throttled(self):
+        from rest_framework.throttling import ScopedRateThrottle
+        ScopedRateThrottle.THROTTLE_RATES = settings.REST_FRAMEWORK[
+            'DEFAULT_THROTTLE_RATES']
+
+        seen = [
+            self.anon.post(reverse('login'),
+                           {'username': 't-staff', 'password': f'guess-{i}'},
+                           format='json').status_code
+            for i in range(5)
+        ]
+        self.assertIn(429, seen, f'no 429 in {seen} — guessing is unlimited')
+        # The throttle must not swallow the earlier attempts' real answer.
+        self.assertEqual(seen[0], 401)
+
+
+class SecuritySettingsTests(TestCase):
+    """`settings.py` carried three problems on five lines: a committed
+    SECRET_KEY, `DEBUG = True` overriding the env-driven line above it, and
+    `'*'` in ALLOWED_HOSTS defeating Host-header validation.
+
+    These assertions describe the DEBUG=false (deployed) shape, so they are
+    written against the settings module's logic rather than the values this
+    test run happens to load.
+    """
+
+    def test_the_committed_secret_key_is_no_longer_a_production_fallback(self):
+        """It stays in the file as the DEBUG-only fallback, so grepping for it
+        proves nothing. What matters is that a non-DEBUG start REFUSES to
+        proceed without SECRET_KEY rather than quietly reusing it."""
+        source = (Path(settings.BASE_DIR) / 'OMS' / 'settings.py').read_text(
+            encoding='utf-8')
+        self.assertIn('raise ImproperlyConfigured', source)
+        self.assertIn("SECRET_KEY = config('SECRET_KEY', default='')", source)
+
+    def test_allowed_hosts_wildcard_is_debug_only(self):
+        """`'*'` used to be unconditional, which disabled Host-header
+        validation on the deployed server.
+
+        Asserted against `OMS.settings.DEBUG` — the module-level value that
+        actually built the list — not `django.conf.settings.DEBUG`, which the
+        test runner forces to False after import. Reading the latter would make
+        this pass on a DEBUG=true machine no matter what the code did.
+        """
+        from OMS import settings as settings_module
+
+        if settings_module.DEBUG:
+            self.assertIn('*', settings.ALLOWED_HOSTS)
+        else:
+            self.assertNotIn('*', settings.ALLOWED_HOSTS)
+
+    def test_cors_is_not_wide_open_by_default(self):
+        """`CORS_ALLOW_ALL_ORIGINS` is now an explicit .env escape hatch
+        defaulting to false, not the baked-in True it used to be."""
+        self.assertFalse(_parse_bool('false'))
+        self.assertTrue(settings.CORS_ALLOWED_ORIGINS)
+
+    def test_throttling_is_configured(self):
+        rates = settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
+        self.assertEqual(set(rates), {'anon', 'user', 'login'})
+
+    def test_clickjacking_and_sniffing_headers_apply_everywhere(self):
+        """Not DEBUG-gated: neither needs HTTPS, so there is no reason for
+        development to run without them."""
+        self.assertEqual(settings.X_FRAME_OPTIONS, 'DENY')
+        self.assertTrue(settings.SECURE_CONTENT_TYPE_NOSNIFF)
 
 
 class RoleResolutionTests(TestCase):

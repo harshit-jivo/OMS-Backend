@@ -7,6 +7,10 @@ ENV/
 .venv/
 .env.test
 .env.production
+# ...but the template IS tracked: it documents which variables a deploy must
+# set and holds no values. Must stay after `.env.*`, which would otherwise
+# ignore it.
+!.env.example
 
 # Python
 **/__pycache__/

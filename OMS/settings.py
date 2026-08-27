@@ -15,6 +15,15 @@ from pathlib import Path
 from datetime import timedelta
 from corsheaders.defaults import default_headers as cors_default_headers
 from decouple import config
+from django.core.exceptions import ImproperlyConfigured
+
+
+def _csv(value, default=()):
+    """Parse a comma-separated .env value into a list, tolerating an inline
+    comment the same way `_parse_bool` does."""
+    raw = str(value or '').split('#', 1)[0]
+    items = [item.strip() for item in raw.split(',') if item.strip()]
+    return items or list(default)
 
 
 def _parse_bool(value, default=False):
@@ -35,21 +44,65 @@ def _parse_bool(value, default=False):
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-# SECRET_KEY = config('SECRET_KEY')
+
+# ---------------------------------------------------------------------------
+# Core security settings.
+#
+# What was here before, on five lines:
+#
+#     DEBUG = _parse_bool(config('DEBUG', ...))   # correct, env-driven
+#     SECRET_KEY = 'django-insecure-#im8s6...'    # hardcoded and committed
+#     DEBUG = True                                # overrode the line above
+#     ALLOWED_HOSTS = [..., '*']                  # defeated Host validation
+#
+# The hardcoded key is in git history, so it is compromised regardless of what
+# happens now. It signs sessions and — because SIMPLE_JWT.SIGNING_KEY defaults
+# to it — every JWT, so anyone with repo access can forge a valid token for any
+# user. Reading it from the environment stops the NEXT leak; only rotating it
+# (Phase 1.3, needs a maintenance window because it invalidates every issued
+# token) ends this one.
+# ---------------------------------------------------------------------------
+
 DEBUG = _parse_bool(config('DEBUG', default='false'), default=False)
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
+# The key this file used to hardcode. Kept ONLY as the DEBUG-mode fallback so a
+# developer can still run `manage.py` with no .env — it must never be what a
+# deployed server uses, which is why production refuses to start without
+# SECRET_KEY set.
+_INSECURE_DEV_SECRET_KEY = (
+    'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05')
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05'
+SECRET_KEY = config('SECRET_KEY', default='')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = _INSECURE_DEV_SECRET_KEY
+    else:
+        # Deliberately fatal. Falling back to a known key here is how a
+        # committed secret survives being "removed" — the app keeps working and
+        # nobody notices the deploy never set one.
+        raise ImproperlyConfigured(
+            'SECRET_KEY is not set. Add it to .env before starting with '
+            'DEBUG=false. Generate one with:\n'
+            '    python -c "from django.core.management.utils import '
+            'get_random_secret_key as k; print(k())"'
+        )
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Host-header validation. `'*'` used to be in this list, which disabled it
+# entirely. Overridable from .env so a new server does not need a code change.
+ALLOWED_HOSTS = _csv(
+    config('ALLOWED_HOSTS', default=''),
+    default=['138.252.101.118', '10.10.101.118', '127.0.0.1', '10.0.2.2',
+             'localhost', '192.168.1.240'],
+)
+if DEBUG:
+    # Local development reaches the dev server by whatever name is convenient
+    # (a LAN IP, a tunnel host, the Android emulator's 10.0.2.2). Only in DEBUG.
+    ALLOWED_HOSTS.append('*')
 
-ALLOWED_HOSTS = ['138.252.101.118', '10.10.101.118', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
-CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
-# ALLOWED_HOSTS = ['*']
+CSRF_TRUSTED_ORIGINS = _csv(
+    config('CSRF_TRUSTED_ORIGINS', default=''),
+    default=['https://oms.jivo.in', 'http://oms.jivo.in'],
+)
 # Application definition
 
 INSTALLED_APPS = [
@@ -348,6 +401,37 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+
+    # NOTE: DEFAULT_PERMISSION_CLASSES is deliberately still absent, so DRF's
+    # own default (AllowAny) applies and any view that forgets to declare
+    # permissions remains public. That is the single highest-value change left
+    # in the plan — it turns every future forgotten `permission_classes` from a
+    # silent hole into a 403 — and it is Phase 2.1, not this one. It is also
+    # the most likely to break a caller: 149 of 294 routes answer anonymous
+    # requests today, and flipping the default without first marking the
+    # genuinely public ones takes the whole API down. Phase 2.2 does that
+    # marking, using the inventory in docs/codebase/API_SURFACE.md.
+
+    # Rate limiting. Login was brute-forceable at unlimited speed: no
+    # throttling existed anywhere, and `LoginView` is necessarily AllowAny.
+    #
+    # `anon` is keyed by client IP, `user` by user id. The login-specific scope
+    # is applied in users.views.LoginView; it is far tighter than `anon`
+    # because a human logging in gets it right in a handful of attempts and an
+    # attacker needs thousands.
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        # Generous on purpose: these are a runaway/scraping backstop, not the
+        # login control. The mobile client polls several endpoints on resume,
+        # and a shared office NAT puts a whole branch behind one `anon` bucket.
+        "anon": config('THROTTLE_ANON', default='120/min'),
+        "user": config('THROTTLE_USER', default='2000/hour'),
+        # Credential-checking endpoints only.
+        "login": config('THROTTLE_LOGIN', default='10/min'),
+    },
 }
 
 # JWT Settings (SimpleJWT). Hardened for production while preserving the
@@ -383,7 +467,34 @@ SIMPLE_JWT = {
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
+# ---------------------------------------------------------------------------
+# CORS
+#
+# Was `CORS_ALLOW_ALL_ORIGINS = True`: any website a user visited could call
+# this API from their browser with their session. The header allowlist further
+# down was carefully written and commented; the wildcard undid the benefit.
+#
+# Only browsers are affected — the React Native client is not subject to CORS,
+# so the mobile app cannot break from this change no matter what is listed.
+# ---------------------------------------------------------------------------
+CORS_ALLOWED_ORIGINS = _csv(
+    config('CORS_ALLOWED_ORIGINS', default=''),
+    default=['https://oms.jivo.in', 'http://oms.jivo.in'],
+)
+
+# Regex allowlist for the local dev servers (Vite picks a free port, so the
+# port cannot be pinned). DEBUG-only: an entry here in production would let any
+# page on localhost — including one an attacker got a developer to open — call
+# the live API.
+CORS_ALLOWED_ORIGIN_REGEXES = (
+    [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$'] if DEBUG else []
+)
+
+# Escape hatch for a deployment that hits an origin nobody anticipated. Setting
+# it re-opens the hole above; it exists so the fix is a one-line .env rollback
+# rather than a redeploy, not as a normal configuration.
+CORS_ALLOW_ALL_ORIGINS = _parse_bool(
+    config('CORS_ALLOW_ALL_ORIGINS', default='false'), default=False)
 
 # ---------------------------------------------------------------------------
 # Email (SMTP) — used by the tracker's stuck-invoice alert emails.
@@ -428,6 +539,49 @@ CORS_ALLOW_HEADERS = (
     'x-os-version',
     'x-device-id',
 )
+
+
+# ---------------------------------------------------------------------------
+# Transport security headers.
+#
+# None of these were set. All are DEBUG-gated: switching them on for local
+# development breaks it (the dev server is plain HTTP, so SSL redirect loops
+# and secure cookies are never sent back).
+#
+# SECURE_PROXY_SSL_HEADER is the load-bearing one. TLS terminates at the
+# reverse proxy, so Django sees plain HTTP on every request; without this it
+# believes the connection is insecure and SECURE_SSL_REDIRECT redirects to
+# https forever. The proxy MUST set `X-Forwarded-Proto` and MUST strip any copy
+# arriving from the client — a client-supplied value would otherwise let anyone
+# tell Django their plain-HTTP request was secure.
+#
+# HSTS is opt-in via .env rather than on by default: it instructs browsers to
+# refuse plain HTTP for this domain for a year, and it cannot be un-sent. Turn
+# it on only once HTTPS is confirmed working on every hostname served,
+# subdomains included.
+# ---------------------------------------------------------------------------
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = _parse_bool(
+        config('SECURE_SSL_REDIRECT', default='true'), default=True)
+
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+
+    # Start at 0. Set SECURE_HSTS_SECONDS=3600 to trial, then raise to
+    # 31536000 (a year) once nothing breaks. Never lower it in a hurry —
+    # browsers honour the LONGEST value they have seen.
+    SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=0, cast=int)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = _parse_bool(
+        config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default='false'), default=False)
+    SECURE_HSTS_PRELOAD = _parse_bool(
+        config('SECURE_HSTS_PRELOAD', default='false'), default=False)
+
+# Safe in every environment, so not gated on DEBUG.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
 
 
 # =========================================================================
