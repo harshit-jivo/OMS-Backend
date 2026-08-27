@@ -3346,13 +3346,69 @@ class BranchView(APIView):
         return Response(serializer.data)
 
 class UpdateOrderStatusView(APIView):
+    """Advance (or reject) an order through its configured status flow.
+
+    Every transition runs under `transaction.atomic()` with the order row held
+    by `select_for_update()`. It previously ran with neither, across ~380 lines
+    and several dependent writes — the defect `approvals/services.py` names in
+    its own opening docstring as the reason its design differs:
+
+        "UpdateOrderStatusView.post is neither, across ~380 lines and several
+         dependent writes — so two approvers acting at once can both pass the
+         pending check and double-advance a document."
+
+    That is exactly right, and the multi-approver rate-approval path is where
+    it bit hardest. Two approvers submitting together both read
+    `rate_approval.status == "PENDING"`, both record a decision, and both then
+    ask `_has_pending_rate_approvals` — which by then answers "none pending" for
+    both. The order advanced twice, with two status logs and two notification
+    fan-outs. The guards were all present and all correct; they were simply
+    reading uncommitted state.
+
+    The lock serialises them. The second approver now blocks, re-reads
+    committed state, and takes the branch that was always meant for them:
+    "You have already approved this order."
+
+    Two things had to be true before locking was safe:
+
+    * **No network calls inside the transaction.** `send_order_notifications`
+      is called from nine points in this method and ends in
+      `requests.post(..., timeout=15)` per recipient. Holding a row lock across
+      that would trade a rare silent corruption for a routine hang. It now
+      defers through `transaction.on_commit` — see that function.
+
+    * **The hand-rolled rollbacks still work.** Several paths save the new
+      status and then restore `previous_status` on failure. Inside
+      `atomic()`, `return Response(...)` does NOT roll back — only an exception
+      does — so those restores are still doing the work. Leave them, and
+      do not convert them to exceptions without reading each one first.
+
+    What atomic() DOES fix for free is the crash case: the method saved the new
+    status at the top and validated entitlement ~60 lines later, so a process
+    death in between left an order advanced with no approval recorded. That
+    window is now rolled back by the database.
+
+    Deliberately unchanged: the 71 sites keying business logic off mutable
+    status NAMES, and the hardcoded status ids. Both are real problems and both
+    are a separate change — locking a fragile flow is still strictly better
+    than leaving it racy.
+    """
+
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, order_id):
         serializer = OrderStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        order = get_object_or_404(Order, id=order_id)
+        # Locked for the rest of the method. A second transition on the SAME
+        # order waits here; transitions on other orders are unaffected, since
+        # this is a row lock.
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            raise Http404('Order not found')
+
         previous_status = order.status
         order_flow_type = _get_order_flow_type_for_order(order)
 
@@ -4836,14 +4892,33 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
     )
     if not plan.recipients or not plan.message:
         return
-    deliver_notification_to_many(
+
+    # Deferred to after the transaction commits. Two reasons, and the first is
+    # what made `UpdateOrderStatusView` unsafe to lock at all:
+    #
+    # 1. `deliver_notification_to_many` ends in `requests.post(..., timeout=15)`
+    #    to Expo plus a web-push call — per recipient. Running that inside a
+    #    transaction that holds `select_for_update()` on the order would park a
+    #    row lock behind outbound HTTP to a third party, so one slow push would
+    #    block every other approver on that order. The race fix is only safe
+    #    because the network calls are out here.
+    #
+    # 2. A notification sent inside a transaction that then rolls back is a
+    #    message about something that never happened. This view rolls its own
+    #    status changes back on several paths.
+    #
+    # `on_commit` runs the callback immediately when no transaction is active,
+    # so callers outside an atomic block are unaffected. Under `TestCase`
+    # (which never commits) it does NOT run — tests asserting delivery need
+    # `self.captureOnCommitCallbacks(execute=True)`.
+    transaction.on_commit(lambda: deliver_notification_to_many(
         plan.recipients,
         order,
         plan.message,
         event_type=plan.event_type,
         notification_type=plan.notification_type,
         title=plan.title,
-    )
+    ))
 
 class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
