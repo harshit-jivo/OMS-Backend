@@ -5,19 +5,12 @@ rather than inline role-name string comparisons scattered through views.
 """
 from rest_framework.permissions import BasePermission
 
-
-def is_admin(user):
-    """Admin by role name, Django staff, or superuser.
-    Three near-identical `is_admin` helpers already exist in the project
-    (devices/permissions.py:11, uilabels/permissions.py:12, users/views.py:867)
-    and they disagree — two ignore is_superuser. This one honours all three.
-    """
-    if not user or not user.is_authenticated:
-        return False
-    if user.is_superuser or user.is_staff:
-        return True
-    role = getattr(getattr(user, 'role', None), 'name', '')
-    return str(role).strip().lower() == 'admin'
+# This module's own `is_admin` correctly diagnosed the problem — "three
+# near-identical helpers already exist and they disagree" — and then solved it
+# by adding a fourth. `core.permissions.is_admin` is the actual single
+# definition; it keeps this one's rule (role, is_staff, is_superuser) and adds
+# the `extra_roles` lookup that all four were missing.
+from core.permissions import is_admin
 
 
 class IsApprovalAdmin(BasePermission):

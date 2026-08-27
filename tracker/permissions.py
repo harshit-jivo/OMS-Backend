@@ -17,6 +17,11 @@ a superuser whose role is 'admin' sees no tracker pages at all. To give someone
 tracker access, set their role — granting superuser does nothing here.
 (Corrected 2026-08-26; this paragraph previously claimed the opposite, which
 `tracker_pages_for` below has never done.)
+
+"Their role" means any role they hold — the primary `role` FK OR one of
+`extra_roles` — and the pages of all of them are unioned. `extra_roles` was
+ignored here until 2026-08-27, which meant a user had to give up their primary
+role to run the tracker. See `tracker_pages_for`.
 """
 from rest_framework.permissions import BasePermission
 
@@ -45,20 +50,43 @@ ROLE_PAGE_MAP = {
 }
 
 
-def _role_name(user):
-    role = getattr(user, 'role', None)
-    return (getattr(role, 'name', '') or '').strip().lower()
-
-
 def tracker_pages_for(user):
     """The set of tracker page keys this user may access.
 
-    Purely role-driven — tracker pages are for the three tracker sub-roles only.
-    The OMS 'admin' role and superusers are NOT special-cased here.
+    Purely role-driven — tracker pages are for the four tracker sub-roles only.
+    The OMS 'admin' role and superusers are NOT special-cased here; that is
+    deliberate and documented in the module docstring above.
+
+    Consults EVERY role the user holds, primary and `extra_roles`, and unions
+    the pages. It previously read the `role` FK alone, which contradicted the
+    rule stated in `users/models.py`:
+
+        "Anything resolving 'does this user hold role X' must check BOTH."
+
+    The consequence was a real access bug, not a theoretical one: `role` is a
+    single FK, so a manager who also runs the tracker had to choose between
+    `manager` and `tracker_admin`. `extra_roles` exists precisely to remove that
+    choice — and here it did nothing, so the user got no tracker access at all
+    while every other module honoured the grant.
+
+    Unioning rather than first-match-wins is what makes the multi-role case
+    behave: a `tracker_entry` who is also `tracker_ap` gets all three pages,
+    which is the only reading under which holding two roles is not worse than
+    holding one.
     """
     if not (user and user.is_authenticated):
         return set()
-    return set(ROLE_PAGE_MAP.get(_role_name(user), set()))
+
+    # `core.permissions.role_names` is the project-wide resolver (primary FK
+    # plus extra_roles, lowercased). Imported here rather than at module level
+    # to keep this module importable during migrations, when the M2M table may
+    # not exist yet.
+    from core.permissions import role_names
+
+    pages = set()
+    for name in role_names(user):
+        pages |= ROLE_PAGE_MAP.get(name, set())
+    return pages
 
 
 class _BaseTrackerPermission(BasePermission):

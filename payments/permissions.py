@@ -20,6 +20,12 @@ must hold even when the request does not come from our own UI.
 """
 from rest_framework.permissions import BasePermission
 
+# The project's single definition of "admin" (was a fifth local copy here).
+# Same rule this module already used — role, is_staff, is_superuser — plus the
+# `extra_roles` lookup that `users/models.py` requires of every role check and
+# that none of the five copies performed.
+from core.permissions import is_admin
+
 # ---------------------------------------------------------------------------
 # Keys — must match ASSIGNABLE_PAGES in the web/mobile clients EXACTLY.
 # ---------------------------------------------------------------------------
@@ -53,20 +59,6 @@ ACTION_PERMISSION_LABELS = {
     DEPOSIT_APPROVE: 'Deposit — Approve',
     PAYMENTS_DASHBOARD: 'Payments Dashboard',
 }
-
-
-def is_admin(user):
-    """Admin by role name, Django staff, or superuser.
-
-    Same three-way rule as approvals/permissions.py:is_admin — kept identical so
-    "admin" cannot mean one thing in one module and something else in another.
-    """
-    if not user or not user.is_authenticated:
-        return False
-    if user.is_superuser or user.is_staff:
-        return True
-    role = getattr(getattr(user, 'role', None), 'name', '')
-    return str(role).strip().lower() == 'admin'
 
 
 # NOTE: there is deliberately no role -> permission map.
