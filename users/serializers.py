@@ -1,8 +1,57 @@
 from rest_framework import serializers
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.password_validation import validate_password
 from django.db.utils import ProgrammingError
 from django.contrib.auth import authenticate
+from core.permissions import PRIVILEGED_ROLE_NAMES, is_admin
 from .models import User, Company, MainGroup, State, UserRole, SchemeProduct, UserState
 from orders.models import Categories
+
+
+def _run_password_validators(value):
+    """Apply AUTH_PASSWORD_VALIDATORS to a password set through the API.
+
+    `CreateUserSerializer` / `UpdateUserSerializer` are plain `Serializer`s that
+    call `set_password()` themselves, which does NOT validate — so the project's
+    configured validators (length, common-password, numeric-only, similarity)
+    were bypassed on every account created through the API. Only the
+    serializer's own `min_length=6` applied, which is weaker than the settings.
+    """
+    if not value:
+        return value
+    try:
+        validate_password(value)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError(list(exc.messages)) from exc
+    return value
+
+
+def assert_may_assign_roles(request, roles):
+    """Refuse to let a non-admin hand out a privileged role.
+
+    Defence in depth behind the view-level `IsAdminRole` guard. The two are not
+    redundant: the view guard answers "may you manage accounts at all", this
+    answers "may you create an account more powerful than your own". If the
+    first is ever loosened — to let a regional manager onboard their own staff,
+    say — this is what stops that becoming a path to `admin`.
+
+    `request` may be None (management commands, tests constructing serializers
+    directly); the check is skipped then, since there is no requester to judge.
+    """
+    if request is None:
+        return
+    wanted = {
+        str(getattr(r, 'name', '') or '').strip().lower()
+        for r in roles if r is not None
+    }
+    escalating = wanted & PRIVILEGED_ROLE_NAMES
+    if escalating and not is_admin(getattr(request, 'user', None)):
+        raise serializers.ValidationError({
+            'role': [
+                'Only an administrator may assign the '
+                f'{", ".join(sorted(escalating))} role.'
+            ]
+        })
 
 class SchemeProductSerializer(serializers.ModelSerializer):
     class Meta:
@@ -59,9 +108,15 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
+        # `password` is deliberately ABSENT. It used to be listed here, and
+        # because this is a ModelSerializer that meant every response built from
+        # it — including the unauthenticated /auth/users/list/ — serialised each
+        # user's PBKDF2 hash. No client ever read it (the edit form blanks the
+        # field), so removing it is not a contract change. Passwords are written
+        # through CreateUserSerializer / UpdateUserSerializer and never read.
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'extra_roles', 'roles', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'password', 'extra_pages', 'created_at'
+            'role','role_display', 'extra_roles', 'roles', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'extra_pages', 'created_at'
         ]
 
     def get_extra_roles(self, obj):
@@ -183,7 +238,18 @@ class CreateUserSerializer(serializers.Serializer):
     def validate_email(self, value):
         if value and User.objects.filter(email=value).exists():
             raise serializers.ValidationError('Email already exists')
-        return value    
+        return value
+
+    def validate_password(self, value):
+        return _run_password_validators(value)
+
+    def validate(self, data):
+        assert_may_assign_roles(
+            self.context.get('request'),
+            [data.get('role'), *(data.get('extra_roles') or [])],
+        )
+        return data
+
     def create(self, validated_data):
         password = validated_data.pop('password')
         main_groups = validated_data.pop('main_groups', [])
@@ -237,6 +303,18 @@ class UpdateUserSerializer(serializers.Serializer):
     category = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, allow_null=True)
     categories = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, many=True)
     sub_group = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate_password(self, value):
+        # Blank/None means "leave the password alone" here — only a real value
+        # is validated. `update()` applies the same rule before set_password().
+        return _run_password_validators(value)
+
+    def validate(self, data):
+        assert_may_assign_roles(
+            self.context.get('request'),
+            [data.get('role'), *(data.get('extra_roles') or [])],
+        )
+        return data
 
     def update(self, instance, validated_data):
         main_groups = validated_data.pop('main_groups', None)

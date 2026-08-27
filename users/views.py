@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from core.permissions import IsAdminRole, is_admin
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
@@ -208,7 +209,13 @@ def _serialize_user_party_assignments(assignments, preferred_category=None):
     }
 
 class PartyUsersView(APIView):
-    permission_classes = [AllowAny]
+    """Which users are assigned to a party. Administrators only.
+
+    Party assignment decides which customers a salesperson can see, so both
+    reading and rewriting it belong to the assignment-management screen.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def get(self, request, card_code):
         category = _normalize_category(request.query_params.get('category'))
@@ -237,34 +244,40 @@ class PartyUsersView(APIView):
         })
     
 class RoleListView(APIView):
+    """The role vocabulary. Any authenticated user.
+
+    Deliberately NOT admin-only: `approvals` reads it to build the approver
+    picker, and that page is open to `Payments_Dashboard` holders who are not
+    administrators. It exposes role names, not who holds them.
+
+    Had no `permission_classes` at all, which under DRF's default meant
+    `AllowAny` — the silent-hole case that Phase 2.1's
+    `DEFAULT_PERMISSION_CLASSES` exists to eliminate.
+    """
+
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         roles = UserRole.objects.filter(is_active=True).values('id', 'name', 'display_name')
         return Response(list(roles))
 
-class UserPartiesView(APIView):
-    permission_classes = [IsAuthenticated]
 
-    def get(self, request, user_id):
-        try:
-            user = User.objects.get(pk=user_id)
-        except User.DoesNotExist:
-            return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+# NOTE: a second, identical-in-name `UserPartiesView` used to be declared here.
+# The one defined further down (with the `?category=all` branch the dashboard
+# needs) shadowed it at import time, so this copy was dead code that never
+# handled a request — while carrying the stricter permission that made the file
+# look safer than it was. Deleted; the live class is the only one now.
 
-        assignments = UserPartyAssignment.objects.filter(user=user, is_active=True).order_by('-assigned_at')
-        user_category = _resolve_requested_category(user, request.query_params.get('category'))
-        assignments = _get_category_filtered_assignments(assignments, user_category)
-        serialized = _serialize_user_party_assignments(assignments, preferred_category=user_category)
-
-        return Response({
-            'success': True,
-            'data': {
-                'user': {'id': user.id, 'username': user.username, 'name': user.name},
-                **serialized,
-            }
-        })
 
 class AssignPartiesView(APIView):
-    permission_classes = [AllowAny]
+    """Assign parties to a user. Administrators only.
+
+    Was `AllowAny`. Party assignment IS the data-visibility boundary for
+    salespeople — an anonymous caller could grant themselves every customer in
+    the company.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request):
         user_id = request.data.get('user_id')
@@ -333,7 +346,9 @@ class AssignPartiesView(APIView):
         })
 
 class BulkAssignUsersPartiesView(APIView):
-    permission_classes = [AllowAny]
+    """Bulk party assignment from an upload. Administrators only."""
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request):
         rows = request.data.get('rows', [])
@@ -938,7 +953,9 @@ class RemoveProductFromPartyView(APIView):
             return Response({'success': False, 'message': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
 
 class RemovePartyAssignmentView(APIView):
-    permission_classes = [AllowAny]
+    """Revoke a party assignment. Administrators only."""
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request):
         user_id = request.data.get('user_id')
@@ -960,9 +977,23 @@ class RemovePartyAssignmentView(APIView):
             return Response({'success': False, 'message': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
     
 class UserPartiesView(APIView):
-    permission_classes = [AllowAny]
+    """The parties assigned to a user — own record, or any record for an admin.
+
+    Was `AllowAny`, which exposed the whole customer-to-salesperson map to
+    anonymous callers. Scoped rather than admin-gated because the dashboard
+    calls this for the logged-in user on every load; only the assignment-
+    management screen reads someone else's.
+    """
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, user_id):
+        if user_id != request.user.pk and not is_admin(request.user):
+            return Response(
+                {'success': False,
+                 'message': 'You may only view your own party assignments'},
+                status=status.HTTP_403_FORBIDDEN)
+
         try:
             user = User.objects.get(pk=user_id)
         except User.DoesNotExist:
@@ -1089,9 +1120,20 @@ class LogoutView(APIView):
         return Response({'success': True, 'message': 'Logged out'})
     
 class UserListForAssignmentView(APIView):
-    permission_classes = [AllowAny]
+    """The full user roster. Any authenticated user.
 
-   
+    Was `AllowAny`, and `UserSerializer` listed `password` in its fields — so
+    this endpoint handed every account's password hash to anonymous callers.
+    Both halves are fixed: the hash is gone from the serializer and the roster
+    now needs a login.
+
+    Not admin-only, for the same reason as `RoleListView`: the approvals
+    configuration page builds its approver picker from this and is open to
+    `Payments_Dashboard` holders.
+    """
+
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         users = (
             User.objects.filter(is_active=True)
@@ -1116,11 +1158,14 @@ class PagePermissionsView(APIView):
     """Admin-managed per-user page access (list of page keys)."""
     permission_classes = [IsAuthenticated]
 
-    def _is_admin(self, request):
-        role = getattr(request.user, 'role', None)
-        return bool(role and str(getattr(role, 'name', '')).strip().lower() == 'admin')
-
     def get(self, request, user_id):
+        # Reading someone else's granted pages tells you what they can reach;
+        # only an admin needs that, and every user can read their own.
+        if user_id != request.user.pk and not is_admin(request.user):
+            return Response(
+                {'success': False,
+                 'message': 'You may only view your own page permissions'},
+                status=status.HTTP_403_FORBIDDEN)
         try:
             user = User.objects.get(pk=user_id)
         except User.DoesNotExist:
@@ -1132,7 +1177,10 @@ class PagePermissionsView(APIView):
         })
 
     def put(self, request, user_id):
-        if not self._is_admin(request):
+        # `core.permissions.is_admin` replaces a local `_is_admin` that read the
+        # `role` FK alone — so a user granted `admin` through `extra_roles` was
+        # refused here while `payments` and `approvals` accepted them.
+        if not is_admin(request.user):
             return Response({'success': False, 'message': 'Only admin can change page permissions'},
                             status=status.HTTP_403_FORBIDDEN)
         try:
@@ -1160,36 +1208,58 @@ class PagePermissionsView(APIView):
             'data': {'user_id': user.id, 'extra_pages': cleaned},
         })
 
+# ---------------------------------------------------------------------------
+# Master data.
+#
+# All four were AllowAny. They are read-only reference lists rather than a
+# breach on their own, but they leak the company's operating footprint — every
+# state, company and product group it trades in — to anyone who finds the URL,
+# and no client needs them before login: `services/api.ts` attaches the bearer
+# token to every request, and every page that reads them sits behind the login
+# screen.
+# ---------------------------------------------------------------------------
+
 class StateListView(ListAPIView):
     """Get all active states"""
-    permission_classes = [AllowAny]  # Or [IsAuthenticated] if login required
+    permission_classes = [IsAuthenticated]
     serializer_class = StateSerializer
     queryset = State.objects.filter(is_active=True).order_by('name')
 
 class CompanyListView(ListAPIView):
     """Get all active companies"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     serializer_class = CompanySerializer
     queryset = Company.objects.filter(is_active=True).order_by('name')
-    
+
 class MainGroupListView(ListAPIView):
     """Get all active main groups"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     serializer_class = MainGroupSerializer
     queryset = MainGroup.objects.filter(is_active=True).order_by('name')
     
 class CategoryListView(ListAPIView):
     """Get all categories"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     serializer_class = CategorySerializer
     queryset = Categories.objects.all().order_by('category')
 
 #Creating User
 class CreateUserView(APIView):
-    permission_classes = [AllowAny]
+    """Create a user account. Administrators only.
+
+    This endpoint was `AllowAny` while its serializer accepted a `role` bound to
+    `UserRole.objects.all()` — so any anonymous caller who could reach the API
+    could mint themselves an `admin` account. The service is internet-facing.
+    That is what this class is guarding, and it is why the serializer ALSO
+    re-checks privileged-role assignment (`assert_may_assign_roles`): one guard
+    protects the endpoint, the other protects the escalation.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request):
-        serializer = CreateUserSerializer(data=request.data)
+        serializer = CreateUserSerializer(
+            data=request.data, context={'request': request})
 
         if serializer.is_valid():
             user = serializer.save()
@@ -1206,12 +1276,21 @@ class CreateUserView(APIView):
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    permission_classes = [AllowAny]
-
 
 class UserDetailView(APIView):
-    permission_classes = [AllowAny] 
-    
+    """Read or update any user account. Administrators only.
+
+    Previously `AllowAny`, which made `PUT /auth/users/<id>/` an anonymous
+    account-takeover: `UpdateUserSerializer` accepts `password`, `role` and
+    `is_active`, so anyone could reset the password of any account — including
+    an admin's — and log in as them.
+
+    A user reading their OWN record does not need this endpoint; `/auth/profile/`
+    already serves that and is authenticated.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
     def get(self, request, user_id):
         try:
             user = User.objects.get(pk=user_id)
@@ -1236,7 +1315,8 @@ class UserDetailView(APIView):
           'message': 'User not found'
             }, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = UpdateUserSerializer(user, data=request.data, partial=True)
+        serializer = UpdateUserSerializer(
+            user, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             updated_user = serializer.save()
             _sync_rate_approver_rules(updated_user)
@@ -1254,12 +1334,26 @@ class UserDetailView(APIView):
         }, status=status.HTTP_400_BAD_REQUEST)
     
 class DeleteUserView(APIView):
+    """Deactivate a user account (soft delete). Administrators only.
 
-    permission_classes = [AllowAny]
+    Was `AllowAny`: an anonymous caller could walk the ID range and disable
+    every account in the company, including every admin, locking the business
+    out of its own system.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request, user_id):
         try:
             user = User.objects.get(pk=user_id)
+            # Deactivating yourself is how an admin locks themselves out with a
+            # misclick; there is no undo through the API once the last admin is
+            # disabled.
+            if user.pk == request.user.pk:
+                return Response(
+                    {'success': False,
+                     'message': 'You cannot deactivate your own account'},
+                    status=status.HTTP_400_BAD_REQUEST)
             user.is_active = False
             user.save()
             return Response({'success': True, 'message': 'User removed successfully'}, status=status.HTTP_200_OK)
