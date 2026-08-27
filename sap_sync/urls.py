@@ -6,7 +6,7 @@ from .views import (
     PartyListView, PartyDetailView, PartyByCodeView, PartyAddressListView,
     BranchListView, SyncLogListView, SyncScheduleListView,
     SyncScheduleDetailView, ToggleScheduleView, SyncStatusView,
-    PushSalesQuotationView, TestSalesQuotation, ApproveOrderAPIView, SalesQuotationLogByOrderView,
+    ApproveOrderAPIView,
     GetPartyByCategoryView ,PushSalesOrderView , ApproveSalesOrderAPIView
 )
  
@@ -38,7 +38,10 @@ urlpatterns = [
     
     # ============ Sync Logs ============
     path('logs/', SyncLogListView.as_view(), name='sync-logs'),
-    path('quotation-log/<int:order_id>/', SalesQuotationLogByOrderView.as_view(), name='quotation-log-by-order'),
+# Sales Quotation routes — DISABLED 2026-08-27, the flow is closed and no
+# longer used. The view classes are commented out in views.py; the
+# SalesQuotationLog model and its table are kept, so history stays queryable.
+    # path('quotation-log/<int:order_id>/', SalesQuotationLogByOrderView.as_view(), name='quotation-log-by-order'),
     
     # ============ Schedule Management ============
     path('schedules/', SyncScheduleListView.as_view(), name='schedule-list'),
@@ -47,11 +50,11 @@ urlpatterns = [
     
     # ============ Status ============
     path('status/', SyncStatusView.as_view(), name='sync-status'),
-    path('push-quotation/', PushSalesQuotationView.as_view(), name='push-quotation'),
+    # path('push-quotation/', PushSalesQuotationView.as_view(), name='push-quotation'),
     path('push-order/', PushSalesOrderView.as_view(), name='push-order'),
-    path('test-quotation/', TestSalesQuotation.as_view()),
+    # path('test-quotation/', TestSalesQuotation.as_view()),
 
-    path('test-quotation/<int:pk>/', TestSalesQuotation.as_view()),
+    # path('test-quotation/<int:pk>/', TestSalesQuotation.as_view()),
     path("approve-order/", ApproveOrderAPIView.as_view(), name="approve-order"),
 
     path('approve-sales-order/', ApproveSalesOrderAPIView.as_view(), name='approve-sales-order'),

@@ -1,4 +1,4 @@
-# Endpoint inventory — 294 routes
+# Endpoint inventory — 287 routes
 
 Generated from the live URLconf by `scripts/endpoint_inventory.py`.
 Regenerate after any routing or permission change.
@@ -9,7 +9,7 @@ A view that declares no `permission_classes` inherits that default, so
 the "permissions" column shows what APPLIES, not what the view file says.
 `(inherited)` marks the ones relying on the default.
 
-> **3 of 294 routes are reachable without authentication.**
+> **3 of 287 routes are reachable without authentication.**
 
 
 ## `HAIS` — 18 routes, all authenticated
@@ -189,16 +189,15 @@ the "permissions" column shows what APPLIES, not what the view file says.
 | `/api/notifications/<int:pk>/` | GET,OPTIONS,PATCH,POST | `FrameworkNotificationListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/notifications/unread-count/` | GET,OPTIONS | `FrameworkNotificationUnreadCountView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 
-## `orders` — 55 routes, all authenticated
+## `orders` — 52 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
 | `/api/orders/<int:order_id>/approve/` | OPTIONS,POST | `ApproveOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/<int:order_id>/cancel-quotation/` | OPTIONS,POST | `CancelSalesQuotationView` | IsAuthenticated | Cancel a completed order's SAP Sales Quotation, then mirror it in OMS. |
 | `/api/orders/<int:order_id>/orderdetails/` | GET,OPTIONS | `OrderDetailsByOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/<int:order_id>/orderlogs/` | GET,OPTIONS | `OrderLogsByOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/<int:order_id>/reject/` | OPTIONS,POST | `RejectOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/<int:order_id>/update-status/` | OPTIONS,POST | `UpdateOrderStatusView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/<int:order_id>/update-status/` | OPTIONS,POST | `UpdateOrderStatusView` | IsAuthenticated | Advance (or reject) an order through its configured status flow. |
 | `/api/orders/<int:order_id>/update/` | OPTIONS,PUT | `UpdateOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/addresses/` | GET,OPTIONS | `PartyAddressesView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/api/ai-order-summary/` | OPTIONS,POST | `AiOrderSummaryView` | IsAuthenticated _(inherited)_ | Order summary text for a supplied order payload. |
@@ -213,7 +212,7 @@ the "permissions" column shows what APPLIES, not what the view file says.
 | `/api/orders/flow-config/` | GET,OPTIONS,POST | `OrderFlowConfigView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/list/` | GET,OPTIONS | `OrderListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/mart/<int:order_id>/` | GET,OPTIONS | `MartOrderDetailView` | IsAuthenticated | One distributor order with its items, for the approver's edit screen. |
-| `/api/orders/mart/<int:order_id>/approve/` | OPTIONS,POST | `MartApproveView` | IsAuthenticated | Approve a distributor order → 'Mart Approved'. (Phase 2 will also push the |
+| `/api/orders/mart/<int:order_id>/approve/` | OPTIONS,POST | `MartApproveView` | IsAuthenticated | Approve a distributor order → 'Mart Approved', then book it into SAP. |
 | `/api/orders/mart/<int:order_id>/reject/` | OPTIONS,POST | `MartRejectView` | IsAuthenticated | Reject a distributor order with a mandatory reason → 'Mart Rejected'. |
 | `/api/orders/mart/<int:order_id>/resend-sap/` | OPTIONS,POST | `MartResendSapView` | IsAuthenticated | Retry pushing an already-approved distributor order to SAP as a Sales |
 | `/api/orders/mart/list/` | GET,OPTIONS | `MartOrderListView` | IsAuthenticated | All distributor (company 3 / Mart) orders, for the Mart Approval queue. |
@@ -229,8 +228,6 @@ the "permissions" column shows what APPLIES, not what the view file says.
 | `/api/orders/product-filters/` | GET,OPTIONS | `ProductFiltersView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/products/` | GET,OPTIONS | `ProductListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/push-token/` | DELETE,OPTIONS,POST | `PushTokenView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/quotation-overview/` | GET,OPTIONS | `QuotationOverviewView` | IsAuthenticated | Admin overview of every completed order and its SAP sales-quotation |
-| `/api/orders/quotation-status/` | GET,OPTIONS | `QuotationStatusView` | IsAuthenticated _(inherited)_ | Batch lookup of SAP Sales Quotation status for completed orders. |
 | `/api/orders/sales-order-status/` | GET,OPTIONS | `SalesOrderSapStatusView` | IsAuthenticated | Batch lookup of SAP Sales Order status for distributor orders. |
 | `/api/orders/schemes/` | GET,OPTIONS | `SchemeListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/schemes/<int:scheme_id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `SchemeDetailView` | IsAuthenticated _(inherited)_ | Read / update / delete a single scheme. |
@@ -283,7 +280,7 @@ the "permissions" column shows what APPLIES, not what the view file says.
 | `/api/payments/receipts/<int:pk>/submit/` | OPTIONS,POST | `PaymentReceiptSubmitView` | IsAuthenticated,CanCreatePayment | Send a draft (or rejected) receipt into the approval chain. |
 | `/api/payments/sap-branches/` | GET,OPTIONS | `SapBranchListView` | IsAuthenticated | SAP branches a payment may be posted to, for this company. |
 
-## `sap_sync` — 27 routes, all authenticated
+## `sap_sync` — 23 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -301,8 +298,6 @@ the "permissions" column shows what APPLIES, not what the view file says.
 | `/api/sap/products/<int:pk>/` | GET,OPTIONS | `ProductDetailView` | IsAuthenticated _(inherited)_ | Get single product by ID or item_code |
 | `/api/sap/products/code/<str:item_code>/` | GET,OPTIONS | `ProductByCodeView` | IsAuthenticated _(inherited)_ | Get product by item_code |
 | `/api/sap/push-order/` | OPTIONS,POST | `PushSalesOrderView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/push-quotation/` | OPTIONS,POST | `PushSalesQuotationView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/quotation-log/<int:order_id>/` | GET,OPTIONS | `SalesQuotationLogByOrderView` | IsAuthenticated | Get the latest successful SAP quotation log for an order. |
 | `/api/sap/schedules/` | GET,OPTIONS,POST | `SyncScheduleListView` | IsAuthenticated,IsAdminRole | List and create sync schedules |
 | `/api/sap/schedules/<int:pk>/` | DELETE,GET,OPTIONS,PUT | `SyncScheduleDetailView` | IsAuthenticated,IsAdminRole | Get, update, or delete a sync schedule |
 | `/api/sap/schedules/<int:pk>/toggle/` | OPTIONS,POST | `ToggleScheduleView` | IsAuthenticated,IsAdminRole | Activate or deactivate a schedule |
@@ -312,8 +307,6 @@ the "permissions" column shows what APPLIES, not what the view file says.
 | `/api/sap/sync/branches/` | OPTIONS,POST | `SyncBranchesView` | IsAuthenticated,IsAdminRole | Sync branches from SAP |
 | `/api/sap/sync/parties/` | OPTIONS,POST | `SyncPartiesView` | IsAuthenticated,IsAdminRole | Trigger manual sync of parties only |
 | `/api/sap/sync/products/` | OPTIONS,POST | `SyncProductsView` | IsAuthenticated,IsAdminRole | Trigger manual sync of products only |
-| `/api/sap/test-quotation/` | OPTIONS,POST | `TestSalesQuotation` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/test-quotation/<int:pk>/` | OPTIONS,POST | `TestSalesQuotation` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 
 ## `serviceLayer` — 7 routes, all authenticated
 
@@ -398,4 +391,4 @@ the "permissions" column shows what APPLIES, not what the view file says.
 
 ---
 
-**Totals: 294 routes, 3 reachable without authentication.**
+**Totals: 287 routes, 3 reachable without authentication.**

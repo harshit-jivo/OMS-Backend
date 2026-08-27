@@ -442,33 +442,51 @@ class BranchListView(ListAPIView):
     queryset = Branch.objects.all().order_by('category', 'bpl_id')
 
 
-class SalesQuotationLogByOrderView(APIView):
-    """Get the latest successful SAP quotation log for an order."""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, order_id):
-        quotation_log = (
-            SalesOrderLog.objects
-            .filter(order_id=str(order_id), status='SUCCESS', sap_doc_num__isnull=False)
-            .order_by('-created_at')
-            .first()
-        )
-
-        if not quotation_log:
-            return Response({
-                'success': False,
-                'message': 'Quotation log not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        return Response({
-            'success': True,
-            'data': {
-                'order_id': quotation_log.order_id,
-                'sap_doc_num': str(quotation_log.sap_doc_num),
-                'sap_doc_entry': quotation_log.sap_doc_entry,
-                'created_at': quotation_log.created_at.isoformat() if quotation_log.created_at else None,
-            }
-        })
+# ---------------------------------------------------------------------------
+# DISABLED 2026-08-27 — the Sales Quotation flow is closed and no longer used.
+#
+# Commented out rather than deleted, at the maintainers' request, so the
+# implementation stays visible in place. `sap_sync.SalesQuotationLog` and its
+# table are KEPT: the history stays queryable and nothing is dropped.
+#
+# Its routes are commented out in urls.py alongside this. Note that
+# QuotationStatusView had already stopped working: it called
+# `SalesOrderService().get_quotation_status(doc_entries)` without the required
+# `branch` argument, so every call raised TypeError — caught by the `except
+# Exception` below, which returns the same empty map it returns when SAP is
+# unreachable. The breakage was indistinguishable from SAP being down, which is
+# why nothing surfaced it.
+#
+# To restore: uncomment here and in urls.py, and fix that call by deciding
+# which company DB to query.
+# ---------------------------------------------------------------------------
+# class SalesQuotationLogByOrderView(APIView):
+#     """Get the latest successful SAP quotation log for an order."""
+#     permission_classes = [IsAuthenticated]
+#
+#     def get(self, request, order_id):
+#         quotation_log = (
+#             SalesOrderLog.objects
+#             .filter(order_id=str(order_id), status='SUCCESS', sap_doc_num__isnull=False)
+#             .order_by('-created_at')
+#             .first()
+#         )
+#
+#         if not quotation_log:
+#             return Response({
+#                 'success': False,
+#                 'message': 'Quotation log not found'
+#             }, status=status.HTTP_404_NOT_FOUND)
+#
+#         return Response({
+#             'success': True,
+#             'data': {
+#                 'order_id': quotation_log.order_id,
+#                 'sap_doc_num': str(quotation_log.sap_doc_num),
+#                 'sap_doc_entry': quotation_log.sap_doc_entry,
+#                 'created_at': quotation_log.created_at.isoformat() if quotation_log.created_at else None,
+#             }
+#         })
 
 class SyncBranchesView(APIView):
     """Sync branches from SAP"""
@@ -571,42 +589,42 @@ class SyncStatusView(APIView):
                 'message': str(e),
             }, status=500)
 
-class PushSalesQuotationView(APIView):
-
-    def post(self, request):
-        order_id = request.data.get("order_id")
-
-        if not order_id:
-            return Response(
-                {"error": "order_id is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            order = Order.objects.get(id=order_id)
-
-            service = SyncService(triggered_by='manual')
-            sap_response = service.create_sales_quotation(order)
-            
-            return Response(
-                {
-                    "message": "Quotation created successfully",
-                    "sap_response": sap_response
-                },
-                status=status.HTTP_200_OK
-            )
-
-        except Order.DoesNotExist:
-            return Response(
-                {"error": "Order not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+# class PushSalesQuotationView(APIView):
+#
+#     def post(self, request):
+#         order_id = request.data.get("order_id")
+#
+#         if not order_id:
+#             return Response(
+#                 {"error": "order_id is required"},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+#
+#         try:
+#             order = Order.objects.get(id=order_id)
+#
+#             service = SyncService(triggered_by='manual')
+#             sap_response = service.create_sales_quotation(order)
+#            
+#             return Response(
+#                 {
+#                     "message": "Quotation created successfully",
+#                     "sap_response": sap_response
+#                 },
+#                 status=status.HTTP_200_OK
+#             )
+#
+#         except Order.DoesNotExist:
+#             return Response(
+#                 {"error": "Order not found"},
+#                 status=status.HTTP_404_NOT_FOUND
+#             )
+#
+#         except Exception as e:
+#             return Response(
+#                 {"error": str(e)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
 
 
 class PushSalesOrderView(APIView):
@@ -647,39 +665,39 @@ class PushSalesOrderView(APIView):
 
             )
 
-class TestSalesQuotation(APIView):
-    
-    def post(self, request):
-        try:
-            # Create a Mock Order object that mimics the Django Model
-            # This allows create_sales_quotation to work without a real DB record
-            mock_item = SimpleNamespace(
-                item_code="FG0000145",
-                qty=84,
-                price_list_basic=1286
-            )
-            
-            order = SimpleNamespace(
-                id="TEST-ORDER-001",
-                card_code="CUSTA000486",
-                created_at="2026-02-10",
-                po_number="7801514523",
-                ship_to_address="WAL MART INDIA PVT LTD LUDHIANA 4717",
-                bill_to_address="WAL MART INDIA PVT LTD LUDHIANA 4717",
-                dispatch_from_id=3,
-                items=SimpleNamespace(all=lambda: [mock_item])
-            )
-
-            service = SyncService(triggered_by="manual_test")
-            result = service.create_sales_quotation(order)
-
-            return Response(result, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+# class TestSalesQuotation(APIView):
+#    
+#     def post(self, request):
+#         try:
+#             # Create a Mock Order object that mimics the Django Model
+#             # This allows create_sales_quotation to work without a real DB record
+#             mock_item = SimpleNamespace(
+#                 item_code="FG0000145",
+#                 qty=84,
+#                 price_list_basic=1286
+#             )
+#            
+#             order = SimpleNamespace(
+#                 id="TEST-ORDER-001",
+#                 card_code="CUSTA000486",
+#                 created_at="2026-02-10",
+#                 po_number="7801514523",
+#                 ship_to_address="WAL MART INDIA PVT LTD LUDHIANA 4717",
+#                 bill_to_address="WAL MART INDIA PVT LTD LUDHIANA 4717",
+#                 dispatch_from_id=3,
+#                 items=SimpleNamespace(all=lambda: [mock_item])
+#             )
+#
+#             service = SyncService(triggered_by="manual_test")
+#             result = service.create_sales_quotation(order)
+#
+#             return Response(result, status=status.HTTP_200_OK)
+#
+#         except Exception as e:
+#             return Response(
+#                 {"error": str(e)},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
             
 class GetPartyByCategoryView(APIView):
     def get(self , request):
