@@ -1,11 +1,18 @@
 # Endpoint inventory — 294 routes
 
-Generated from the live URLconf.
+Generated from the live URLconf by `scripts/endpoint_inventory.py`.
+Regenerate after any routing or permission change.
 
-`(none declared)` inherits the DRF default, which is currently **AllowAny**.
+**`DEFAULT_PERMISSION_CLASSES` = `['IsAuthenticated']`**
+
+A view that declares no `permission_classes` inherits that default, so
+the "permissions" column shows what APPLIES, not what the view file says.
+`(inherited)` marks the ones relying on the default.
+
+> **3 of 294 routes are reachable without authentication.**
 
 
-## `HAIS` — 18 routes, **0 open**
+## `HAIS` — 18 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -28,16 +35,16 @@ Generated from the live URLconf.
 | `/api/hais/^storage-types/(?P<pk>[^/.]+)\.(?P<format>[a-z0-9]+)/?$` | OPTIONS | `StorageTypeViewSet` | IsAuthenticated | Shared behaviour for the dropdown master endpoints. |
 | `/api/hais/^storage-types\.(?P<format>[a-z0-9]+)/?$` | OPTIONS | `StorageTypeViewSet` | IsAuthenticated | Shared behaviour for the dropdown master endpoints. |
 
-## `SKU` — 4 routes, **4 open**
+## `SKU` — 4 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/sku/<str:item_code>/` | DELETE,GET,OPTIONS,PATCH,PUT | `SKUDetailView` | AllowAny 🔴 | Concrete view for retrieving, updating or deleting a model instance. |
-| `/api/sku/all/` | GET,OPTIONS | `SKUListView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/sku/pending/` | GET,OPTIONS | `SKUPendingList` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/sku/upload/` | OPTIONS,POST | `SKUCreateView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/sku/<str:item_code>/` | DELETE,GET,OPTIONS,PATCH,PUT | `SKUDetailView` | IsAuthenticated _(inherited)_ | Concrete view for retrieving, updating or deleting a model instance. |
+| `/api/sku/all/` | GET,OPTIONS | `SKUListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/sku/pending/` | GET,OPTIONS | `SKUPendingList` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/sku/upload/` | OPTIONS,POST | `SKUCreateView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 
-## `approvals` — 11 routes, **0 open**
+## `approvals` — 11 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -53,13 +60,13 @@ Generated from the live URLconf.
 | `/api/approvals/workflows/<int:pk>/` | DELETE,GET,OPTIONS,PATCH,PUT | `WorkflowDetailView` | IsAuthenticated,IsApprovalAdmin | Concrete view for retrieving, updating or deleting a model instance. |
 | `/api/approvals/workflows/<int:pk>/preview/` | GET,OPTIONS | `WorkflowPreviewView` | IsAuthenticated,IsApprovalAdmin | Render the ladder a document would take, with resolved approver names. |
 
-## `attachments` — 1 routes, **0 open**
+## `attachments` — 1 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
 | `/api/payments/attachments/<int:pk>/download/` | GET,OPTIONS | `AttachmentDownloadView` | IsAuthenticated | Stream a stored file after checking permission. |
 
-## `devices` — 7 routes, **0 open**
+## `devices` — 7 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -71,110 +78,110 @@ Generated from the live URLconf.
 | `/api/devices/register/` | OPTIONS,POST | `DeviceRegisterView` | IsAuthenticated | POST /api/devices/register/ — idempotent upsert of the caller's device. |
 | `/api/devices/update/` | OPTIONS,PUT | `DeviceUpdateView` | IsAuthenticated | PUT /api/devices/update/ — refresh telemetry for an existing device. |
 
-## `einvoice` — 21 routes, **21 open**
+## `einvoice` — 21 routes, **1 open**
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/einvoice/companies/` | GET,OPTIONS | `list_companies` | AllowAny 🔴 | Companies (SAP company DBs) an IRN can be generated against. |
-| `/api/einvoice/ewb/` | OPTIONS,POST | `generate_ewb_by_irn` | AllowAny 🔴 | Body: e-Way Bill payload incl. Irn + transport details |
-| `/api/einvoice/ewb/<str:irn>/` | GET,OPTIONS | `get_ewb_by_irn` | AllowAny 🔴 | GET the e-Way Bill linked to an IRN. |
-| `/api/einvoice/gstin/<str:gstin>/` | GET,OPTIONS | `get_gstin_details` | AllowAny 🔴 | GET GSTIN master details. |
-| `/api/einvoice/gstin/<str:gstin>/sync/` | GET,OPTIONS | `sync_gstin` | AllowAny 🔴 | Force a fresh sync of a GSTIN from the GST common portal. |
-| `/api/einvoice/health/` | GET,OPTIONS | `health` | AllowAny 🔴 | Quick check that config is present (does NOT hit the NIC API). |
-| `/api/einvoice/heartbeat/` | GET,OPTIONS | `heartbeat` | AllowAny 🔴 | Unencrypted NIC heartbeat/ping (no auth). |
-| `/api/einvoice/invoices/` | GET,OPTIONS | `list_invoices` | AllowAny 🔴 | List recent SAP invoices that DO NOT yet have an IRN, so the user can generate |
-| `/api/einvoice/irn/` | OPTIONS,POST | `generate_irn` | AllowAny 🔴 | POST a full e-invoice JSON payload as the request body, e.g.: |
-| `/api/einvoice/irn/<str:irn>/` | GET,OPTIONS | `get_irn_details` | AllowAny 🔴 | GET the details of a previously generated IRN. |
-| `/api/einvoice/irn/<str:irn>/qr.png` | ? | `irn_qr_png` | (none declared) 🔴 | GET the NIC signed QR of a stored IRN as a PNG image (for print / <img src>). |
-| `/api/einvoice/irn/by-doc/` | GET,OPTIONS | `get_irn_by_doc` | AllowAny 🔴 | Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy |
-| `/api/einvoice/irn/cancel/` | OPTIONS,POST | `cancel_irn` | AllowAny 🔴 | Body: { "irn": "...", "reason_code": "2", "remarks": "..." } |
-| `/api/einvoice/irn/from-invoice/<int:docentry>/` | GET,OPTIONS,POST | `irn_from_invoice` | AllowAny 🔴 | Build an IRN payload straight from a SAP B1 invoice (OINV DocEntry). |
-| `/api/einvoice/irn/rejected/` | GET,OPTIONS | `get_rejected_irns` | AllowAny 🔴 | Query param: ?date=dd/mm/yyyy |
-| `/api/einvoice/irn/sample/` | OPTIONS,POST | `generate_irn_sample` | AllowAny 🔴 | Convenience endpoint: builds a minimal valid invoice from the configured |
-| `/api/einvoice/irn/validate/` | OPTIONS,POST | `validate_irn` | AllowAny 🔴 | Validate an invoice payload against the GSTN regexes + arithmetic rules |
-| `/api/einvoice/logs/` | GET,OPTIONS | `generation_logs` | AllowAny 🔴 | List IRN auto-generation attempts (einvoice_irn_generation_log). |
-| `/api/einvoice/logs/retry/` | OPTIONS,POST | `retry_generation` | AllowAny 🔴 | Re-run auto IRN generation for a DocEntry. Body: { "docentry": n, "company_db": "..." } |
-| `/api/einvoice/qr/` | OPTIONS,POST | `render_qr` | AllowAny 🔴 | Render any SignedQRCode string into a QR image without a DB lookup. |
-| `/api/einvoice/token/` | GET,OPTIONS,POST | `get_token` | AllowAny 🔴 | Run the auth handshake against NIC and report the result. Useful for testing |
+| `/api/einvoice/companies/` | GET,OPTIONS | `list_companies` | IsAuthenticated | Companies (SAP company DBs) an IRN can be generated against. |
+| `/api/einvoice/ewb/` | OPTIONS,POST | `generate_ewb_by_irn` | IsAuthenticated | Body: e-Way Bill payload incl. Irn + transport details |
+| `/api/einvoice/ewb/<str:irn>/` | GET,OPTIONS | `get_ewb_by_irn` | IsAuthenticated | GET the e-Way Bill linked to an IRN. |
+| `/api/einvoice/gstin/<str:gstin>/` | GET,OPTIONS | `get_gstin_details` | IsAuthenticated | GET GSTIN master details. |
+| `/api/einvoice/gstin/<str:gstin>/sync/` | GET,OPTIONS | `sync_gstin` | IsAuthenticated | Force a fresh sync of a GSTIN from the GST common portal. |
+| `/api/einvoice/health/` | GET,OPTIONS | `health` | IsAuthenticated | Quick check that config is present (does NOT hit the NIC API). |
+| `/api/einvoice/heartbeat/` | GET,OPTIONS | `heartbeat` | IsAuthenticated | Unencrypted NIC heartbeat/ping (no auth). |
+| `/api/einvoice/invoices/` | GET,OPTIONS | `list_invoices` | IsAuthenticated | List recent SAP invoices that DO NOT yet have an IRN, so the user can generate |
+| `/api/einvoice/irn/` | OPTIONS,POST | `generate_irn` | IsAuthenticated | POST a full e-invoice JSON payload as the request body, e.g.: |
+| `/api/einvoice/irn/<str:irn>/` | GET,OPTIONS | `get_irn_details` | IsAuthenticated | GET the details of a previously generated IRN. |
+| `/api/einvoice/irn/<str:irn>/qr.png` | GET,OPTIONS | `irn_qr_png` | AllowAny 🔴 | GET the NIC signed QR of a stored IRN as a PNG image (for print / <img src>). |
+| `/api/einvoice/irn/by-doc/` | GET,OPTIONS | `get_irn_by_doc` | IsAuthenticated | Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy |
+| `/api/einvoice/irn/cancel/` | OPTIONS,POST | `cancel_irn` | IsAuthenticated | Body: { "irn": "...", "reason_code": "2", "remarks": "..." } |
+| `/api/einvoice/irn/from-invoice/<int:docentry>/` | GET,OPTIONS,POST | `irn_from_invoice` | IsAuthenticated | Build an IRN payload straight from a SAP B1 invoice (OINV DocEntry). |
+| `/api/einvoice/irn/rejected/` | GET,OPTIONS | `get_rejected_irns` | IsAuthenticated | Query param: ?date=dd/mm/yyyy |
+| `/api/einvoice/irn/sample/` | OPTIONS,POST | `generate_irn_sample` | IsAuthenticated | Convenience endpoint: builds a minimal valid invoice from the configured |
+| `/api/einvoice/irn/validate/` | OPTIONS,POST | `validate_irn` | IsAuthenticated | Validate an invoice payload against the GSTN regexes + arithmetic rules |
+| `/api/einvoice/logs/` | GET,OPTIONS | `generation_logs` | IsAuthenticated | List IRN auto-generation attempts (einvoice_irn_generation_log). |
+| `/api/einvoice/logs/retry/` | OPTIONS,POST | `retry_generation` | IsAuthenticated | Re-run auto IRN generation for a DocEntry. Body: { "docentry": n, "company_db": "..." } |
+| `/api/einvoice/qr/` | OPTIONS,POST | `render_qr` | IsAuthenticated | Render any SignedQRCode string into a QR image without a DB lookup. |
+| `/api/einvoice/token/` | GET,OPTIONS,POST | `get_token` | IsAuthenticated | Run the auth handshake against NIC and report the result. Useful for testing |
 
-## `ewaybill` — 12 routes, **12 open**
-
-| path | methods | view | permissions | note |
-|---|---|---|---|---|
-| `/api/ewaybill/<str:ewb_no>/` | GET,OPTIONS | `get_ewb` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/ewaybill/cancel/` | OPTIONS,POST | `cancel_ewb` | AllowAny 🔴 | Body: { "ewbNo": 123, "reason_code": 2, "remarks": "..." }. Updates the stored record. |
-| `/api/ewaybill/close/` | OPTIONS,POST | `close_ewb` | AllowAny 🔴 | Voluntary closure of an EWB after delivery (GSTN advisory 17.06.2026). |
-| `/api/ewaybill/extend-validity/` | OPTIONS,POST | `extend_validity` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/ewaybill/from-invoice/<int:docentry>/` | GET,OPTIONS,POST | `ewb_from_invoice` | AllowAny 🔴 | Build an e-Way Bill straight from a SAP B1 invoice (OINV DocEntry). |
-| `/api/ewaybill/generate/` | OPTIONS,POST | `generate_ewb` | AllowAny 🔴 | Body: full GENEWAYBILL payload (supply + transport details). |
-| `/api/ewaybill/gstin/<str:gstin>/` | GET,OPTIONS | `ewb_gstin_details` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/ewaybill/reject/` | OPTIONS,POST | `reject_ewb` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/ewaybill/token/` | OPTIONS,POST | `ewb_token` | AllowAny 🔴 | Run the EWB auth handshake; returns a masked token. |
-| `/api/ewaybill/transporter/<str:trans_id>/` | GET,OPTIONS | `ewb_transporter_details` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/ewaybill/update-part-b/` | OPTIONS,POST | `update_part_b` | AllowAny 🔴 | Body: VEHEWB payload (ewbNo, vehicleNo, fromPlace, fromState, transMode, ...). |
-| `/api/ewaybill/update-transporter/` | OPTIONS,POST | `update_transporter` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-
-## `hana` — 23 routes, **23 open**
+## `ewaybill` — 12 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/hana/address/` | GET,OPTIONS | `GetAddressView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/all-customers/` | GET,OPTIONS | `GetAllCustomersView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/batch-details/` | GET,OPTIONS | `GetBatchDetailsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/customer-details/` | GET,OPTIONS | `GetCustomerDetailsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/draft/verify` | GET,OPTIONS | `GetDraftVerification` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/fg-items/` | GET,OPTIONS | `GetFGItemsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/freight-masters/` | GET,OPTIONS | `GetFreightMastersView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/inventory-details/` | GET,OPTIONS | `GetInventoryDetailsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/inventory-report/` | GET,OPTIONS | `GetInventoryReportView` | AllowAny 🔴 | Warehouse-wise FG stock, pivoted and grouped by variety. |
-| `/api/hana/invoice-drafts/` | GET,OPTIONS | `GetInvoiceDrafts` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/item-price/` | GET,OPTIONS | `GetItemPriceView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/next-doc-number/` | GET,OPTIONS | `GetNextDocNumberView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/open-parties/` | GET,OPTIONS | `GetOpenPartiesView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/pending-dispatch/` | GET,OPTIONS | `GetPendingDispatchView` | AllowAny 🔴 | Open sales orders against the AR invoices raised on them. |
-| `/api/hana/product-so/` | GET,OPTIONS | `GetProductSalesOrderView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/product-stock/` | GET,OPTIONS | `GetProductStockView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/salesperson-details/` | GET,OPTIONS | `GetSalespersonDetailsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/series/` | GET,OPTIONS | `GetSeries` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/so/` | GET,OPTIONS | `GetSalesOrderView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/state-chain/` | GET,OPTIONS | `GetStateChainView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/vendor-states/` | GET,OPTIONS | `GetVendorStatesView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/warehouse-details/` | GET,OPTIONS | `GetWarehouseDetailsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/hana/warehouses/` | GET,OPTIONS | `GetWarehousesView` | AllowAny 🔴 | Selectable warehouses, for the order-level warehouse picker. |
+| `/api/ewaybill/<str:ewb_no>/` | GET,OPTIONS | `get_ewb` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
+| `/api/ewaybill/cancel/` | OPTIONS,POST | `cancel_ewb` | IsAuthenticated | Body: { "ewbNo": 123, "reason_code": 2, "remarks": "..." }. Updates the stored record. |
+| `/api/ewaybill/close/` | OPTIONS,POST | `close_ewb` | IsAuthenticated | Voluntary closure of an EWB after delivery (GSTN advisory 17.06.2026). |
+| `/api/ewaybill/extend-validity/` | OPTIONS,POST | `extend_validity` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
+| `/api/ewaybill/from-invoice/<int:docentry>/` | GET,OPTIONS,POST | `ewb_from_invoice` | IsAuthenticated | Build an e-Way Bill straight from a SAP B1 invoice (OINV DocEntry). |
+| `/api/ewaybill/generate/` | OPTIONS,POST | `generate_ewb` | IsAuthenticated | Body: full GENEWAYBILL payload (supply + transport details). |
+| `/api/ewaybill/gstin/<str:gstin>/` | GET,OPTIONS | `ewb_gstin_details` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
+| `/api/ewaybill/reject/` | OPTIONS,POST | `reject_ewb` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
+| `/api/ewaybill/token/` | OPTIONS,POST | `ewb_token` | IsAuthenticated | Run the EWB auth handshake; returns a masked token. |
+| `/api/ewaybill/transporter/<str:trans_id>/` | GET,OPTIONS | `ewb_transporter_details` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
+| `/api/ewaybill/update-part-b/` | OPTIONS,POST | `update_part_b` | IsAuthenticated | Body: VEHEWB payload (ewbNo, vehicleNo, fromPlace, fromState, transMode, ...). |
+| `/api/ewaybill/update-transporter/` | OPTIONS,POST | `update_transporter` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 
-## `invoice` — 14 routes, **12 open**
+## `hana` — 23 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/invoice/<int:pk>/delete/` | DELETE,OPTIONS,POST | `InvoiceLogDeleteView` | AllowAny 🔴 | Soft-delete a review entry, and restore one. |
-| `/api/invoice/<int:pk>/update-status/` | OPTIONS,PATCH | `InvoicelogStatusUpdateView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/all/` | GET,OPTIONS | `InvoiceLogListView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/credit-limit/cards/` | GET,OPTIONS | `CreditLimitCardsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/credit-limit/flow/` | GET,OPTIONS | `GetCreditLimitJSAPFlow` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/credit-limit/request/` | OPTIONS,POST | `CreditLimitRequestView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/crystal/` | GET,OPTIONS | `GetPrintReport` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/history/<int:pk>/` | GET,OPTIONS | `InvoiceHistoryView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/log/<int:id>/` | GET,OPTIONS,PATCH,PUT | `UpdateInvoiceLogView` | AllowAny 🔴 | Concrete view for retrieving, updating a model instance. |
-| `/api/invoice/logs/all/` | GET,OPTIONS | `InvoiceLogListwoWhsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/pending/` | OPTIONS,POST | `InvoiceLogCreateView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/invoice/refLogs/` | OPTIONS,POST | `InvoiceRefLogCreateView` | AllowAny 🔴 | Concrete view for creating a model instance. |
+| `/api/hana/address/` | GET,OPTIONS | `GetAddressView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/all-customers/` | GET,OPTIONS | `GetAllCustomersView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/batch-details/` | GET,OPTIONS | `GetBatchDetailsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/customer-details/` | GET,OPTIONS | `GetCustomerDetailsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/draft/verify` | GET,OPTIONS | `GetDraftVerification` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/fg-items/` | GET,OPTIONS | `GetFGItemsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/freight-masters/` | GET,OPTIONS | `GetFreightMastersView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/inventory-details/` | GET,OPTIONS | `GetInventoryDetailsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/inventory-report/` | GET,OPTIONS | `GetInventoryReportView` | IsAuthenticated _(inherited)_ | Warehouse-wise FG stock, pivoted and grouped by variety. |
+| `/api/hana/invoice-drafts/` | GET,OPTIONS | `GetInvoiceDrafts` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/item-price/` | GET,OPTIONS | `GetItemPriceView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/next-doc-number/` | GET,OPTIONS | `GetNextDocNumberView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/open-parties/` | GET,OPTIONS | `GetOpenPartiesView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/pending-dispatch/` | GET,OPTIONS | `GetPendingDispatchView` | IsAuthenticated _(inherited)_ | Open sales orders against the AR invoices raised on them. |
+| `/api/hana/product-so/` | GET,OPTIONS | `GetProductSalesOrderView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/product-stock/` | GET,OPTIONS | `GetProductStockView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/salesperson-details/` | GET,OPTIONS | `GetSalespersonDetailsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/series/` | GET,OPTIONS | `GetSeries` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/so/` | GET,OPTIONS | `GetSalesOrderView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/state-chain/` | GET,OPTIONS | `GetStateChainView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/vendor-states/` | GET,OPTIONS | `GetVendorStatesView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/warehouse-details/` | GET,OPTIONS | `GetWarehouseDetailsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/hana/warehouses/` | GET,OPTIONS | `GetWarehousesView` | IsAuthenticated _(inherited)_ | Selectable warehouses, for the order-level warehouse picker. |
+
+## `invoice` — 14 routes, all authenticated
+
+| path | methods | view | permissions | note |
+|---|---|---|---|---|
+| `/api/invoice/<int:pk>/delete/` | DELETE,OPTIONS,POST | `InvoiceLogDeleteView` | IsAuthenticated _(inherited)_ | Soft-delete a review entry, and restore one. |
+| `/api/invoice/<int:pk>/update-status/` | OPTIONS,PATCH | `InvoicelogStatusUpdateView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/all/` | GET,OPTIONS | `InvoiceLogListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/credit-limit/cards/` | GET,OPTIONS | `CreditLimitCardsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/credit-limit/flow/` | GET,OPTIONS | `GetCreditLimitJSAPFlow` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/credit-limit/request/` | OPTIONS,POST | `CreditLimitRequestView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/crystal/` | GET,OPTIONS | `GetPrintReport` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/history/<int:pk>/` | GET,OPTIONS | `InvoiceHistoryView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/log/<int:id>/` | GET,OPTIONS,PATCH,PUT | `UpdateInvoiceLogView` | IsAuthenticated _(inherited)_ | Concrete view for retrieving, updating a model instance. |
+| `/api/invoice/logs/all/` | GET,OPTIONS | `InvoiceLogListwoWhsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/pending/` | OPTIONS,POST | `InvoiceLogCreateView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/invoice/refLogs/` | OPTIONS,POST | `InvoiceRefLogCreateView` | IsAuthenticated _(inherited)_ | Concrete view for creating a model instance. |
 | `/api/invoice/reserved-batches/` | GET,OPTIONS | `ReservedBatchesView` | IsAuthenticated | How much of each batch an in-flight invoice log has already committed. |
 | `/api/invoice/used-sales-orders/` | GET,OPTIONS | `UsedSalesOrdersView` | IsAuthenticated | Which sales orders already appear on an invoice log. |
 
-## `legal` — 8 routes, **8 open**
+## `legal` — 8 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/legal/item-nutrition/` | GET,OPTIONS | `NutrientByItemView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/legal/item/` | GET,OPTIONS,POST | `LabelItemListCreateView` | AllowAny 🔴 | Concrete view for listing a queryset or creating a model instance. |
-| `/api/legal/item/<int:id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `LabelItemRetrieveUpdateDestroyView` | AllowAny 🔴 | Concrete view for retrieving, updating or deleting a model instance. |
-| `/api/legal/nutrition/` | GET,OPTIONS,POST | `LabelNutritionListCreateView` | AllowAny 🔴 | Concrete view for listing a queryset or creating a model instance. |
-| `/api/legal/nutrition/<int:id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `LabelNutritionRetrieveUpdateDestroyView` | AllowAny 🔴 | Concrete view for retrieving, updating or deleting a model instance. |
-| `/api/legal/uom/` | GET,OPTIONS,POST | `NutritionUOMListCreatView` | AllowAny 🔴 | Concrete view for listing a queryset or creating a model instance. |
-| `/api/legal/uom/<int:id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `NutritionUOMRetrieveUpdateDestroyView` | AllowAny 🔴 | Concrete view for retrieving, updating or deleting a model instance. |
-| `/api/legal/upload/` | OPTIONS,POST | `FeedtoAIView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/legal/item-nutrition/` | GET,OPTIONS | `NutrientByItemView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/legal/item/` | GET,OPTIONS,POST | `LabelItemListCreateView` | IsAuthenticated _(inherited)_ | Concrete view for listing a queryset or creating a model instance. |
+| `/api/legal/item/<int:id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `LabelItemRetrieveUpdateDestroyView` | IsAuthenticated _(inherited)_ | Concrete view for retrieving, updating or deleting a model instance. |
+| `/api/legal/nutrition/` | GET,OPTIONS,POST | `LabelNutritionListCreateView` | IsAuthenticated _(inherited)_ | Concrete view for listing a queryset or creating a model instance. |
+| `/api/legal/nutrition/<int:id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `LabelNutritionRetrieveUpdateDestroyView` | IsAuthenticated _(inherited)_ | Concrete view for retrieving, updating or deleting a model instance. |
+| `/api/legal/uom/` | GET,OPTIONS,POST | `NutritionUOMListCreatView` | IsAuthenticated _(inherited)_ | Concrete view for listing a queryset or creating a model instance. |
+| `/api/legal/uom/<int:id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `NutritionUOMRetrieveUpdateDestroyView` | IsAuthenticated _(inherited)_ | Concrete view for retrieving, updating or deleting a model instance. |
+| `/api/legal/upload/` | OPTIONS,POST | `FeedtoAIView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 
-## `notifications` — 3 routes, **0 open**
+## `notifications` — 3 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -182,7 +189,7 @@ Generated from the live URLconf.
 | `/api/notifications/<int:pk>/` | GET,OPTIONS,PATCH,POST | `FrameworkNotificationListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/notifications/unread-count/` | GET,OPTIONS | `FrameworkNotificationUnreadCountView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 
-## `orders` — 55 routes, **24 open**
+## `orders` — 55 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -193,16 +200,16 @@ Generated from the live URLconf.
 | `/api/orders/<int:order_id>/reject/` | OPTIONS,POST | `RejectOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/<int:order_id>/update-status/` | OPTIONS,POST | `UpdateOrderStatusView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/<int:order_id>/update/` | OPTIONS,PUT | `UpdateOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/addresses/` | GET,OPTIONS | `PartyAddressesView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/api/ai-order-summary/` | ? | `ai_order_summary` | (none declared) 🔴 |  |
-| `/api/orders/branch/` | GET,OPTIONS | `BranchView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/create-scheme/` | OPTIONS,POST | `CreateSchemeView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/addresses/` | GET,OPTIONS | `PartyAddressesView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/api/ai-order-summary/` | OPTIONS,POST | `AiOrderSummaryView` | IsAuthenticated _(inherited)_ | Order summary text for a supplied order payload. |
+| `/api/orders/branch/` | GET,OPTIONS | `BranchView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/create-scheme/` | OPTIONS,POST | `CreateSchemeView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/create/` | OPTIONS,POST | `CreateOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/dashboard/` | GET,OPTIONS | `DashboardKPIView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/dashboard/charts/` | GET,OPTIONS | `DashboardChartsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/dashboard/` | GET,OPTIONS | `DashboardKPIView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/dashboard/charts/` | GET,OPTIONS | `DashboardChartsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/dashboardW/` | GET,OPTIONS | `WDashboardKPIView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/dashboardW/charts/` | GET,OPTIONS | `WDashboardChartsView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/dispatches/` | GET,OPTIONS | `DispatchLocationListView` | AllowAny 🔴 | Concrete view for listing a queryset. |
+| `/api/orders/dispatches/` | GET,OPTIONS | `DispatchLocationListView` | IsAuthenticated _(inherited)_ | Concrete view for listing a queryset. |
 | `/api/orders/flow-config/` | GET,OPTIONS,POST | `OrderFlowConfigView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/list/` | GET,OPTIONS | `OrderListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/mart/<int:order_id>/` | GET,OPTIONS | `MartOrderDetailView` | IsAuthenticated | One distributor order with its items, for the approver's edit screen. |
@@ -214,35 +221,35 @@ Generated from the live URLconf.
 | `/api/orders/notifications/<int:pk>/` | GET,OPTIONS,PATCH,POST | `NotificationListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/notifications/history/` | GET,OPTIONS | `NotificationHistoryView` | IsAuthenticated | Paginated notification history (Phase 3, Task 9). |
 | `/api/orders/orderdetailsbyid/<int:order_id>/` | GET,OPTIONS | `OrderDetailsByOrderView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/orders-by-item/` | GET,OPTIONS | `GetOrdersByItemView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/orders-by-item/` | GET,OPTIONS | `GetOrdersByItemView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/ordersbyuser/<int:user_id>/` | GET,OPTIONS | `OrdersByUserView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/parties/` | GET,OPTIONS | `PartyView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/parties/` | GET,OPTIONS | `PartyView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/party-flow-config/` | DELETE,GET,OPTIONS,POST | `PartyOrderFlowConfigView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/party-products/<str:card_code>/` | GET,OPTIONS | `PartyProductsView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/product-filters/` | GET,OPTIONS | `ProductFiltersView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/products/` | GET,OPTIONS | `ProductListView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/party-products/<str:card_code>/` | GET,OPTIONS | `PartyProductsView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/product-filters/` | GET,OPTIONS | `ProductFiltersView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/products/` | GET,OPTIONS | `ProductListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/push-token/` | DELETE,OPTIONS,POST | `PushTokenView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/quotation-overview/` | GET,OPTIONS | `QuotationOverviewView` | IsAuthenticated | Admin overview of every completed order and its SAP sales-quotation |
-| `/api/orders/quotation-status/` | GET,OPTIONS | `QuotationStatusView` | AllowAny 🔴 | Batch lookup of SAP Sales Quotation status for completed orders. |
+| `/api/orders/quotation-status/` | GET,OPTIONS | `QuotationStatusView` | IsAuthenticated _(inherited)_ | Batch lookup of SAP Sales Quotation status for completed orders. |
 | `/api/orders/sales-order-status/` | GET,OPTIONS | `SalesOrderSapStatusView` | IsAuthenticated | Batch lookup of SAP Sales Order status for distributor orders. |
-| `/api/orders/schemes/` | GET,OPTIONS | `SchemeListView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/schemes/<int:scheme_id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `SchemeDetailView` | AllowAny 🔴 | Read / update / delete a single scheme. |
-| `/api/orders/schemes/manage/` | GET,OPTIONS | `SchemeManageListView` | AllowAny 🔴 | Full scheme rows for the Add Scheme management table. |
-| `/api/orders/staff-products/` | GET,OPTIONS,POST | `StaffProductsAPIView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/schemes/` | GET,OPTIONS | `SchemeListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/schemes/<int:scheme_id>/` | DELETE,GET,OPTIONS,PATCH,PUT | `SchemeDetailView` | IsAuthenticated _(inherited)_ | Read / update / delete a single scheme. |
+| `/api/orders/schemes/manage/` | GET,OPTIONS | `SchemeManageListView` | IsAuthenticated _(inherited)_ | Full scheme rows for the Add Scheme management table. |
+| `/api/orders/staff-products/` | GET,OPTIONS,POST | `StaffProductsAPIView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/status-tracking/` | GET,OPTIONS | `OrderStatusTrackingView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/status/` | GET,OPTIONS | `OrderStatusList` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/stock-check/` | GET,OPTIONS | `OrderStockCheckView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/status/` | GET,OPTIONS | `OrderStatusList` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/stock-check/` | GET,OPTIONS | `OrderStockCheckView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/templates/orders/` | GET,OPTIONS | `TemplateOrderListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/orders/templates/parties/` | GET,OPTIONS | `TemplatePartyListView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/v2/schemes/` | GET,OPTIONS,POST | `SchemeV2ListCreateView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/v2/schemes/<int:scheme_id>/` | DELETE,GET,OPTIONS,PATCH | `SchemeV2DetailView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/orders/v2/schemes/<int:scheme_id>/assignments/` | DELETE,GET,OPTIONS,POST | `SchemeAssignmentView` | AllowAny 🔴 | Target a scheme at a party, a state, a main group, a category, or everyone. |
-| `/api/orders/v2/schemes/applicable/` | GET,OPTIONS | `SchemeApplicableView` | AllowAny 🔴 | Everything reaching a vendor, with the scope that let each scheme in -- |
-| `/api/orders/v2/schemes/preview/` | OPTIONS,POST | `SchemePreviewView` | AllowAny 🔴 | Dry-run the engine over a draft order. |
+| `/api/orders/v2/schemes/` | GET,OPTIONS,POST | `SchemeV2ListCreateView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/v2/schemes/<int:scheme_id>/` | DELETE,GET,OPTIONS,PATCH | `SchemeV2DetailView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/orders/v2/schemes/<int:scheme_id>/assignments/` | DELETE,GET,OPTIONS,POST | `SchemeAssignmentView` | IsAuthenticated _(inherited)_ | Target a scheme at a party, a state, a main group, a category, or everyone. |
+| `/api/orders/v2/schemes/applicable/` | GET,OPTIONS | `SchemeApplicableView` | IsAuthenticated _(inherited)_ | Everything reaching a vendor, with the scope that let each scheme in -- |
+| `/api/orders/v2/schemes/preview/` | OPTIONS,POST | `SchemePreviewView` | IsAuthenticated _(inherited)_ | Dry-run the engine over a draft order. |
 | `/api/orders/web-push/public-key/` | GET,OPTIONS | `WebPushPublicKeyView` | IsAuthenticated | Expose the VAPID public (application server) key the browser needs to |
 | `/api/orders/web-push/subscribe/` | DELETE,OPTIONS,POST | `WebPushSubscriptionView` | IsAuthenticated | Register or remove a browser Web Push subscription for the caller. |
 
-## `payments` — 29 routes, **0 open**
+## `payments` — 29 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -276,39 +283,39 @@ Generated from the live URLconf.
 | `/api/payments/receipts/<int:pk>/submit/` | OPTIONS,POST | `PaymentReceiptSubmitView` | IsAuthenticated,CanCreatePayment | Send a draft (or rejected) receipt into the approval chain. |
 | `/api/payments/sap-branches/` | GET,OPTIONS | `SapBranchListView` | IsAuthenticated | SAP branches a payment may be posted to, for this company. |
 
-## `sap_sync` — 27 routes, **26 open**
+## `sap_sync` — 27 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/sap/addresses/` | GET,OPTIONS | `PartyAddressListView` | AllowAny 🔴 | List all party addresses with optional filter |
-| `/api/sap/approve-order/` | OPTIONS,POST | `ApproveOrderAPIView` | AllowAny 🔴 | Approve an order and push to SAP |
-| `/api/sap/approve-sales-order/` | OPTIONS,POST | `ApproveSalesOrderAPIView` | AllowAny 🔴 | Approve an order and push to SAP |
-| `/api/sap/branches/` | GET,OPTIONS | `BranchListView` | AllowAny 🔴 | Get all branches |
-| `/api/sap/logs/` | GET,OPTIONS | `SyncLogListView` | AllowAny 🔴 | List all sync logs |
-| `/api/sap/parties/` | GET,OPTIONS | `PartyListView` | AllowAny 🔴 | Concrete view for listing a queryset. |
-| `/api/sap/parties/<int:pk>/` | GET,OPTIONS | `PartyDetailView` | AllowAny 🔴 | Get single party with addresses |
-| `/api/sap/parties/category/` | GET,OPTIONS | `GetPartyByCategoryView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/parties/code/<str:card_code>/` | GET,OPTIONS | `PartyByCodeView` | AllowAny 🔴 | Get party by card_code with addresses |
-| `/api/sap/product-varieties/` | GET,OPTIONS | `ProductVarietyListView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/products/` | GET,OPTIONS | `ProductListView` | AllowAny 🔴 | Concrete view for listing a queryset. |
-| `/api/sap/products/<int:pk>/` | GET,OPTIONS | `ProductDetailView` | AllowAny 🔴 | Get single product by ID or item_code |
-| `/api/sap/products/code/<str:item_code>/` | GET,OPTIONS | `ProductByCodeView` | AllowAny 🔴 | Get product by item_code |
-| `/api/sap/push-order/` | OPTIONS,POST | `PushSalesOrderView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/push-quotation/` | OPTIONS,POST | `PushSalesQuotationView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/sap/addresses/` | GET,OPTIONS | `PartyAddressListView` | IsAuthenticated _(inherited)_ | List all party addresses with optional filter |
+| `/api/sap/approve-order/` | OPTIONS,POST | `ApproveOrderAPIView` | IsAuthenticated _(inherited)_ | Approve an order and push to SAP |
+| `/api/sap/approve-sales-order/` | OPTIONS,POST | `ApproveSalesOrderAPIView` | IsAuthenticated _(inherited)_ | Approve an order and push to SAP |
+| `/api/sap/branches/` | GET,OPTIONS | `BranchListView` | IsAuthenticated _(inherited)_ | Get all branches |
+| `/api/sap/logs/` | GET,OPTIONS | `SyncLogListView` | IsAuthenticated _(inherited)_ | List all sync logs |
+| `/api/sap/parties/` | GET,OPTIONS | `PartyListView` | IsAuthenticated _(inherited)_ | Concrete view for listing a queryset. |
+| `/api/sap/parties/<int:pk>/` | GET,OPTIONS | `PartyDetailView` | IsAuthenticated _(inherited)_ | Get single party with addresses |
+| `/api/sap/parties/category/` | GET,OPTIONS | `GetPartyByCategoryView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/sap/parties/code/<str:card_code>/` | GET,OPTIONS | `PartyByCodeView` | IsAuthenticated _(inherited)_ | Get party by card_code with addresses |
+| `/api/sap/product-varieties/` | GET,OPTIONS | `ProductVarietyListView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/sap/products/` | GET,OPTIONS | `ProductListView` | IsAuthenticated _(inherited)_ | Concrete view for listing a queryset. |
+| `/api/sap/products/<int:pk>/` | GET,OPTIONS | `ProductDetailView` | IsAuthenticated _(inherited)_ | Get single product by ID or item_code |
+| `/api/sap/products/code/<str:item_code>/` | GET,OPTIONS | `ProductByCodeView` | IsAuthenticated _(inherited)_ | Get product by item_code |
+| `/api/sap/push-order/` | OPTIONS,POST | `PushSalesOrderView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/sap/push-quotation/` | OPTIONS,POST | `PushSalesQuotationView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 | `/api/sap/quotation-log/<int:order_id>/` | GET,OPTIONS | `SalesQuotationLogByOrderView` | IsAuthenticated | Get the latest successful SAP quotation log for an order. |
-| `/api/sap/schedules/` | GET,OPTIONS,POST | `SyncScheduleListView` | AllowAny 🔴 | List and create sync schedules |
-| `/api/sap/schedules/<int:pk>/` | DELETE,GET,OPTIONS,PUT | `SyncScheduleDetailView` | AllowAny 🔴 | Get, update, or delete a sync schedule |
-| `/api/sap/schedules/<int:pk>/toggle/` | OPTIONS,POST | `ToggleScheduleView` | AllowAny 🔴 | Activate or deactivate a schedule |
-| `/api/sap/status/` | GET,OPTIONS | `SyncStatusView` | AllowAny 🔴 | Get sync status with counts |
-| `/api/sap/sync/addresses/` | OPTIONS,POST | `SyncPartyAddressesView` | AllowAny 🔴 | Trigger manual sync of party addresses only |
-| `/api/sap/sync/all/` | OPTIONS,POST | `SyncAllView` | AllowAny 🔴 | Trigger manual sync of all data (Products, Parties, Addresses) |
-| `/api/sap/sync/branches/` | OPTIONS,POST | `SyncBranchesView` | AllowAny 🔴 | Sync branches from SAP |
-| `/api/sap/sync/parties/` | OPTIONS,POST | `SyncPartiesView` | AllowAny 🔴 | Trigger manual sync of parties only |
-| `/api/sap/sync/products/` | OPTIONS,POST | `SyncProductsView` | AllowAny 🔴 | Trigger manual sync of products only |
-| `/api/sap/test-quotation/` | OPTIONS,POST | `TestSalesQuotation` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/sap/test-quotation/<int:pk>/` | OPTIONS,POST | `TestSalesQuotation` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/sap/schedules/` | GET,OPTIONS,POST | `SyncScheduleListView` | IsAuthenticated,IsAdminRole | List and create sync schedules |
+| `/api/sap/schedules/<int:pk>/` | DELETE,GET,OPTIONS,PUT | `SyncScheduleDetailView` | IsAuthenticated,IsAdminRole | Get, update, or delete a sync schedule |
+| `/api/sap/schedules/<int:pk>/toggle/` | OPTIONS,POST | `ToggleScheduleView` | IsAuthenticated,IsAdminRole | Activate or deactivate a schedule |
+| `/api/sap/status/` | GET,OPTIONS | `SyncStatusView` | IsAuthenticated _(inherited)_ | Get sync status with counts |
+| `/api/sap/sync/addresses/` | OPTIONS,POST | `SyncPartyAddressesView` | IsAuthenticated,IsAdminRole | Trigger manual sync of party addresses only |
+| `/api/sap/sync/all/` | OPTIONS,POST | `SyncAllView` | IsAuthenticated,IsAdminRole | Trigger manual sync of all data (Products, Parties, Addresses) |
+| `/api/sap/sync/branches/` | OPTIONS,POST | `SyncBranchesView` | IsAuthenticated,IsAdminRole | Sync branches from SAP |
+| `/api/sap/sync/parties/` | OPTIONS,POST | `SyncPartiesView` | IsAuthenticated,IsAdminRole | Trigger manual sync of parties only |
+| `/api/sap/sync/products/` | OPTIONS,POST | `SyncProductsView` | IsAuthenticated,IsAdminRole | Trigger manual sync of products only |
+| `/api/sap/test-quotation/` | OPTIONS,POST | `TestSalesQuotation` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/sap/test-quotation/<int:pk>/` | OPTIONS,POST | `TestSalesQuotation` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 
-## `serviceLayer` — 7 routes, **3 open**
+## `serviceLayer` — 7 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -316,11 +323,11 @@ Generated from the live URLconf.
 | `/api/service-layer/ap/invoice/` | OPTIONS,POST | `APInvoiceCreateView` | IsTrackerAP | POST /api/service-layer/ap/invoice/?branch=OIL |
 | `/api/service-layer/ap/open-grpos/` | GET,OPTIONS | `OpenGRPOListView` | IsTrackerAP | GET /api/service-layer/ap/open-grpos/?branch=OIL[&vendor=CARD][&search=] |
 | `/api/service-layer/ap/vendor-tds/` | GET,OPTIONS | `VendorTDSView` | IsTrackerAP | GET /api/service-layer/ap/vendor-tds/?branch=OIL&card_code=VENDA001320 |
-| `/api/service-layer/draft-action/` | OPTIONS,POST | `DraftActionView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/service-layer/draft/` | GET,OPTIONS,POST | `DraftView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/service-layer/invoice/` | OPTIONS,POST | `SAPInvoiceCreateView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/service-layer/draft-action/` | OPTIONS,POST | `DraftActionView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/service-layer/draft/` | GET,OPTIONS,POST | `DraftView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
+| `/api/service-layer/invoice/` | OPTIONS,POST | `SAPInvoiceCreateView` | IsAuthenticated _(inherited)_ | Intentionally simple parent class for all views. Only implements |
 
-## `tracker` — 24 routes, **0 open**
+## `tracker` — 24 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -349,7 +356,7 @@ Generated from the live URLconf.
 | `/api/tracker/stage-export/` | GET,OPTIONS | `StageExportView` | IsTrackerUser | Excel export of one queue tab, in the SAME register layout as the |
 | `/api/tracker/vendors/` | GET,OPTIONS | `VendorsView` | IsTrackerEntry | SAP vendors for the entry form's searchable party dropdown (fast, |
 
-## `uilabels` — 4 routes, **0 open**
+## `uilabels` — 4 routes, all authenticated
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
@@ -358,37 +365,37 @@ Generated from the live URLconf.
 | `/api/ui-config/fields/` | GET,OPTIONS | `PublicFieldsView` | IsAuthenticated | Field-behaviour config for input fields (as opposed to plain labels). |
 | `/api/ui-config/labels/` | GET,OPTIONS | `PublicLabelsView` | IsAuthenticated | Flat ``{field_key: display_name}`` map of every ACTIVE label. |
 
-## `users` — 26 routes, **16 open**
+## `users` — 26 routes, **2 open**
 
 | path | methods | view | permissions | note |
 |---|---|---|---|---|
-| `/api/auth/assign-parties/` | OPTIONS,POST | `AssignPartiesView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/auth/assign-parties/bulk-upload/` | OPTIONS,POST | `BulkAssignUsersPartiesView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/auth/assign-parties/` | OPTIONS,POST | `AssignPartiesView` | IsAuthenticated,IsAdminRole | Assign parties to a user. Administrators only. |
+| `/api/auth/assign-parties/bulk-upload/` | OPTIONS,POST | `BulkAssignUsersPartiesView` | IsAuthenticated,IsAdminRole | Bulk party assignment from an upload. Administrators only. |
 | `/api/auth/bulk-party/assign-products/` | OPTIONS,POST | `BulkAssignPartyToProductView` | IsAuthenticated | Assign multiple products to multiple parties |
-| `/api/auth/categories/` | GET,OPTIONS | `CategoryListView` | AllowAny 🔴 | Get all categories |
+| `/api/auth/categories/` | GET,OPTIONS | `CategoryListView` | IsAuthenticated | Get all categories |
 | `/api/auth/combo-mappings/` | GET,OPTIONS,POST | `ComboMappingsView` | IsAuthenticated | Combo packs and the free-of-cost item each one carries. |
-| `/api/auth/companies/` | GET,OPTIONS | `CompanyListView` | AllowAny 🔴 | Get all active companies |
-| `/api/auth/login/` | OPTIONS,POST | `LoginView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/auth/companies/` | GET,OPTIONS | `CompanyListView` | IsAuthenticated | Get all active companies |
+| `/api/auth/login/` | OPTIONS,POST | `LoginView` | AllowAny 🔴 | Exchange credentials for a JWT pair. |
 | `/api/auth/logout/` | OPTIONS,POST | `LogoutView` | IsAuthenticated | POST /api/auth/logout/ — blacklist the refresh token so it cannot be |
-| `/api/auth/mainGroup/` | GET,OPTIONS | `MainGroupListView` | AllowAny 🔴 | Get all active main groups |
+| `/api/auth/mainGroup/` | GET,OPTIONS | `MainGroupListView` | IsAuthenticated | Get all active main groups |
 | `/api/auth/parties/<str:card_code>/products/` | GET,OPTIONS | `PartyProductsView` | IsAuthenticated | Get all products assigned to a party with their basic_rate |
-| `/api/auth/parties/<str:card_code>/users/` | GET,OPTIONS | `PartyUsersView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/auth/parties/<str:card_code>/users/` | GET,OPTIONS | `PartyUsersView` | IsAuthenticated,IsAdminRole | Which users are assigned to a party. Administrators only. |
 | `/api/auth/party-product/add/` | OPTIONS,POST | `AssignProductToPartyView` | IsAuthenticated | Add single product to party with basic_rate |
 | `/api/auth/party-product/bulk-add/` | OPTIONS,POST | `BulkAssignProductsToPartyView` | IsAuthenticated | Add multiple products to a party |
 | `/api/auth/party-product/remove/` | OPTIONS,POST | `RemoveProductFromPartyView` | IsAuthenticated | Remove a product from party |
 | `/api/auth/party-product/update-rate/` | OPTIONS,POST | `UpdateProductRateView` | IsAuthenticated | Update basic_rate for a party-product |
 | `/api/auth/profile/` | GET,OPTIONS | `ProfileView` | IsAuthenticated | Intentionally simple parent class for all views. Only implements |
 | `/api/auth/refresh/` | OPTIONS,POST | `AuthTokenRefreshView` | AllowAny 🔴 | POST /api/auth/refresh/ — exchange a refresh token for a new access |
-| `/api/auth/remove-party/` | OPTIONS,POST | `RemovePartyAssignmentView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/auth/roles/` | GET,OPTIONS | `RoleListView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/auth/states/` | GET,OPTIONS | `StateListView` | AllowAny 🔴 | Get all active states |
-| `/api/auth/users/<int:user_id>/` | GET,OPTIONS,PUT | `UserDetailView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/auth/users/<int:user_id>/delete/` | OPTIONS,POST | `DeleteUserView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/auth/remove-party/` | OPTIONS,POST | `RemovePartyAssignmentView` | IsAuthenticated,IsAdminRole | Revoke a party assignment. Administrators only. |
+| `/api/auth/roles/` | GET,OPTIONS | `RoleListView` | IsAuthenticated | The role vocabulary. Any authenticated user. |
+| `/api/auth/states/` | GET,OPTIONS | `StateListView` | IsAuthenticated | Get all active states |
+| `/api/auth/users/<int:user_id>/` | GET,OPTIONS,PUT | `UserDetailView` | IsAuthenticated,IsAdminRole | Read or update any user account. Administrators only. |
+| `/api/auth/users/<int:user_id>/delete/` | OPTIONS,POST | `DeleteUserView` | IsAuthenticated,IsAdminRole | Deactivate a user account (soft delete). Administrators only. |
 | `/api/auth/users/<int:user_id>/page-permissions/` | GET,OPTIONS,PUT | `PagePermissionsView` | IsAuthenticated | Admin-managed per-user page access (list of page keys). |
-| `/api/auth/users/<int:user_id>/parties/` | GET,OPTIONS | `UserPartiesView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/auth/users/create/` | OPTIONS,POST | `CreateUserView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
-| `/api/auth/users/list/` | GET,OPTIONS | `UserListForAssignmentView` | AllowAny 🔴 | Intentionally simple parent class for all views. Only implements |
+| `/api/auth/users/<int:user_id>/parties/` | GET,OPTIONS | `UserPartiesView` | IsAuthenticated | The parties assigned to a user — own record, or any record for an admin. |
+| `/api/auth/users/create/` | OPTIONS,POST | `CreateUserView` | IsAuthenticated,IsAdminRole | Create a user account. Administrators only. |
+| `/api/auth/users/list/` | GET,OPTIONS | `UserListForAssignmentView` | IsAuthenticated | The full user roster. Any authenticated user. |
 
 ---
 
-**Totals: 294 routes, 149 reachable without authentication.**
+**Totals: 294 routes, 3 reachable without authentication.**

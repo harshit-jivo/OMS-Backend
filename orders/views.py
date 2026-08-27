@@ -4,7 +4,7 @@ import re
 from .serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,SchemeWriteSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
 from .models import PartyProductAssignment,OrdersLog,Parties, Branches, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
 from rest_framework.generics import ListAPIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -30,7 +30,6 @@ from .scheme_rules import (
 from . import scheme_engine
 from users.models import SchemeProduct, User, State
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
 import json
 import logging
 import requests
@@ -81,13 +80,27 @@ ORDER_FLOW_TYPE_CHOICES = {
     ORDER_FLOW_TYPE_BILLING: 'Billing Orders Flow',
 }
 
-@csrf_exempt
-def ai_order_summary(request):
-    data = json.loads(request.body)
+class AiOrderSummaryView(APIView):
+    """Order summary text for a supplied order payload.
 
-    result = get_order_summary(data)
+    Was a plain Django view decorated `@csrf_exempt`, which made it the most
+    exposed endpoint in the project: no authentication (a plain view never
+    enters DRF's dispatch, so no permission class could apply), no CSRF, and an
+    unguarded `json.loads(request.body)` that raised a 500 on any malformed
+    body.
 
-    return JsonResponse({"summary": result})
+    `get_order_summary` is still a stub returning a formatted string, and no
+    client calls this — so requiring a login costs nothing today and stops the
+    endpoint from becoming an unauthenticated proxy to a paid AI service the
+    moment someone wires the real one in behind it.
+    """
+
+    def post(self, request):
+        if not isinstance(request.data, dict):
+            return Response(
+                {'success': False, 'message': 'A JSON object body is required'},
+                status=status.HTTP_400_BAD_REQUEST)
+        return Response({'summary': get_order_summary(request.data)})
 
 def _normalize_order_flow_type(flow_type):
     flow_type = str(flow_type or ORDER_FLOW_TYPE_ASM).strip().upper()
@@ -1949,7 +1962,6 @@ class OrderStatusTrackingView(APIView):
         ))
 
 class DashboardKPIView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         from django.contrib.auth import get_user_model
@@ -1984,7 +1996,6 @@ class DashboardKPIView(APIView):
         })
 
 class DashboardChartsView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         now = timezone.now()
@@ -2237,7 +2248,6 @@ def _serialize_free_product(free_item_code, category):
 
 
 class PartyProductsView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request, card_code):
         normalized_card_code = (card_code or '').strip()
@@ -2323,7 +2333,6 @@ class PartyProductsView(APIView):
 #         return Response(rows)
     
 class PartyView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         user_id = request.user.id
@@ -2367,13 +2376,11 @@ class PartyView(APIView):
         return Response(data)
 
 class DispatchLocationListView(ListAPIView):
-    permission_classes = [AllowAny]
     serializer_class = DispatchLocationSerializer
     queryset = DispatchLocation.objects.filter(is_active=True, name__icontains='FACTORY').order_by('name')
 
 class PartyAddressesView(APIView):
 
-    permission_classes = [AllowAny]
 
     def get(self, request):
         card_code = request.query_params.get('card_code')
@@ -2451,7 +2458,6 @@ class PartyAddressesView(APIView):
         })
 
 class ProductFiltersView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         category = request.query_params.get('category')
@@ -2527,7 +2533,6 @@ class ProductFiltersView(APIView):
         })
 
 class ProductListView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         category = request.query_params.get('category')
@@ -3065,7 +3070,6 @@ class CreateOrderView(APIView):
 
 
 class SchemeListView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         from users.models import SchemeProduct
@@ -3111,7 +3115,6 @@ class SchemeListView(APIView):
 
 
 class OrderStatusList(APIView):
-    permission_classes = [AllowAny]
     def get(self,request):
         status = OrderStatus.objects.all().values('id','name')
         return Response(list(status))
@@ -3306,7 +3309,6 @@ class PartyOrderFlowConfigView(APIView):
         })
 
 class SchemeProductView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         queryset = SchemeProduct.objects.select_related('state').filter(is_active=True)
@@ -3336,7 +3338,6 @@ class SchemeProductView(APIView):
 
 
 class BranchView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         branches = Branches.objects.filter(bpl_name__icontains='FACTORY').order_by("bpl_name").distinct('bpl_name')
@@ -4333,7 +4334,6 @@ class OrderListView(APIView):
         return Response(data)
 
 class CreateSchemeView(APIView):
-    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = SchemeWriteSerializer(data=request.data)
@@ -4361,7 +4361,6 @@ class SchemeManageListView(APIView):
     schemes needs item_code and is_active as well.
     """
 
-    permission_classes = [AllowAny]
 
     def get(self, request):
         queryset = SchemeProduct.objects.all()
@@ -4395,7 +4394,6 @@ class SchemeManageListView(APIView):
 class SchemeDetailView(APIView):
     """Read / update / delete a single scheme."""
 
-    permission_classes = [AllowAny]
 
     def _get_object(self, scheme_id):
         return SchemeProduct.objects.filter(scheme_id=scheme_id).first()
@@ -4920,7 +4918,6 @@ def _get_live_stock_by_product(item_codes_by_category):
 
 
 class OrderStockCheckView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         if request.user.is_authenticated:
@@ -5183,7 +5180,6 @@ class QuotationStatusView(APIView):
     still open in SAP. Degrades gracefully (empty map) if SAP is unreachable so
     the orders list still renders.
     """
-    permission_classes = [AllowAny]
 
     def get(self, request):
         from hana.services.services import SalesOrderService
@@ -5424,9 +5420,14 @@ class GetOrdersByItemView(APIView):
 # ---------------------------------------------------------------------------
 # Scheme engine v2 (see docs/scheme-architecture.md)
 #
-# Permission classes match the existing scheme views (AllowAny) so this lands
-# behind the same gate as SchemeManageListView / SchemeDetailView rather than
-# introducing a second, inconsistent auth story mid-migration.
+# Permissions match the other scheme views, as they always have — but that gate
+# is now the project default (IsAuthenticated) rather than the AllowAny this
+# comment used to describe. The intent is unchanged: one auth story across v1
+# and v2 schemes, not two.
+#
+# Still outstanding: creating and editing a scheme changes what every customer
+# is charged, so it likely warrants more than "any logged-in user". That is a
+# question about who runs Scheme Manager, which is Phase 2.6, not a default.
 # ---------------------------------------------------------------------------
 
 from django.db import transaction as _db_transaction
@@ -5436,7 +5437,6 @@ from .serializers import SchemeV2Serializer, SchemeAssignmentSerializer
 
 
 class SchemeV2ListCreateView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         queryset = Scheme.objects.prefetch_related('benefits', 'triggers', 'assignments')
@@ -5481,7 +5481,6 @@ class SchemeV2ListCreateView(APIView):
 
 
 class SchemeV2DetailView(APIView):
-    permission_classes = [AllowAny]
 
     def _get_object(self, scheme_id):
         return (
@@ -5550,7 +5549,6 @@ class SchemeAssignmentView(APIView):
     later -- which is the whole point of separating assignment from the offer.
     """
 
-    permission_classes = [AllowAny]
 
     def get(self, request, scheme_id):
         if not Scheme.objects.filter(pk=scheme_id).exists():
@@ -5618,7 +5616,6 @@ class SchemePreviewView(APIView):
     a scheme from a dropdown, the engine proposes and they confirm.
     """
 
-    permission_classes = [AllowAny]
 
     def post(self, request):
         card_code = (request.data.get('card_code') or '').strip()
@@ -5655,7 +5652,6 @@ class SchemeApplicableView(APIView):
     """Everything reaching a vendor, with the scope that let each scheme in --
     the first question anyone asks about an unexpected giveaway."""
 
-    permission_classes = [AllowAny]
 
     def get(self, request):
         card_code = (request.query_params.get('card_code') or '').strip()

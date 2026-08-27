@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.http import HttpResponse
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from . import mapping, qr as qrgen, sap
@@ -478,10 +479,36 @@ def heartbeat(request):
 
 # ---- Signed QR code -> printable image ------------------------------------
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
 def irn_qr_png(request, irn):
     """
     GET the NIC signed QR of a stored IRN as a PNG image (for print / <img src>).
     Renders IrnRecord.signed_qr_code verbatim so the NIC verifier app can validate it.
+
+    DELIBERATELY unauthenticated — the one endpoint outside login/refresh that
+    is. Two reasons, and the first is decisive:
+
+    1. **A browser cannot authenticate this request.** The client renders it as
+       `<img src>`, in a print popup, and via `window.open` (see
+       `OMS-Frontend/src/components/QrViewer.tsx`). None of those can carry an
+       `Authorization` header, and the API issues no session cookie to fall
+       back on. Requiring a token here does not secure the QR; it removes it
+       from the two pages that show it.
+    2. **The content is not a secret.** It is the NIC signed QR that gets
+       PRINTED ON THE INVOICE and handed to the customer — its whole purpose is
+       to be scanned by anyone. The URL is keyed by IRN, a 64-character NIC
+       hash, so it is not enumerable either.
+
+    It is `AllowAny` explicitly, and it is `@api_view` at all, because it used
+    to be a PLAIN Django view: no `@api_view`, therefore never inside DRF's
+    dispatch, therefore untouchable by DEFAULT_PERMISSION_CLASSES or by any
+    declaration. It was anonymous by accident and invisible to every audit that
+    greps for `permission_classes`. Now the same access is a stated decision
+    that `users.tests.PublicEndpointAllowlistTests` asserts on purpose.
+
+    To close it properly, `QrViewer` must fetch through axios and render an
+    object URL; then delete the `permission_classes` line above.
     """
     record = IrnRecord.objects.filter(irn=irn).first()
     if not record or not record.signed_qr_code:

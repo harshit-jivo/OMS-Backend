@@ -402,15 +402,26 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
 
-    # NOTE: DEFAULT_PERMISSION_CLASSES is deliberately still absent, so DRF's
-    # own default (AllowAny) applies and any view that forgets to declare
-    # permissions remains public. That is the single highest-value change left
-    # in the plan — it turns every future forgotten `permission_classes` from a
-    # silent hole into a 403 — and it is Phase 2.1, not this one. It is also
-    # the most likely to break a caller: 149 of 294 routes answer anonymous
-    # requests today, and flipping the default without first marking the
-    # genuinely public ones takes the whole API down. Phase 2.2 does that
-    # marking, using the inventory in docs/codebase/API_SURFACE.md.
+    # Closed by default. DRF's own default is AllowAny, so before this line
+    # ANY view that forgot to declare `permission_classes` was public — and 57
+    # routes were public for exactly that reason, not by anyone's decision.
+    #
+    # This inverts the failure mode. A forgotten declaration is now a 403 that
+    # someone reports, rather than a hole nobody sees. It is the single
+    # highest-value line in the security work.
+    #
+    # The endpoints that must stay open declare `AllowAny` explicitly, so the
+    # decision is visible in the view that made it. There are two:
+    # `users.LoginView` and `users.AuthTokenRefreshView` — see
+    # `users.tests.PublicEndpointAllowlistTests`, which enumerates the live
+    # URLconf and fails if a third one appears.
+    #
+    # NOTE: this cannot reach a plain Django view (one with no `@api_view`),
+    # because those never enter DRF's dispatch. `scripts/endpoint_inventory.py`
+    # reports them as their own category for that reason.
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+    ),
 
     # Rate limiting. Login was brute-forceable at unlimited speed: no
     # throttling existed anywhere, and `LoginView` is necessarily AllowAny.

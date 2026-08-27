@@ -1,9 +1,28 @@
+"""SAP synchronisation API.
+
+Every view in this module declared `permission_classes = [AllowAny]` — all 26
+routes, including the ones that trigger a full master-data pull from SAP and
+the two that approve sales orders. Those declarations are gone; the project
+default (`IsAuthenticated`, set in OMS/settings.py) now applies.
+
+The eight sync/schedule views are further restricted to administrators. They
+are infrastructure controls, not business screens: `SyncAllView` rewrites the
+product and party masters that every order is priced from, and the schedule
+views decide when that happens unattended. An ordinary authenticated user has
+no reason to reach them, and a mistaken trigger is expensive.
+
+Deliberately NOT admin-gated: the approval views and every read endpoint.
+Approval is a business decision made by non-admin approvers, and restricting it
+here would break that flow — its own authorisation belongs with the order
+workflow (plan Phase 2.6), not with a blanket role check.
+"""
 import logging
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import ListAPIView, RetrieveAPIView
+from core.permissions import IsAdminRole
 from django.db.models import Q
 from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q  , SalesOrderLog
 from .serializers import (ProductSerializer, PartySerializer, PartyListSerializer,
@@ -18,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 class SyncAllView(APIView):
     """Trigger manual sync of all data (Products, Parties, Addresses)"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def post(self, request):
         try:
@@ -47,7 +66,7 @@ class SyncAllView(APIView):
 
 class SyncProductsView(APIView):
     """Trigger manual sync of products only"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def post(self, request):
         try:
@@ -75,7 +94,7 @@ class SyncProductsView(APIView):
 
 class SyncPartiesView(APIView):
     """Trigger manual sync of parties only"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def post(self, request):
         try:
@@ -103,7 +122,7 @@ class SyncPartiesView(APIView):
 
 class SyncPartyAddressesView(APIView):
     """Trigger manual sync of party addresses only"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def post(self, request):
         try:
@@ -132,7 +151,6 @@ class SyncPartyAddressesView(APIView):
 # ============ Products ============
 
 class ProductListView(ListAPIView):
-    permission_classes = [AllowAny]
     serializer_class = ProductSerializer
 
     def get_queryset(self):
@@ -161,7 +179,6 @@ class ProductListView(ListAPIView):
 
 
 class ProductVarietyListView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         category = str(request.query_params.get('category') or '').strip()
@@ -189,7 +206,6 @@ class ProductVarietyListView(APIView):
 
 class ProductDetailView(RetrieveAPIView):
     """Get single product by ID or item_code"""
-    permission_classes = [AllowAny]
     serializer_class = ProductSerializer
     queryset = Product.objects.filter(active_product_q())
     lookup_field = 'pk'
@@ -197,7 +213,6 @@ class ProductDetailView(RetrieveAPIView):
 
 class ProductByCodeView(RetrieveAPIView):
     """Get product by item_code"""
-    permission_classes = [AllowAny]
     serializer_class = ProductSerializer
     queryset = Product.objects.filter(active_product_q())
     lookup_field = 'item_code'
@@ -206,7 +221,6 @@ class ProductByCodeView(RetrieveAPIView):
 # ============ Parties ============
 
 class PartyListView(ListAPIView):
-    permission_classes = [AllowAny]
     serializer_class = PartyListSerializer
 
     def get_queryset(self):
@@ -236,7 +250,6 @@ class PartyListView(ListAPIView):
 
 class PartyDetailView(RetrieveAPIView):
     """Get single party with addresses"""
-    permission_classes = [AllowAny]
     serializer_class = PartySerializer
     queryset = Party.objects.prefetch_related('addresses')
     lookup_field = 'pk'
@@ -244,7 +257,6 @@ class PartyDetailView(RetrieveAPIView):
 
 class PartyByCodeView(RetrieveAPIView):
     """Get party by card_code with addresses"""
-    permission_classes = [AllowAny]
     serializer_class = PartySerializer
     queryset = Party.objects.prefetch_related('addresses')
     lookup_field = 'card_code'
@@ -254,7 +266,6 @@ class PartyByCodeView(RetrieveAPIView):
 
 class PartyAddressListView(ListAPIView):
     """List all party addresses with optional filter"""
-    permission_classes = [AllowAny]
     serializer_class = PartyAddressSerializer
     
     def get_queryset(self):
@@ -282,7 +293,6 @@ class PartyAddressListView(ListAPIView):
 
 class SyncLogListView(ListAPIView):
     """List all sync logs"""
-    permission_classes = [AllowAny]
     serializer_class = SyncLogSerializer
     
     def get_queryset(self):
@@ -312,7 +322,7 @@ class SyncLogListView(ListAPIView):
 
 class SyncScheduleListView(APIView):
     """List and create sync schedules"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def get(self, request):
         schedules = SyncSchedule.objects.all()
@@ -340,7 +350,7 @@ class SyncScheduleListView(APIView):
 
 class SyncScheduleDetailView(APIView):
     """Get, update, or delete a sync schedule"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def get_object(self, pk):
         try:
@@ -401,7 +411,7 @@ class SyncScheduleDetailView(APIView):
 
 class ToggleScheduleView(APIView):
     """Activate or deactivate a schedule"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def post(self, request, pk):
         try:
@@ -428,7 +438,6 @@ class ToggleScheduleView(APIView):
 # Add this view
 class BranchListView(ListAPIView):
     """Get all branches"""
-    permission_classes = [AllowAny]
     serializer_class = BranchSerializer
     queryset = Branch.objects.all().order_by('category', 'bpl_id')
 
@@ -463,7 +472,7 @@ class SalesQuotationLogByOrderView(APIView):
 
 class SyncBranchesView(APIView):
     """Sync branches from SAP"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminRole]
     
     def post(self, request):
         try:
@@ -488,7 +497,6 @@ class SyncBranchesView(APIView):
 
 class   ApproveOrderAPIView(APIView):
     """Approve an order and push to SAP"""
-    permission_classes = [AllowAny]
     
     def post(self, request):
         order_id = request.data.get('order_id')
@@ -524,7 +532,6 @@ class   ApproveOrderAPIView(APIView):
         
 class SyncStatusView(APIView):
     """Get sync status with counts"""
-    permission_classes = [AllowAny]
     
     def get(self, request):
         try:
@@ -696,7 +703,6 @@ class GetPartyByCategoryView(APIView):
 
 class   ApproveSalesOrderAPIView(APIView):
     """Approve an order and push to SAP"""
-    permission_classes = [AllowAny]
     
     def post(self, request):
         order_id = request.data.get('order_id')
