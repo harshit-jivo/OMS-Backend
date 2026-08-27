@@ -29,7 +29,8 @@ from .scheme_rules import (
     should_mirror_punjab_combo_scheme_qty)
 from . import scheme_engine
 from users.models import SchemeProduct, User, State
-from django.http import JsonResponse
+from django.http import Http404, JsonResponse
+from django.db import transaction
 import json
 import logging
 import requests
@@ -4025,26 +4026,162 @@ class MartOrderDetailView(APIView):
         return Response(_serialize_mart_order(order, with_items=True))
 
 
+def _sap_outcome_is_ambiguous(exc):
+    """True when SAP may have created the document despite raising.
+
+    The distinction `payments/sap_poster.py` calls a financial invariant: a SAP
+    *rejection* means nothing was committed and a retry is safe; a SAP
+    *timeout* means the document may exist, and retrying duplicates it.
+    Collapsing the two produces duplicate documents.
+
+    `SyncService.create_sales_order` signals them differently, though only by
+    accident of what it raises:
+
+      * a non-201 response  -> `Exception(response.text)` — SAP answered and
+        refused. Definite.
+      * `DuplicateCustomerReference` — the pre-check refused before posting.
+        Definite, and the safest possible case.
+      * a `requests` transport error with no response attached — the request
+        never completed. AMBIGUOUS.
+    """
+    if isinstance(exc, requests.exceptions.RequestException):
+        return getattr(exc, 'response', None) is None
+    return False
+
+
+def _mart_release_sap_claim(order, exc, *, retry):
+    """Decide what happens to the in-flight `sap_created` claim after a failure.
+
+    On a definite rejection the claim is released so the order can be retried
+    through `MartResendSapView` — nothing was created, so a retry is correct.
+
+    On an ambiguous failure the claim is DELIBERATELY LEFT SET, which blocks
+    the retry. SAP may hold a sales order for this document, and a retry would
+    book a second one against the same customer. Someone must look in SAP and
+    clear it by hand; a blocked order is recoverable, a duplicate financial
+    document is not.
+    """
+    ambiguous = _sap_outcome_is_ambiguous(exc)
+    what = 'retry' if retry else 'creation'
+
+    if not ambiguous:
+        with transaction.atomic():
+            fresh = Order.objects.select_for_update().get(pk=order.pk)
+            fresh.sap_created = False
+            fresh.save(update_fields=['sap_created'])
+        return Response(
+            {
+                'message': f'Order {order.order_number} approved, but SAP sales order '
+                           f'{what} failed. SAP rejected it, so nothing was created — '
+                           f'you can retry the push without re-approving.',
+                'order_number': order.order_number,
+                'status': order.status.name if order.status else '',
+                'sap_error': str(exc),
+                'sap_state': 'REJECTED',
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    logger.error(
+        'SAP outcome UNKNOWN for order %s — claim left set, retry blocked',
+        order.order_number,
+    )
+    return Response(
+        {
+            'message': f'SAP did not respond for order {order.order_number}, so it is '
+                       f'not known whether the sales order was created. DO NOT '
+                       f'resubmit — check SAP first, or this books a second order '
+                       f'against the same customer.',
+            'order_number': order.order_number,
+            'status': order.status.name if order.status else '',
+            'sap_error': str(exc),
+            'sap_state': 'UNKNOWN',
+        },
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
+
+
 class MartApproveView(APIView):
-    """Approve a distributor order → 'Mart Approved'. (Phase 2 will also push the
-    approved order into SAP/HANA here.)"""
+    """Approve a distributor order → 'Mart Approved', then book it into SAP.
+
+    This is the only order-flow endpoint that creates a financial document, so
+    it is the one place in `orders` where a double submission costs real money:
+    two SAP Sales Orders for one OMS order, against the same customer.
+
+    Nothing stopped that. There was no lock, no transaction, and — the cheapest
+    miss — no check of `order.sap_created`, a flag `create_sales_order` already
+    SETS on success and that nothing ever READ. A double-click, or two
+    approvers working the queue at once, put both requests past
+    `_is_mart_approver` and both into `create_sales_order`.
+
+    The only thing standing in the way was `_assert_num_at_card_available`,
+    which pre-checks HANA for a duplicate customer reference. It is well
+    written but cannot close this, for three reasons:
+
+      * it is check-then-act, not a lock — both requests query HANA before
+        either has posted, and the window is a SAP login plus an HTTP
+        round-trip;
+      * it fails OPEN by design, so the guard disappears exactly when HANA is
+        unhealthy;
+      * it needs `NumAtCard`, and returns early without it — so an order with
+        no customer PO reference had no protection at all, from it or from
+        SAP's own -5002 duplicate rejection, which keys off the same field.
+
+    The fix is the discipline `payments/sap_poster.py` already applies to
+    money: reload the row under `select_for_update()` immediately before the
+    SAP call and refuse if it has already been posted.
+
+    Deliberately NOT inside the transaction: the SAP call itself. Holding a row
+    lock across a Service Layer round-trip would make every other approver on
+    that order wait for SAP, and SAP is exactly the thing that hangs. Instead
+    the lock sets an in-flight claim (`sap_created`) and commits, which is how
+    `payments.sap_poster.post_document` uses its `POSTING_TO_SAP` status: the
+    marker, not the lock, is what stops the second request.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, order_id):
         if not _is_mart_approver(request.user):
             return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
 
         approved = _mart_status(MART_STATUS_APPROVED_ID)
         if not approved:
             return Response({'error': f"Approved status (id {MART_STATUS_APPROVED_ID}) is not configured in the DB."},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        order.status = approved
-        order.approved_by = request.user if request.user.is_authenticated else None
-        order.approved_at = datetime.now()
-        order.save()
-        log_order_action(order, approved.name, user=request.user, remarks='Mart order approved')
+        # --- claim the order, under a row lock ------------------------------
+        # The second concurrent approver blocks on select_for_update, then
+        # re-reads and sees the claim, so only one request reaches SAP.
+        #
+        # The claim must be SET here, not after the push. Checking `sap_created`
+        # under the lock and releasing it before the SAP call would leave the
+        # original race untouched: both requests would read False, because the
+        # flag is only written once a post has already succeeded.
+        with transaction.atomic():
+            try:
+                order = (Order.objects
+                         .select_for_update()
+                         .get(id=order_id, order_type='DISTRIBUTOR'))
+            except Order.DoesNotExist:
+                raise Http404('Order not found')
+
+            if order.sap_created:
+                return Response(
+                    {
+                        'error': f'Order {order.order_number} is already booked into SAP, '
+                                 f'or a push is in flight.',
+                        'order_number': order.order_number,
+                        'status': order.status.name if order.status else '',
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            order.status = approved
+            order.approved_by = request.user if request.user.is_authenticated else None
+            order.approved_at = timezone.now()
+            order.sap_created = True
+            order.save()
+            log_order_action(order, approved.name, user=request.user, remarks='Mart order approved')
 
         # Push the approved distributor order into SAP as a Sales Order. The
         # company DB is resolved from order.company inside the service — a
@@ -4056,17 +4193,7 @@ class MartApproveView(APIView):
             sap_result = service.create_sales_order(order)
         except Exception as exc:
             logger.exception("SAP sales order creation failed for order %s", order.order_number)
-            # Approval stands (already saved); surface the SAP failure so the
-            # operator can retry the push without re-approving.
-            return Response(
-                {
-                    'message': f'Order {order.order_number} approved, but SAP sales order creation failed.',
-                    'order_number': order.order_number,
-                    'status': order.status.name,
-                    'sap_error': str(exc),
-                },
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return _mart_release_sap_claim(order, exc, retry=False)
 
         # SAP order created → move the order to Completed.
         completed = _mart_status(MART_STATUS_COMPLETED_ID)
@@ -4177,14 +4304,42 @@ class MartResendSapView(APIView):
     def post(self, request, order_id):
         if not _is_mart_approver(request.user):
             return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-        order = get_object_or_404(Order, id=order_id, order_type='DISTRIBUTOR')
 
-        # A completed order already booked into SAP — nothing to retry.
-        if order.status_id == MART_STATUS_COMPLETED_ID:
-            return Response(
-                {'error': f'Order {order.order_number} is already completed in SAP.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Same claim-under-lock as MartApproveView, for the same reason: this
+        # endpoint also ends in `create_sales_order`, so pressing Retry twice
+        # was a second route to two SAP sales orders.
+        with transaction.atomic():
+            try:
+                order = (Order.objects
+                         .select_for_update()
+                         .get(id=order_id, order_type='DISTRIBUTOR'))
+            except Order.DoesNotExist:
+                raise Http404('Order not found')
+
+            # The guard was `status_id == COMPLETED`, which missed a real state.
+            # `create_sales_order` sets `sap_created` BEFORE the caller moves the
+            # order to Completed, so an order can sit at
+            # `sap_created=True, status='Mart Approved'` — the push succeeded and
+            # the status save did not. That order looks retryable by status and
+            # is not, and retrying it books a duplicate.
+            #
+            # `sap_created` is the authority now; the status check stays only to
+            # give the clearer message for the ordinary completed case.
+            if order.status_id == MART_STATUS_COMPLETED_ID:
+                return Response(
+                    {'error': f'Order {order.order_number} is already completed in SAP.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if order.sap_created:
+                return Response(
+                    {'error': f'Order {order.order_number} is already booked into SAP, '
+                              f'or its SAP outcome is unknown. Check SAP before '
+                              f'retrying — a retry would create a second order.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            order.sap_created = True
+            order.save(update_fields=['sap_created'])
 
         from sap_sync.services.sync_service import SyncService
 
@@ -4193,14 +4348,7 @@ class MartResendSapView(APIView):
             sap_result = service.create_sales_order(order)
         except Exception as exc:
             logger.exception("SAP sales order retry failed for order %s", order.order_number)
-            return Response(
-                {
-                    'message': f'SAP sales order creation failed again for {order.order_number}.',
-                    'order_number': order.order_number,
-                    'sap_error': str(exc),
-                },
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return _mart_release_sap_claim(order, exc, retry=True)
 
         # SAP order created → move the order to Completed (mirrors MartApproveView).
         completed = _mart_status(MART_STATUS_COMPLETED_ID)
