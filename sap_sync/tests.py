@@ -217,7 +217,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["NumAtCard"], "PO-12345")
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_normalizes_legacy_web_quantity_shape(self):
         item = SimpleNamespace(
@@ -250,7 +250,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][0]["Quantity"], 12.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_mirrors_punjab_combo_scheme_quantity(self):
         item = SimpleNamespace(
@@ -297,7 +297,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_resolves_punjab_combo_scheme_as_separate_line(self):
         item = SimpleNamespace(
@@ -349,7 +349,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_expands_punjab_combo_scheme_items(self):
         item = SimpleNamespace(
@@ -405,7 +405,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_adds_party_assigned_combo_item(self):
         item = SimpleNamespace(
@@ -458,7 +458,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_expands_unlinked_punjab_combo_by_item_name(self):
         item = SimpleNamespace(
@@ -514,7 +514,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_keeps_cold_press_combo_10_set_scheme_quantity(self):
         item = SimpleNamespace(
@@ -553,7 +553,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["Quantity"], 60.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_punjab_cold_press_5ltr_combo_mirrors_scheme_qty(self):
         """
@@ -610,7 +610,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
     @skip(
-        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/scheme_rules.py and the ONLY reference to either in production code is an unused import at orders/views.py:29. map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
+        "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
     )
     def test_map_order_to_sap_punjab_combo_with_scheme_expands_to_components_plus_scheme(self):
         """

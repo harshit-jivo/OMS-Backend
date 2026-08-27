@@ -13,7 +13,7 @@ from .connection import SAPConnection
 import requests
 from django.conf import settings
 from ..models import SalesQuotationLog , SalesOrderLog
-from orders.scheme_rules import (
+from orders.services.scheme_rules import (
     get_party_product_scheme,
 )
 from users.models import PartyProductAssignment, SchemeProduct
@@ -381,23 +381,30 @@ class SyncService:
         )
 
     def _post_with_ssl_fallback(self, url, payload):
-        try:
-            return self.sap_session.post(
-                url,
-                json=payload,
-                verify=self.sap_verify,
-                timeout=self.sap_timeout,
-            )
-        except requests.exceptions.SSLError:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            self.sap_verify = False
-            self.sap_session.verify = False
-            return self.sap_session.post(
-                url,
-                json=payload,
-                verify=False,
-                timeout=self.sap_timeout,
-            )
+        """POST to the Service Layer, honouring the configured TLS setting.
+
+        The name is kept because callers use it; the FALLBACK is deliberately
+        gone. It used to catch SSLError, retry with `verify=False`, and leave
+        verification off for the rest of this object's life.
+
+        That is worse than never verifying at all. It yields at exactly the
+        moment verification is doing its job — a certificate that does not
+        validate is the case it exists to catch — and then sends the SAP
+        credential and a sales order over the connection it just failed to
+        authenticate. Worse, it did so silently, so a deployment could believe
+        it had TLS verification on for months.
+
+        A certificate failure is now a failure. The two supported ways to talk
+        to a SAP box with a self-signed certificate are both explicit:
+        `HANA_SSL_CA_BUNDLE` to trust that certificate, or
+        `HANA_SSL_VERIFY=false` to accept the risk on purpose.
+        """
+        return self.sap_session.post(
+            url,
+            json=payload,
+            verify=self.sap_verify,
+            timeout=self.sap_timeout,
+        )
 
     @contextmanager
     def _sync_lock(self, sync_type):

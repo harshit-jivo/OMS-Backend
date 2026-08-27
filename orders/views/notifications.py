@@ -13,69 +13,27 @@ re-exported copy would not affect the callers in this module — the test would
 pass while stubbing nothing.
 """
 from urllib import request
-from django.shortcuts import render
-import re
-from sap_sync.models import Branch
-from orders.serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,SchemeWriteSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
-from orders.models import PartyProductAssignment,OrdersLog,Parties, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
-from rest_framework.generics import ListAPIView
+from orders.serializers import NotificationSerializer
+from orders.models import Notification, PushToken, WebPushSubscription
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from datetime import datetime
-from decimal import Decimal
-from functools import lru_cache
-from rest_framework.permissions import IsAdminUser
-import calendar
-from django.db.models import Sum, Count, Max, F, Q, OuterRef, Subquery
-from django.db.models.functions import TruncMonth
-from django.utils import timezone
-from collections import defaultdict
-from django.shortcuts import get_object_or_404
-from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog, SalesOrderLog
-from sap_sync.services.connection import SAPConnection
-from orders.models import Order, OrderStatus
-from orders.models import PartyProductAssignment
-from orders.scheme_rules import (
-    get_ordered_quantity,
-    get_party_product_scheme,
-    should_mirror_punjab_combo_scheme_qty)
-from orders import scheme_engine
-from users.models import SchemeProduct, User, State
-from django.http import Http404, JsonResponse
+from sap_sync.models import Party as SapParty
+from users.models import User
 from django.db import transaction
-import json
 import logging
-import requests
-from orders.ai_service import get_order_summary
-from orders.notifications import (
-    NotificationEvents,
-    NotificationPlan,
-    NotificationTemplates,
-    NotificationTypes,
-    deactivate_push_token,
-    deliver_notification,
-    deliver_notification_to_many,
-    mark_order_notifications_read,
+from orders.notifications import NotificationEvents, NotificationPlan, NotificationTemplates, NotificationTypes, deactivate_push_token, deliver_notification_to_many
+from orders.webpush import get_vapid_public_key
+from ._shared import (
+    _assigned_rate_approvers_for_order,
+    _build_iexact_filter,
+    _get_user_category_names,
+    _get_user_main_group_names,
 )
-from orders.webpush import get_vapid_public_key
-from orders.webpush import get_vapid_public_key
-from django.db import transaction as _db_transaction
-from orders.models import Scheme, SchemeAssignment
-from orders.serializers import SchemeV2Serializer, SchemeAssignmentSerializer
 
 logger = logging.getLogger(__name__)
 
-from ._shared import (
-    _get_user_category_name,
-    _get_user_category_names,
-    _normalize_scope_name,
-    _get_user_main_group_names,
-    _build_iexact_filter,
-    _assigned_rate_approvers_for_order,
-)
 
 
 

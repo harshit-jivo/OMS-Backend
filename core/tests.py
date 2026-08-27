@@ -16,6 +16,7 @@ Two things are asserted here that no per-app test can:
 This file lives in `core` rather than an app because the property it protects
 belongs to the project: the routing table as a whole, not any one app's views.
 """
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -578,3 +579,104 @@ class ModelTableOwnershipTests(TestCase):
             'field definitions instead of duplicating them:\n  '
             + '\n  '.join(f'{t}: {", ".join(m)}' for t, m in sorted(shared.items()))
         ))
+
+
+class UnresolvedNameTests(TestCase):
+    """No module may use a name it never defines or imports.
+
+    Python resolves globals when a line RUNS, not when the module is imported.
+    So a function that references a name nothing provides imports cleanly,
+    passes `manage.py check`, and raises NameError the first time a request
+    reaches that line — in production, on whichever endpoint nobody tested.
+
+    This is not hypothetical. Splitting `orders/views.py` and `users/views.py`
+    into packages produced exactly this bug three times, and the 539-test suite
+    was green for all three:
+
+    * `logger` is a module-level ASSIGNMENT, so a header-copying split gave it
+      to one module and left the others to raise on their first log line;
+    * `_save_template_if_unique` moved to a service and its caller was never
+      given the import — a NameError waiting on the next saved order template;
+    * `_normalize_category` was placed in the wrong module, one level away from
+      the helper that needed it.
+
+    None of those is reachable by the tests, which is the point: this checks
+    the code, not a code path.
+
+    What it does NOT catch is a bad module PATH — `from .models import X` in a
+    module that moved one package deeper resolves `X` fine as a name and fails
+    at import. `manage.py check` catches that one, and this test does not
+    replace it.
+    """
+
+    #: Every first-party app. Third-party packages are not ours to police.
+    APPS = (
+        'orders', 'users', 'sap_sync', 'hana', 'payments', 'notifications',
+        'tracker', 'invoice', 'einvoice', 'ewaybill', 'devices', 'approvals',
+        'attachments', 'core', 'legal', 'audit', 'uilabels', 'serviceLayer',
+        'SKU', 'HAIS',
+    )
+
+    @staticmethod
+    def _free_names(tree):
+        """(unresolved names, whether the module uses `import *`).
+
+        A star import makes the available names unknowable statically, so those
+        modules are reported and skipped rather than guessed at.
+        """
+        import builtins
+
+        defined = set(dir(builtins)) | {
+            '__name__', '__doc__', '__file__', '__all__', '__path__'}
+        star = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.name == '*':
+                        star = True
+                    defined.add(alias.asname or alias.name.split('.')[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                defined.add(node.id)
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, ast.Global):
+                defined.update(node.names)
+        used = {n.id for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        return used - defined, star
+
+    def _sources(self):
+        from django.conf import settings as dj_settings
+
+        base = Path(dj_settings.BASE_DIR)
+        for app in self.APPS:
+            for path in sorted((base / app).rglob('*.py')):
+                # Migrations are generated and frozen; __pycache__ is not source.
+                if 'migrations' in path.parts or '__pycache__' in path.parts:
+                    continue
+                yield path
+
+    def test_no_module_uses_an_undefined_name(self):
+        offenders = {}
+        scanned = 0
+        for path in self._sources():
+            free, star = self._free_names(
+                ast.parse(path.read_text(encoding='utf-8')))
+            if star:
+                continue
+            scanned += 1
+            if free:
+                offenders[str(path)] = sorted(free)
+
+        self.assertGreater(scanned, 200,
+                           'the scan matched almost nothing — check APPS')
+        self.assertEqual(offenders, {}, (
+            'these names are used but never defined or imported, which is a '
+            'NameError the first time the line runs:\n  '
+            + '\n  '.join(f'{p}: {", ".join(names)}'
+                          for p, names in sorted(offenders.items()))))

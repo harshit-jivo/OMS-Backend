@@ -5,9 +5,21 @@ This was a single 5,919-line `orders/views.py`. It is being split by domain
 that happen without touching a single caller: `orders.views.<anything>` still
 resolves exactly as it did.
 
-    _shared.py         scoping helpers several view groups need
+    lifecycle.py       placing an order and moving it through its flow
+    queries.py         read-only order lists, details, logs, status tracking
+    dashboards.py      dashboard/reporting views (read-only)
+    masters.py         parties, products, addresses, dispatch locations
+    schemes.py         scheme administration (v1 and v2)
+    mart.py            distributor (Mart) orders — the SAP-writing path
     notifications.py   notification views + recipient resolution
-    _legacy.py         everything not yet moved — meant to shrink to nothing
+    flow_config.py     editing the status flow configuration
+    templates.py       saved order templates
+    stock.py           pre-order stock check
+    ai.py              AI order summary
+    _shared.py         scoping helpers and status constants several groups need
+
+There is no `_legacy` module any more: the split finished, and what was left
+turned out to be one domain (the write path) rather than a remainder.
 
 Why the re-export below is written the way it is: `from ._legacy import *`
 skips names beginning with an underscore, and this module's private helpers are
@@ -22,14 +34,27 @@ while the code that calls it — living in `_legacy` or `notifications` — goes
 using its own. The patch silently does nothing and the test passes anyway.
 Patch where a name is LOOKED UP: `orders.views.notifications.<name>`.
 """
-from ._legacy import *  # noqa: F401,F403
+from .ai import *  # noqa: F401,F403
+from .flow_config import *  # noqa: F401,F403
+from .lifecycle import *  # noqa: F401,F403
+from .queries import *  # noqa: F401,F403
+from .stock import *  # noqa: F401,F403
+from .templates import *  # noqa: F401,F403
+from .dashboards import *  # noqa: F401,F403
+from .schemes import *  # noqa: F401,F403
+from .mart import *  # noqa: F401,F403
+from .masters import *  # noqa: F401,F403
 from .notifications import *  # noqa: F401,F403
 
-from . import _legacy, _shared, notifications  # noqa: F401
+from . import (  # noqa: F401
+    _shared, ai, dashboards, flow_config, lifecycle, mart, masters,
+    notifications, queries, schemes, stock, templates,
+)
 
 # Carry the underscore-prefixed helpers across as well; see the docstring.
 _ns = globals()
-for _module in (_shared, notifications, _legacy):
+for _module in (_shared, notifications, dashboards, schemes, mart, masters,
+                flow_config, queries, templates, stock, ai, lifecycle):
     for _name in dir(_module):
         if _name.startswith('_') and not _name.startswith('__'):
             _ns.setdefault(_name, getattr(_module, _name))

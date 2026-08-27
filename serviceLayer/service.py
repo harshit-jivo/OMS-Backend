@@ -1,10 +1,70 @@
+"""SAP Service Layer session manager.
+
+Three clients in this project talk to the Service Layer — this one,
+`einvoice/sap.py` and `payments/sap_client.py`. The other two share a shape
+(`_base()` / `_verify()` / `_timeout()` helpers so a call cannot forget its
+timeout, one typed exception, truncated error bodies). This one predates that
+shape; the helpers below bring it into line without changing its API, because
+`serviceLayer.views`, `serviceLayer.ap_views` and `einvoice.sap` all call it.
+"""
+import logging
+
 import requests
-from django.core.cache import cache
-from django.conf import settings
-
-
 import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from django.conf import settings
+from django.core.cache import cache
+
+logger = logging.getLogger(__name__)
+
+
+def _verify():
+    """Honour the configured TLS setting.
+
+    This module used to hardcode `verify=False` in four places, which meant SAP
+    credentials and invoice payloads went over an unverified connection
+    regardless of configuration — and there was no way to turn verification on.
+    `einvoice/sap.py` and `payments/sap_client.py` already read these settings;
+    this is the last client that did not.
+    """
+    bundle = getattr(settings, 'HANA_SSL_CA_BUNDLE', '') or ''
+    if bundle:
+        return bundle
+    return getattr(settings, 'HANA_SSL_VERIFY', True)
+
+
+def _timeout():
+    """(connect, read) from settings, never unbounded."""
+    return (
+        getattr(settings, 'HANA_CONNECT_TIMEOUT', None) or 15,
+        getattr(settings, 'HANA_READ_TIMEOUT', None) or 120,
+    )
+
+
+def _session_ttl(sap_data):
+    """Cache TTL in SECONDS for a Service Layer session.
+
+    SAP reports `SessionTimeout` in MINUTES. This module treated it as seconds
+    and subtracted 60, so a typical SessionTimeout of 30 became a TTL of -30 —
+    which Django reads as already-expired, so the session was never reused and
+    every call logged in again. When SAP omitted the field the 3600 default
+    became a 59-minute TTL against a 30-minute session, i.e. the opposite
+    failure: a cached session that SAP had already dropped.
+
+    Converted properly, with a minute of headroom and a floor so a tiny or
+    missing value can never produce a negative TTL.
+    """
+    try:
+        minutes = int(sap_data.get('SessionTimeout') or 30)
+    except (TypeError, ValueError):
+        minutes = 30
+    return max(60, minutes * 60 - 60)
+
+
+if _verify() is False:
+    # Only silence the warning when verification is off BY CONFIGURATION.
+    # Disabling it unconditionally, as this module did at import time, hides
+    # the warning even for deployments that have verification switched on.
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class SAPServiceLayerManager():
 
@@ -48,7 +108,7 @@ class SAPServiceLayerManager():
     @classmethod
     def get_session(cls , branch):
         session = requests.Session()
-        session.verify = False
+        session.verify = _verify()
 
         schema = cls.schema_for(branch)
         session_key, route_key = cls._cache_keys(schema)
@@ -69,10 +129,11 @@ class SAPServiceLayerManager():
         }
 
         try:
-            response = requests.post(login_url, json=login_payload, verify=False, timeout=10)
+            response = requests.post(login_url, json=login_payload,
+                                     verify=_verify(), timeout=_timeout())
             if response.status_code == 200:
                 sap_data = response.json()
-                timeout = sap_data.get('SessionTimeout', 3600) - 60
+                timeout = _session_ttl(sap_data)
 
                 new_b1_session = sap_data.get('SessionId')
                 new_route_id = response.cookies.get('ROUTEID')
@@ -91,7 +152,7 @@ class SAPServiceLayerManager():
     @classmethod
     def get_session_for(cls, username, password , branch):
         session = requests.Session()
-        session.verify = False
+        session.verify = _verify()
 
         schema = cls.schema_for(branch)
 
@@ -102,10 +163,14 @@ class SAPServiceLayerManager():
             "Password": password,
         }
 
-        print(login_payload)
+        # NB: never log `login_payload` — it carries the approver's password.
+        # A `print(login_payload)` stood here, so every approver login wrote a
+        # live SAP credential to stdout, i.e. to the server log.
+        logger.debug('Approver login to CompanyDB=%s as %s', schema, username)
 
         try:
-            response = requests.post(login_url, json=login_payload, verify=False, timeout=10)
+            response = requests.post(login_url, json=login_payload,
+                                     verify=_verify(), timeout=_timeout())
             if response.status_code == 200:
                 sap_data = response.json()
                 session.cookies.set('B1SESSION', sap_data.get('SessionId'))

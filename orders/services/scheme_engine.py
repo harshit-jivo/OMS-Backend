@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import (
+from orders.models import (
     UOM_FIELDS,
     Scheme,
     SchemeAssignment,

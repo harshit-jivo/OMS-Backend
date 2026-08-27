@@ -5,13 +5,16 @@ level typed functions, _base()/_verify()/_timeout() helpers so a call can never
 forget its timeout, one typed exception, truncated error bodies, and
 `raise ... from exc`.
 
-Two bugs in serviceLayer/service.py are deliberately NOT reproduced:
+Two bugs in serviceLayer/service.py prompted this module and are NOT
+reproduced here. Both have since been fixed there too, so this note is history
+rather than a live warning:
 
-  * its session cache key is the global 'b1_session' with no company DB in it
-    (service.py:15). This module talks to three company DBs, so a cached OIL
-    session would be used for a BEVERAGES post — silently crediting the wrong
-    company. Here the key is per company DB.
-  * it treats SAP's SessionTimeout (minutes) as seconds (service.py:35).
+  * its session cache key was the global 'b1_session' with no company DB in it.
+    This module talks to three company DBs, so a cached OIL session would be
+    used for a BEVERAGES post — silently crediting the wrong company. Both
+    modules now key per company DB.
+  * it treated SAP's SessionTimeout (minutes) as seconds, which made the TTL
+    negative for a typical 30-minute session, so nothing was ever cached.
 """
 from __future__ import annotations
 
@@ -42,8 +45,11 @@ def _base():
 
 
 def _verify():
-    """Honour the configured TLS setting, unlike serviceLayer/service.py which
-    hardcodes verify=False."""
+    """Honour the configured TLS setting.
+
+    Every SAP client in the project now does; `serviceLayer/service.py` used to
+    hardcode verify=False, and `sap_sync` used to fall back to it on any
+    SSLError."""
     bundle = getattr(settings, 'HANA_SSL_CA_BUNDLE', '') or ''
     if bundle:
         return bundle

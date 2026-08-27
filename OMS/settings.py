@@ -326,6 +326,11 @@ HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default=
 # In DEBUG, default to False for local/self-signed SAP endpoints unless explicitly set.
 HANA_SSL_VERIFY = config('HANA_SSL_VERIFY', default=not DEBUG, cast=bool)
 HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')
+# TLS verification for the non-SAP outbound calls (DSR credit limit, Crystal
+# Reports). Both are plain http today, so this has no effect until one of them
+# moves to https — at which point it decides whether the move is verified.
+EXTERNAL_SSL_VERIFY = _parse_bool(config('EXTERNAL_SSL_VERIFY', default='true'),
+                                  default=True)
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
 
@@ -496,6 +501,13 @@ REST_FRAMEWORK = {
     # replaces DRF's own AutoSchema for every view at once; it changes no
     # runtime behaviour, only what `manage.py spectacular` can describe.
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+
+    # One error shape across the API (plan 3.8). Strictly additive: it fills in
+    # the `message` / `detail` / `error` keys the clients read without
+    # replacing any key an endpoint already sends. It also turns an unhandled
+    # exception into JSON — previously the API answered those with Django's
+    # HTML 500 page. See core/exception_handler.py.
+    "EXCEPTION_HANDLER": "core.exception_handler.api_exception_handler",
 
     # Rate limiting. Login was brute-forceable at unlimited speed: no
     # throttling existed anywhere, and `LoginView` is necessarily AllowAny.

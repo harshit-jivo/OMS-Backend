@@ -1,31 +1,27 @@
-import logging
+"""Who may sell what: user-to-party and party-to-product assignments.
+
+Split out of `users/views.py` (plan item 3.3), and the bulk of it — twelve
+views and twelve helpers, all concerned with the same question from different
+directions (by user, by party, by product, in bulk).
+
+These endpoints decide which customers a salesperson sees and at what rate,
+so they are the ones the Phase 2 lockdown mattered most for: before it, several
+answered unauthenticated requests.
+"""
 
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.permissions import IsAuthenticated
 from core.permissions import IsAdminRole, is_admin
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.settings import api_settings as jwt_settings
-from rest_framework_simplejwt.serializers import TokenRefreshSerializer
-from rest_framework_simplejwt.views import TokenRefreshView
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from django.contrib.auth.models import update_last_login
-from .serializers import LoginSerializer, UpdateUserSerializer, UserSerializer,StateSerializer, CompanySerializer,MainGroupSerializer,CreateUserSerializer, CategorySerializer
-from rest_framework.generics import ListAPIView
-from .models import State, Company, MainGroup,UserRole,User, UserPartyAssignment,PartyProductAssignment
+from users.models import User, UserPartyAssignment, PartyProductAssignment
 from sap_sync.models import Party, Product, active_product_q
-from orders.models import Categories, RateApproverRule
 from decimal import Decimal
 from django.db.models import Q
-
-logger = logging.getLogger(__name__)
-
-
-def _normalize_category(value):
-    normalized = str(value or '').strip().upper()
-    return normalized or None
+from ._shared import (
+    _get_user_assignment_category,
+    _normalize_category,
+)
 
 
 def _combo_free_defaults(data):
@@ -51,35 +47,6 @@ def _combo_free_defaults(data):
                 defaults['free_qty_per_unit'] = None
 
     return defaults
-
-
-def _selected_csv_names(value):
-    return list(dict.fromkeys(
-        name.strip()
-        for name in str(value or '').split(',')
-        if name.strip()
-    ))
-
-
-def _sync_rate_approver_rules(user):
-    RateApproverRule.objects.filter(approver=user).delete()
-
-    role_name = str(getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
-    category = _get_user_assignment_category(user)
-    sub_groups = _selected_csv_names(getattr(user, 'sub_group', ''))
-
-    if role_name != 'approver' or not category or not sub_groups:
-        return
-
-    for sub_group in sub_groups:
-        RateApproverRule.objects.update_or_create(
-            category=category,
-            sub_group=sub_group,
-            defaults={
-                'approver': user,
-                'is_active': True,
-            },
-        )
 
 
 def _party_key(card_code, category):
@@ -124,11 +91,6 @@ def _get_party_for_assignment(card_code, category):
         if party:
             return party
     return queryset.order_by('id').first()
-
-
-def _get_user_assignment_category(user):
-    category_obj = getattr(user, 'category', None)
-    return _normalize_category(getattr(category_obj, 'category', None))
 
 
 def _get_user_assignment_categories(user):
@@ -243,24 +205,6 @@ class PartyUsersView(APIView):
                 'users': users, 'total_assigned': len(users)
             }
         })
-    
-class RoleListView(APIView):
-    """The role vocabulary. Any authenticated user.
-
-    Deliberately NOT admin-only: `approvals` reads it to build the approver
-    picker, and that page is open to `Payments_Dashboard` holders who are not
-    administrators. It exposes role names, not who holds them.
-
-    Had no `permission_classes` at all, which under DRF's default meant
-    `AllowAny` — the silent-hole case that Phase 2.1's
-    `DEFAULT_PERMISSION_CLASSES` exists to eliminate.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        roles = UserRole.objects.filter(is_active=True).values('id', 'name', 'display_name')
-        return Response(list(roles))
 
 
 # NOTE: a second, identical-in-name `UserPartiesView` used to be declared here.
@@ -1020,362 +964,3 @@ class UserPartiesView(APIView):
                 **serialized,
             }
         })
-
-class LoginView(APIView):
-    """Exchange credentials for a JWT pair.
-
-    Necessarily `AllowAny`, and therefore the one endpoint that most needs a
-    rate limit: nothing throttled it, so passwords could be guessed at whatever
-    speed the network allowed. `ScopedRateThrottle` applies the `login` rate
-    from settings (10/min per IP by default) rather than the looser `anon` one.
-
-    Keyed by IP, which is the only identifier available before authentication.
-    A shared office NAT therefore shares one bucket — the rate is set high
-    enough that ordinary humans never reach it and low enough that guessing is
-    hopeless.
-    """
-
-    permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
-
-    def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-
-        if serializer.is_valid():
-            user = serializer.validated_data['user']
-            refresh = RefreshToken.for_user(user)
-            update_last_login(None, user)
-
-            access_lifetime = jwt_settings.ACCESS_TOKEN_LIFETIME
-            logger.info("Login successful user_id=%s", user.id)
-
-            return Response({
-                'success': True,
-                'message': 'Login successful',
-                'data': {
-                    'user': UserSerializer(user).data,
-                    # Existing fields kept exactly (clients read data.tokens.*);
-                    # token_type + expires_in are additive (Task 4).
-                    'tokens': {
-                        'access': str(refresh.access_token),
-                        'refresh': str(refresh),
-                        'token_type': 'Bearer',
-                        'expires_in': int(access_lifetime.total_seconds()),
-                    },
-                }
-            })
-
-        logger.warning(
-            "Login failed for username=%s",
-            str(request.data.get('username', ''))[:150],
-        )
-        return Response({
-            'success': False,
-            'message': 'Login failed',
-            'errors': serializer.errors
-        }, status=status.HTTP_401_UNAUTHORIZED)
-
-
-class ActiveUserTokenRefreshSerializer(TokenRefreshSerializer):
-    """Refresh serializer that also rejects tokens whose user is now missing or
-    inactive (Task 7). The parent already handles expired/invalid tokens and,
-    with BLACKLIST_AFTER_ROTATION, rotates + blacklists the old refresh token.
-    """
-
-    def validate(self, attrs):
-        # Decode/verify the refresh token BEFORE rotation so we can look up the
-        # subject. This raises for expired/invalid/blacklisted tokens.
-        token = RefreshToken(attrs['refresh'])
-        user_id = token.get(jwt_settings.USER_ID_CLAIM)
-        try:
-            user = User.objects.get(**{jwt_settings.USER_ID_FIELD: user_id})
-        except User.DoesNotExist:
-            raise InvalidToken('No active account found for this token')
-        if not user.is_active:
-            raise InvalidToken('User account is disabled')
-
-        return super().validate(attrs)
-
-
-class AuthTokenRefreshView(TokenRefreshView):
-    """POST /api/auth/refresh/ — exchange a refresh token for a new access
-    token, honouring rotation/blacklist settings and blocking inactive users.
-    """
-
-    permission_classes = [AllowAny]
-    serializer_class = ActiveUserTokenRefreshSerializer
-    # Also credential-checking and also unauthenticated: the body carries a
-    # refresh token, so an unthrottled endpoint is a token-guessing oracle.
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
-
-
-class LogoutView(APIView):
-    """POST /api/auth/logout/ — blacklist the refresh token so it cannot be
-    reused (server-side invalidation, not just a client-side clear)."""
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        refresh_token = (
-            request.data.get('refresh')
-            or request.data.get('refresh_token')
-            or ''
-        )
-        if not refresh_token:
-            return Response(
-                {'success': False, 'message': 'Refresh token is required'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            RefreshToken(refresh_token).blacklist()
-        except TokenError:
-            # Already expired/invalid/blacklisted — logout is idempotent.
-            logger.info("Logout with already-invalid refresh user_id=%s", request.user.id)
-            return Response({'success': True, 'message': 'Logged out'})
-
-        logger.info("Logout success user_id=%s", request.user.id)
-        return Response({'success': True, 'message': 'Logged out'})
-    
-class UserListForAssignmentView(APIView):
-    """The full user roster. Any authenticated user.
-
-    Was `AllowAny`, and `UserSerializer` listed `password` in its fields — so
-    this endpoint handed every account's password hash to anonymous callers.
-    Both halves are fixed: the hash is gone from the serializer and the roster
-    now needs a login.
-
-    Not admin-only, for the same reason as `RoleListView`: the approvals
-    configuration page builds its approver picker from this and is open to
-    `Payments_Dashboard` holders.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        users = (
-            User.objects.filter(is_active=True)
-            .select_related('role', 'company', 'main_group', 'state')
-            .prefetch_related('main_groups', 'user_states__state')
-            .order_by('id')
-        )
-        data = UserSerializer(users, many=True).data
-        return Response({'success': True, 'data': data})
-
-class ProfileView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        return Response({
-            'success': True,
-            'data': UserSerializer(request.user).data
-        })
-
-
-class PagePermissionsView(APIView):
-    """Admin-managed per-user page access (list of page keys)."""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, user_id):
-        # Reading someone else's granted pages tells you what they can reach;
-        # only an admin needs that, and every user can read their own.
-        if user_id != request.user.pk and not is_admin(request.user):
-            return Response(
-                {'success': False,
-                 'message': 'You may only view your own page permissions'},
-                status=status.HTTP_403_FORBIDDEN)
-        try:
-            user = User.objects.get(pk=user_id)
-        except User.DoesNotExist:
-            return Response({'success': False, 'message': 'User not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-        return Response({
-            'success': True,
-            'data': {'user_id': user.id, 'extra_pages': user.extra_pages or []},
-        })
-
-    def put(self, request, user_id):
-        # `core.permissions.is_admin` replaces a local `_is_admin` that read the
-        # `role` FK alone — so a user granted `admin` through `extra_roles` was
-        # refused here while `payments` and `approvals` accepted them.
-        if not is_admin(request.user):
-            return Response({'success': False, 'message': 'Only admin can change page permissions'},
-                            status=status.HTTP_403_FORBIDDEN)
-        try:
-            user = User.objects.get(pk=user_id)
-        except User.DoesNotExist:
-            return Response({'success': False, 'message': 'User not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-
-        pages = request.data.get('extra_pages', [])
-        if not isinstance(pages, list):
-            return Response({'success': False, 'message': 'extra_pages must be a list'},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        cleaned = []
-        for page in pages:
-            page = str(page).strip()
-            if page and page not in cleaned:
-                cleaned.append(page)
-
-        user.extra_pages = cleaned
-        user.save(update_fields=['extra_pages', 'updated_at'])
-        return Response({
-            'success': True,
-            'message': 'Page permissions updated',
-            'data': {'user_id': user.id, 'extra_pages': cleaned},
-        })
-
-# ---------------------------------------------------------------------------
-# Master data.
-#
-# All four were AllowAny. They are read-only reference lists rather than a
-# breach on their own, but they leak the company's operating footprint — every
-# state, company and product group it trades in — to anyone who finds the URL,
-# and no client needs them before login: `services/api.ts` attaches the bearer
-# token to every request, and every page that reads them sits behind the login
-# screen.
-# ---------------------------------------------------------------------------
-
-class StateListView(ListAPIView):
-    """Get all active states"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = StateSerializer
-    queryset = State.objects.filter(is_active=True).order_by('name')
-
-class CompanyListView(ListAPIView):
-    """Get all active companies"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = CompanySerializer
-    queryset = Company.objects.filter(is_active=True).order_by('name')
-
-class MainGroupListView(ListAPIView):
-    """Get all active main groups"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = MainGroupSerializer
-    queryset = MainGroup.objects.filter(is_active=True).order_by('name')
-    
-class CategoryListView(ListAPIView):
-    """Get all categories"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = CategorySerializer
-    queryset = Categories.objects.all().order_by('category')
-
-#Creating User
-class CreateUserView(APIView):
-    """Create a user account. Administrators only.
-
-    This endpoint was `AllowAny` while its serializer accepted a `role` bound to
-    `UserRole.objects.all()` — so any anonymous caller who could reach the API
-    could mint themselves an `admin` account. The service is internet-facing.
-    That is what this class is guarding, and it is why the serializer ALSO
-    re-checks privileged-role assignment (`assert_may_assign_roles`): one guard
-    protects the endpoint, the other protects the escalation.
-    """
-
-    permission_classes = [IsAuthenticated, IsAdminRole]
-
-    def post(self, request):
-        serializer = CreateUserSerializer(
-            data=request.data, context={'request': request})
-
-        if serializer.is_valid():
-            user = serializer.save()
-            _sync_rate_approver_rules(user)
-            return Response({
-                'success': True,
-                'message': 'User created successfully',
-                'data': UserSerializer(user).data
-            }, status=status.HTTP_201_CREATED)
-
-        return Response({
-            'success': False,
-            'message': 'Failed to create user',
-            'errors': serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-
-class UserDetailView(APIView):
-    """Read or update any user account. Administrators only.
-
-    Previously `AllowAny`, which made `PUT /auth/users/<id>/` an anonymous
-    account-takeover: `UpdateUserSerializer` accepts `password`, `role` and
-    `is_active`, so anyone could reset the password of any account — including
-    an admin's — and log in as them.
-
-    A user reading their OWN record does not need this endpoint; `/auth/profile/`
-    already serves that and is authenticated.
-    """
-
-    permission_classes = [IsAuthenticated, IsAdminRole]
-
-    def get(self, request, user_id):
-        try:
-            user = User.objects.get(pk=user_id)
-            serializer = UserSerializer(user)
-            return Response({
-                'success': True,
-                'data': serializer.data
-            }, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'User not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-    def put(self, request, user_id):
- 
-        try:
-            user = User.objects.get(pk=user_id)
-        except User.DoesNotExist:
-            return Response({
-                'success': False,
-          'message': 'User not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = UpdateUserSerializer(
-            user, data=request.data, partial=True, context={'request': request})
-        if serializer.is_valid():
-            updated_user = serializer.save()
-            _sync_rate_approver_rules(updated_user)
-            return Response({
- 
-                'success': True,
-                'message': 'User updated successfully',
-                'data': UserSerializer(updated_user).data
-            }, status=status.HTTP_200_OK)
-
-        return Response({
-            'success': False,
-            'message': 'Failed to update user',
-            'errors': serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
-class DeleteUserView(APIView):
-    """Deactivate a user account (soft delete). Administrators only.
-
-    Was `AllowAny`: an anonymous caller could walk the ID range and disable
-    every account in the company, including every admin, locking the business
-    out of its own system.
-    """
-
-    permission_classes = [IsAuthenticated, IsAdminRole]
-
-    def post(self, request, user_id):
-        try:
-            user = User.objects.get(pk=user_id)
-            # Deactivating yourself is how an admin locks themselves out with a
-            # misclick; there is no undo through the API once the last admin is
-            # disabled.
-            if user.pk == request.user.pk:
-                return Response(
-                    {'success': False,
-                     'message': 'You cannot deactivate your own account'},
-                    status=status.HTTP_400_BAD_REQUEST)
-            user.is_active = False
-            user.save()
-            return Response({'success': True, 'message': 'User removed successfully'}, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return Response({'success': False, 'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)

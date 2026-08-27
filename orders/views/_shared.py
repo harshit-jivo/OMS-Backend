@@ -9,59 +9,11 @@ These belong in `orders/selectors.py` eventually. They are here first because a
 move within `orders.views` is invisible to every caller, and a move to a new
 top-level module is not.
 """
-from urllib import request
-from django.shortcuts import render
-import re
-from sap_sync.models import Branch
-from orders.serializers import SchemeProductSerializer,OrderDetailSerializer, OrderListByUserIdSerializer,OrdersLogSerializer,OrderStatusUpdateSerializer, DispatchLocationSerializer,BranchSerializer, PartyAddressSerializer,ProductSerializer,CreateOrderSerializer,OrderItemSerializer, CreateSchemeSerializer,SchemeWriteSerializer,OrderItemSchemeSerializer, NotificationSerializer,StaffProductSerializer , OrdersByItemSerializer
-from orders.models import PartyProductAssignment,OrdersLog,Parties, DispatchLocation, UserPartyAssignment, PartyAddress,ProductDetails,Order,OrderItem,OrderStatus,log_order_action, OrderItemScheme,OrderItemScheme,Template, Notification, PushToken, WebPushSubscription, StaffProductPrice, OrderFlowConfig, PartyOrderFlowConfig, RateApproverRule,OrderRateApproval,OrderItemApprovalMapping
-from rest_framework.generics import ListAPIView
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from datetime import datetime
-from decimal import Decimal
-from functools import lru_cache
-from rest_framework.permissions import IsAdminUser
-import calendar
-from django.db.models import Sum, Count, Max, F, Q, OuterRef, Subquery
-from django.db.models.functions import TruncMonth
-from django.utils import timezone
-from collections import defaultdict
-from django.shortcuts import get_object_or_404
-from rest_framework import permissions
-from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q, SalesQuotationLog, SalesOrderLog
-from sap_sync.services.connection import SAPConnection
-from orders.models import Order, OrderStatus
-from orders.models import PartyProductAssignment
-from orders.scheme_rules import (
-    get_ordered_quantity,
-    get_party_product_scheme,
-    should_mirror_punjab_combo_scheme_qty)
-from orders import scheme_engine
-from users.models import SchemeProduct, User, State
-from django.http import Http404, JsonResponse
-from django.db import transaction
-import json
+from orders.models import OrdersLog, Order, OrderStatus
+from django.db.models import Q
+from sap_sync.models import Party as SapParty
+from users.models import User
 import logging
-import requests
-from orders.ai_service import get_order_summary
-from orders.notifications import (
-    NotificationEvents,
-    NotificationPlan,
-    NotificationTemplates,
-    NotificationTypes,
-    deactivate_push_token,
-    deliver_notification,
-    deliver_notification_to_many,
-    mark_order_notifications_read,
-)
-from orders.webpush import get_vapid_public_key
-from orders.webpush import get_vapid_public_key
-from django.db import transaction as _db_transaction
-from orders.models import Scheme, SchemeAssignment
-from orders.serializers import SchemeV2Serializer, SchemeAssignmentSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -111,3 +63,122 @@ def _assigned_rate_approvers_for_order(order, status_filter=None, exclude_user=N
     if exclude_user:
         approvals = approvals.exclude(approver=exclude_user)
     return [approval.approver for approval in approvals if approval.approver]
+
+
+
+
+BILLING_ACTIVE_CODES = ['BILLING', 'BILLING_PENDING']
+BILLING_ACCEPTED_ACTION_ID = 3
+BILLING_REJECTED_ACTION_ID = 8
+BILLING_DECISION_ACTION_IDS = [BILLING_ACCEPTED_ACTION_ID, BILLING_REJECTED_ACTION_ID]
+AUDITOR_ACCEPTED_ACTION_ID = 9
+AUDITOR_REJECTED_ACTION_ID = 7
+AUDITOR_DECISION_ACTION_IDS = [AUDITOR_ACCEPTED_ACTION_ID, AUDITOR_REJECTED_ACTION_ID]
+APPROVER_ACTIVE_CODES = ['NEED_APPROVAL', 'RATE_APPROVAL']
+
+
+def _apply_billing_order_scope(queryset, user):
+    user_categories = _get_user_category_names(user)
+    user_main_groups = _get_user_main_group_names(user)
+
+    if not user_categories and not user_main_groups:
+        return queryset
+
+    party_queryset = SapParty.objects.all()
+    if user_categories:
+        party_queryset = party_queryset.filter(category__in=user_categories)
+    if user_main_groups:
+        party_queryset = party_queryset.filter(
+            _build_iexact_filter('main_group', user_main_groups)
+        )
+
+    queryset = queryset.filter(
+        card_code__in=party_queryset.values_list('card_code', flat=True)
+    )
+
+    if user_categories:
+        queryset = queryset.filter(items__category__in=user_categories)
+
+    return queryset.distinct()
+
+def _get_base_orders(user):
+    """Scope orders by user role:
+    - admin: all orders
+    - manager: only orders created by this user
+    - distributor: only the distributor's own orders (same scope as manager, so
+      the dashboard shows all sections but only this distributor's data)
+    - mart_approval: all distributor (company-3 / Mart) orders — the Mart queue
+      this role manages end to end
+    - auditor: orders currently in or previously routed through auditor review
+    - approver: orders pending approval (NEED_APPROVAL, RATE_APPROVAL)
+    - billing: orders currently in billing or already handled by this billing user
+    """
+    role = getattr(user, 'role', None)
+    role_name = getattr(role, 'name', '').lower() if role else ''
+    if role_name == 'admin':
+        return Order.objects.all()
+    if role_name in ('manager', 'distributor'):
+        return Order.objects.filter(created_by=user.id)
+    if role_name == 'mart_approval':
+        return Order.objects.filter(order_type='DISTRIBUTOR')
+    if role_name == 'auditor':
+        return Order.objects.filter(
+            Q(status__code='AUDITOR_APPROVAL') |
+            Q(logs__action__code='AUDITOR_APPROVAL') |
+            Q(logs__action__name__icontains='auditor')
+        ).distinct()
+    if role_name == 'approver':
+        queryset = Order.objects.filter(
+            rate_approvals__approver=user,
+            rate_approvals__status='PENDING',
+            status__code__in=APPROVER_ACTIVE_CODES,
+        ).distinct()
+        return queryset
+    if role_name == 'billing':
+        handled_order_ids = (
+            OrdersLog.objects
+            .filter(
+                performed_by=user,
+                action_id__in=BILLING_DECISION_ACTION_IDS
+            )
+            .values_list('order_id', flat=True)
+            .distinct()
+        )
+
+        queryset = Order.objects.filter(
+            Q(status__code__in=BILLING_ACTIVE_CODES) |
+            Q(id__in=handled_order_ids)
+        ).distinct()
+
+        return _apply_billing_order_scope(queryset, user)
+    return Order.objects.none()
+
+
+
+# OrderStatus rows already present in the DB (managed there, not via migration):
+#   Mart Approval = 12 (where a submitted distributor order lands)
+#   Approved      = 6  (on approve)
+#   Rejected      = 7  (on reject)
+MART_STATUS_PENDING_ID = 12
+
+
+def _mart_status(status_id):
+    """Fetch a Mart-flow status by id (rows are seeded in the DB, not migrations)."""
+    return OrderStatus.objects.filter(id=status_id).first()
+
+
+def _mart_approver_user():
+    """The user who works the Mart Approval queue. There is a single
+    'mart_approval' user in this deployment, so a freshly submitted distributor
+    order's pending Mart-Approval log row is stamped with that user instead of
+    NULL. Falls back to None if the role/user isn't present."""
+    # Match the role loosely (case / underscore / space insensitive) so a role
+    # stored as 'Mart Approval' or 'mart_approval' both resolve.
+    return (
+        User.objects
+        .filter(is_active=True)
+        .filter(Q(role__name__iexact='mart_approval') |
+                Q(role__name__iexact='mart approval'))
+        .order_by('id')
+        .first()
+    )

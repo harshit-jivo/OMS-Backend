@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from django.test import TestCase
 
-from orders import scheme_engine
+from orders.services import scheme_engine
 from orders.models import Parties, Scheme, SchemeAssignment, SchemeBenefit, SchemeTrigger
 from users.models import State
 
@@ -419,7 +419,7 @@ class SchemeV2OrderLineTests(TestCase):
         self.scheme_v2 = make_scheme('V2-CAT', category='OIL')
 
     def _entry(self, **overrides):
-        from orders.views import _extract_order_item_schemes
+        from orders.services.order_items import _extract_order_item_schemes
 
         item = {
             "item_code": "FG-1",
@@ -516,7 +516,7 @@ class OrderCreateResolvesSchemesTests(TestCase):
 
     def test_giveaway_is_saved_even_when_the_client_sends_none(self):
         from orders.models import OrderItemScheme
-        from orders.views import _apply_engine_schemes
+        from orders.services.order_items import _apply_engine_schemes
 
         lines = [{'item_code': 'FG-1', 'category': 'OIL', 'qty': 30}]
         order, created = self._order_with(lines)
@@ -536,7 +536,7 @@ class OrderCreateResolvesSchemesTests(TestCase):
 
     def test_a_giveaway_the_client_already_sent_is_not_duplicated(self):
         from orders.models import OrderItemScheme
-        from orders.views import _apply_engine_schemes
+        from orders.services.order_items import _apply_engine_schemes
 
         lines = [{'item_code': 'FG-1', 'category': 'OIL', 'qty': 30}]
         order, created = self._order_with(lines)
@@ -556,7 +556,7 @@ class OrderCreateResolvesSchemesTests(TestCase):
 
     def test_a_scheme_for_another_category_is_not_added(self):
         from orders.models import OrderItemScheme
-        from orders.views import _apply_engine_schemes
+        from orders.services.order_items import _apply_engine_schemes
 
         lines = [{'item_code': 'FG-1', 'category': 'MART', 'qty': 30}]
         order, created = self._order_with(lines)
@@ -568,7 +568,7 @@ class OrderCreateResolvesSchemesTests(TestCase):
     def test_a_ruleless_scheme_proposes_nothing(self):
         """Quantity still typed by hand — a zero-qty free line would ship nothing."""
         from orders.models import OrderItemScheme
-        from orders.views import _apply_engine_schemes
+        from orders.services.order_items import _apply_engine_schemes
 
         self.scheme.benefits.update(per_qty=0, free_qty=0)
         lines = [{'item_code': 'FG-1', 'category': 'OIL', 'qty': 30}]

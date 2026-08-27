@@ -28,6 +28,21 @@ from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
 from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_item_name_map
 
+
+def _external_verify():
+    """TLS verification for the DSR and Crystal calls below.
+
+    These four call sites passed `verify=_external_verify()` as a literal. Both services are
+    plain http today, where requests ignores `verify` entirely — so it was not
+    a live exposure, it was a TRAP: the day either URL gains an `s`, the calls
+    would keep working and silently stop verifying anything, and nothing in the
+    code would say so.
+
+    Defaults to on. A self-signed certificate on either box is then an explicit
+    decision (`EXTERNAL_SSL_VERIFY=false`) rather than a default nobody chose.
+    """
+    return getattr(settings, 'EXTERNAL_SSL_VERIFY', True)
+
 logger = logging.getLogger(__name__)
 
 
@@ -491,7 +506,7 @@ class CreditLimitCardsView(APIView):
         company = request.query_params.get('company', '1')
         url = f"{settings.DSR_API_BASE}/api/CreditLimit/GetCustomerCards"
         try:
-            dsr_response = requests.get(url, params={'company': company}, timeout=20, verify=False)
+            dsr_response = requests.get(url, params={'company': company}, timeout=20, verify=_external_verify())
             try:
                 body = dsr_response.json()
             except ValueError:
@@ -574,7 +589,7 @@ class CreditLimitRequestView(APIView):
                 data={'documentData': document_data},
                 files={'attachment': (attachment.name, attachment, attachment.content_type)},
                 timeout=30,
-                verify=False,
+                verify=_external_verify(),
             )
             try:
                 body = dsr_response.json()
@@ -665,7 +680,7 @@ class GetCreditLimitJSAPFlow(APIView):
                 flow_url,
                 params={'flowId': flow_id},
                 timeout=20,
-                verify=False
+                verify=_external_verify()
             )
 
 
@@ -740,7 +755,7 @@ class GetPrintReport(APIView):
 
         url = f"{settings.CRYSTAL_URL}/{self._CRYSTAL_PATHS[branch]}/{doc_entry}"
         try:
-            crystal_response = requests.get(url, timeout=60, verify=False)
+            crystal_response = requests.get(url, timeout=60, verify=_external_verify())
         except requests.RequestException as exc:
             return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
