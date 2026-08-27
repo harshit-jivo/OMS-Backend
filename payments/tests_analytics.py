@@ -74,8 +74,14 @@ class RangeResolutionTests(TestCase):
         the reader's first action was always to widen the range.
         """
         self.assertEqual(analytics.DEFAULT_PRESET, 'last_30_days')
+        # Derived from TODAY rather than hardcoded. The literal here used to be
+        # date(2026, 7, 12), which is TODAY - 29 only for a TODAY of 2026-08-10
+        # — so it broke silently when the module-level TODAY was changed to
+        # 2026-08-05, asserting a 25-day window against a test whose own
+        # docstring says 30. Every other assertion in this class is
+        # TODAY-relative, which is why they all survived that edit.
         self.assertEqual(analytics.resolve_range(None, today=TODAY),
-                         (date(2026, 7, 12), TODAY))
+                         (TODAY - timedelta(days=29), TODAY))
 
     def test_custom_uses_the_supplied_dates(self):
         self.assertEqual(

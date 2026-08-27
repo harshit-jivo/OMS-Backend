@@ -406,14 +406,27 @@ class MigrateSchemesV2CommandTests(TestCase):
 class SchemeV2OrderLineTests(TestCase):
     """The chain from an Add Sales payload to what SAP is told to ship."""
 
+    def setUp(self):
+        # `_extract_order_item_schemes` now runs `_scheme_v2_category_allows`,
+        # a save-time mirror of the engine's category wall added after this
+        # class was written. It requires BOTH the line category and the
+        # scheme's own category to be present and identical — a blank anywhere
+        # is a mismatch and the scheme is dropped, so a stale or hand-rolled
+        # client cannot persist a scheme the UI would never have offered.
+        #
+        # The fixture had neither, so every entry was silently dropped and the
+        # test read `0 != 1`. It needs a real Scheme row to resolve against.
+        self.scheme_v2 = make_scheme('V2-CAT', category='OIL')
+
     def _entry(self, **overrides):
         from orders.views import _extract_order_item_schemes
 
         item = {
             "item_code": "FG-1",
             "qty": 3,
+            "category": "OIL",
             "schemes": [{
-                "scheme_v2_id": 7,
+                "scheme_v2_id": self.scheme_v2.pk,
                 "benefit_id": 55,
                 "benefit_item_code": "FG-FREE",
                 "scheme_qty": 6,
@@ -430,7 +443,7 @@ class SchemeV2OrderLineTests(TestCase):
         entries = self._entry()
         self.assertEqual(len(entries), 1)
         self.assertIsNone(entries[0]["scheme"])
-        self.assertEqual(entries[0]["scheme_v2_id"], 7)
+        self.assertEqual(entries[0]["scheme_v2_id"], self.scheme_v2.pk)
         self.assertEqual(entries[0]["benefit_item_code"], "FG-FREE")
         self.assertEqual(entries[0]["scope_value"], "DL")
 
