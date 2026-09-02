@@ -1,7 +1,19 @@
+"""NIC e-invoice (IRN) generation, lookup and cancellation.
+
+Phase 2.4 audit: every view here relied on the project-wide default
+(`IsAuthenticated`) with no `permission_classes` declared, `irn_qr_png`
+excepted (deliberately `AllowAny` — see its own docstring below). None of
+these actions is admin-only by current design: generating/cancelling an IRN
+is a per-invoice business action available to any authenticated user, not an
+org-wide configuration change, and `ewaybill` (which reuses this app's SAP
+and validation helpers) mirrors the same access model. So the fix is to make
+that default explicit per view rather than invent a role restriction that
+would tighten access nothing here has ever had.
+"""
 from django.conf import settings
 from django.http import HttpResponse
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from . import mapping, qr as qrgen, sap
@@ -25,6 +37,7 @@ def _run(fn, *args, **kwargs):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def health(request):
     """Quick check that config is present (does NOT hit the NIC API)."""
     cfg = settings.EINV
@@ -41,6 +54,7 @@ def health(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def list_companies(request):
     """Companies (SAP company DBs) an IRN can be generated against.
 
@@ -56,6 +70,7 @@ def list_companies(request):
 
 
 @api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
 def get_token(request):
     """
     Run the auth handshake against NIC and report the result. Useful for testing
@@ -79,6 +94,7 @@ def get_token(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def validate_irn(request):
     """
     Validate an invoice payload against the GSTN regexes + arithmetic rules
@@ -92,6 +108,7 @@ def validate_irn(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def generate_irn(request):
     """
     POST a full e-invoice JSON payload as the request body, e.g.:
@@ -135,6 +152,7 @@ def generate_irn(request):
 
 
 @api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
 def irn_from_invoice(request, docentry):
     """
     Build an IRN payload straight from a SAP B1 invoice (OINV DocEntry).
@@ -220,6 +238,7 @@ def irn_from_invoice(request, docentry):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def list_invoices(request):
     """
     List recent SAP invoices that DO NOT yet have an IRN, so the user can generate
@@ -303,6 +322,7 @@ def list_invoices(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def generation_logs(request):
     """
     List IRN auto-generation attempts (einvoice_irn_generation_log).
@@ -337,6 +357,7 @@ def generation_logs(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def retry_generation(request):
     """Re-run auto IRN generation for a DocEntry. Body: { "docentry": n, "company_db": "..." }"""
     d = request.data if isinstance(request.data, dict) else {}
@@ -354,6 +375,7 @@ def retry_generation(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def generate_irn_sample(request):
     """
     Convenience endpoint: builds a minimal valid invoice from the configured
@@ -379,6 +401,7 @@ def generate_irn_sample(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def cancel_irn(request):
     """Body: { "irn": "...", "reason_code": "2", "remarks": "..." }
     reason_code: 1-Duplicate, 2-Data entry mistake, 3-Order cancelled, 4-Other.
@@ -400,12 +423,14 @@ def cancel_irn(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_irn_details(request, irn):
     """GET the details of a previously generated IRN."""
     return _run(EInvoiceClient().get_irn_details, irn)
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_irn_by_doc(request):
     """Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy"""
     q = request.query_params
@@ -416,6 +441,7 @@ def get_irn_by_doc(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_rejected_irns(request):
     """Query param: ?date=dd/mm/yyyy"""
     date = request.query_params.get("date")
@@ -425,18 +451,21 @@ def get_rejected_irns(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_gstin_details(request, gstin):
     """GET GSTIN master details."""
     return _run(EInvoiceClient().get_gstin_details, gstin)
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def sync_gstin(request, gstin):
     """Force a fresh sync of a GSTIN from the GST common portal."""
     return _run(EInvoiceClient().sync_gstin, gstin)
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def generate_ewb_by_irn(request):
     """Body: e-Way Bill payload incl. Irn + transport details
     (Distance, TransMode, TransId, TransName, TransDocNo, TransDocDt, VehNo, VehType) and,
@@ -466,12 +495,14 @@ def generate_ewb_by_irn(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_ewb_by_irn(request, irn):
     """GET the e-Way Bill linked to an IRN."""
     return _run(EInvoiceClient().get_ewb_by_irn, irn)
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def heartbeat(request):
     """Unencrypted NIC heartbeat/ping (no auth)."""
     return _run(EInvoiceClient().health_ping)
@@ -523,6 +554,7 @@ def irn_qr_png(request, irn):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def render_qr(request):
     """
     Render any SignedQRCode string into a QR image without a DB lookup.

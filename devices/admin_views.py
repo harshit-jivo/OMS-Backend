@@ -27,6 +27,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.pagination import ordering_from
+
 from .models import (
     APP_TYPE_MOBILE,
     APP_TYPE_TABLET,
@@ -157,10 +159,8 @@ def _filtered_devices(request):
         )
 
     # --- ordering (allow-listed) --------------------------------------------
-    ordering = (params.get("ordering") or "-last_active").strip()
-    bare = ordering.lstrip("-")
-    if bare not in DEVICE_ORDER_FIELDS:
-        ordering = "-last_active"
+    # Shared with sap_sync's list views — see core.pagination.ordering_from.
+    ordering = ordering_from(request, DEVICE_ORDER_FIELDS, "-last_active")
     return qs.order_by(ordering)
 
 

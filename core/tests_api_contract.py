@@ -295,7 +295,14 @@ class LegacyNotificationEndpointTests(TestCase):
     3.5 retires it, and has been stuck on a question nobody could answer: is
     the old endpoint still being called, and by whom? These routes now say so
     in the response and record it in the log.
+
+    Both of the app's remaining reads of `orders.Notification` —
+    `NotificationListView` (latest 50, mobile) and `NotificationHistoryView`
+    (paginated, web) — carry the instrumentation, so both are exercised here
+    rather than just the first one.
     """
+
+    LEGACY_PATHS = ('/api/orders/notifications/', '/api/orders/notifications/history/')
 
     def setUp(self):
         self.client = APIClient()
@@ -303,36 +310,52 @@ class LegacyNotificationEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
 
     def test_the_legacy_list_endpoint_is_marked_deprecated(self):
-        response = self.client.get('/api/orders/notifications/')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response[DEPRECATION_HEADER], 'true')
+        for path in self.LEGACY_PATHS:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response[DEPRECATION_HEADER], 'true')
 
     def test_it_names_the_replacement(self):
-        response = self.client.get('/api/orders/notifications/')
-        self.assertIn('/api/v1/notifications/', response[LINK_HEADER])
+        for path in self.LEGACY_PATHS:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertIn('/api/v1/notifications/', response[LINK_HEADER])
 
     def test_it_still_returns_what_it_always_did(self):
         """Deprecating an endpoint must not degrade it. The mobile client is
-        still on this route and will be until someone sets a date."""
-        response = self.client.get('/api/orders/notifications/')
-        self.assertEqual(response.json(), [])
+        still on the list route, and the web client on the history route, and
+        both will be until someone sets a date."""
+        self.assertEqual(self.client.get('/api/orders/notifications/').json(), [])
+
+        history = self.client.get('/api/orders/notifications/history/').json()
+        self.assertEqual(history['results'], [])
+        self.assertEqual(history['count'], 0)
+        self.assertEqual(history['unread_count'], 0)
 
     def test_it_carries_no_sunset_date(self):
         """Deliberate. The date belongs to whoever owns the client migration,
         and 3.5 is still awaiting that decision."""
-        self.assertNotIn(SUNSET_HEADER, self.client.get('/api/orders/notifications/'))
+        for path in self.LEGACY_PATHS:
+            with self.subTest(path=path):
+                self.assertNotIn(SUNSET_HEADER, self.client.get(path))
 
     def test_the_versioned_prefix_is_deprecated_too(self):
         """Mounting a superseded route under `/api/v1/` does not un-deprecate
         it. The decorator is on the view, so both prefixes carry the header —
         which is the reason to put it there rather than on a URL pattern."""
-        response = self.client.get('/api/v1/orders/notifications/')
-        self.assertEqual(response[DEPRECATION_HEADER], 'true')
+        for path in self.LEGACY_PATHS:
+            with self.subTest(path=path):
+                versioned = '/api/v1/' + path[len('/api/'):]
+                response = self.client.get(versioned)
+                self.assertEqual(response[DEPRECATION_HEADER], 'true')
 
     def test_it_is_registered(self):
-        self.assertIn('NotificationListView', REGISTRY)
-        self.assertEqual(REGISTRY['NotificationListView']['successor'],
-                         '/api/v1/notifications/')
+        for view_name in ('NotificationListView', 'NotificationHistoryView'):
+            with self.subTest(view=view_name):
+                self.assertIn(view_name, REGISTRY)
+                self.assertEqual(REGISTRY[view_name]['successor'],
+                                 '/api/v1/notifications/')
 
     def test_the_successor_route_exists(self):
         """A `Link: rel="successor-version"` pointing at a 404 is worse than

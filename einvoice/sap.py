@@ -16,6 +16,7 @@ import requests
 import urllib3
 from django.conf import settings
 
+from core.sap_client_base import base_url as _base
 from einvoice.mapping import gstin as _gstin
 from serviceLayer.service import SAPServiceLayerManager
 
@@ -28,10 +29,12 @@ class SapFetchError(Exception):
     """Raised when the invoice (or HSN) could not be fetched from Service Layer."""
 
 
-def _base() -> str:
-    return settings.HANA_SERVICE_LAYER_URL.rstrip("/")
-
-
+# `_verify()`/`_timeout()` stay local (Phase 3.6 dedup): they read the same
+# settings as serviceLayer.service/payments.sap_client but not identically —
+# this version never consults HANA_SSL_CA_BUNDLE and has no `or` fallback on
+# an explicitly-falsy timeout setting. See core/sap_client_base.py's
+# docstring for the exact discrepancy; not changed here to avoid altering
+# this module's behaviour under a pure-deduplication task.
 def _verify():
     return getattr(settings, "HANA_SSL_VERIFY", False)
 

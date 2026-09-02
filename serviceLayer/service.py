@@ -4,7 +4,9 @@ Three clients in this project talk to the Service Layer — this one,
 `einvoice/sap.py` and `payments/sap_client.py`. The other two share a shape
 (`_base()` / `_verify()` / `_timeout()` helpers so a call cannot forget its
 timeout, one typed exception, truncated error bodies). This one predates that
-shape; the helpers below bring it into line without changing its API, because
+shape; `_verify`/`_timeout` below are the two of those helpers that really
+were identical here, now shared via `core.sap_client_base` (Phase 3.6) rather
+than kept as a local copy — without changing this module's API, because
 `serviceLayer.views`, `serviceLayer.ap_views` and `einvoice.sap` all call it.
 """
 import logging
@@ -14,30 +16,10 @@ import urllib3
 from django.conf import settings
 from django.core.cache import cache
 
+from core.sap_client_base import timeout_setting as _timeout
+from core.sap_client_base import verify_setting as _verify
+
 logger = logging.getLogger(__name__)
-
-
-def _verify():
-    """Honour the configured TLS setting.
-
-    This module used to hardcode `verify=False` in four places, which meant SAP
-    credentials and invoice payloads went over an unverified connection
-    regardless of configuration — and there was no way to turn verification on.
-    `einvoice/sap.py` and `payments/sap_client.py` already read these settings;
-    this is the last client that did not.
-    """
-    bundle = getattr(settings, 'HANA_SSL_CA_BUNDLE', '') or ''
-    if bundle:
-        return bundle
-    return getattr(settings, 'HANA_SSL_VERIFY', True)
-
-
-def _timeout():
-    """(connect, read) from settings, never unbounded."""
-    return (
-        getattr(settings, 'HANA_CONNECT_TIMEOUT', None) or 15,
-        getattr(settings, 'HANA_READ_TIMEOUT', None) or 120,
-    )
 
 
 def _session_ttl(sap_data):

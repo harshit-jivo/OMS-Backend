@@ -1011,3 +1011,174 @@ Stated so the gaps are known rather than assumed closed:
 - **No infrastructure review** — deployment, reverse proxy, TLS termination and
   backup policy were not examined.
 - **`OMS-app` not examined** — see §12.1.
+
+---
+
+## 14. Status — 2026-09-02
+
+This document's own status prose above is pinned to 2026-08-27 and, in several
+places, describes work as blocked or not-started that a same-day, later
+commit (`38c4e87`) already finished. This section replaces impression with a
+line-by-line audit: every numbered item below was checked against the actual
+current code — not commit messages, not this document's own earlier prose —
+by seven independent read-only passes, one per phase. Nothing was executed
+(no `manage.py`, no `pytest`, no live DB/SAP/HANA connection) — this is a
+static-code audit, not a rehearsal.
+
+Two blocked items are not defects: **1.3** (rotating `SECRET_KEY` and setting
+a distinct `JWT_SIGNING_KEY`) is the operator's own follow-up — the code fully
+supports it via env vars, but the working `.env` sets neither, so the app
+still runs on the compromised dev fallback key. **4.4** (moving `tracker` to
+its own schema) is paused under the operator's standing no-database-
+structural-changes constraint, not overlooked — see `Invariant #10` below and
+the frontend companion document's equivalent constraint.
+
+### Phase 0 — Safety net: **done**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 0.1 | CI: `manage.py test` (this project's pytest) + `makemigrations --check` on every push | **done** | `.github/workflows/ci.yml` — dry-run check + test run + `manage.py check` + schema generate/validate, all on push/PR. |
+| 0.2 | Characterisation tests for `users` auth | **done** | `users/tests.py` (443 lines) — login, refresh, user CRUD, role-assignment lockdown, password policy, scoped access, login throttling, `extra_roles` resolution. |
+| 0.3 | Characterisation tests for `tracker` stage transitions | **done** | `tracker/tests_stage_transitions.py` (503 lines, ~40 methods) exercises `apply_action` directly — routing, permissions, holds, rejections, locking, terminal stages. |
+| 0.4 | Staging database (pg_dump restore) | **done** | `scripts/make_staging.py` + `OMS/staging_settings.py` + `scripts/scrub_staging.py` all exist and are fully implemented, including a `--target-host` flag that is the actual fix for the "blocked on one grant" note — staging lives on a different server, sidestepping the need for `CREATEDB` on the production role. Not rehearsed end-to-end by this audit (that would touch a live-adjacent server), so the one open item is a dry run, not missing code. |
+| 0.5 | Endpoint inventory (route → auth/roles) | **done** | `scripts/endpoint_inventory.py` walks the live resolver; output committed at `docs/codebase/API_SURFACE.md`; continuously regression-tested by `core/tests.py::PublicEndpointAllowlistTests`. "Callers" (which frontend paths hit each route) isn't tracked — a minor gap against the item's literal wording, not against its purpose. |
+| 0.6 | `drf-spectacular` at `/api/schema/` | **done** | Wired in `OMS/urls.py`; `SERVE_PERMISSIONS` deliberately locked to `IsAuthenticated` (not spectacular's own `AllowAny` default) so the API surface isn't leaked anonymously; `manage.py spectacular --validate` runs in CI. |
+
+Beyond the checklist: `core/tests.py` also carries `AdminGuardTests`,
+`EnvExampleTests`, `NoCommittedCredentialsTests` and others — a broader
+security-hygiene suite than Phase 0 asked for, effectively covering parts of
+Phase 1 ahead of schedule.
+
+### Phase 1 — Critical security: **done except the rotation itself**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 1.1 | Lock down user-admin + party-assignment views; block role-escalation | **done** | `IsAuthenticated + IsAdminRole` on `CreateUserView`/`UserDetailView`/`DeleteUserView` and the party-assignment views; role-escalation blocked by a `validate()`-time guard (`assert_may_assign_roles`/`PRIVILEGED_ROLE_NAMES`) rather than a constrained queryset — same outcome, different mechanism than the plan's literal wording. |
+| 1.2 | `SECRET_KEY` from env, `DEBUG`/`ALLOWED_HOSTS` fixed | **done** | The old hardcoded key survives only as a DEBUG-mode fallback; production with no `SECRET_KEY` set raises `ImproperlyConfigured` rather than silently using it. `'*'` is appended to `ALLOWED_HOSTS` only `if DEBUG`. |
+| 1.3 | Rotate `SECRET_KEY` and set a distinct `JWT_SIGNING_KEY` | **blocked — operator's own task** | The env-var code path exists and is documented in `.env.example`, but the working `.env` sets neither key and still runs `DEBUG=True` — still on the compromised fallback. Not something an automated session should do. |
+| 1.4 | Explicit `CORS_ALLOWED_ORIGINS` | **done** | Real allowlist is now the default; `CORS_ALLOW_ALL_ORIGINS` still exists but defaults to `false` and is documented as an emergency escape hatch only. |
+| 1.5 | DRF throttling, especially login | **done** | `Anon`/`User` rate throttles project-wide; `LoginView` and the token-refresh view additionally use a scoped `login` throttle (10/min default). |
+| 1.6 | Security headers (HSTS, SSL redirect, secure cookies) | **done** | All present under `if not DEBUG`; HSTS seconds intentionally starts at 0 as a staged rollout until HTTPS is confirmed working — a deliberate sequencing choice, not a gap. |
+| 1.7 | `CreateUserSerializer` runs `AUTH_PASSWORD_VALIDATORS` | **done** | `validate_password()` now calls Django's real validators before `create()` — similarity, minimum length, common-password and numeric checks all enforced, not just the field's own `min_length=6`. |
+
+### Phase 2 — Permission architecture: **strong, with one real gap**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 2.1 | `DEFAULT_PERMISSION_CLASSES = IsAuthenticated` | **done** | Set in `REST_FRAMEWORK` settings; regression-tested (`test_the_default_is_closed`). |
+| 2.2 | Public endpoints explicitly `AllowAny` | **done** | Exactly 4 categories (login, refresh, health liveness/readiness, the public e-invoice QR image) — nothing else; a committed allowlist test fails the build if any other route opens up. |
+| 2.3 | `ROLE_PAGE_MAP` pattern extracted into `core/permissions.py` | **done, but as a different design than described** | `core/permissions.py` is the single source of truth for role identity/admin-ness, replacing 5 previously-disagreeing local `is_admin` definitions — but its own docstring explicitly argues against building a project-wide role→capability map, confining that pattern to `tracker` on purpose. The plan's literal wording should be read as superseded by this considered decision, not as unfinished. |
+| 2.4 | Migrate `hana`, `SKU`, `legal`, `invoice`, `serviceLayer`, `einvoice`, `ewaybill` onto `core/permissions.py` | **done, 2026-09-02** | Every view in `hana` (23 classes), `SKU` (4), `legal` (8), `invoice` (12 that lacked it), `einvoice` (20 `@api_view` functions; the public `irn_qr_png` left `AllowAny` and byte-for-byte untouched) and `ewaybill` (12 functions) now declares `permission_classes` explicitly instead of silently inheriting the Phase 2.1 default, each app carrying a module docstring recording why. `serviceLayer/ap_views.py` needed no change — all 4 of its view classes were already covered by `tracker.permissions.IsTrackerAP`. **Deliberately no new role restrictions were invented:** none of these 7 apps has an existing in-app `IsAdminRole` precedent to extend (unlike `sap_sync`, which had 8 admin-gated views before its own migration), so tightening any of them would have been a guess at intent, not a migration. The borderline cases are named rather than silently decided — `SKU.SKUDetailView`'s DELETE and `legal`'s three `RetrieveUpdateDestroyAPIView`s, all of which permit destructive actions by any authenticated user today exactly as they did before. One genuine bug was fixed in passing: `invoice.branches_for_user()` gated on raw `is_superuser`, so an admin via the `admin` role or `extra_roles` went unrecognised and could be wrongly scoped to their own (possibly empty) categories — now calls `core.permissions.is_admin()`, a pure widening. Verified: the endpoint inventory shows the same 10 open routes as before, nothing newly closed or opened. |
+| 2.5 | Resolve `extra_roles` with one rule everywhere | **done** | `tracker_pages_for()` now calls the shared `core.permissions.role_names()`, fixing the exact bug §7.4 described; `devices`, `approvals`, `payments` permissions all import the shared `is_admin` instead of local copies. |
+| 2.6 | Object-level permissions (row ownership) | **done** | A user can only view their own party assignments unless admin; `PartyView` filters through `UserPartyAssignment` — the literal "salesman sees only their own parties" example, and it's tested. |
+| 2.7 | Tests asserting 401/403 for every endpoint | **partial** | Achieved a different, arguably stronger way: `PublicEndpointAllowlistTests` statically resolves the actually-applied permission class for every live route (not just a grep) and fails if anything is open beyond the allowlist. Live HTTP 401/403 requests exist for only a handful of routes, not the full inventory. |
+
+`core.permissions.IsSelfOrAdmin` is defined with a full usage docstring but
+has zero call sites anywhere — dead code; 2.6's actual behaviour is achieved
+with inline checks instead.
+
+### Phase 3 — Structural refactor: **mixed, as expected for a 3–4 week incremental phase**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 3.1 | Split `orders/views.py` (5,667 LOC) by domain | **done** | Now an 11-module package (`dashboards.py`, `lifecycle.py`, `masters.py`, `queries.py`, `schemes.py`, etc., ~5,481 LOC total), no legacy remnant, `__init__.py` re-exports so nothing else needed to change. |
+| 3.2 | Order business rules into `orders/services/` | **done, 2026-09-02** | Both remaining inline blocks were extracted, each as a mechanical statement-for-statement move rather than a rewrite. `UpdateOrderStatusView`'s ~370-line transition body → `apply_order_status_transition()` in new `orders/services/order_status.py`; the view's `post()` now only validates, locks the row (`select_for_update()` inside the same `@transaction.atomic`) and delegates. **9 characterization tests were written first**, asserting today's behaviour including its known quirks, before a line moved (131 → 140 tests, all green before and after). `MartApproveView`/`MartResendSapView`'s SAP-posting bodies → `approve_and_post_to_sap()` / `resend_sales_order_to_sap()` in new `orders/services/mart_posting.py`, along with `_sap_outcome_is_ambiguous()` and `_mart_release_sap_claim()`; 140/140 identical before and after. Nothing about conditions, branch order, side effects, hardcoded status ids (3, 6, 9, `APPROVER_REJECTED_ACTION_ID`) or the 71-sites-key-off-status-*name* coupling was touched — those remain exactly as they were, deliberately, and are still the real §8.1 problem. **Known fragility, pre-existing and not introduced here:** both new service modules import from `orders.views._shared`, so importing either in true isolation (before `orders.views` has loaded) raises `ImportError` through a circular path; it never fires in practice because the URLconf always loads the views package first. |
+| 3.3 | Split `users/views.py` | **done** | Now `auth.py` / `accounts.py` / `assignments.py`, matching the plan exactly. |
+| 3.4 | Consolidate `orders.Branches` / `sap_sync.Branch` | **done** | `orders.Branches` state-deleted via a no-SQL migration (`sqlmigrate` prints nothing, both models were `managed=False`); `sap_sync.Branch` is the sole surviving model. |
+| 3.5 | Retire `orders.Notification` for `notifications.Notification` | **partial — groundwork complete, migration not scheduled** | `orders.Notification` is still the live, actively-written model. Both of its remaining endpoints (`NotificationListView` and `NotificationHistoryView`) now carry `@deprecated` instrumentation (headers + usage logging) pointing at the `notifications` app as successor, consistently. No data or traffic has moved, and none is in progress: migrating `orders.Notification` itself is a deliberate, un-scheduled decision left for the operator, not a coding task this audit advances further. |
+| 3.6 | Unify the SAP client | **done as scoped, 2026-09-02 — with two divergences deliberately left unmerged** | New `core/sap_client_base.py` holds the helpers that were genuinely identical: `verify_setting()` and `timeout_setting()` (imported as `_verify`/`_timeout` by `serviceLayer/service.py` and `payments/sap_client.py`) and `base_url()` (imported as `_base` by `einvoice/sap.py` and `payments/sap_client.py`). Each file's own call sites and typed exception (`SapFetchError`, `SapError` with `status_code`/`sap_code`/`payload`, and `serviceLayer`'s bare `Exception`) are unchanged. 223/223 `serviceLayer`+`einvoice`+`payments` tests pass, identical before and after. **Two real divergences were found and NOT force-merged**, because merging them would have been a behaviour change disguised as deduplication: (1) `einvoice/sap.py`'s verify helper reads only `HANA_SSL_VERIFY` and never consults `HANA_SSL_CA_BUNDLE` as the other two do — currently inert because this deployment leaves that setting unset, but a genuine inconsistency in the code as written, and a live one the moment a CA bundle is configured; (2) `serviceLayer/service.py` has no `_base()` at all (it builds its single login URL inline without the `rstrip('/')`), so it was left alone rather than newly wired onto the shared one. **Out of scope by design:** the two direct-DB stacks (`hana/services/connection.py` over `hdbcli`, `sap_sync/services/connection.py` over `pyodbc`) were not merged with these three REST/session-cookie HTTP clients — different protocol, different lifecycle; forcing a shared base across them would glue together two unrelated things rather than remove duplication. The plan's original "unify the SAP client" wording should be read as satisfied by *this* scoping, not by a single universal client. |
+| 3.7 | Parameter-bind HANA SQL (§7.5) | **done** | `hana/services/connection.py` — the file §7.5 named — now binds every value-bearing query with `?` placeholders; only allow-listed schema names (never request input) are still interpolated. *Not covered by this fix and worth a future look:* `sap_sync/services/connection.py`'s OPENQUERY building and `serviceLayer/ap_views.py`'s OData `$filter` interpolation are the same injection-risk class and remain untouched. |
+| 3.8 | Consistent error envelope + DRF exception handler | **done** | `core.exception_handler.api_exception_handler` is wired in; it additively sets envelope keys via `setdefault` (never overwrites a view's own response shape) and turns previously-unhandled exceptions into JSON 500s instead of Django's HTML error page. |
+
+### Phase 4 — Database and performance: **the decisions hold up; one item was never attempted**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 4.1 | Clean the dangerous orphan `django_migrations` row | **done** | `hana/migrations/0001_initial.py` is now a genuine empty migration, closing the one orphan row that could have made Django silently skip `hana`'s real first migration. The other 43 orphan rows are inert history, left alone by design. |
+| 4.2 | Query audit (`django-debug-toolbar`/`nplusone`, top 20 endpoints) | **done — measured, not tooled** | No `django-debug-toolbar`/`nplusone` installed (live-endpoint tooling is off-limits per the standing constraints); instead, 16 new tests across `orders`, `sap_sync`, `tracker`, `approvals` (`tests_query_audit.py` in each) hit list/dashboard endpoints via the Django test client against `OMS.test_settings`' in-memory sqlite DB, seeding 3 then 6 related rows and asserting the query count via `CaptureQueriesContext` does NOT scale — the actual N+1 signature. Found and fixed 3 real ones (each confirmed to scale before the fix and stay flat after, by temporarily reverting and re-running): `orders.PartyProductsView` ran one `SapProduct` lookup per party-product assignment (`orders/views/masters.py`, now one batched query); `tracker.InvoiceListSerializer.get_editable` re-ran the `extra_roles` M2M query once per invoice row via `all_role_names()` (`tracker/serializers.py`, now cached per request); `tracker.StuckAlertSerializer.get_notified` called `.select_related('user')` on an already-`prefetch_related`-populated manager, which clones the queryset and silently drops Django's prefetch cache, re-querying per alert (same file, now reads the prefetched `.all()` directly). The other 13 endpoints measured constant, confirming their existing `select_related`/`prefetch_related` — no change needed. One unrelated correctness bug surfaced along the way and was left alone as out of this item's scope: `sap_sync.PartySerializer`'s `addresses` field references a relation migration `0004_...` removed in 2026-02, so `PartyDetailView`/`PartyByCodeView`/`GetPartyByCategoryView` 500 on every real call. |
+| 4.3 | New indexes on unindexed FKs | **not done — by measured decision** | DB is 61MB; the largest relevant table has 159 rows. Every candidate table is small enough that Postgres seq-scans faster than an index would. Cargo-culting avoided, not skipped. |
+| 4.4 | Move `tracker` to its own schema | **blocked — standing constraint** | 15 tables plus a `search_path` change, which the operator's no-database-structural-changes constraint currently rules out (see `Invariant #10`). Paused pending the operator's go-ahead, not abandoned. |
+| 4.5 | The tracker HOLD tie-break defect | **done** | `StageEvent.EventType.NOTE` plus a partial unique constraint (`...one_open_visit_per_stage`) fixes the exact race the doc describes, landed as one no-op migration and one real `AddConstraint`. |
+| 4.6 | Squash migrations | **not done — by measured decision, plus a real precondition still missing** | Same "buys nothing at this size" reasoning as 4.3. It doesn't itself require live-DB DDL, but there is still no staging DB rehearsal path exercised (0.4's tooling exists but hasn't been run) to safely rewrite a migration graph against, so this stays deferred either way. |
+| 4.7 | Connection reuse (Postgres + HANA) | **partial** | Postgres half done (`CONN_MAX_AGE=60`, `CONN_HEALTH_CHECKS=True`, correctly sequenced after Phase 5.1 moved the scheduler out of the web process). The HANA half was never done: `HANAConnection` still opens and closes a fresh `hdbcli` connection per call, at roughly 49 call sites, with no pooling — and this gap isn't mentioned in the document's own Phase 4 write-up either. |
+
+### Phase 5 — Operations: **done**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 5.1 | Dedicated scheduler process, not request-cycle | **done** | `sap_sync/management/commands/run_scheduler.py` uses a Postgres advisory lock so a second copy can't double-run; `apps.py` no longer auto-starts anything. |
+| 5.2 | Request-ID / structured logging | **done** | `contextvars`-based request context (not thread-local), validated/echoed `X-Request-ID`, JSON-log opt-in, applied to all app + third-party loggers. |
+| 5.3 | Health endpoints | **done** | Liveness/readiness/detail tiers; Postgres is CRITICAL, HANA/Service-Layer/scheduler are DEGRADED-only; an undocumented bonus scheduler probe ties back into 5.1's advisory lock. |
+| 5.4 | Error tracking (Sentry, opt-in) | **done** | No-op when `SENTRY_DSN` unset; PII scrubbing before send (headers, sensitive keys, JWTs, session cookies, password fields); trace sampling defaults to 0.0. |
+| 5.5 | No hardcoded SAP/JSAP credentials/host | **done** | `SAP_DB_HOST` has no default at all (forces startup failure if unset); JSAP config raises `ImproperlyConfigured` if partially set. |
+
+All five are backed by dedicated test files (`core/tests_health.py`,
+`core/tests_logging.py`, `core/tests_error_tracking.py`, and more).
+
+### Phase 6 — API contract: **mostly done, one item half-real**
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 6.1 | Schema served and CI-validated | **done** | `manage.py spectacular --validate` runs on every push; schema uploaded as a build artifact. |
+| 6.2 | Additive `/api/v1/` versioning | **done** | The same URL patterns are mounted at both `/api/` and `/api/v1/` — proven identical (`assertIs` on the resolved callback) rather than just described, via `core/tests_api_contract.py`. |
+| 6.3 | Pagination + filtering/ordering standardisation | **done, 2026-09-02** | Pagination was already live (`OptInPagination`, opt-in via `?page=`, capped at 200, logs unbounded ≥1000-row responses) on the three heaviest list endpoints, up to 35,719 rows. The filtering/ordering half is now wired too: `django_filters` added to `INSTALLED_APPS` (it had sat unused in `requirements.txt` since the first commit) and `DjangoFilterBackend` added to `ProductListView`, `PartyListView`, `PartyAddressListView` — **additively**, with `filterset_fields` restricted to columns the views' pre-existing hand-written filters never touch (`sub_group`/`type`/`variety`; `chain`/`country`/`category`; `state`/`city`/`country`/`category`), so no query param can collide with or double-filter against the existing `icontains`/`iexact` logic, which was left completely untouched. Each view now calls the shared `core.pagination.ordering_from` allow-list only when `?ordering=` is actually sent, falling back to its default field on an unlisted or hostile value; with no `ordering` param, `order_by()` is never called at all, so the model's own `Meta.ordering` and the response bytes are unchanged. `devices/admin_views.py`'s duplicate 4-line allow-list check was deleted in favour of the same shared helper, so there is now one implementation rather than two. |
+| 6.4 | Deprecation mechanism | **done** | `@deprecated(successor=, sunset=, note=)` sets real `Deprecation`/`Sunset`/`Link` headers and logs usage by client platform/version/build; applied for real to one endpoint (`orders.NotificationListView`) as groundwork for Phase 3.5. |
+
+One thing worth fixing rather than just noting: `docs/codebase/API_SURFACE.md`
+(the generated route inventory) predates the 6.2 versioning work and lists no
+`/api/v1/` routes at all — nothing in `scripts/` or CI regenerates it
+automatically, so §12's own instruction to "regenerate after structural
+change" isn't actually wired up yet.
+
+### The punch list, worked the same day
+
+Every actionable gap this audit found — 2.4, 3.2, 3.5's inconsistency, 3.6,
+4.2 and 6.3's filtering half — was implemented on 2026-09-02 by seven parallel
+agents, each owning a disjoint set of files, each verifying against
+`--settings=OMS.test_settings` (in-memory SQLite, every outbound SAP/HANA/push
+call mocked — the same invocation CI runs) before and after its change. No
+live database, SAP Service Layer, HANA or NIC endpoint was contacted, no
+server or scheduler was started, and no schema changed.
+
+Consolidated verification afterward, on the settled tree: **815 tests, OK, 0
+failures, 0 errors** (10 skipped, all pre-existing); `manage.py check` reports
+the same single pre-existing `invoice.CreditLimitLogs` FK warning it did
+before; `makemigrations --check --dry-run` reports **"No changes detected"**,
+confirming no model or migration drift.
+
+The per-item rows above record what each one actually did, including the
+judgment calls where an agent deliberately did *less* than the plan's literal
+wording asked — 2.4 inventing no new role restrictions, 3.6 refusing to merge
+two helpers that turned out to genuinely differ, 6.3 leaving the pre-existing
+hand-written filters alone. Those restraints are the useful part of the
+record; a future reader should not "finish" them without first re-deriving why
+they were left.
+
+### What this leaves
+
+1. **1.3 and 4.4** — unchanged, and correctly so. Both are blocked on a human
+   action, not on anything code can fix: rotating `SECRET_KEY`/`JWT_SIGNING_KEY`
+   is the operator's own task (the code path is ready; the working `.env` sets
+   neither, so the app still runs on the compromised dev fallback), and moving
+   `tracker` to its own schema is paused under the standing no-database-
+   structural-changes constraint.
+2. **3.5's actual migration** — both legacy `orders.Notification` endpoints are
+   now consistently instrumented with deprecation headers and usage logging, so
+   the data exists to make the call. Whether and when to move traffic to
+   `notifications.Notification` is an operator decision; nothing is in progress.
+3. **A real bug found in passing, not fixed** (out of scope for the item that
+   surfaced it, but worth its own task): `sap_sync.PartySerializer` declares an
+   `addresses` nested field, but migration `0004_alter_party_options_...`
+   removed the `party` FK that relation depended on back in 2026-02 — so
+   `PartyDetailView`, `PartyByCodeView` and `GetPartyByCategoryView` raise on
+   every real call. No test covered them, which is why it went unnoticed.
+4. **Two latent issues recorded above rather than fixed**: `einvoice/sap.py`'s
+   TLS verify helper ignoring `HANA_SSL_CA_BUNDLE` (inert only while that
+   setting is unset), and the circular-import fragility between
+   `orders/services/*` and `orders/views/_shared` (never fires in practice
+   because the URLconf loads the views package first).
+5. **The §8.1 problem 3.2 did not touch** — 71 sites keying business logic off
+   mutable status *names* and hardcoded status ids. The extraction moved that
+   code intact rather than fixing it, deliberately: it is its own project, with
+   its own risk profile, and it needs the characterization tests 3.2 just added
+   as its foundation.

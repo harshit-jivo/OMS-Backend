@@ -32,7 +32,9 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from orders.models import Order, OrderRateApproval, OrderStatus, OrdersLog
+from orders.models import (
+    Order, OrderFlowConfig, OrderRateApproval, OrderStatus, OrdersLog,
+)
 from orders.views import send_order_notifications
 from users.models import User, UserRole
 
@@ -256,3 +258,244 @@ class TransitionBasicsTests(_StatusTestCase):
         self._submit(self.approver_a, RATE_APPROVED_ID, reason='ok')
         self.assertGreater(
             OrdersLog.objects.filter(order=self.order).count(), before)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Characterisation tests — added ahead of plan item 3.2's extraction of
+# `UpdateOrderStatusView`'s status-name branch dispatch into
+# `orders.services.order_status`.
+#
+# Everything above this line already covered the rate-approval path. The
+# named-status branches below it (auditor <-> billing handoffs, billing/
+# auditor completion, auditor rejection, the "already rejected" short-circuit
+# and the generic fallback) had NO test coverage at all before this pass —
+# these tests record today's actual behaviour, quirks included, so the
+# extraction has something to prove it did not change, and are meant to keep
+# passing, unchanged, after the move.
+#
+# Every status name below is deliberately NOT an exact, case-insensitive
+# match for the four canonical stage labels ('Rate Approval', 'Billing',
+# 'Auditor Approval', 'Completed') UNLESS a branch's own condition requires
+# that exact name. An exact match makes the status resolvable by
+# `_get_next_order_flow_status` (`orders.services.order_flow`), which can
+# silently overwrite the client-requested target status before the branch
+# dispatch below ever sees it — a real, separate behaviour this suite is not
+# trying to characterise. Disabling every stage on the ASM `OrderFlowConfig`
+# row up front neutralises that path everywhere here, including the one
+# exact-name case (`AuditorToBillingTests`), so what is actually under test
+# is only the dispatch logic itself.
+# ─────────────────────────────────────────────────────────────────────────
+
+class _BranchDispatchTestCase(TestCase):
+
+    def setUp(self):
+        OrderFlowConfig.objects.create(
+            flow_type='ASM',
+            rate_approval_enabled=False,
+            billing_enabled=False,
+            auditor_enabled=False,
+            rate_conditions=[],
+        )
+        self.actor = User.objects.create_user(
+            username='disp-actor', password='pw', name='Dispatch Actor',
+            role=_role('sales'))
+
+    def _order(self, status):
+        return Order.objects.create(
+            order_number=f'ORD-DISP-{status.id}',
+            status=status,
+            created_by=self.actor,
+        )
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def _submit(self, order, user, status_id, **body):
+        return self._client(user).post(
+            reverse('update-status', args=[order.id]),
+            {'status': status_id, **body}, format='json')
+
+
+class AuditorToBillingTests(_BranchDispatchTestCase):
+    """`is_auditor_to_billing` — requires prev_name == 'auditor approval'
+    exactly, which is why this is the one class that needs the disabled
+    `OrderFlowConfig` from the base class to keep the auto-advance override
+    from overwriting the requested target before this branch is evaluated."""
+
+    def test_forwards_to_billing_and_marks_the_new_stage_pending(self):
+        auditor = OrderStatus.objects.create(name='Auditor Approval')
+        billing = OrderStatus.objects.create(name='Billing Approval')
+        order = self._order(auditor)
+
+        res = self._submit(order, self.actor, billing.id)
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['status'], 'Billing Approval')
+        self.assertEqual(
+            res.json()['message'], 'Order accepted and sent to Billing Approval')
+        order.refresh_from_db()
+        self.assertEqual(order.status_id, billing.id)
+        self.assertTrue(
+            OrdersLog.objects.filter(
+                order=order, action=billing, performed_by__isnull=True).exists(),
+            'the new billing stage should get a pending (performed_by=None) marker')
+
+    def test_resolves_an_existing_pending_auditor_marker(self):
+        auditor = OrderStatus.objects.create(name='Auditor Approval')
+        billing = OrderStatus.objects.create(name='Billing Approval')
+        order = self._order(auditor)
+        pending = OrdersLog.objects.create(
+            order=order, action=auditor, performed_by=None, remarks='')
+
+        self._submit(order, self.actor, billing.id, reason='looks right')
+
+        pending.refresh_from_db()
+        self.assertEqual(pending.performed_by_id, self.actor.id)
+        self.assertEqual(pending.remarks, 'looks right')
+
+
+class BillingToAuditorTests(_BranchDispatchTestCase):
+
+    def test_forwards_to_auditor_and_closes_the_billing_marker(self):
+        billing = OrderStatus.objects.create(name='Billing Stage')
+        auditor = OrderStatus.objects.create(name='Auditor Stage')
+        order = self._order(billing)
+
+        res = self._submit(order, self.actor, auditor.id, reason='fwd')
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['status'], 'Auditor Stage')
+        order.refresh_from_db()
+        self.assertEqual(order.status_id, auditor.id)
+        billing_log = OrdersLog.objects.get(order=order, action=billing)
+        self.assertEqual(billing_log.performed_by_id, self.actor.id)
+        self.assertEqual(billing_log.remarks, 'fwd')
+        self.assertTrue(
+            OrdersLog.objects.filter(
+                order=order, action=auditor, performed_by__isnull=True).exists())
+
+
+class BillingCompletedTests(_BranchDispatchTestCase):
+
+    def test_completes_the_order_and_stamps_the_completion_log_directly(self):
+        billing = OrderStatus.objects.create(name='Billing Stage')
+        completed = OrderStatus.objects.create(name='Completed', code='COMPLETED')
+        order = self._order(billing)
+
+        res = self._submit(order, self.actor, completed.id, reason='invoiced')
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['message'], 'Order completed successfully')
+        order.refresh_from_db()
+        self.assertEqual(order.status_id, completed.id)
+        billing_log = OrdersLog.objects.get(order=order, action=billing)
+        self.assertEqual(billing_log.performed_by_id, self.actor.id)
+        # Unlike the auditor/billing handoffs above, the completion log is
+        # stamped with the actor directly — there is no pending-marker dance
+        # for this terminal stage.
+        completed_log = OrdersLog.objects.get(order=order, action=completed)
+        self.assertEqual(completed_log.performed_by_id, self.actor.id)
+        self.assertEqual(completed_log.remarks, 'invoiced')
+
+
+class AuditorRejectedTests(_BranchDispatchTestCase):
+
+    def test_rejects_and_closes_the_auditor_marker(self):
+        auditor = OrderStatus.objects.create(name='Auditor Stage')
+        rejected = OrderStatus.objects.create(name='Rejected by Auditor', code='REJECTED')
+        order = self._order(auditor)
+
+        res = self._submit(order, self.actor, rejected.id, reason='bad pricing')
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['message'], 'Order rejected successfully')
+        order.refresh_from_db()
+        self.assertEqual(order.status_id, rejected.id)
+        auditor_log = OrdersLog.objects.get(order=order, action=auditor)
+        self.assertEqual(auditor_log.performed_by_id, self.actor.id)
+        self.assertEqual(auditor_log.remarks, 'bad pricing')
+        rejected_log = OrdersLog.objects.get(order=order, action=rejected)
+        self.assertEqual(rejected_log.remarks, 'bad pricing')
+
+
+class AuditorCompletedTests(_BranchDispatchTestCase):
+
+    def test_completes_from_auditor_and_resolves_the_pending_marker(self):
+        auditor = OrderStatus.objects.create(name='Auditor Stage')
+        completed = OrderStatus.objects.create(name='Completed', code='COMPLETED')
+        order = self._order(auditor)
+        pending = OrdersLog.objects.create(
+            order=order, action=auditor, performed_by=None, remarks='')
+
+        res = self._submit(order, self.actor, completed.id)
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['message'], 'Order completed successfully')
+        order.refresh_from_db()
+        self.assertEqual(order.status_id, completed.id)
+        pending.refresh_from_db()
+        self.assertEqual(pending.performed_by_id, self.actor.id)
+        # No reason was given, so a hardcoded default fills the remarks — a
+        # quirk specific to this branch; every sibling branch just stores the
+        # raw (possibly empty) reason instead.
+        self.assertEqual(pending.remarks, 'Sales quotation created by auditor')
+        completed_log = OrdersLog.objects.get(order=order, action=completed)
+        self.assertEqual(completed_log.remarks, 'Sales quotation created by auditor')
+
+
+class AlreadyRejectedGuardTests(_BranchDispatchTestCase):
+
+    def test_resubmitting_the_same_rejected_status_is_a_no_op(self):
+        rejected = OrderStatus.objects.create(name='Rejected', code='REJECTED')
+        order = self._order(rejected)
+
+        res = self._submit(order, self.actor, rejected.id)
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json(), {
+            'message': 'Order already rejected',
+            'order_id': order.id,
+            'status': 'Rejected',
+        })
+        self.assertFalse(
+            OrdersLog.objects.filter(order=order).exists(),
+            'the early-return guard should not write any log row')
+
+
+class GenericFallbackTests(_BranchDispatchTestCase):
+    """Neither a rate-approval, auditor nor billing status name — the plain
+    "advance to whatever status was requested" path at the bottom of the
+    view."""
+
+    def test_creates_a_new_log_row_when_no_pending_marker_exists(self):
+        created = OrderStatus.objects.create(name='Order Created')
+        dispatched = OrderStatus.objects.create(name='Dispatched')
+        order = self._order(created)
+
+        res = self._submit(order, self.actor, dispatched.id, reason='sent')
+
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['message'], 'Order updated and sent to Dispatched')
+        order.refresh_from_db()
+        self.assertEqual(order.status_id, dispatched.id)
+        log = OrdersLog.objects.get(order=order, action=dispatched)
+        self.assertEqual(log.performed_by_id, self.actor.id)
+        self.assertEqual(log.remarks, 'sent')
+
+    def test_resolves_an_existing_pending_marker_instead_of_duplicating(self):
+        created = OrderStatus.objects.create(name='Order Created')
+        dispatched = OrderStatus.objects.create(name='Dispatched')
+        order = self._order(created)
+        pending = OrdersLog.objects.create(
+            order=order, action=dispatched, performed_by=None, remarks='')
+
+        self._submit(order, self.actor, dispatched.id, reason='sent')
+
+        self.assertEqual(
+            OrdersLog.objects.filter(order=order, action=dispatched).count(), 1,
+            'a pending marker should be updated in place, not duplicated')
+        pending.refresh_from_db()
+        self.assertEqual(pending.performed_by_id, self.actor.id)
+        self.assertEqual(pending.remarks, 'sent')

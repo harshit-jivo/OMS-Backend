@@ -1,5 +1,17 @@
-# views.py
+"""HANA read views for billing/order-entry lookups (stock, parties, prices, ...).
+
+Phase 2.4 audit: every view here declared no `permission_classes` at all and
+relied solely on the project-wide default (`IsAuthenticated`, OMS/settings.py).
+Every view is a read-only query against HANA/SAP reference data with no
+admin-vs-regular-user distinction in its current behaviour — nothing here
+rewrites master data or touches another user's records the way `sap_sync`'s
+eight sync/schedule views do (those are gated with `core.permissions.IsAdminRole`
+because they *are* different: mass rewrites of the product/party masters every
+order is priced from). So the fix is to make the existing default explicit,
+per view, rather than invent a role restriction nothing here has ever had.
+"""
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
@@ -30,6 +42,8 @@ def get_branch_or_error(request, allowed=VALID_BRANCHES):
 
 
 class GetProductStockView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         branch, error = get_branch_or_error(request)
         if error:
@@ -53,6 +67,7 @@ class GetInventoryReportView(APIView):
     Feeds the billing Inventory Report page (and its Excel download): one row
     per item, one column per warehouse, a subtotal per variety.
     """
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         branch, error = get_branch_or_error(request)
@@ -125,6 +140,7 @@ class GetPendingDispatchView(APIView):
     moment an invoice is punched or a line is added, with nothing to keep in
     step by hand.
     """
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         branch, error = get_branch_or_error(request)
@@ -158,6 +174,8 @@ class GetPendingDispatchView(APIView):
 
 
 class GetSalesOrderView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         party_code = request.query_params.get('card_code')
         branch, error = get_branch_or_error(request)
@@ -175,6 +193,8 @@ class GetSalesOrderView(APIView):
         return Response(grouped)
 
 class GetProductSalesOrderView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         item_code = request.query_params.get('item_code')
         branch, error = get_branch_or_error(request)
@@ -193,6 +213,8 @@ class GetProductSalesOrderView(APIView):
 
 
 class GetOpenPartiesView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         branch, error = get_branch_or_error(request)
         if error:
@@ -202,6 +224,8 @@ class GetOpenPartiesView(APIView):
         return Response(openParties)
 
 class GetCustomerDetailsView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         party_code = request.query_params.get('card_code')
         branch, error = get_branch_or_error(request)
@@ -219,6 +243,7 @@ class GetCustomerDetailsView(APIView):
 
 class GetWarehousesView(APIView):
     """Selectable warehouses, for the order-level warehouse picker."""
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         branch, error = get_branch_or_error(request)
@@ -237,6 +262,8 @@ class GetWarehousesView(APIView):
 
 
 class GetWarehouseDetailsView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         warehouse_code = request.query_params.get('whs_code')
         branch, error = get_branch_or_error(request)
@@ -253,6 +280,8 @@ class GetWarehouseDetailsView(APIView):
         return Response(details)
 
 class GetSalespersonDetailsView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         salesperson_code = request.query_params.get('slp_code')
         branch, error = get_branch_or_error(request)
@@ -269,6 +298,8 @@ class GetSalespersonDetailsView(APIView):
         return Response(details)
 
 class GetFreightMastersView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         branch, error = get_branch_or_error(request)
         if error:
@@ -278,6 +309,8 @@ class GetFreightMastersView(APIView):
         return Response(freight_masters)
 
 class GetAddressView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         card_code = request.query_params.get('card_code')
         branch, error = get_branch_or_error(request)
@@ -295,6 +328,8 @@ class GetAddressView(APIView):
 
 
 class GetVendorStatesView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         branch, error = get_branch_or_error(request)
         if error:
@@ -305,6 +340,8 @@ class GetVendorStatesView(APIView):
 
 
 class GetStateChainView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         state_code = request.query_params.get('state_code')
         branch, error = get_branch_or_error(request)
@@ -315,6 +352,8 @@ class GetStateChainView(APIView):
         return Response(chain)
 
 class GetAllCustomersView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         branch, error = get_branch_or_error(request)
         if error:
@@ -324,6 +363,8 @@ class GetAllCustomersView(APIView):
         return Response(customers)
 
 class GetNextDocNumberView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         doc_type = request.query_params.get('doc_type')
         branch, error = get_branch_or_error(request)
@@ -340,6 +381,8 @@ class GetNextDocNumberView(APIView):
         return Response(next_doc_number)
 
 class GetFGItemsView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         branch, error = get_branch_or_error(request)
         if error:
@@ -350,6 +393,8 @@ class GetFGItemsView(APIView):
 
 
 class GetBatchDetailsView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         item_code = request.query_params.get('item_code')
         whs_code = request.query_params.get('whs_code')
@@ -367,6 +412,8 @@ class GetBatchDetailsView(APIView):
         return Response(batch_details)
 
 class GetInventoryDetailsView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         item_code = request.query_params.get('item_code')
         branch, error = get_branch_or_error(request)
@@ -383,6 +430,8 @@ class GetInventoryDetailsView(APIView):
         return Response(inventory_details)
 
 class GetItemPriceView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get (self , request):
         item_code = request.query_params.get('item_code')
         price_list = request.query_params.get('price_list')
@@ -400,6 +449,8 @@ class GetItemPriceView(APIView):
         return Response(item_price)
 
 class GetSeries(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self , request):
         finYear = request.query_params.get('finYear')
         groupCode = request.query_params.get('groupCode')
@@ -415,6 +466,7 @@ class GetSeries(APIView):
 
 
 class GetDraftVerification(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self , request):
         refId = request.query_params.get('refId')
@@ -429,6 +481,7 @@ class GetDraftVerification(APIView):
         return Response({"data" : result})
 
 class GetInvoiceDrafts(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self , request):
         statusCode = request.query_params.get('statusCode')

@@ -25,6 +25,10 @@ import requests
 from django.conf import settings
 from django.core.cache import cache
 
+from core.sap_client_base import base_url as _base
+from core.sap_client_base import timeout_setting as _timeout
+from core.sap_client_base import verify_setting as _verify
+
 logger = logging.getLogger(__name__)
 
 SESSION_CACHE_PREFIX = 'payments:sap_session'
@@ -38,29 +42,6 @@ class SapError(Exception):
         self.status_code = status_code
         self.sap_code = sap_code
         self.payload = payload
-
-
-def _base():
-    return settings.HANA_SERVICE_LAYER_URL.rstrip('/')
-
-
-def _verify():
-    """Honour the configured TLS setting.
-
-    Every SAP client in the project now does; `serviceLayer/service.py` used to
-    hardcode verify=False, and `sap_sync` used to fall back to it on any
-    SSLError."""
-    bundle = getattr(settings, 'HANA_SSL_CA_BUNDLE', '') or ''
-    if bundle:
-        return bundle
-    return getattr(settings, 'HANA_SSL_VERIFY', True)
-
-
-def _timeout():
-    return (
-        getattr(settings, 'HANA_CONNECT_TIMEOUT', None) or 15,
-        getattr(settings, 'HANA_READ_TIMEOUT', None) or 120,
-    )
 
 
 def _cache_key(company_db):

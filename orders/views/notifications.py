@@ -414,6 +414,19 @@ class WebPushSubscriptionView(APIView):
         return Response({'success': True, 'message': 'Web push subscription removed'})
 
 
+@deprecated(
+    successor='/api/v1/notifications/',
+    note=(
+        'Superseded by the reusable `notifications` app. This is the paginated '
+        'history variant of the same legacy read path as `NotificationListView` '
+        '-- it also reads `orders.Notification` (table `notifications`), which '
+        'plan item 3.5 retires in favour of `notifications.Notification` (table '
+        '`notifications_notification`). No sunset date is set: the web client '
+        'still calls this, and the date belongs to whoever owns that migration. '
+        'The header and the usage log exist so the decision can be made from '
+        'evidence rather than from a guess.'
+    ),
+)
 class NotificationHistoryView(APIView):
     """Paginated notification history (Phase 3, Task 9).
 

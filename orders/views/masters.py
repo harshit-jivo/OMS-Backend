@@ -116,24 +116,36 @@ class PartyProductsView(APIView):
     def get(self, request, card_code):
         normalized_card_code = (card_code or '').strip()
         active_item_codes = _active_sap_item_codes()
-        assignments = PartyProductAssignment.objects.filter(
-            card_code=normalized_card_code,
-            is_active=True,
-            item_code__in=active_item_codes,
-        ).order_by('category', 'item_code')
+        assignments = list(
+            PartyProductAssignment.objects.filter(
+                card_code=normalized_card_code,
+                is_active=True,
+                item_code__in=active_item_codes,
+            ).select_related('scheme').order_by('category', 'item_code')
+        )
+
+        # Phase 4.2 query audit: this used to run one (sometimes two) SapProduct
+        # lookups PER assignment -- a real N+1 that scaled with the party's
+        # catalogue size. One batched query for every item_code the assignments
+        # could possibly need, keyed both by (item_code, category) and by
+        # item_code alone, replaces that -- see
+        # docs/CODEBASE_AND_REFACTOR_PLAN.md Phase 4.2.
+        item_codes = {assignment.item_code for assignment in assignments}
+        products_by_item_and_category = {}
+        products_by_item_code = {}
+        for product in SapProduct.objects.filter(active_product_q(), item_code__in=item_codes):
+            products_by_item_and_category.setdefault(
+                (product.item_code, product.category), product)
+            # Some older assignment rows can carry a valid item_code with a
+            # category that no longer matches SAP metadata exactly -- fall back
+            # to any active product for that item_code, same as before.
+            products_by_item_code.setdefault(product.item_code, product)
 
         rows = []
         for assignment in assignments:
-            product = SapProduct.objects.filter(
-                active_product_q(),
-                item_code=assignment.item_code,
-                category=assignment.category,
-            ).first()
-
-            # Some older assignment rows can carry a valid item_code with a
-            # category that no longer matches SAP metadata exactly.
-            if not product:
-                product = SapProduct.objects.filter(active_product_q(), item_code=assignment.item_code).first()
+            product = products_by_item_and_category.get(
+                (assignment.item_code, assignment.category)
+            ) or products_by_item_code.get(assignment.item_code)
 
             if not product:
                 continue

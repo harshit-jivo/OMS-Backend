@@ -120,6 +120,7 @@ INSTALLED_APPS = [
     # 'rest_framework.authto
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'django_filters',
     'django_apscheduler',
     # OpenAPI schema at /api/schema/ (Phase 0.6). Already a pinned dependency
     # before this line; it was simply never installed.
@@ -679,7 +680,19 @@ CORS_ALLOW_HEADERS = (
 # here — the browser receives it and refuses to expose it. Without this the
 # front end cannot show the user a request ID to quote in a bug report, which
 # is most of the point of having one.
-CORS_EXPOSE_HEADERS = ('x-request-id',)
+#
+# The three RFC 8594 headers are here for the same reason. `core/deprecation.py`
+# sets them on every deprecated endpoint, and the web client warns in the
+# console the first time it calls one — which is how a retirement gets noticed
+# by the people who have to do the migrating, rather than on the sunset date.
+# Unexposed, those headers arrive and are then withheld from the client that
+# needs them, and the whole mechanism is invisible in a browser.
+CORS_EXPOSE_HEADERS = (
+    'x-request-id',
+    'deprecation',
+    'sunset',
+    'link',
+)
 
 # Whether a reverse proxy sets X-Forwarded-For. Off by default: the header is
 # caller-supplied, so trusting it without a proxy in front lets any client

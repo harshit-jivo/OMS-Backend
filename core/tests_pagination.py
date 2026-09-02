@@ -165,3 +165,94 @@ class OrderingAllowListTests(TestCase):
                 self.assertEqual(
                     ordering_from(self._request(hostile), {'created_at'}, '-id'),
                     '-id')
+
+
+class OptInFilteringTests(TestCase):
+    """The other half of 6.3: `DjangoFilterBackend`, wired onto
+    `PartyAddressListView` (same for `ProductListView` / `PartyListView`,
+    exercised at the view level by `sap_sync.tests_query_audit`).
+
+    Wired in additively: the fields it filters on (`state`, `city`,
+    `country`, `category`) are ones the view's own hand-written `card_code` /
+    `address_type` / `gst` filters never touched, and it only ever narrows
+    the queryset when a caller actually sends one of its own query params --
+    the same opt-in guarantee `OptInPaginationTests` above makes for paging.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        PartyAddress.objects.bulk_create([
+            PartyAddress(card_code='C0001', address_name='A1',
+                         address_type='S', state='Delhi'),
+            PartyAddress(card_code='C0002', address_name='A2',
+                         address_type='S', state='Maharashtra'),
+            PartyAddress(card_code='C0003', address_name='A3',
+                         address_type='S', state='Delhi'),
+        ])
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=User.objects.create_user(
+            username='clerk-filter', password='x'))
+
+    def test_without_a_filter_param_every_row_still_comes_back(self):
+        """Declaring `filter_backends` must not narrow anything on its own."""
+        body = self.client.get(PATH).json()
+        self.assertEqual(len(body), PartyAddress.objects.count())
+        self.assertEqual(
+            {row['card_code'] for row in body},
+            set(PartyAddress.objects.values_list('card_code', flat=True)))
+
+    def test_a_filter_param_narrows_to_the_matching_rows(self):
+        body = self.client.get(f'{PATH}?state=Delhi').json()
+        self.assertEqual({row['card_code'] for row in body},
+                          {'C0001', 'C0003'})
+
+    def test_a_filter_param_with_no_match_returns_an_empty_list(self):
+        self.assertEqual(self.client.get(f'{PATH}?state=Gujarat').json(), [])
+
+    def test_filtering_composes_with_the_existing_hand_written_filters(self):
+        """`card_code` (hand-written) and `state` (DjangoFilterBackend) must
+        narrow together, not have one silently win."""
+        body = self.client.get(f'{PATH}?card_code=C0001&state=Delhi').json()
+        self.assertEqual([row['card_code'] for row in body], ['C0001'])
+        self.assertEqual(
+            self.client.get(f'{PATH}?card_code=C0001&state=Maharashtra').json(),
+            [])
+
+
+class OptInOrderingTests(TestCase):
+    """The shared `ordering_from` allow-list (see `OrderingAllowListTests`
+    above), wired for real onto `PartyAddressListView` via `?ordering=` --
+    the same helper, not a second copy of the rule."""
+
+    @classmethod
+    def setUpTestData(cls):
+        PartyAddress.objects.bulk_create([
+            PartyAddress(card_code='C3', address_name='Zeta', address_type='S'),
+            PartyAddress(card_code='C1', address_name='Alpha', address_type='S'),
+            PartyAddress(card_code='C2', address_name='Mu', address_type='S'),
+        ])
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=User.objects.create_user(
+            username='clerk-order', password='x'))
+
+    def test_without_an_ordering_param_the_models_own_ordering_holds(self):
+        """No `ordering` param must mean `order_by()` is never even called --
+        the model's `Meta.ordering` (`card_code`) is what decides, unchanged."""
+        body = self.client.get(PATH).json()
+        self.assertEqual([row['card_code'] for row in body], ['C1', 'C2', 'C3'])
+
+    def test_an_allowed_ordering_field_is_honoured(self):
+        body = self.client.get(f'{PATH}?ordering=-address_name').json()
+        self.assertEqual([row['address_name'] for row in body],
+                          ['Zeta', 'Mu', 'Alpha'])
+
+    def test_an_unlisted_ordering_field_falls_back_to_the_default(self):
+        """Rejected by the same allow-list `ordering_from` already enforces
+        elsewhere -- an unlisted field falls back to the view's default
+        ordering rather than reaching `order_by()` unchecked."""
+        body = self.client.get(f'{PATH}?ordering=synced_at').json()
+        self.assertEqual([row['card_code'] for row in body], ['C1', 'C2', 'C3'])

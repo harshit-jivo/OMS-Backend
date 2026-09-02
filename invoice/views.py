@@ -1,3 +1,17 @@
+"""Sales-invoice review/approval screen, credit-limit requests, bill printing.
+
+Phase 2.4 audit: two views (`UsedSalesOrdersView`, `ReservedBatchesView`)
+already declared `permission_classes = [IsAuthenticated]`; every other view
+relied silently on the project-wide default. All of them are now explicit,
+matching the two that already were. None is gated with
+`core.permissions.IsAdminRole`: create/approve/reject/delete here are ordinary
+reviewer actions on the billing desk, not org-wide admin functions — the same
+distinction `sap_sync` draws for its own (deliberately non-admin-gated) order
+approval views. `branches_for_user` below is the one place this app's access
+logic genuinely needed `core.permissions`: it used to check `is_superuser`
+alone for "sees every branch", the exact bug class `core.permissions.is_admin`
+exists to close (an admin via role/`extra_roles`/`is_staff` wasn't recognised).
+"""
 import json
 import logging
 import re
@@ -21,6 +35,7 @@ from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
 from django.http import HttpResponse
 
+from core.permissions import is_admin
 from devices.context import describe_request_device
 from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
@@ -71,14 +86,21 @@ def branches_for_user(user):
     An OIL user has no business reviewing beverage bills and vice versa, so the
     review screens are scoped to the branches behind the user's own categories.
 
-    None — meaning unrestricted — is returned for superusers and for anyone with
-    no category assigned at all. That last case matters: admins and auditors are
+    None — meaning unrestricted — is returned for admins and for anyone with no
+    category assigned at all. That last case matters: admins and auditors are
     set up without categories, and scoping them to nothing would empty the
     review screen for the very people who have to work it.
+
+    Phase 2.4: this used to check `is_superuser` alone, which is exactly the
+    bug `core.permissions` was built to close (see its module docstring) — an
+    admin holding the role via `extra_roles`, or via `is_staff`, was not
+    recognised here and could have been scoped down to their own categories
+    instead of seeing the whole review screen. `core.permissions.is_admin`
+    covers all three; this is a widening, not a new restriction.
     """
     if not user or not getattr(user, 'is_authenticated', False):
         return None
-    if getattr(user, 'is_superuser', False):
+    if is_admin(user):
         return None
 
     names = {
@@ -103,6 +125,8 @@ def scope_logs_to_user(invoice_logs, request):
 
 
 class InvoiceLogCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def post(self, request):
         # A resubmit from the "Edit" action on a rejected invoice carries the id of
         # the log it replaces. It is not a model field, so keep it out of the
@@ -184,6 +208,7 @@ class InvoiceLogCreateView(APIView):
 
 
 class InvoicelogStatusUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
         try:
@@ -256,6 +281,8 @@ class InvoiceLogDeleteView(APIView):
     and a DELETED entry is appended to the timeline so the removal is itself
     part of the audit trail.
     """
+
+    permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk):
         try:
@@ -360,6 +387,7 @@ class InvoiceLogDeleteView(APIView):
 
 
 class InvoiceLogListView(APIView):
+  permission_classes = [IsAuthenticated]
 
   def get(self, request):
     inv_status = request.query_params.get('status')
@@ -400,6 +428,7 @@ class InvoiceLogListView(APIView):
     return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self ,  request , pk):
         try:
@@ -421,6 +450,7 @@ class InvoiceHistoryView(APIView):
 
 
 class InvoiceRefLogCreateView(CreateAPIView):
+    permission_classes = [IsAuthenticated]
 
     serializer_class = InvoiceRefLogsSerializer
     queryset = InvoiceRefLogs.objects.all()
@@ -477,6 +507,7 @@ class InvoiceRefLogCreateView(CreateAPIView):
 
 
 class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated]
     # Deleted entries are excluded rather than merely hidden: editing one would
     # write a history entry against a log nobody can see.
     queryset = InvoiceLog.objects.filter(is_deleted=False)
@@ -501,6 +532,7 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
 
 
 class CreditLimitCardsView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         company = request.query_params.get('company', '1')
@@ -517,6 +549,7 @@ class CreditLimitCardsView(APIView):
 
 
 class CreditLimitRequestView(APIView):
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -634,6 +667,8 @@ class CreditLimitRequestView(APIView):
 
 
 class GetCreditLimitJSAPFlow(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         invoice_id = request.query_params.get('invoice_id')
         # `company` is still accepted (callers send it) but no longer used: the
@@ -702,6 +737,8 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response({'error':'Invalid JSON received from JSAP API'}, status=status.HTTP_502_BAD_GATEWAY)
         
 class GetPrintReport(APIView):
+    permission_classes = [IsAuthenticated]
+
     # Characters Windows/macOS refuse in a filename, plus control chars.
     _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
@@ -787,7 +824,8 @@ class GetPrintReport(APIView):
 
   
 class InvoiceLogListwoWhsView(APIView):
-    
+  permission_classes = [IsAuthenticated]
+
   def get(self, request):
     inv_status = request.query_params.get('status')
     # select_related/prefetch_related keep the lineage fields on the serializer
