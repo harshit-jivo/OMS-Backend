@@ -15,6 +15,8 @@ project's several definitions of "admin" legitimately diverge.
 """
 
 import logging
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -33,7 +35,61 @@ from users.models import User
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# OpenAPI response shapes — documentation only, no runtime effect.
+#
+# These views assemble their JSON by hand instead of declaring a
+# `serializer_class`, so drf-spectacular has nothing to infer from and emits an
+# undescribed body; the frontend generates its TypeScript from this document,
+# so an undescribed body means an untyped `data`. Each declaration below mirrors
+# the literal dict the method returns — envelope included — because a *wrong*
+# declaration is worse than none: the compiler would then agree with the lie.
+# ---------------------------------------------------------------------------
 
+#: `POST /api/auth/login/` 200. Note there is no `errors` key on this branch.
+LOGIN_SUCCESS_RESPONSE = inline_serializer(name='LoginSuccess', fields={
+    'success': serializers.BooleanField(),
+    'message': serializers.CharField(),
+    'data': inline_serializer(name='LoginSuccessData', fields={
+        'user': UserSerializer(),
+        'tokens': inline_serializer(name='LoginTokens', fields={
+            'access': serializers.CharField(),
+            'refresh': serializers.CharField(),
+            'token_type': serializers.CharField(),
+            'expires_in': serializers.IntegerField(),
+        }),
+    }),
+})
+
+#: `POST /api/auth/login/` 401 — a genuinely different shape: no `data` at all,
+#: and an `errors` key that exists only here. `errors` is `serializer.errors`
+#: verbatim, i.e. field name -> list of messages, with the credential check
+#: itself reported under `non_field_errors`.
+LOGIN_FAILURE_RESPONSE = inline_serializer(name='LoginFailure', fields={
+    'success': serializers.BooleanField(),
+    'message': serializers.CharField(),
+    'errors': serializers.DictField(
+        child=serializers.ListField(child=serializers.CharField())),
+})
+
+#: `GET /api/auth/profile/` 200. Deliberately has no `message` key — the view
+#: returns only `success` and `data`, unlike most envelopes in this app.
+PROFILE_RESPONSE = inline_serializer(name='Profile', fields={
+    'success': serializers.BooleanField(),
+    'data': UserSerializer(),
+})
+
+
+@extend_schema(
+    request=LoginSerializer,
+    responses={
+        200: LOGIN_SUCCESS_RESPONSE,
+        401: LOGIN_FAILURE_RESPONSE,
+    },
+    description='Exchange credentials for a JWT pair. Returns two materially '
+                'different bodies: 200 carries `data.user` and `data.tokens`, '
+                'while 401 carries `errors` and no `data` at all.',
+)
 class LoginView(APIView):
     """Exchange credentials for a JWT pair.
 
@@ -152,6 +208,13 @@ class LogoutView(APIView):
         logger.info("Logout success user_id=%s", request.user.id)
         return Response({'success': True, 'message': 'Logged out'})
 
+@extend_schema(
+    responses={200: PROFILE_RESPONSE},
+    description='The authenticated session identity. `data` is the full '
+                '`UserSerializer` record for `request.user` — roles, '
+                'assignments and `extra_pages` — which the frontend route '
+                'guards read. Single code path: no error branch of its own.',
+)
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
 

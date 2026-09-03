@@ -1130,6 +1130,118 @@ One thing worth fixing rather than just noting: `docs/codebase/API_SURFACE.md`
 automatically, so §12's own instruction to "regenerate after structural
 change" isn't actually wired up yet.
 
+### `@extend_schema` — 1,119 undescribed operations down to 988
+
+Added the same day, after the punch list below. The frontend's type pipeline
+(`drf-spectacular` → `openapi.yml` → `openapi-typescript` → `api.generated.ts`)
+only produces a real type when a view declares a `serializer_class`; the
+hand-rolled `@api_view`/`APIView` majority published `unknown`, so the
+frontend kept hand-written interfaces that nothing checked against this server.
+
+**27 views were decorated, chosen by tracing which endpoints the frontend
+actually calls** — not by working down the list. `users`: `ProfileView`,
+`LoginView`, `UserListForAssignmentView` and two others. `orders`: 14,
+including `OrdersByUserView`, `OrderDetailsByOrderView`, `OrderListView` and
+`UpdateOrderStatusView`. `tracker`: 7, including `MyQueueView` and
+`LookupsView`. `sap_sync`: `ProductVarietyListView`. That closed **131
+operations**, because Phase 6.2 mounts every route at both `/api/` and
+`/api/v1/` and several views carry more than one method.
+
+`@extend_schema` is documentation-only, and this work changed no runtime
+behaviour: 815 tests before and after, `manage.py spectacular --validate`
+still exits 0, and on the frontend side `npm run types:api` followed by
+`tsc -b` came back clean — the generated types agreed with every hand-written
+interface already in that tree, and the `conformance.ts` compile-time check
+still passes.
+
+**Two traps were found in the process, both of which would have published a
+confidently wrong type — strictly worse than the `unknown` it replaced,
+because the frontend compiler would then enforce a lie:**
+
+1. **Component-name collisions across apps.** `orders/serializers.py` and
+   `sap_sync/serializers.py` each define a `ProductSerializer`, a
+   `PartyAddressSerializer` and a `BranchSerializer`, on different models with
+   different field sets. `drf-spectacular` names a schema component after the
+   serializer *class*, so a first pass silently overwrote `sap_sync`'s
+   components with `orders`' — `Branch` went from 7 fields to 3 — which would
+   have handed the frontend a wrong type for the SAP master-data endpoints.
+   Anyone adding more decorators must check for this: two serializers sharing a
+   class name anywhere in the project will collide in the schema, silently.
+2. **`SerializerMethodField` defaults to `string` when unhinted.**
+   `InvoiceListSerializer`/`InvoiceDetailSerializer`'s method fields were about
+   to publish `is_overdue`, `editable` and `is_partially_paid` as `string`
+   (they are booleans) and `days_at_stage` as `string` (DRF's JSON encoder
+   renders that `Decimal` as a number), and nine fields on `UserSerializer`
+   including `roles` (an array) and `company` (an object or null). Method
+   fields need an explicit return-type hint or an `OpenApiTypes` annotation
+   before they can be trusted in the schema.
+
+The remaining 988 are the long tail and are deliberately left. The value here
+was never coverage — it is that a field rename on a high-traffic endpoint now
+breaks the frontend build instead of production. Decorate the rest
+opportunistically, as those views are touched for other reasons.
+
+### A TLS inconsistency: refused once, then closed properly
+
+**Resolved 2026-09-02.** `einvoice/sap.py` now imports the shared
+`core.sap_client_base.verify_setting` (aliased `_verify`, so all seven call
+sites are untouched), so all three Service Layer clients resolve TLS the same
+way. `HANA_SSL_VERIFY` and `HANA_SSL_CA_BUNDLE` were also added to
+`.env.example`, which had been missing both — that omission, not the helper
+divergence, was the actual latent bug: a deployment set up from the example
+would have hit the differing defaults.
+
+What made it safe to do, having been correctly refused the first time: this
+deployment sets `HANA_SSL_VERIFY` explicitly, so the differing default is never
+reached. Verified by evaluating both implementations against the real settings
+module — old local `_verify()` returns `False`, shared `verify_setting()`
+returns `False`, identical — rather than by reasoning about it. Tests: einvoice
+5/5, serviceLayer + payments 218/218, unchanged.
+
+The history below is kept because the reasoning is the useful part.
+
+---
+
+#### Why it was refused the first time
+
+The 3.6 write-up above notes that `einvoice/sap.py`'s `_verify()` ignores
+`HANA_SSL_CA_BUNDLE` while the shared `core/sap_client_base.py`
+`verify_setting()` honours it. A follow-up pass was tasked with closing that
+gap and correctly refused, because the two functions differ in a **second**,
+unreported way:
+
+```python
+core/sap_client_base.py:  getattr(settings, 'HANA_SSL_VERIFY', True)   # default True
+einvoice/sap.py:          getattr(settings, "HANA_SSL_VERIFY", False)  # default False
+```
+
+Switching `einvoice` onto the shared helper therefore does not only add the
+CA-bundle lookup — it also flips the behaviour when `HANA_SSL_VERIFY` is
+absent from the environment, from "do not verify" to "verify". In any
+deployment where that setting is unset and the endpoint's certificate does not
+validate, that turns working e-invoice calls into failures. That is a
+behaviour change wearing the costume of a consistency fix, so no code was
+changed.
+
+Closing it properly means deciding what the *intended* default is and applying
+it deliberately — with the operator's knowledge, since it can break a live
+integration — rather than inheriting one accidentally from whichever helper
+won. Recorded here so the next person does not repeat the same two-line
+"cleanup" without seeing the second difference.
+
+That decision was then made, and it was easier than feared: `HANA_SSL_VERIFY`
+is set explicitly in this deployment's `.env`, so neither default is ever
+reached and the two implementations provably resolve to the same value here.
+The defaults now diverge only for a deployment that omits the setting
+entirely — and for that case, verifying (the shared helper's `True`) is the
+right fail-safe, with `.env.example` updated to make the choice explicit
+rather than leaving a fresh install to discover it. The remaining local helper
+in `einvoice/sap.py`, `_timeout()`, was deliberately left alone: it diverges
+from the shared version only when a timeout setting is explicitly `0` or
+empty, where the shared one substitutes 15/120 and the local one passes the
+`0` through to `requests` as "no timeout". Which of those is correct is a
+behaviour decision nobody has made, so it is not a deduplication.
+
 ### The punch list, worked the same day
 
 Every actionable gap this audit found — 2.4, 3.2, 3.5's inconsistency, 3.6,
@@ -1166,12 +1278,42 @@ they were left.
    now consistently instrumented with deprecation headers and usage logging, so
    the data exists to make the call. Whether and when to move traffic to
    `notifications.Notification` is an operator decision; nothing is in progress.
-3. **A real bug found in passing, not fixed** (out of scope for the item that
-   surfaced it, but worth its own task): `sap_sync.PartySerializer` declares an
-   `addresses` nested field, but migration `0004_alter_party_options_...`
-   removed the `party` FK that relation depended on back in 2026-02 — so
-   `PartyDetailView`, `PartyByCodeView` and `GetPartyByCategoryView` raise on
-   every real call. No test covered them, which is why it went unnoticed.
+3. ~~**A real bug found in passing, not fixed**~~ — **investigated and closed
+   2026-09-02, and the original report was wrong.** The claim was that
+   `sap_sync.PartySerializer`'s `addresses` field made `PartyDetailView`,
+   `PartyByCodeView` and `GetPartyByCategoryView` raise on every call, since
+   migration `0004_alter_party_options_...` removed the `PartyAddress.party` FK
+   backing that relation in 2026-02.
+
+   The premise held; the conclusion did not. There is genuinely no `addresses`
+   relation on `Party` — but the field was `read_only=True`, and DRF sets
+   `required=False` for read-only fields, so the `AttributeError` from the
+   missing attribute became a `SkipField` and the key was silently dropped.
+   Confirmed by execution rather than by reading: serializing a real `Party`
+   returns every other field intact, no `addresses` key, no error. **These
+   endpoints have been returning 200 the whole time.**
+
+   The actual defect was in the published contract, and it was live. Because
+   `drf-spectacular` introspects this serializer, the schema advertised
+   `addresses` and the frontend's generated types declared it **required** —
+   `readonly addresses: PartyAddress[]` — for an array no response had carried
+   since February. Any frontend code that trusted that type would have compiled
+   cleanly and found `undefined` at runtime.
+
+   Fixed by deleting the dead field rather than repairing it: nothing consumes
+   it (the frontend reads addresses from `/sap/addresses/`, which works), and
+   resolving it by `card_code` would add payload to a live API plus an N+1 to
+   serve no caller. Response bodies are byte-for-byte unchanged; only the
+   advertised contract moved, to match reality. Two regression tests
+   (`sap_sync.tests_query_audit.PartySerializerContractTests`) now fail if any
+   serializer field is declared but not delivered — the silent-skip behaviour is
+   what let this survive seven months, so the guard targets that specifically,
+   not just this one field.
+
+   **The transferable lesson:** a `read_only=True` field naming a relation that
+   does not exist fails silently at runtime and loudly in the schema. It is
+   invisible in every response and every log, and only shows up as a phantom
+   required field in generated client types. Worth grepping for elsewhere.
 4. **Two latent issues recorded above rather than fixed**: `einvoice/sap.py`'s
    TLS verify helper ignoring `HANA_SSL_CA_BUNDLE` (inert only while that
    setting is unset), and the circular-import fragility between

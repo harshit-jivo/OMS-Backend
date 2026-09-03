@@ -1,6 +1,11 @@
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer,
+)
+from rest_framework import serializers
 from rest_framework import status as http
 from .permissions import (
     IsTrackerAdmin, IsTrackerAlerts, IsTrackerEntry, IsTrackerReports,
@@ -24,9 +29,164 @@ from .models import (
 from .serializers import (
     BranchSerializer, CategorySerializer, GstRateSerializer, GstTypeSerializer,
     InvoiceDetailSerializer, InvoiceListSerializer, InvoiceModeSerializer,
-    InvoiceWriteSerializer, PaymentDetailSerializer, StageSerializer,
-    StuckAlertSerializer, UnitSerializer,
+    InvoiceWriteSerializer, PaymentDetailSerializer, StageEventSerializer,
+    StageSerializer, StuckAlertSerializer, UnitSerializer,
 )
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI declarations — DOCUMENTATION ONLY, no runtime behaviour.
+#
+# The views in this module assemble their JSON by hand, so drf-spectacular has
+# no `serializer_class` to infer from and describes them as "No response body",
+# which makes the generated frontend types useless. Every shape below was read
+# off the view body it documents, error branches included. `core/health.py` is
+# the same pattern.
+# ---------------------------------------------------------------------------
+
+class TrackerCategorySerializer(CategorySerializer):
+    """Schema-only alias with the same fields.
+
+    `CategorySerializer` would be published under the component name
+    `Category`, which an unrelated serializer in another app already owns. Two
+    different classes claiming one component name makes the schema wrong for
+    one of them, silently. Renaming here keeps both honest.
+    """
+
+
+class TrackerBranchSerializer(BranchSerializer):
+    """Schema-only alias — see `TrackerCategorySerializer`. `Branch` is already
+    taken by the orders/HANA branch serializer."""
+
+
+class TrackerStageEventSerializer(StageEventSerializer):
+    """Schema-only alias of `StageEventSerializer`, with one correction.
+
+    `acted_by_name` walks `acted_by.username` with `default=None`, so it is
+    NULL on every event the engine wrote unattended (a scheduled JSAP sync, an
+    auto-advance). The base serializer leaves drf-spectacular describing it as
+    a non-null string.
+    """
+    acted_by_name = serializers.CharField(read_only=True, allow_null=True)
+
+
+class TrackerInvoiceListSerializer(InvoiceListSerializer):
+    """Schema-only. Never instantiated at runtime.
+
+    The same fields as `InvoiceListSerializer` — but its seven
+    `SerializerMethodField`s carry no return type hint, and drf-spectacular
+    defaults an unhinted method field to `string`. Published as-is that would
+    describe four booleans and three nullable strings as plain non-null
+    strings: precisely the confidently-wrong type a generated client cannot
+    recover from. Each is re-declared here as what the getter really returns:
+
+        days_at_stage      `services.days_at_stage` -> Decimal, which DRF's
+                           JSON encoder renders as a NUMBER, not a string
+        is_overdue         bool
+        editable           bool
+        is_partially_paid  bool
+        payment_status     PaymentDetail.Status, or null when the invoice has
+        paid_amount        no payment row yet; the two amounts are `str()` of
+        open_balance       a Decimal, so decimal STRINGS or null
+    """
+    days_at_stage = serializers.FloatField(read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+    editable = serializers.BooleanField(read_only=True)
+    is_partially_paid = serializers.BooleanField(read_only=True)
+    payment_status = serializers.CharField(read_only=True, allow_null=True)
+    paid_amount = serializers.CharField(read_only=True, allow_null=True)
+    open_balance = serializers.CharField(read_only=True, allow_null=True)
+
+
+class TrackerInvoiceDetailSerializer(TrackerInvoiceListSerializer):
+    """Schema-only counterpart of `InvoiceDetailSerializer` — the list shape
+    plus the full stage-event log and the payment row.
+
+    `payment` is a reverse one-to-one that does not exist until the invoice
+    reaches the payment desk, and DRF renders a missing one as null rather than
+    omitting the key; hence `allow_null`.
+    """
+    events = TrackerStageEventSerializer(many=True, read_only=True)
+    payment = PaymentDetailSerializer(read_only=True, allow_null=True)
+
+    class Meta(TrackerInvoiceListSerializer.Meta):
+        fields = InvoiceListSerializer.Meta.fields + ['events', 'payment']
+
+
+class TrackerQueueInvoiceSerializer(TrackerInvoiceListSerializer):
+    """Schema-only. Never instantiated at runtime.
+
+    `MyQueueView` serialises its rows with `InvoiceListSerializer` and then
+    MUTATES each row dict, adding return-tracking keys that exist in no
+    serializer but which the Current-vs-Returned tab split depends on.
+    `arrived_via_return` is set on every row; the other four are added only
+    when it is True, so they are declared optional.
+    """
+    arrived_via_return = serializers.BooleanField()
+    return_reason = serializers.CharField(required=False)
+    returned_from = serializers.CharField(required=False)
+    returned_by = serializers.CharField(required=False, allow_null=True)
+    returned_at = serializers.DateTimeField(required=False)
+
+    class Meta(TrackerInvoiceListSerializer.Meta):
+        fields = InvoiceListSerializer.Meta.fields + [
+            'arrived_via_return', 'return_reason', 'returned_from',
+            'returned_by', 'returned_at',
+        ]
+
+
+#: An error body a view RETURNS explicitly, e.g.
+#: `Response({'detail': ...}, status=403)` — `detail` is the only key such a
+#: return carries. The same status code RAISED instead (a permission class
+#: rejecting the request) goes through `core.exception_handler`, which also
+#: fills in `message`, `error` and `success`; hence those three are optional.
+TRACKER_ERROR_RESPONSE = inline_serializer(name='TrackerError', fields={
+    'detail': serializers.CharField(),
+    'message': serializers.CharField(required=False),
+    'error': serializers.CharField(required=False),
+    'success': serializers.BooleanField(required=False),
+})
+
+#: 400 from `serializer.is_valid(raise_exception=True)`. The body is a DRF
+#: validation error — arbitrary FIELD NAMES mapped to lists of messages, which
+#: cannot be enumerated here — plus the four keys below, which
+#: `core.exception_handler` always adds. The per-field entries are deliberately
+#: left undeclared rather than invented.
+TRACKER_VALIDATION_ERROR_RESPONSE = inline_serializer(
+    name='TrackerValidationError', fields={
+        'detail': serializers.CharField(),
+        'message': serializers.CharField(),
+        'error': serializers.CharField(),
+        'success': serializers.BooleanField(),
+    })
+
+#: `Response(status=404)` with no data: DRF's JSON renderer emits a zero-length
+#: body, NOT a `{"detail": ...}` object. Declared as a body-less response
+#: because that is literally what goes over the wire.
+TRACKER_EMPTY_404 = OpenApiResponse(
+    description='Not found, or outside the scope of this user. EMPTY body — the '
+                'response carries no JSON at all, not even `detail`.')
+
+TRACKER_LOOKUPS_RESPONSE = inline_serializer(name='TrackerLookups', fields={
+    'categories': TrackerCategorySerializer(many=True),
+    'units': UnitSerializer(many=True),
+    'branches': TrackerBranchSerializer(many=True),
+    'modes': InvoiceModeSerializer(many=True),
+    'gst_types': GstTypeSerializer(many=True),
+    'gst_rates': GstRateSerializer(many=True),
+    'stages': StageSerializer(many=True),
+})
+
+TRACKER_MY_QUEUE_RESPONSE = inline_serializer(name='TrackerMyQueue', fields={
+    'stages': serializers.ListField(child=inline_serializer(
+        name='TrackerMyQueueStage', fields={
+            'code': serializers.CharField(),
+            'name': serializers.CharField(),
+            'order': serializers.IntegerField(),
+            'count': serializers.IntegerField(),
+        })),
+    'invoices': TrackerQueueInvoiceSerializer(many=True),
+})
 
 
 class VendorsView(APIView):
@@ -96,6 +256,12 @@ class JsapSyncView(APIView):
                             status=http.HTTP_400_BAD_REQUEST)
 
 
+@extend_schema(
+    responses={200: TRACKER_LOOKUPS_RESPONSE},
+    description='Everything the entry form and the tracker filters need, in '
+                'one call. All seven keys are always present (possibly as '
+                'empty arrays); every list is restricted to `is_active` rows.',
+)
 class LookupsView(APIView):
     """Everything the entry form / filters need in one call."""
     permission_classes = [IsTrackerUser]
@@ -176,6 +342,34 @@ def _apply_filters(qs, params):
 class InvoiceListCreateView(APIView):
     permission_classes = [IsTrackerEntry]
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter('party', OpenApiTypes.STR,
+                             description='Case-insensitive substring of the party name.'),
+            OpenApiParameter('invoice_number', OpenApiTypes.STR,
+                             description='Case-insensitive substring of the invoice number.'),
+            OpenApiParameter('effective_month', OpenApiTypes.STR,
+                             description='Accounting period as "YYYY-MM". An '
+                                         'unparseable value is ignored, not rejected.'),
+            OpenApiParameter('category', OpenApiTypes.INT, description='Category id.'),
+            OpenApiParameter('branch', OpenApiTypes.INT, description='Branch id.'),
+            OpenApiParameter('unit', OpenApiTypes.INT, description='Unit id.'),
+            OpenApiParameter('status', OpenApiTypes.STR,
+                             enum=['IN_PROGRESS', 'COMPLETED'],
+                             description='Invoice status, exact match.'),
+            OpenApiParameter('stage', OpenApiTypes.STR,
+                             description='Current stage CODE (e.g. `entry`), exact match.'),
+            OpenApiParameter('overdue', OpenApiTypes.STR,
+                             description='Only the literal `true` filters (keeps '
+                                         'overdue rows, applied in Python after '
+                                         'serialisation). Any other value is ignored.'),
+        ],
+        responses={200: TrackerInvoiceListSerializer(many=True)},
+        description='Invoices visible to this user, as a BARE ARRAY — there is '
+                    'no envelope and no pagination. Note the rows are the LIST '
+                    'shape: no `events`, no `payment` object. POST to the same '
+                    'URL answers with the fuller DETAIL shape instead.',
+    )
     def get(self, request):
         qs = _apply_filters(_scoped_queryset(request.user), request.query_params)
         data = InvoiceListSerializer(qs, many=True, context={'request': request}).data
@@ -183,6 +377,16 @@ class InvoiceListCreateView(APIView):
             data = [d for d in data if d['is_overdue']]
         return Response(data)
 
+    @extend_schema(
+        request=InvoiceWriteSerializer,
+        responses={
+            201: TrackerInvoiceDetailSerializer,
+            400: TRACKER_VALIDATION_ERROR_RESPONSE,
+        },
+        description='Create an invoice at the entry stage. The 201 body is the '
+                    'DETAIL serializer (`events` and `payment` included), NOT '
+                    'the list shape this endpoint returns on GET.',
+    )
     def post(self, request):
         serializer = InvoiceWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -200,6 +404,12 @@ class InvoiceDetailView(APIView):
     def _get(self, request, pk):
         return _scoped_queryset(request.user).filter(pk=pk).first()
 
+    @extend_schema(
+        responses={200: TrackerInvoiceDetailSerializer, 404: TRACKER_EMPTY_404},
+        description='One invoice in full. 404 (with an empty body) both when no '
+                    'such invoice exists and when it lies outside the scope '
+                    'of this user — the two are deliberately indistinguishable.',
+    )
     def get(self, request, pk):
         invoice = self._get(request, pk)
         if not invoice:
@@ -207,6 +417,19 @@ class InvoiceDetailView(APIView):
         return Response(
             InvoiceDetailSerializer(invoice, context={'request': request}).data)
 
+    @extend_schema(
+        request=InvoiceWriteSerializer,
+        responses={
+            200: TrackerInvoiceDetailSerializer,
+            400: TRACKER_VALIDATION_ERROR_RESPONSE,
+            403: TRACKER_ERROR_RESPONSE,
+            404: TRACKER_EMPTY_404,
+        },
+        description='Partial update of an entry-stage invoice; the 200 body is '
+                    'the DETAIL shape. 403 (a `detail` sentence) when the '
+                    'invoice is locked or has left the entry desk, or when the '
+                    'caller is not on the entry desk.',
+    )
     def patch(self, request, pk):
         invoice = self._get(request, pk)
         if not invoice:
@@ -227,6 +450,13 @@ class InvoiceDetailView(APIView):
         return Response(
             InvoiceDetailSerializer(invoice, context={'request': request}).data)
 
+    @extend_schema(
+        responses={
+            204: OpenApiResponse(description='Soft-deleted. Empty body.'),
+            403: TRACKER_ERROR_RESPONSE,
+            404: TRACKER_EMPTY_404,
+        },
+    )
     def delete(self, request, pk):
         """Soft-delete an invoice (row kept, hidden everywhere).
 
@@ -266,6 +496,16 @@ class InvoiceDetailView(APIView):
         return Response(status=http.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(
+    responses={200: TRACKER_MY_QUEUE_RESPONSE},
+    description='The actionable inbox. `stages` lists EVERY stage this user '
+                'works (so empty desks still render as tabs) with a pending '
+                'count; `invoices` holds the in-progress invoices parked at '
+                'those stages. Each invoice row is the list shape plus '
+                '`arrived_via_return`, and — only when that is true — '
+                '`return_reason`, `returned_from`, `returned_by` and '
+                '`returned_at`, which drive the Current / Returned split.',
+)
 class MyQueueView(APIView):
     """The actionable inbox: invoices parked at a stage this user handles.
 

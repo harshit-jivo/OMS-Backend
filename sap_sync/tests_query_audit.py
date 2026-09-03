@@ -33,15 +33,28 @@ class SapSyncListQueryAuditTests(TestCase):
     flat serializers with no nested relation, so none of them should show an
     N+1 -- measured here rather than assumed.
 
-    NOTE (found during this audit, left alone -- out of this task's scope):
-    `sap_sync.PartySerializer` declares an `addresses` nested field and
-    `PartyDetailView` / `PartyByCodeView` / `GetPartyByCategoryView` all use
-    it, but migration `sap_sync/migrations/0004_...` removed the `party` FK
-    that used to back that related name (`RemoveField partyaddress.party`).
-    `Party` has no `addresses` relation any more -- serializing one raises
-    `AttributeError`, so those three endpoints 500 on every real call. That is
-    a correctness bug, not an N+1 (there is no query to count; it never gets
-    that far), so it is reported here rather than fixed under this task.
+    NOTE (raised during this audit, then investigated and RESOLVED -- the
+    original claim recorded here was wrong, and is corrected in place so the
+    wrong version does not get quoted onward):
+
+    The claim was that `sap_sync.PartySerializer`'s `addresses` field made
+    `PartyDetailView` / `PartyByCodeView` / `GetPartyByCategoryView` return 500
+    on every call, because migration `0004_...` removed the `PartyAddress.party`
+    FK backing that related name.
+
+    The premise was right and the conclusion was wrong. There is indeed no
+    `addresses` relation on `Party`. But the field was declared `read_only=True`,
+    and DRF sets `required=False` for read-only fields -- so `get_attribute()`
+    raising `AttributeError` was converted to `SkipField` and the key was
+    silently dropped. Verified by execution, not by reading: serializing a real
+    `Party` returns 200 with every other field intact and no `addresses` key.
+
+    The actual defect was in the published contract. drf-spectacular introspects
+    this serializer, so the schema advertised `addresses` and the frontend's
+    generated types declared it REQUIRED (`readonly addresses: PartyAddress[]`)
+    -- an array that had not been sent since February. The dead field has been
+    removed from the serializer; response bodies are unchanged, and the schema
+    now matches what these endpoints actually return.
     """
 
     @classmethod
@@ -114,4 +127,51 @@ class SapSyncListQueryAuditTests(TestCase):
             count_at_3, count_at_6,
             f'PartyAddressListView issued {count_at_3} queries for 3 addresses '
             f'but {count_at_6} for 6 -- query count scales with row count (N+1).',
+        )
+
+
+class PartySerializerContractTests(TestCase):
+    """`PartySerializer` must publish exactly what it delivers.
+
+    Regression guard for the `addresses` field removed from that serializer: it
+    referenced a relation deleted by migration 0004, and because it was
+    `read_only=True` DRF silently skipped it (`required=False` turns the missing
+    attribute's AttributeError into SkipField) instead of raising. The result
+    was a schema — and a set of generated frontend types — advertising a
+    REQUIRED `addresses: PartyAddress[]` that no response has carried since.
+
+    These assertions fail if anyone re-adds a serializer field that `Party`
+    cannot actually resolve, whether it fails loudly or silently.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.party = Party.objects.create(card_code='CONTRACT1',
+                                         card_name='Contract Test Party')
+
+    def test_every_declared_field_is_actually_delivered(self):
+        """No declared field may be silently dropped from the payload."""
+        from .serializers import PartySerializer
+
+        serializer = PartySerializer(self.party)
+        declared = set(serializer.fields.keys())
+        delivered = set(serializer.data.keys())
+
+        self.assertEqual(
+            declared - delivered, set(),
+            'PartySerializer declares field(s) it does not deliver: '
+            f'{sorted(declared - delivered)}. A read_only field naming a '
+            'relation Party does not have is skipped silently at runtime, but '
+            'still lands in the OpenAPI schema and the frontend types.',
+        )
+
+    def test_addresses_is_not_advertised(self):
+        """Party has no `addresses` relation; nothing may claim otherwise."""
+        from .serializers import PartySerializer
+
+        self.assertNotIn(
+            'addresses', PartySerializer(self.party).data,
+            'Party has no addresses relation (PartyAddress.card_code is a plain '
+            'CharField since migration 0004). Addresses come from '
+            '/sap/addresses/ (PartyAddressListView) instead.',
         )

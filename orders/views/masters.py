@@ -14,15 +14,150 @@ behind — the closure came back empty in both directions.
 """
 from urllib import request
 import re
+from drf_spectacular.utils import (
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_serializer,
+    inline_serializer,
+)
 from sap_sync.models import Branch
 from orders.serializers import DispatchLocationSerializer, BranchSerializer, PartyAddressSerializer, ProductSerializer, StaffProductSerializer
 from orders.models import PartyProductAssignment, DispatchLocation, UserPartyAssignment, ProductDetails, Order, StaffProductPrice
 from rest_framework.generics import ListAPIView
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework import serializers
 from rest_framework import status
 from django.db.models import Q
 from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI response shapes (`@extend_schema` below). Documentation only.
+#
+# Three of these endpoints assemble their rows by hand, so there is no
+# serializer for drf-spectacular to infer from and the generated document
+# describes no body at all. The shapes below were read off the view bodies.
+#
+# A note on the number types. These views put model values straight into a
+# plain dict, so DRF's JSON encoder — not a serializer field — decides how they
+# render, and it turns a `Decimal` into a JSON NUMBER. That is why `basic_rate`
+# and `tax_rate` are declared as floats here even though a ModelSerializer
+# would have sent them as strings.
+# ---------------------------------------------------------------------------
+
+# `orders.serializers` and `sap_sync.serializers` each define a
+# `ProductSerializer`, a `PartyAddressSerializer` and a `BranchSerializer` — on
+# DIFFERENT models, with different field sets. drf-spectacular names a schema
+# component after the serializer CLASS, so naming the orders ones in a response
+# would overwrite sap_sync's identically-named components and hand
+# `/api/sap/products/`, `/api/sap/parties/.../addresses/` and
+# `/api/sap/branches/` a body they do not return.
+#
+# These three subclasses exist only to carry a distinct component name. They
+# add no field and are never instantiated at runtime — the views below still
+# return the originals, whose fields these inherit, so the documented shape
+# cannot drift from the real one.
+
+
+@extend_schema_serializer(component_name='OrdersProduct')
+class _OrdersProductSchema(ProductSerializer):
+    """Schema alias for `orders.serializers.ProductSerializer`."""
+
+
+@extend_schema_serializer(component_name='OrdersPartyAddress')
+class _OrdersPartyAddressSchema(PartyAddressSerializer):
+    """Schema alias for `orders.serializers.PartyAddressSerializer`."""
+
+
+@extend_schema_serializer(component_name='OrdersBranch')
+class _OrdersBranchSchema(BranchSerializer):
+    """Schema alias for `orders.serializers.BranchSerializer`."""
+
+
+#: The free-of-cost companion line of a combo pack. Null when the combo has no
+#: mapping yet, which is the normal state for an unmapped combo.
+_PARTY_PRODUCT_FREE_ITEM = inline_serializer(
+    name='PartyProductFreeItem',
+    fields={
+        'item_code': serializers.CharField(),
+        'item_name': serializers.CharField(allow_null=True),
+        'category': serializers.CharField(),
+        'brand': serializers.CharField(allow_null=True),
+        # `variety` and `sub_group` are BOTH the product's sub_group — the Add
+        # Sales cascade reads `variety`, everything else reads `sub_group`.
+        'variety': serializers.CharField(allow_null=True),
+        'sub_group': serializers.CharField(allow_null=True),
+        'sal_factor2': serializers.FloatField(allow_null=True),
+        'sal_pack_unit': serializers.CharField(allow_null=True),
+        'tax_rate': serializers.FloatField(allow_null=True),
+        # Always the literal 0: the auto-added free line is never priced.
+        'basic_rate': serializers.FloatField(),
+    },
+    allow_null=True,
+)
+
+PARTY_PRODUCT_ROWS = inline_serializer(
+    name='PartyProductRow',
+    fields={
+        'item_code': serializers.CharField(),
+        'category': serializers.CharField(),
+        # `PartyProductAssignment.basic_rate` (Decimal) rendered as a number.
+        'basic_rate': serializers.FloatField(),
+        # `assignment.updated_at.isoformat()`, or null.
+        'updated_at': serializers.DateTimeField(allow_null=True),
+        'item_name': serializers.CharField(allow_null=True),
+        'sal_factor2': serializers.FloatField(allow_null=True),
+        'tax_rate': serializers.FloatField(allow_null=True),
+        'sal_pack_unit': serializers.CharField(allow_null=True),
+        'brand': serializers.CharField(allow_null=True),
+        # Duplicates, both fed from the product's sub_group. See above.
+        'variety': serializers.CharField(allow_null=True),
+        'sub_group': serializers.CharField(allow_null=True),
+        'combo_scheme_id': serializers.IntegerField(allow_null=True),
+        'combo_scheme_name': serializers.CharField(allow_null=True),
+        'is_combo': serializers.BooleanField(),
+        # These three are null together: they are only filled for a combo pack
+        # that has a free-half mapping.
+        'free_item_code': serializers.CharField(allow_null=True),
+        'free_qty_per_unit': serializers.FloatField(allow_null=True),
+        'free_item': _PARTY_PRODUCT_FREE_ITEM,
+    },
+    many=True,
+)
+
+#: `PartyView` — a picker option. `value`/`label` duplicate
+#: `card_code`/`card_name`; both pairs are sent because different screens read
+#: different halves.
+PARTY_OPTIONS = inline_serializer(
+    name='PartyOption',
+    fields={
+        'value': serializers.CharField(),
+        'card_code': serializers.CharField(),
+        'card_name': serializers.CharField(),
+        # f"{card_name} ({card_code})"
+        'label': serializers.CharField(),
+        'category': serializers.CharField(allow_null=True),
+        'state': serializers.CharField(allow_null=True),
+    },
+    many=True,
+)
+
+PARTY_ADDRESSES_RESPONSE = inline_serializer(
+    name='PartyAddresses',
+    fields={
+        'bill_to': _OrdersPartyAddressSchema(many=True),
+        'ship_to': _OrdersPartyAddressSchema(many=True),
+        # Always False. The fallback branch that would set it is commented out
+        # in the view; the key is still sent, so it is declared.
+        'is_fallback': serializers.BooleanField(),
+    },
+)
+
+PARTY_ADDRESSES_ERROR = inline_serializer(
+    name='PartyAddressesError',
+    fields={'error': serializers.CharField()},
+)
 
 
 def _active_sap_item_codes():
@@ -111,6 +246,14 @@ def _serialize_free_product(free_item_code, category):
     }
 
 
+@extend_schema(
+    responses={200: PARTY_PRODUCT_ROWS},
+    description='The products one party may be sold, with that party\'s rate '
+                '— the product cascade on the Add Sales screen. A bare array. '
+                'An assignment whose item_code has no active SAP product is '
+                'skipped, so this can be shorter than the assignment list and '
+                'can legitimately be empty.',
+)
 class PartyProductsView(APIView):
 
     def get(self, request, card_code):
@@ -208,6 +351,12 @@ class PartyProductsView(APIView):
 #         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 #         return Response(rows)
     
+@extend_schema(
+    responses={200: PARTY_OPTIONS},
+    description='The parties assigned to the calling user, as picker options. '
+                'A bare array, ordered by card_name, and scoped to '
+                '`request.user` — it takes no user parameter.',
+)
 class PartyView(APIView):
 
     def get(self, request):
@@ -255,6 +404,20 @@ class DispatchLocationListView(ListAPIView):
     serializer_class = DispatchLocationSerializer
     queryset = DispatchLocation.objects.filter(is_active=True, name__icontains='FACTORY').order_by('name')
 
+@extend_schema(
+    responses={
+        200: PARTY_ADDRESSES_RESPONSE,
+        400: OpenApiResponse(
+            response=PARTY_ADDRESSES_ERROR,
+            description='`card_code` was missing from the query string. The '
+                        'view returns this itself, so the body is `{"error": '
+                        '...}` and nothing else.',
+        ),
+    },
+    description='Bill-to and ship-to addresses for one party, split by '
+                '`address_type` and optionally narrowed by `category`. Either '
+                'list can be empty; `is_fallback` is always False.',
+)
 class PartyAddressesView(APIView):
 
 
@@ -408,6 +571,14 @@ class ProductFiltersView(APIView):
             'types': [{'label': t, 'value': t} for t in types]
         })
 
+@extend_schema(
+    responses={200: _OrdersProductSchema(many=True)},
+    description='The product catalogue for the order form\'s picker, limited '
+                'to item codes still active in SAP and optionally narrowed by '
+                'the `category`, `brand`, `variety` and `type` query '
+                'parameters. A bare array — the serializer was always there, '
+                'spectacular simply cannot see it through a bare APIView.',
+)
 class ProductListView(APIView):
 
     def get(self, request):
@@ -432,6 +603,13 @@ class ProductListView(APIView):
 
 
 
+@extend_schema(
+    responses={200: _OrdersBranchSchema(many=True)},
+    description='Factory dispatch locations for the "dispatch from" selector. '
+                'A bare array. Note `bpl_id` is a STRING here even though the '
+                'column is an integer — see `orders.serializers.'
+                'BranchSerializer` for why that is deliberate.',
+)
 class BranchView(APIView):
     """Factory dispatch locations, for the "dispatch from" selector.
 

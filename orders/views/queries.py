@@ -9,8 +9,15 @@ returns rather than deciding it.
 orders they did not create.
 """
 from urllib import request
-from orders.serializers import OrderDetailSerializer, OrderListByUserIdSerializer, OrdersLogSerializer, OrdersByItemSerializer
+from drf_spectacular.utils import (
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_serializer,
+    inline_serializer,
+)
+from orders.serializers import OrderDetailSerializer, OrderItemSchemeSerializer, OrderItemSerializer, OrderListByUserIdSerializer, OrdersLogSerializer, OrdersByItemSerializer
 from orders.models import OrdersLog, Order, OrderItem, OrderStatus, OrderRateApproval
+from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -30,6 +37,179 @@ from ._shared import (
     _get_base_orders,
 )
 
+
+# ---------------------------------------------------------------------------
+# OpenAPI response shapes (`@extend_schema` below). Documentation only — none
+# of this runs, and none of it changes what any view returns.
+#
+# These views build their JSON by hand, so drf-spectacular has no
+# `serializer_class` to infer from and emits an undescribed body. Each shape
+# below was read off the view it annotates, branch by branch.
+#
+# Two shapes recur and are worth stating once:
+#
+# * A RAISED exception (an `Http404` from `get_object_or_404`, a permission
+#   denial) passes through `core.exception_handler.api_exception_handler`,
+#   which keeps the original keys and fills in `detail` / `message` / `error` /
+#   `success`. That is `ORDERS_QUERY_ERROR` below.
+# * An explicit `return Response({...}, status=...)` never reaches that
+#   handler, so those branches carry exactly the keys the view wrote and
+#   nothing else. They are declared literally.
+# ---------------------------------------------------------------------------
+
+# Five doc-only serializer subclasses. They are NEVER instantiated at runtime
+# — the views below still return the originals — and they exist because the
+# schema drf-spectacular derives from those originals is wrong about a handful
+# of fields, in ways that would be baked straight into the generated
+# TypeScript.
+#
+# Each override was checked against the method it replaces:
+#
+# * `OrdersLogSerializer.performed_by_name` has `source="performed_by.username"`
+#   and is not `allow_null`, so when `performed_by` is None DRF raises
+#   `SkipField` and OMITS THE KEY. That is not an edge case here — this very
+#   view blanks `performed_by` on the pending "Rate approval" row before
+#   serialising — so the key is optional, not merely nullable.
+# * `SerializerMethodField` has no return annotation on any of these getters,
+#   and spectacular's documented fallback for that is `string`. Four of them do
+#   not return a string at all: `is_scheme_visible` returns a bool,
+#   `approval_approvers` a list of `{id, name}`, `last_purchase_price` a
+#   Decimal (rendered as a JSON number) and `vareity_cost` an object of three
+#   Decimals. The rest return `str | None`, so they are pinned nullable.
+#
+# The real fix is a return annotation (or `@extend_schema_field`) on each
+# getter in `orders/serializers.py`; these subclasses stand in until that lands
+# and inherit every other field, so there is nothing here to keep in sync.
+
+
+@extend_schema_serializer(component_name='OrdersLog')
+class _OrdersLogSchema(OrdersLogSerializer):
+    """Schema alias for `OrdersLogSerializer` — `performed_by_name` optional."""
+
+    performed_by_name = serializers.CharField(required=False)
+
+
+@extend_schema_serializer(component_name='OrderItemScheme')
+class _OrderItemSchemeSchema(OrderItemSchemeSerializer):
+    """Schema alias for `OrderItemSchemeSerializer`.
+
+    Both getters return None when the line carries no scheme id, which is the
+    common case.
+    """
+
+    scheme_name = serializers.CharField(read_only=True, allow_null=True)
+    scheme_item_code = serializers.CharField(read_only=True, allow_null=True)
+
+
+@extend_schema_serializer(component_name='OrderItemDetail')
+class _OrderItemSchema(OrderItemSerializer):
+    """Schema alias for `OrderItemSerializer`, with its method fields typed."""
+
+    schemes = _OrderItemSchemeSchema(many=True, read_only=True)
+    is_scheme_visible = serializers.BooleanField(read_only=True)
+    approval_approvers = inline_serializer(
+        name='OrderItemApprover',
+        fields={
+            'id': serializers.IntegerField(),
+            'name': serializers.CharField(allow_blank=True),
+        },
+        many=True,
+        read_only=True,
+    )
+    # `OrderItem.basic_price` of the party's previous order for this item, or
+    # null when there is no previous order. A Decimal, so a JSON number.
+    last_purchase_price = serializers.FloatField(read_only=True, allow_null=True)
+    scheme_name = serializers.CharField(read_only=True, allow_null=True)
+    scheme_item_code = serializers.CharField(read_only=True, allow_null=True)
+
+
+@extend_schema_serializer(component_name='OrderDetail')
+class _OrderDetailSchema(OrderDetailSerializer):
+    """Schema alias for `OrderDetailSerializer`, with its method fields typed."""
+
+    items = _OrderItemSchema(many=True, read_only=True)
+    vareity_cost = inline_serializer(
+        name='OrderVarietyCost',
+        fields={
+            'commodity_price': serializers.FloatField(),
+            'other_total': serializers.FloatField(),
+            'premium_total': serializers.FloatField(),
+        },
+        read_only=True,
+    )
+    party_state = serializers.CharField(read_only=True, allow_null=True)
+    created_by_name = serializers.CharField(read_only=True, allow_null=True)
+
+
+@extend_schema_serializer(component_name='OrderListByUserId')
+class _OrderListByUserIdSchema(OrderListByUserIdSerializer):
+    """Schema alias for `OrderListByUserIdSerializer`."""
+
+    # `get_created_by_name` returns None for an order whose creator was
+    # deleted (the FK is SET_NULL).
+    created_by_name = serializers.CharField(read_only=True, allow_null=True)
+
+
+ORDERS_QUERY_ERROR = inline_serializer(
+    name='OrdersQueryError',
+    fields={
+        'detail': serializers.CharField(),
+        'message': serializers.CharField(),
+        'error': serializers.CharField(),
+        'success': serializers.BooleanField(),
+    },
+)
+
+#: `OrdersByUserView`'s 403 — written by the view itself, so it is a bare
+#: `{"detail": ...}` with none of the handler's extra keys.
+ORDERS_BY_USER_FORBIDDEN = inline_serializer(
+    name='OrdersByUserForbidden',
+    fields={'detail': serializers.CharField()},
+)
+
+#: `OrderStatusList` — literally `OrderStatus.objects.values('id', 'name')`.
+ORDER_STATUS_OPTIONS = inline_serializer(
+    name='OrderStatusOption',
+    fields={
+        'id': serializers.IntegerField(),
+        'name': serializers.CharField(),
+    },
+    many=True,
+)
+
+#: `OrderListView`'s hand-built row. No serializer describes it; the types are
+#: what the view puts in the dict, not what the model column is.
+ORDER_LIST_ROWS = inline_serializer(
+    name='OrderListRow',
+    fields={
+        'id': serializers.IntegerField(),
+        'order_number': serializers.CharField(),
+        # 'PARTY' | 'STAFF' | 'DISTRIBUTOR' for anything written since the
+        # normaliser landed. Left as a plain string rather than an enum
+        # because the column is not constrained and older rows are not
+        # guaranteed to be one of the three.
+        'order_type': serializers.CharField(),
+        'employee_id': serializers.CharField(allow_null=True, allow_blank=True),
+        'card_code': serializers.CharField(),
+        'card_name': serializers.CharField(),
+        # `str(order.total_amount)` — a STRING in the JSON, not a number.
+        'total_amount': serializers.CharField(),
+        # `OrderStatus.code`, not its id and not its display name.
+        'status': serializers.CharField(),
+        'status_display': serializers.CharField(),
+        # Falls back to the latest successful SalesQuotationLog, then to ''.
+        # Never null.
+        'sap_doc_number': serializers.CharField(allow_blank=True),
+        'items_count': serializers.IntegerField(),
+        # `User.name` of the creator — null when the creator row was deleted
+        # (the FK is SET_NULL).
+        'created_by': serializers.CharField(allow_null=True),
+        'created_at': serializers.DateTimeField(),
+        'delivery_date': serializers.DateField(allow_null=True),
+        'is_foc': serializers.BooleanField(),
+    },
+    many=True,
+)
 
 
 class OrderStatusTrackingView(APIView):
@@ -107,11 +287,34 @@ class OrderStatusTrackingView(APIView):
         ))
 
 
+@extend_schema(
+    responses={200: ORDER_STATUS_OPTIONS},
+    description='Every row of the order-status table as `{id, name}`. A bare '
+                'array — no envelope, no pagination, and no `code`, which is '
+                'the column the rest of the API keys off.',
+)
 class OrderStatusList(APIView):
     def get(self,request):
         status = OrderStatus.objects.all().values('id','name')
         return Response(list(status))
 
+@extend_schema(
+    responses={
+        200: _OrdersLogSchema(many=True),
+        404: OpenApiResponse(
+            response=ORDERS_QUERY_ERROR,
+            description='No order with this id (`get_object_or_404`).',
+        ),
+    },
+    description='The audit timeline for one order, oldest first, with the '
+                '"Order Created" row (action_id 1) excluded.\n\n'
+                'Note `performed_by_name`: an order sitting at "Rate approval" '
+                'has its latest rate-approval log blanked to '
+                '`performed_by=None` (or a synthetic pending row created) '
+                'before serialising, and DRF OMITS the `performed_by_name` key '
+                'entirely for such a row rather than sending null. Treat it as '
+                'possibly-absent, not merely nullable.',
+)
 class OrderLogsByOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -149,6 +352,20 @@ class OrderLogsByOrderView(APIView):
         serializer = OrdersLogSerializer(logs, many=True)
         return Response(serializer.data)
 
+@extend_schema(
+    responses={
+        200: _OrderDetailSchema,
+        404: OpenApiResponse(
+            response=ORDERS_QUERY_ERROR,
+            description='No order with this id (`get_object_or_404`).',
+        ),
+    },
+    description='One order with its items. Mounted twice — '
+                '`/orderdetailsbyid/{order_id}/` and '
+                '`/{order_id}/orderdetails/` — and both routes answer with the '
+                'same `OrderDetailSerializer` body. Not scoped to the caller: '
+                'any authenticated user may read any order id.',
+)
 class OrderDetailsByOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -167,6 +384,21 @@ class OrderDetailsByOrderView(APIView):
 ORDERS_CROSS_USER_ROLES = {"admin", "manager", "billing", "approver", "auditor"}
 
 
+@extend_schema(
+    responses={
+        200: _OrderListByUserIdSchema(many=True),
+        403: OpenApiResponse(
+            response=ORDERS_BY_USER_FORBIDDEN,
+            description='A non-privileged caller (anyone outside '
+                        '`ORDERS_CROSS_USER_ROLES`, and not staff/superuser) '
+                        'asked for another user\'s orders. The view writes '
+                        'this body itself, so it is `{"detail": ...}` alone.',
+        ),
+    },
+    description='Every order created by `user_id`, newest first. Roles in '
+                '`ORDERS_CROSS_USER_ROLES` may read any user; everyone else '
+                'only themselves, and gets 403 otherwise.',
+)
 class OrdersByUserView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -198,6 +430,15 @@ class OrdersByUserView(APIView):
         return Response(serializer.data)
 
 
+@extend_schema(
+    responses={200: ORDER_LIST_ROWS},
+    description='The approval queues and the dashboard list. A bare array of '
+                'hand-built rows — no serializer describes it, and the shape '
+                'is NOT `OrderListByUserIdSerializer`. Filtered by the '
+                '`status`, `user_id`, `billing`, `include_sap` and '
+                '`approval_pending` query parameters, but the row shape is the '
+                'same on every branch.',
+)
 class OrderListView(APIView):
     permission_classes = [IsAuthenticated]
 

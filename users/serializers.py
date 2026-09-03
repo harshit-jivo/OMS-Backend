@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password
@@ -119,37 +120,44 @@ class UserSerializer(serializers.ModelSerializer):
             'role','role_display', 'extra_roles', 'roles', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'extra_pages', 'created_at'
         ]
 
+    @extend_schema_field(RoleSerializer(many=True))
     def get_extra_roles(self, obj):
         return [
             {'id': r.id, 'name': r.name, 'display_name': r.display_name}
             for r in obj.extra_roles.all()
         ]
 
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_roles(self, obj):
         """Every role name the user holds — primary plus extras."""
         return sorted(obj.all_role_names())
 
+    @extend_schema_field(CompanySerializer(allow_null=True))
     def get_company(self, obj):
         if not obj.company:
             return None
         return CompanySerializer(obj.company).data
 
+    @extend_schema_field(MainGroupSerializer(allow_null=True))
     def get_main_group(self, obj):
         if not obj.main_group:
             return None
         return MainGroupSerializer(obj.main_group).data
     
+    @extend_schema_field(MainGroupSerializer(many=True))
     def get_main_groups(self, obj):
         groups = obj.main_groups.all()
         if not groups.exists():
             return []
         return MainGroupSerializer(groups, many=True).data
 
+    @extend_schema_field(StateSerializer(allow_null=True))
     def get_state(self, obj):
         if not obj.state:
             return None
         return StateSerializer(obj.state).data
 
+    @extend_schema_field(StateSerializer(many=True))
     def get_states(self, obj):
         assigned_states = []
         seen_state_ids = set()
@@ -178,11 +186,13 @@ class UserSerializer(serializers.ModelSerializer):
 
         return []
         
+    @extend_schema_field(CategorySerializer(allow_null=True))
     def get_category(self, obj):
         if not obj.category:
             return None
         return CategorySerializer(obj.category).data
 
+    @extend_schema_field(CategorySerializer(many=True))
     def get_categories(self, obj):
         categories = obj.categories.all()
         if not categories.exists():

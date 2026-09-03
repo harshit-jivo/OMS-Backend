@@ -9,6 +9,9 @@ so they are the ones the Phase 2 lockdown mattered most for: before it, several
 answered unauthenticated requests.
 """
 
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -170,6 +173,57 @@ def _serialize_user_party_assignments(assignments, preferred_category=None):
         'card_codes': list(dict.fromkeys(card_codes)),
         'total_assigned': len(parties_list),
     }
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI response shapes — documentation only, no runtime effect.
+#
+# `UserPartiesView` builds its body by hand and spreads
+# `_serialize_user_party_assignments()` into it, so the three keys `parties`,
+# `card_codes` and `total_assigned` sit as SIBLINGS of `user` inside `data`
+# rather than nested under a key of their own. Declared to match that literally
+# — the shape is only obvious if you read the helper.
+# ---------------------------------------------------------------------------
+
+#: One row of `data.parties`. `id` is the PARTY's primary key, not the
+#: assignment's — the assignment itself has no id in this payload. The rest of
+#: the fields come from the `Party` master except `category`, which is the
+#: ASSIGNMENT's category (so the same card_code assigned under both OIL and
+#: BEVERAGES stays two distinct rows), and `assigned_at`, which comes from
+#: `UserPartyAssignment`. `state`, `main_group` and `category` are all nullable
+#: on the model, so all three can come back null.
+USER_PARTY_ITEM = inline_serializer(name='UserPartyAssignmentItem', fields={
+    'id': serializers.IntegerField(),
+    'card_code': serializers.CharField(),
+    'card_name': serializers.CharField(),
+    'state': serializers.CharField(allow_null=True),
+    'main_group': serializers.CharField(allow_null=True),
+    'category': serializers.CharField(allow_null=True),
+    'assigned_at': serializers.DateTimeField(),
+}, many=True)
+
+#: `GET /api/auth/users/{user_id}/parties/` 200.
+USER_PARTIES_RESPONSE = inline_serializer(name='UserParties', fields={
+    'success': serializers.BooleanField(),
+    'data': inline_serializer(name='UserPartiesData', fields={
+        # A three-key summary of the user, NOT the full `UserSerializer`.
+        'user': inline_serializer(name='UserPartiesUser', fields={
+            'id': serializers.IntegerField(),
+            'username': serializers.CharField(),
+            'name': serializers.CharField(),
+        }),
+        'parties': USER_PARTY_ITEM,
+        'card_codes': serializers.ListField(child=serializers.CharField()),
+        'total_assigned': serializers.IntegerField(),
+    }),
+})
+
+#: The 403 and 404 branches, which carry `message` and no `data` at all.
+USER_PARTIES_ERROR_RESPONSE = inline_serializer(name='UserPartiesError', fields={
+    'success': serializers.BooleanField(),
+    'message': serializers.CharField(),
+})
+
 
 class PartyUsersView(APIView):
     """Which users are assigned to a party. Administrators only.
@@ -921,6 +975,29 @@ class RemovePartyAssignmentView(APIView):
         except UserPartyAssignment.DoesNotExist:
             return Response({'success': False, 'message': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
     
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='category',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description='Scope the assignments to one category. The literal '
+                        'value `all` bypasses scoping and returns every '
+                        'category. Any other value is honoured only if it is '
+                        "one of the user's own categories, otherwise the "
+                        "user's primary category is used.",
+        ),
+    ],
+    responses={
+        200: USER_PARTIES_RESPONSE,
+        403: USER_PARTIES_ERROR_RESPONSE,
+        404: USER_PARTIES_ERROR_RESPONSE,
+    },
+    description='Parties assigned to `user_id`. 403 when a non-admin asks for '
+                "someone else's record and 404 when the user does not exist; "
+                'both carry `{success: false, message}` and no `data`.',
+)
 class UserPartiesView(APIView):
     """The parties assigned to a user — own record, or any record for an admin.
 

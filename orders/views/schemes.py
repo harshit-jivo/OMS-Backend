@@ -14,10 +14,12 @@ Covers both scheme generations: the original `Scheme`/`SchemeAssignment` views
 and the v2 views that replaced them.
 """
 from urllib import request
+from drf_spectacular.utils import extend_schema, inline_serializer
 from orders.serializers import SchemeProductSerializer, SchemeWriteSerializer
 from orders.models import OrderItemScheme
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework import serializers
 from rest_framework import status
 from django.db.models import Q
 from sap_sync.models import Product as SapProduct, active_product_q
@@ -30,6 +32,35 @@ from orders.serializers import SchemeV2Serializer, SchemeAssignmentSerializer
 
 
 
+#: `SchemeListView`'s row. Documentation only.
+#:
+#: The first four keys come from a `.values()` call, so they are the raw
+#: `users.SchemeProduct` columns. `item_name` is NOT one of them: it is grafted
+#: on in Python afterwards from a second query, which is exactly why no
+#: serializer can describe this body.
+SCHEME_LIST_ROWS = inline_serializer(
+    name='SchemeListRow',
+    fields={
+        'scheme_id': serializers.IntegerField(),
+        'scheme_name': serializers.CharField(),
+        'state_code': serializers.CharField(allow_null=True),
+        'item_code': serializers.CharField(allow_null=True),
+        # Grafted on: the SAP product name, falling back to the item_code and
+        # then to ''. Always a string, never null.
+        'item_name': serializers.CharField(allow_blank=True),
+    },
+    many=True,
+)
+
+
+@extend_schema(
+    responses={200: SCHEME_LIST_ROWS},
+    description='Active scheme products, optionally filtered by the '
+                '`state_code` query parameter (matched against either the '
+                'state code or its name). A bare array; `item_name` is added '
+                'in Python after the query, so it is present on every row even '
+                'though it is not a column.',
+)
 class SchemeListView(APIView):
 
     def get(self, request):

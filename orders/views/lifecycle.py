@@ -27,11 +27,18 @@ view's job is just the request-facing part: validate, lock the row, hand off.
 """
 
 from urllib import request
+from drf_spectacular.utils import (
+    OpenApiResponse,
+    PolymorphicProxySerializer,
+    extend_schema,
+    inline_serializer,
+)
 from orders.serializers import OrderStatusUpdateSerializer, CreateOrderSerializer
 from orders.models import Order, OrderStatus, log_order_action, OrderRateApproval, OrderItemApprovalMapping
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework import serializers
 from rest_framework import status
 from datetime import datetime
 from django.shortcuts import get_object_or_404
@@ -87,6 +94,211 @@ DISTRIBUTOR_COMPANY = '3'                 # every distributor order is company 3
 DISTRIBUTOR_DISPATCH_ID = 2               # distributor orders dispatch from the factory
 DISTRIBUTOR_DISPATCH_NAME = 'FACTORY'
 DISTRIBUTOR_WAREHOUSE_CODE = 'GP-FGM'     # default warehouse for distributor orders
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI response shapes (`@extend_schema` below). Documentation only — this
+# section runs nothing and changes no response by one byte.
+#
+# Both write endpoints here branch heavily and their bodies are NOT uniform, so
+# the declarations below are deliberately conservative:
+#
+# * A key is declared required only when EVERY branch that can produce that
+#   status code writes it. Everything else is `required=False`, which is the
+#   literal truth — the key is sometimes absent, not sometimes null.
+# * Where two branches under the SAME status code disagree about a key's TYPE,
+#   the declaration is a `oneOf` rather than a merged object, because merging
+#   would have to pick one type and be wrong about the other.
+#
+# The error envelope matters here too. `core.exception_handler` fires only for
+# RAISED exceptions, so `serializer.is_valid(raise_exception=True)` in
+# `UpdateOrderStatusView` produces field errors PLUS `detail`/`message`/
+# `error`/`success`, while `CreateOrderView`'s `return Response(
+# serializer.errors, 400)` produces the bare errors dict with no envelope.
+# ---------------------------------------------------------------------------
+
+#: What `core.exception_handler` makes of a raised `Http404` — from
+#: `get_object_or_404(Order, ...)` on the edit path, `get_object_or_404(
+#: OrderStatus, ...)` inside the transition, or `raise Http404('Order not
+#: found')` in `UpdateOrderStatusView`.
+ORDER_LIFECYCLE_ERROR = inline_serializer(
+    name='OrderLifecycleError',
+    fields={
+        'detail': serializers.CharField(),
+        'message': serializers.CharField(),
+        'error': serializers.CharField(),
+        'success': serializers.BooleanField(),
+    },
+)
+
+#: Every 200 `apply_order_status_transition` can return. `message`, `order_id`
+#: and `status` are on all of them; the rate-approval branches add
+#: `approval_status`, and the "still waiting on other approvers" branch alone
+#: adds `pending_approvers`.
+#:
+#: `status` is a status NAME, not a code and not an id — and on the
+#: "waiting for remaining approvers" branch it is the PREVIOUS status's name,
+#: because that branch deliberately rolls the order back.
+ORDER_STATUS_UPDATE_OK = inline_serializer(
+    name='OrderStatusUpdateResult',
+    fields={
+        'message': serializers.CharField(),
+        'order_id': serializers.IntegerField(),
+        'status': serializers.CharField(allow_blank=True),
+        # Rate-approval branches only: 'APPROVED' or 'REJECTED'.
+        'approval_status': serializers.CharField(required=False),
+        # Only when a multi-approver order still has approvers outstanding.
+        'pending_approvers': serializers.ListField(
+            child=serializers.CharField(), required=False,
+        ),
+    },
+)
+
+#: 403 — two different producers, and they do not share a key.
+ORDER_STATUS_UPDATE_FORBIDDEN = inline_serializer(
+    name='OrderStatusUpdateForbidden',
+    fields={
+        # The view's own branch: the order is not assigned to this user for
+        # rate approval. Written explicitly, so `message` is the only key.
+        'message': serializers.CharField(required=False),
+        # DRF's permission/authentication layer, via
+        # `core.exception_handler` — that one carries the full envelope.
+        'detail': serializers.CharField(required=False),
+        'error': serializers.CharField(required=False),
+        'success': serializers.BooleanField(required=False),
+    },
+)
+
+#: 400, shape one: the approver has already decided this order. Returned
+#: explicitly, so no envelope keys.
+_ORDER_STATUS_ALREADY_DECIDED = inline_serializer(
+    name='OrderStatusAlreadyDecided',
+    fields={
+        'message': serializers.CharField(),
+        'order_id': serializers.IntegerField(),
+        'status': serializers.CharField(allow_blank=True),
+        'approval_status': serializers.CharField(),
+    },
+)
+
+#: 400, shape two: `OrderStatusUpdateSerializer` rejected the request body.
+#: Raised, so the envelope is added on top of the field errors. Note `status`
+#: is a LIST of messages here and a plain string in the shape above — which is
+#: precisely why these two cannot be merged into one object.
+_ORDER_STATUS_UPDATE_INVALID = inline_serializer(
+    name='OrderStatusUpdateInvalid',
+    fields={
+        'status': serializers.ListField(
+            child=serializers.CharField(), required=False,
+        ),
+        'reason': serializers.ListField(
+            child=serializers.CharField(), required=False,
+        ),
+        'detail': serializers.CharField(),
+        'message': serializers.CharField(),
+        'error': serializers.CharField(),
+        'success': serializers.BooleanField(),
+    },
+)
+
+ORDER_STATUS_UPDATE_BAD_REQUEST = PolymorphicProxySerializer(
+    component_name='OrderStatusUpdateBadRequest',
+    serializers=[_ORDER_STATUS_ALREADY_DECIDED, _ORDER_STATUS_UPDATE_INVALID],
+    resource_type_field_name=None,
+)
+
+#: `CreateOrderView`'s 200 — the three EDIT branches (staff update, standard
+#: update, distributor edit). Six keys are common to all three; the rest depend
+#: on which branch ran.
+ORDER_EDIT_RESULT = inline_serializer(
+    name='OrderEditResult',
+    fields={
+        'id': serializers.IntegerField(),
+        'order_number': serializers.CharField(),
+        # `str(order.total_amount)` — a STRING, not a number.
+        'total_amount': serializers.CharField(),
+        # The status NAME, or '' when the order somehow has no status.
+        'status': serializers.CharField(allow_blank=True),
+        'needs_approval': serializers.BooleanField(),
+        'message': serializers.CharField(),
+        # Staff-update and distributor-edit branches only.
+        'order_type': serializers.CharField(required=False),
+        # Staff-update branch only.
+        'employee_id': serializers.CharField(
+            required=False, allow_null=True, allow_blank=True,
+        ),
+        # Distributor-edit branch only — forced to '3' (Mart).
+        'company': serializers.CharField(
+            required=False, allow_null=True, allow_blank=True,
+        ),
+    },
+)
+
+#: `CreateOrderView`'s 201 — the three CREATE branches (staff, standard,
+#: distributor). Same six common keys; `flagged_items` and `remarks` are sent
+#: by the two non-distributor branches, `company` only by the distributor one.
+ORDER_CREATE_RESULT = inline_serializer(
+    name='OrderCreateResult',
+    fields={
+        'id': serializers.IntegerField(),
+        'order_number': serializers.CharField(),
+        'total_amount': serializers.CharField(),
+        'status': serializers.CharField(allow_blank=True),
+        'needs_approval': serializers.BooleanField(),
+        'message': serializers.CharField(),
+        # Staff-create and distributor-create branches only.
+        'order_type': serializers.CharField(required=False),
+        # Staff-create branch only.
+        'employee_id': serializers.CharField(
+            required=False, allow_null=True, allow_blank=True,
+        ),
+        # Distributor-create branch only.
+        'company': serializers.CharField(
+            required=False, allow_null=True, allow_blank=True,
+        ),
+        # Staff-create ([] always) and standard-create. One human-readable
+        # sentence per line whose entered rate differs from the price list.
+        'flagged_items': serializers.ListField(
+            child=serializers.CharField(), required=False,
+        ),
+        'remarks': serializers.CharField(required=False, allow_blank=True),
+    },
+)
+
+#: `CreateOrderView`'s 400. Two producers, and only one of them has a shape
+#: worth naming, so this is written as a raw schema rather than forced through
+#: a serializer:
+#:
+#: * the four explicit guards (no items, staff order without employee_id,
+#:   party order without card_code) — `{'error': <sentence>}` and nothing else,
+#:   because the view returns it rather than raising it;
+#: * `return Response(serializer.errors, 400)` — the raw DRF error dict, keyed
+#:   by whichever `CreateOrderSerializer` fields failed, values being lists of
+#:   messages, except `items` (a ListField of DictField) whose errors nest per
+#:   index. That half is left as a free-form object ON PURPOSE: the key set is
+#:   not fixed, and inventing one would be worse than admitting it is dynamic.
+ORDER_CREATE_BAD_REQUEST = {
+    'oneOf': [
+        {
+            'type': 'object',
+            'properties': {'error': {'type': 'string'}},
+            'required': ['error'],
+            'description': 'One of the four explicit guards in the view.',
+        },
+        {
+            'type': 'object',
+            'additionalProperties': True,
+            'description': (
+                'Raw DRF validation errors from CreateOrderSerializer, keyed '
+                'by field name. Deliberately untyped: which keys appear '
+                'depends on which fields failed, and `items` errors nest by '
+                'index. No error envelope — this branch returns the errors '
+                'dict directly rather than raising.'
+            ),
+        },
+    ],
+}
+
 
 class UpdateOrderView(APIView):
     permission_classes = [IsAuthenticated]
@@ -233,6 +445,41 @@ class UpdateOrderView(APIView):
             'message': f"Order updated and sent to {next_status.name.lower()}" if next_status else 'Order updated successfully',
         }, status=status.HTTP_200_OK)
 
+@extend_schema(
+    request=CreateOrderSerializer,
+    responses={
+        200: OpenApiResponse(
+            response=ORDER_EDIT_RESULT,
+            description='An EDIT — the request carried an `order_id`. Three '
+                        'branches land here (staff update, standard update, '
+                        'distributor edit) and their key sets differ; see the '
+                        'per-field notes on the schema.',
+        ),
+        201: OpenApiResponse(
+            response=ORDER_CREATE_RESULT,
+            description='A CREATE — no `order_id` in the request. Three '
+                        'branches land here (staff, standard, distributor) and '
+                        'their key sets differ; see the per-field notes on the '
+                        'schema.',
+        ),
+        400: ORDER_CREATE_BAD_REQUEST,
+        404: OpenApiResponse(
+            response=ORDER_LIFECYCLE_ERROR,
+            description='Edit mode only: the `order_id` in the body matches no '
+                        'order (`get_object_or_404`).',
+        ),
+    },
+    description='The single order-write endpoint: create, save-as-draft and '
+                'edit all post here, and an `order_id` in the BODY (not the '
+                'URL) is what makes it an edit.\n\n'
+                'The response is not one shape. Six success branches exist — '
+                'staff/standard/distributor, each for create and edit — and '
+                'they agree on `id`, `order_number`, `total_amount`, `status`, '
+                '`needs_approval` and `message` only. `order_type`, '
+                '`employee_id`, `company`, `flagged_items` and `remarks` are '
+                'each sent by some branches and not others, and the create and '
+                'edit paths are separated by status code (201 vs 200).',
+)
 class CreateOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -602,6 +849,43 @@ class CreateOrderView(APIView):
             if is_edit else 'Distributor order submitted for Mart approval',
         }, status=status.HTTP_200_OK if is_edit else status.HTTP_201_CREATED)
 
+@extend_schema(
+    request=OrderStatusUpdateSerializer,
+    responses={
+        200: OpenApiResponse(
+            response=ORDER_STATUS_UPDATE_OK,
+            description='The transition was applied — or, in the '
+                        '"already rejected" and "waiting for remaining '
+                        'approvers" branches, deliberately not applied. Every '
+                        '200 branch sends `message`, `order_id` and `status`; '
+                        'the rate-approval ones add `approval_status`, and one '
+                        'of them adds `pending_approvers`.',
+        ),
+        400: ORDER_STATUS_UPDATE_BAD_REQUEST,
+        403: OpenApiResponse(
+            response=ORDER_STATUS_UPDATE_FORBIDDEN,
+            description='Either the order is not assigned to this user for '
+                        'rate approval (the view\'s own `{"message": ...}`) or '
+                        'DRF refused the request (the '
+                        '`detail`/`message`/`error`/`success` envelope). The '
+                        'two do not share a key, so both are optional here.',
+        ),
+        404: OpenApiResponse(
+            response=ORDER_LIFECYCLE_ERROR,
+            description='No order with this id, or no order status with the '
+                        'posted `status` id.',
+        ),
+    },
+    description='Advance or reject one order. The body is `{status: <status '
+                'id>, reason?: <text>}`.\n\n'
+                'The response body is built by '
+                '`orders.services.order_status.apply_order_status_transition`, '
+                'not by this view, and that function has nine return points. '
+                'The posted `status` id is also NOT always the status the '
+                'order ends up in: the flow configuration can override it, and '
+                'the multi-approver branch rolls it back — so read the `status` '
+                'NAME in the response rather than assuming the one you sent.',
+)
 class UpdateOrderStatusView(APIView):
     """Advance (or reject) an order through its configured status flow.
 

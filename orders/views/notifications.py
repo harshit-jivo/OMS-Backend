@@ -13,11 +13,19 @@ re-exported copy would not affect the callers in this module — the test would
 pass while stubbing nothing.
 """
 from urllib import request
+from drf_spectacular.utils import (
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_serializer,
+    extend_schema_view,
+    inline_serializer,
+)
 from orders.serializers import NotificationSerializer
 from orders.models import Notification, PushToken, WebPushSubscription
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework import serializers
 from rest_framework import status
 from sap_sync.models import Party as SapParty
 from users.models import User
@@ -274,6 +282,37 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
         title=plan.title,
     ))
 
+# `orders.Notification` (table `notifications`) and
+# `notifications.Notification` (table `notifications_notification`) are two
+# different models with two identically-named serializers. drf-spectacular
+# names a schema component after the serializer CLASS, so this alias keeps the
+# legacy orders body from colliding with the replacement app's when that one is
+# described too. It adds no field and is never instantiated at runtime.
+
+
+@extend_schema_serializer(component_name='OrdersNotification')
+class _OrdersNotificationSchema(NotificationSerializer):
+    """Schema alias for `orders.serializers.NotificationSerializer`."""
+
+
+#: `NotificationListView`'s two hand-written bodies. Documentation only.
+#:
+#: Both are single-key dicts and the KEY differs by outcome: a success says
+#: `message`, a failure says `error`. Neither passes through
+#: `core.exception_handler` — the view returns them explicitly — so neither
+#: carries the `detail`/`message`/`error`/`success` envelope that a raised
+#: exception would add.
+NOTIFICATION_ACK = inline_serializer(
+    name='NotificationAck',
+    fields={'message': serializers.CharField()},
+)
+
+NOTIFICATION_ERROR = inline_serializer(
+    name='NotificationError',
+    fields={'error': serializers.CharField()},
+)
+
+
 @deprecated(
     successor='/api/v1/notifications/',
     note=(
@@ -284,6 +323,41 @@ def send_order_notifications(order, status_name, actor=None, previous_status=Non
         'client still calls this, and the date belongs to whoever owns that '
         'migration. The header and the usage log exist so the decision can be '
         'made from evidence rather than from a guess.'
+    ),
+)
+@extend_schema_view(
+    get=extend_schema(
+        responses={200: _OrdersNotificationSchema(many=True)},
+        description='The caller\'s 50 most recent notifications, newest first. '
+                    'A bare array, hard-capped at 50 with no pagination and no '
+                    'total.',
+    ),
+    post=extend_schema(
+        request=None,
+        responses={200: NOTIFICATION_ACK},
+        description='Mark every unread notification of the caller as read. '
+                    'Reads nothing from the request body and always answers '
+                    '200, even when nothing was unread.',
+    ),
+    patch=extend_schema(
+        request=None,
+        responses={
+            200: NOTIFICATION_ACK,
+            400: OpenApiResponse(
+                response=NOTIFICATION_ERROR,
+                description='No `pk` in the URL. Reachable because this same '
+                            'view is routed both at `/notifications/` and at '
+                            '`/notifications/{pk}/`.',
+            ),
+            404: OpenApiResponse(
+                response=NOTIFICATION_ERROR,
+                description='No notification with that id BELONGING TO THE '
+                            'CALLER — the lookup is scoped to `request.user`, '
+                            'so another user\'s id reads as not found.',
+            ),
+        },
+        description='Mark one notification as read. Reads nothing from the '
+                    'request body: the id comes from the URL.',
     ),
 )
 class NotificationListView(APIView):

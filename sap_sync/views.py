@@ -17,6 +17,8 @@ here would break that flow — its own authorisation belongs with the order
 workflow (plan Phase 2.6), not with a blanket role check.
 """
 import logging
+from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -201,6 +203,47 @@ class ProductListView(ListAPIView):
         return queryset
 
 
+#: The one shape `ProductVarietyListView` returns. Documentation only — read
+#: off the view body below, which builds the dict by hand and so gives
+#: drf-spectacular nothing to infer from.
+#:
+#: `varieties` and `sub_groups` are the SAME list, sent twice: the view built
+#: `sub_groups` once and assigns it to both keys, keeping `varieties` for
+#: callers written before the rename. The frontend currently reads
+#: `sub_groups ?? varieties` because it could not tell which key the server
+#: sends; declaring both as always-present settles that.
+#:
+#: `category` is the request's own `category` query param echoed back, already
+#: stripped — an empty string when the caller sent none.
+SAP_PRODUCT_VARIETY_LIST = inline_serializer(
+    name='SapProductVarietyList',
+    fields={
+        'category': serializers.CharField(allow_blank=True),
+        'count': serializers.IntegerField(),
+        'varieties': serializers.ListField(child=serializers.CharField()),
+        'sub_groups': serializers.ListField(child=serializers.CharField()),
+    },
+)
+
+
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='category',
+            type=str,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description='Restrict to one product category (case-insensitive '
+                        'exact match). Omitted or blank returns the sub '
+                        'groups of every category.',
+        ),
+    ],
+    responses={200: SAP_PRODUCT_VARIETY_LIST},
+    description='Distinct product sub groups ("varieties"), sorted '
+                'case-insensitively, over active non-deleted products. Always '
+                '200; there is no error branch. `varieties` and `sub_groups` '
+                'are the same list — `varieties` is the legacy key.',
+)
 class ProductVarietyListView(APIView):
 
     def get(self, request):

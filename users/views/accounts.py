@@ -13,6 +13,8 @@ escalation, and it is enforced here.
 """
 import logging
 
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -27,6 +29,35 @@ from ._shared import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI response shapes — documentation only, no runtime effect.
+#
+# Both lookup lists below build their body by hand, so drf-spectacular would
+# otherwise describe them as undescribed operations and the generated
+# TypeScript would be useless. Declared exactly as returned, envelope and all.
+# ---------------------------------------------------------------------------
+
+#: `GET /api/auth/roles/` 200. A BARE LIST — this endpoint is one of the few in
+#: the app with no `{success, data}` envelope. The body is
+#: `list(UserRole.objects.filter(is_active=True).values('id','name','display_name'))`,
+#: so these three keys are the whole object; `is_active` is a filter, not a
+#: field, and is not present in the response.
+ROLE_LIST_RESPONSE = inline_serializer(name='RoleListItem', fields={
+    'id': serializers.IntegerField(),
+    'name': serializers.CharField(),
+    'display_name': serializers.CharField(),
+}, many=True)
+
+#: `GET /api/auth/users/list/` 200. Enveloped, unlike its sibling `/auth/`
+#: lists (states, companies, main groups, categories) which are DRF generics
+#: returning a bare array. `data` is `UserSerializer(many=True)`; there is no
+#: `message` key and no pagination wrapper.
+USER_LIST_RESPONSE = inline_serializer(name='UserListForAssignment', fields={
+    'success': serializers.BooleanField(),
+    'data': UserSerializer(many=True),
+})
 
 
 def _selected_csv_names(value):
@@ -56,7 +87,12 @@ def _sync_rate_approver_rules(user):
                 'is_active': True,
             },
         )
-    
+
+@extend_schema(
+    responses={200: ROLE_LIST_RESPONSE},
+    description='The active role vocabulary, as a bare array of '
+                '`{id, name, display_name}`. No envelope.',
+)
 class RoleListView(APIView):
     """The role vocabulary. Any authenticated user.
 
@@ -74,7 +110,13 @@ class RoleListView(APIView):
     def get(self, request):
         roles = UserRole.objects.filter(is_active=True).values('id', 'name', 'display_name')
         return Response(list(roles))
-    
+
+@extend_schema(
+    responses={200: USER_LIST_RESPONSE},
+    description='The active user roster, wrapped in `{success, data}`. The '
+                'envelope is the point: every other list under `/auth/` '
+                'returns a bare array, so clients must unwrap this one.',
+)
 class UserListForAssignmentView(APIView):
     """The full user roster. Any authenticated user.
 
