@@ -293,6 +293,30 @@ PARTY_FILTER_FIELDS = ['chain', 'country', 'category']
 PARTY_ORDER_FIELDS = {'card_code', 'card_name', 'state', 'main_group', 'card_type'}
 
 
+def _scope_parties_to_user(queryset, user):
+    """Restrict a Party queryset to the user's assigned categories.
+
+    A user scoped to MART sees MART parties; OIL and BEVERAGES likewise, and
+    a multi-category user sees the union. Resolved through
+    `User.category_names()` (primary FK ∪ `categories` M2M). Two cases pass
+    unscoped, both deliberate:
+
+    * admins — consistent with every other scope in the project;
+    * users with NO categories assigned — categories are an opt-in
+      restriction (this is also what `_apply_billing_order_scope` in
+      `orders` does), so an unassigned user keeps today's full view rather
+      than losing everything on deploy.
+    """
+    from core.permissions import is_admin
+
+    if is_admin(user):
+        return queryset
+    names = getattr(user, 'category_names', lambda: set())()
+    if not names:
+        return queryset
+    return queryset.filter(category__in=names)
+
+
 class PartyListView(ListAPIView):
     serializer_class = PartyListSerializer
     pagination_class = OptInPagination   # 3,357 rows
@@ -300,8 +324,9 @@ class PartyListView(ListAPIView):
     filterset_fields = PARTY_FILTER_FIELDS
 
     def get_queryset(self):
-        # Return all parties; filtering is handled on the client or via query params
-        queryset = Party.objects.all()
+        # All parties the requester may see (category-scoped); further
+        # filtering is handled on the client or via query params.
+        queryset = _scope_parties_to_user(Party.objects.all(), self.request.user)
 
         search = self.request.query_params.get('search', None)
         if search:
@@ -804,9 +829,14 @@ class GetPartyByCategoryView(APIView):
                 'message': 'category query parameter is required'
             }, status=status.HTTP_400_BAD_REQUEST)
             
-        parties = Party.objects.filter(category__iexact=category)
+        # Category-scoped like PartyListView: a MART-scoped user asking for
+        # OIL gets an empty list, not a hole around the scope.
+        parties = _scope_parties_to_user(
+            Party.objects.filter(category__iexact=category),
+            request.user,
+        )
         serializer = PartySerializer(parties, many=True)
-        
+
         return Response({
             'success': True,
             'data': serializer.data

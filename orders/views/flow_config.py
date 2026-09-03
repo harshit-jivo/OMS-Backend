@@ -82,15 +82,17 @@ ORDER_FLOW_PAGE_KEY = 'Order_Flow_Settings'
 
 
 def _can_manage_order_flow(user):
-    """Admins, or any user explicitly granted the Order Flow Settings page on
-    the Permissions screen (stored in User.extra_pages)."""
-    if not user or not getattr(user, 'is_authenticated', False):
-        return False
-    role_name = getattr(getattr(user, 'role', None), 'name', '')
-    if user.is_staff or str(role_name).strip().lower() == 'admin':
-        return True
-    extra_pages = getattr(user, 'extra_pages', None) or []
-    return ORDER_FLOW_PAGE_KEY in extra_pages
+    """Admins, or any holder of the Order Flow Settings key.
+
+    Phase 3: resolved through `core.permissions.effective_keys`, which reads
+    the same `extra_pages` grant this function used to read directly — plus
+    role bundles, so a role can now carry the page. `is_admin` replaces the
+    local staff-or-primary-role-admin check: it also counts `is_superuser`
+    and `admin` held via `extra_roles`, which the old comparison missed.
+    """
+    from core.permissions import effective_keys, is_admin
+
+    return is_admin(user) or ORDER_FLOW_PAGE_KEY in effective_keys(user)
 
 
 class OrderFlowConfigView(APIView):

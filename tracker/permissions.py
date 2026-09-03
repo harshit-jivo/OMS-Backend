@@ -11,12 +11,23 @@ Four tracker sub-roles:
   * tracker_user   -> My Stage Queue
   * tracker_ap     -> AP Invoice Entry (vendor invoices copied from a GRPO)
 
-Stuck Alerts is admin-only. Access is decided by the tracker sub-role and
-nothing else: `is_superuser` and the OMS 'admin' role are NOT special-cased, so
-a superuser whose role is 'admin' sees no tracker pages at all. To give someone
-tracker access, set their role — granting superuser does nothing here.
-(Corrected 2026-08-26; this paragraph previously claimed the opposite, which
-`tracker_pages_for` below has never done.)
+Stuck Alerts is admin-only (tracker-admin, that is).
+
+Since the registry fold (Phase 5), the sub-roles are no longer the ONLY way
+in: the seven page keys are registered in `core.permission_registry`, so a
+page can also be granted through a role's bundle on the Role Permissions
+matrix or per-user on the Permissions page — `tracker_pages_for` unions both
+sources. The sub-roles keep meaning exactly what they meant; the keys are for
+the cases the roles could not express (a manager who needs Reports without a
+tracker role).
+
+POLICY CHANGE, deliberate and visible: because `effective_keys` expands
+administrators to every registered key, the OMS `admin` role and superusers
+now hold every tracker page too. Before the fold they held none — a
+documented choice — but a permission system whose admin cannot see a module
+is a permission system with two definitions of admin, which is the disease
+this work cures. To take tracker away from admins again, resolve the keys
+without the admin expansion here.
 
 "Their role" means any role they hold — the primary `role` FK OR one of
 `extra_roles` — and the pages of all of them are unioned. `extra_roles` was
@@ -77,15 +88,20 @@ def tracker_pages_for(user):
     if not (user and user.is_authenticated):
         return set()
 
-    # `core.permissions.role_names` is the project-wide resolver (primary FK
-    # plus extra_roles, lowercased). Imported here rather than at module level
-    # to keep this module importable during migrations, when the M2M table may
-    # not exist yet.
-    from core.permissions import role_names
+    # `core.permissions` resolvers are imported here rather than at module
+    # level to keep this module importable during migrations, when the M2M
+    # table may not exist yet.
+    from core.permissions import effective_keys, role_names
 
     pages = set()
     for name in role_names(user):
         pages |= ROLE_PAGE_MAP.get(name, set())
+
+    # Registry fold: tracker page keys granted through a role's bundle or the
+    # user's personal grants count too. Intersecting with ALL_TRACKER_PAGES
+    # keeps this function's contract (it returns tracker pages, nothing else)
+    # even though effective_keys returns the user's whole key set.
+    pages |= effective_keys(user) & ALL_TRACKER_PAGES
     return pages
 
 

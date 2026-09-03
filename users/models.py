@@ -193,7 +193,48 @@ class UserRole(models.Model):
         ordering = ['name']
 
     def __str__(self):
-        return self.display_name        
+        return self.display_name
+
+
+class RolePermissions(models.Model):
+    """The permission keys a role bundles — the role's ticked boxes.
+
+    One row per role, holding a JSON list of keys from
+    `core.permission_registry`. A user's effective permissions are the union
+    of every held role's bundle plus their personal `extra_pages` grants —
+    see `core.permissions.effective_keys`, the only reader.
+
+    Why a separate table instead of a field on `UserRole`
+    -----------------------------------------------------
+    Adding a column to `users_role` makes EVERY existing query on it —
+    including `user.role` during login — fail with UndefinedColumn on any
+    database that has not applied the migration yet. A separate table fails
+    only when *it* is queried, and `effective_keys` treats that failure as
+    "no bundles yet": the system degrades to exactly today's behaviour
+    (extra_pages only) instead of taking login down. When the user-model
+    consolidation lands (roles M2M), this can fold into the role table in
+    the same deployment window.
+
+    Keys are validated against the registry ON READ, not on write: a stale
+    key left behind by a code change is inert, and a migration never has to
+    chase data. `set_keys` still filters on write so the admin UI cannot
+    store junk.
+    """
+
+    role = models.OneToOneField(
+        UserRole,
+        on_delete=models.CASCADE,
+        related_name='permission_bundle',
+    )
+    keys = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'users_role_permissions'
+
+    def __str__(self):
+        return f'{self.role.name}: {len(self.keys or [])} keys'
+
 
 class User(AbstractUser):
     first_name = None
@@ -339,6 +380,28 @@ class User(AbstractUser):
     def has_role(self, name):
         """True when the user holds `name` as either their primary or an extra role."""
         return str(name).strip().lower() in self.all_role_names()
+
+    def category_names(self):
+        """Upper-cased names of every category this user is scoped to —
+        the primary `category` FK plus the full `categories` M2M.
+
+        The M2M's own comment states the rule: `categories` is the full set
+        used for data scoping, with the FK kept as the primary for backward
+        compatibility. Same shape as `all_role_names`: consult BOTH, or a
+        user assigned MART through the M2M is invisible to half the scoping.
+
+        An EMPTY set means "not category-scoped" — the user sees every
+        category. Categories are an opt-in restriction, not a grant.
+        """
+        names = {
+            str(n).strip().upper()
+            for n in self.categories.values_list('category', flat=True)
+        }
+        primary = getattr(self.category, 'category', '')
+        if primary:
+            names.add(str(primary).strip().upper())
+        names.discard('')
+        return names
 
 
     

@@ -27,6 +27,23 @@ def _get_user_category_name(user):
 
 
 def _get_user_category_names(user):
+    """Every category the user is scoped to — primary FK plus the
+    `categories` M2M, via `User.category_names()`.
+
+    Previously read the primary FK ALONE, while the model states that
+    `categories` "is the full set used for data scoping" — so a user assigned
+    [OIL, MART] was scoped to OIL only. This is a deliberate WIDENING to the
+    behaviour the model layer already promised: a multi-category user now
+    sees the union of their categories. Falls back to the primary FK when the
+    M2M is unavailable (bare test objects, mid-migration), matching
+    `core.permissions.role_names`.
+    """
+    names = getattr(user, 'category_names', None)
+    if callable(names):
+        try:
+            return sorted(names())
+        except Exception:  # noqa: BLE001 — unmigrated DB / detached instance
+            pass
     category = _get_user_category_name(user)
     return [category] if category else []
 

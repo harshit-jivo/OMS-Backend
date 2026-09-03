@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView,PagePermissionsView,ComboMappingsView
+from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView,PagePermissionsView,ComboMappingsView,PermissionRegistryView,RolePermissionsListView,RolePermissionsUpdateView,RoleCreateView,RoleUpdateView,RoleDeleteView
 from django.views.decorators.csrf import csrf_exempt
 
 
@@ -19,6 +19,14 @@ urlpatterns = [
     path('roles/', RoleListView.as_view(), name='roles-list'),
     path('users/list/', UserListForAssignmentView.as_view(), name='users-list'),
     path('users/<int:user_id>/page-permissions/', PagePermissionsView.as_view(), name='user-page-permissions'),
+
+    # Role Permissions matrix (Phase 4): the registry, and per-role bundles.
+    path('permission-registry/', PermissionRegistryView.as_view(), name='permission-registry'),
+    path('roles/permissions/', RolePermissionsListView.as_view(), name='role-permissions-list'),
+    path('roles/<int:role_id>/permissions/', RolePermissionsUpdateView.as_view(), name='role-permissions-update'),
+    path('roles/create/', RoleCreateView.as_view(), name='role-create'),
+    path('roles/<int:role_id>/update/', RoleUpdateView.as_view(), name='role-update'),
+    path('roles/<int:role_id>/delete/', RoleDeleteView.as_view(), name='role-delete'),
 
     # User-Party assignment
     path('users/<int:user_id>/parties/', UserPartiesView.as_view(), name='user-parties'),

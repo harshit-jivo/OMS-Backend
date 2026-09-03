@@ -99,6 +99,13 @@ class UserSerializer(serializers.ModelSerializer):
     # `role` alone, or a user granted a function role looks like they hold none.
     extra_roles = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
+    # The user's effective permission keys: union of every held role's bundle
+    # (users.RolePermissions) and personal `extra_pages`, computed by
+    # `core.permissions.effective_keys`. Clients should prefer this over
+    # reading `extra_pages` directly — it is the server's own answer, and it
+    # already accounts for admin (who receives every registered key). Additive:
+    # clients that ignore it keep working exactly as before.
+    permissions = serializers.SerializerMethodField()
     is_active = serializers.BooleanField(read_only=True)
     # Read-only account flags/timestamps surfaced on the mobile Profile screen.
     # Kept read_only so they can never be set through this serializer.
@@ -117,7 +124,7 @@ class UserSerializer(serializers.ModelSerializer):
         # through CreateUserSerializer / UpdateUserSerializer and never read.
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'extra_roles', 'roles', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'extra_pages', 'created_at'
+            'role','role_display', 'extra_roles', 'roles', 'permissions', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'extra_pages', 'created_at'
         ]
 
     @extend_schema_field(RoleSerializer(many=True))
@@ -126,6 +133,11 @@ class UserSerializer(serializers.ModelSerializer):
             {'id': r.id, 'name': r.name, 'display_name': r.display_name}
             for r in obj.extra_roles.all()
         ]
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_permissions(self, obj):
+        from core.permissions import effective_keys
+        return sorted(effective_keys(obj))
 
     @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_roles(self, obj):

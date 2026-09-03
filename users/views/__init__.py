@@ -4,10 +4,11 @@
 This package is the seam that let it be split without touching `users/urls.py`
 or any caller: `users.views.<anything>` still resolves.
 
-    auth.py          login, token refresh, logout, profile, page permissions
-    assignments.py   which users may sell which parties, and which products
-    accounts.py      user CRUD and the lookup lists the admin screens need
-    _shared.py       the one helper two of those three need
+    auth.py             login, token refresh, logout, profile, page permissions
+    assignments.py      which users may sell which parties, and which products
+    accounts.py         user CRUD and the lookup lists the admin screens need
+    role_permissions.py the Role Permissions matrix: registry + role bundles
+    _shared.py          the one helper two of those three need
 
 The same patching caveat as `orders.views` applies: a name re-exported here is
 a SEPARATE BINDING from the one its own module uses, so
@@ -19,6 +20,14 @@ Nothing patches these today; this note is for when something does.
 from .accounts import *  # noqa: F401,F403
 from .assignments import *  # noqa: F401,F403
 from .auth import *  # noqa: F401,F403
+from .role_permissions import (  # noqa: F401
+    PermissionRegistryView,
+    RoleCreateView,
+    RoleDeleteView,
+    RolePermissionsListView,
+    RolePermissionsUpdateView,
+    RoleUpdateView,
+)
 
 from . import _shared, accounts, assignments, auth  # noqa: F401
 

@@ -52,13 +52,24 @@ MART_TAB_STATUS_IDS = {
 
 # ── Mart Approval flow (distributor / company 3 orders) ──────────────────────
 def _is_mart_approver(user):
-    """Only the Mart Approval role (or admin) may work the Mart queue."""
-    if not user or not getattr(user, 'is_authenticated', False):
-        return False
-    if getattr(user, 'is_staff', False):
+    """Only the Mart Approval desk (or admin) may work the Mart queue.
+
+    Resolved through `core.permissions` (Phase 3): `is_admin` is the project's
+    one definition of admin, and the desk itself is the `orders.mart.decide`
+    registry key — granted to the mart_approval role by migration 0032 — with
+    `has_role` as the transitional fallback for databases where the seed has
+    not been applied yet. `has_role` also counts `extra_roles`, which the old
+    primary-FK-only comparison here missed; that widening is the model layer's
+    stated rule, not a policy change. Once 0032 is verified live, the
+    `has_role` line goes — same cleanup contract as `HasKeyOrRole`.
+    """
+    from core.permissions import effective_keys, has_role, is_admin
+
+    if is_admin(user):
         return True
-    role_name = getattr(getattr(user, 'role', None), 'name', '')
-    return str(role_name).strip().lower() in MART_APPROVER_ROLES
+    if 'orders.mart.decide' in effective_keys(user):
+        return True
+    return has_role(user, *MART_APPROVER_ROLES)
 
 
 def _serialize_mart_order(order, *, with_items=False):

@@ -37,6 +37,7 @@ from orders.serializers import OrderStatusUpdateSerializer, CreateOrderSerialize
 from orders.models import Order, OrderStatus, log_order_action, OrderRateApproval, OrderItemApprovalMapping
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
+from core.permissions import HasKeyOrRole
 from rest_framework.response import Response
 from rest_framework import serializers
 from rest_framework import status
@@ -72,6 +73,45 @@ from ._shared import (
     _mart_status,
 )
 BILLING_RESOLVED_CODES = ['BILLING_REJECTED', 'COMPLETED']
+
+# ---------------------------------------------------------------------------
+# Endpoint gates (Phase 3: registry keys, with a transitional role fallback).
+#
+# These endpoints accepted ANY authenticated user — an auditor, or a legal /
+# HAIS / tracker / payments account, could create or approve a sales order by
+# calling the API directly. The web client's routeAccess.ts gates were the only
+# thing standing in the way, and hiding a link is not access control.
+#
+# Authority now comes from `core.permission_registry` keys, granted to roles
+# through their bundles (users.RolePermissions, seeded by migration 0032) and
+# to individuals through `extra_pages`. The role names below are the
+# TRANSITIONAL fallback that keeps every desk working on a database where
+# 0031/0032 have not been applied yet — they name exactly who used each
+# endpoint before keys existed, read off the frontend route table and the desk
+# pages. Once the seed is verified live, each gate drops to `HasKey(key)` and
+# the role sets go — see the cleanup contract on `HasKeyOrRole`.
+# ---------------------------------------------------------------------------
+
+#: Who creates and edits orders: Add_Sales on web is billing|manager
+#: (routeAccess.ts), and the mobile flows create as manager or distributor.
+ORDER_CREATOR_ROLES = ('manager', 'billing', 'distributor')
+
+#: `rate approver` is stored several ways; mirror routeAccess.ts and list the
+#: accepted spellings rather than normalising, so a new spelling is a visible
+#: decision. The live role table uses `approver`.
+RATE_APPROVER_ROLES = (
+    'approver', 'rate approver', 'rate_approver', 'rate-approver', 'rateapprover',
+)
+
+#: Every desk that moves an order through its flow. `update-status` is one
+#: endpoint serving the auditor, billing and rate-approver desk pages, plus
+#: manager/distributor actions from mobile and the Mart queue. Per-desk
+#: entitlement inside a transition (e.g. "is this user an assigned rate
+#: approver") is checked by the transition service where it exists; this gate
+#: keeps roles with no business in the order flow out entirely.
+ORDER_DESK_ROLES = ORDER_CREATOR_ROLES + RATE_APPROVER_ROLES + (
+    'auditor', 'mart_approval', 'factory_approver',
+)
 
 
 def _normalize_warehouse_code(value):
@@ -301,7 +341,11 @@ ORDER_CREATE_BAD_REQUEST = {
 
 
 class UpdateOrderView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Same actors as create — plus the auditor, who adjusts an order under
+    # review before deciding on it.
+    def get_permissions(self):
+        return [IsAuthenticated(),
+                HasKeyOrRole('orders.sales.edit', *ORDER_CREATOR_ROLES, 'auditor')]
 
     def put(self, request, order_id):
         def _to_float(value, default=0.0):
@@ -481,7 +525,9 @@ class UpdateOrderView(APIView):
                 'edit paths are separated by status code (201 vs 200).',
 )
 class CreateOrderView(APIView):
-    permission_classes = [IsAuthenticated]
+    def get_permissions(self):
+        return [IsAuthenticated(),
+                HasKeyOrRole('orders.sales.create', *ORDER_CREATOR_ROLES)]
 
     def post(self, request):
         def _to_float(value, default=0.0):
@@ -941,7 +987,9 @@ class UpdateOrderStatusView(APIView):
     request parsing, then hands off.
     """
 
-    permission_classes = [IsAuthenticated]
+    def get_permissions(self):
+        return [IsAuthenticated(),
+                HasKeyOrRole('orders.status.transition', *ORDER_DESK_ROLES)]
 
     @transaction.atomic
     def post(self, request, order_id):
@@ -974,7 +1022,12 @@ def get_status(name):
     return _status_cache[name]
 
 class ApproveOrderView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Legacy simple-flow decision (no web caller; mobile/older clients). A
+    # decision endpoint, so the deciding desks — not creators — hold it.
+    def get_permissions(self):
+        return [IsAuthenticated(),
+                HasKeyOrRole('orders.decision.simple',
+                             'auditor', 'billing', 'manager', *RATE_APPROVER_ROLES)]
 
     def post(self, request, order_id):
         try:
@@ -1013,7 +1066,11 @@ class ApproveOrderView(APIView):
         })
 
 class RejectOrderView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Mirror of ApproveOrderView — same desks, same reasoning.
+    def get_permissions(self):
+        return [IsAuthenticated(),
+                HasKeyOrRole('orders.decision.simple',
+                             'auditor', 'billing', 'manager', *RATE_APPROVER_ROLES)]
 
     def post(self, request, order_id):
         try:
