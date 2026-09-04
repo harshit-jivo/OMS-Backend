@@ -285,6 +285,14 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
         source='created_by.name', read_only=True, default='')
     created_by_username = serializers.CharField(
         source='created_by.username', read_only=True, default='')
+    # Who performed the handover check, in the same representation style as
+    # created_by above: name and username only, no other account detail.
+    verification_status_display = serializers.CharField(
+        source='get_verification_status_display', read_only=True, default='')
+    verified_by_name = serializers.CharField(
+        source='verified_by.name', read_only=True, default='')
+    verified_by_username = serializers.CharField(
+        source='verified_by.username', read_only=True, default='')
 
     class Meta:
         model = PaymentReceipt
@@ -306,6 +314,11 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
                   'sap_reconciled_at',
                   'methods', 'allocations', 'attachments', 'approval',
                   'created_by', 'created_by_name', 'created_by_username',
+                  # The handover gate. Orthogonal to `status` above — a receipt
+                  # carries both, and the verification axis never rewinds.
+                  'verification_status', 'verification_status_display',
+                  'verified_by', 'verified_by_name', 'verified_by_username',
+                  'verified_at', 'verification_remarks',
                   'created_at', 'updated_at']
         read_only_fields = fields
 
@@ -558,6 +571,12 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         allocations = validated_data.pop('allocations', None)
         user = self.context['request'].user
 
+        # Snapshot the MATERIAL figures before anything is overwritten, so the
+        # comparison below is against what was actually verified.
+        was_verified = (instance.verification_status
+                        == PaymentReceipt.VerificationStatus.VERIFIED)
+        before = self._material_snapshot(instance) if was_verified else None
+
         for field, value in validated_data.items():
             setattr(instance, field, value)
 
@@ -587,6 +606,30 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
 
         instance.save()
 
+        # A MATERIAL edit after verification invalidates it. Otherwise the
+        # record would claim someone verified figures they never saw: the
+        # cheque number, the amount or the allocations could all change while
+        # `verified_by` still names the person who checked the old ones.
+        #
+        # Deliberately narrow. Re-reading `instance` from the database is what
+        # makes this honest — the child rows were replaced above, so the
+        # snapshot has to come from the saved state, not the in-memory copy.
+        # A remarks or branch edit is NOT material and leaves verification
+        # intact; re-verifying for a typo fix would make the gate a nuisance
+        # and train people to click through it.
+        reset_verification = False
+        if was_verified:
+            instance.refresh_from_db()
+            if self._material_snapshot(instance) != before:
+                instance.verification_status = (
+                    PaymentReceipt.VerificationStatus.PENDING)
+                instance.verified_by = None
+                instance.verified_at = None
+                instance.save(update_fields=[
+                    'verification_status', 'verified_by', 'verified_at',
+                    'updated_at'])
+                reset_verification = True
+
         from .services import log_status
         # UPDATED, not STATUS_CHANGED: an edit changes the figures without
         # changing the status, and the timeline must say WHO altered a
@@ -595,8 +638,33 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         log_status(instance, from_status=instance.status,
                    to_status=instance.status, user=user,
                    action=PaymentStatusHistory.Action.UPDATED,
-                   reason='Receipt edited.')
+                   reason=('Receipt edited — verification reset, the amounts '
+                           'changed after it was verified.'
+                           if reset_verification else 'Receipt edited.'))
         return instance
+
+    @staticmethod
+    def _material_snapshot(instance):
+        """The figures a verifier physically checks, as a comparable value.
+
+        Amount, tender and what the money settles — plus the cheque/UPI
+        identifiers that tie the entry to a specific physical instrument.
+        Sorted, so re-sending the same rows in a different order is not
+        mistaken for a change.
+        """
+        return {
+            'total_amount': instance.total_amount,
+            'allocated_amount': instance.allocated_amount,
+            'methods': sorted(
+                (m.method, m.amount, m.cheque_number or '',
+                 m.bank_name or '', m.cheque_date, m.upi_reference or '')
+                for m in instance.methods.all()
+            ),
+            'allocations': sorted(
+                (a.sap_doc_entry, a.invoice_type or '', a.amount_applied)
+                for a in instance.allocations.all()
+            ),
+        }
 
 
 # ---------------------------------------------------------------------------

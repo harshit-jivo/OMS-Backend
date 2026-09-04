@@ -346,6 +346,22 @@ def submit_receipt(receipt, user, ctx=None):
         raise ValidationError(
             f'A {receipt.get_status_display().lower()} receipt cannot be submitted.')
 
+    # THE VERIFICATION GATE. Placed here, in the one function every path into
+    # approval calls, so it cannot be bypassed by another route — the submit
+    # endpoint, the verify endpoint and any future caller all pass through it.
+    #
+    # It sits AFTER the status check so the more specific message wins: a
+    # posted receipt should be told it is posted, not that it needs verifying.
+    #
+    # Applies equally to the REJECTED and PENDING_ERROR retry paths. Those
+    # receipts were verified before their first submission and stay VERIFIED
+    # (verification is never rewound), so in practice this never blocks them —
+    # but a receipt that somehow reaches those states unverified must not slip
+    # into approval through the back door.
+    if receipt.verification_status != PaymentReceipt.VerificationStatus.VERIFIED:
+        raise ValidationError(
+            'Payment must be verified before it can be submitted for approval.')
+
     validate_receipt(receipt)
     previous = receipt.status
 
@@ -380,6 +396,87 @@ def submit_receipt(receipt, user, ctx=None):
     # the same transaction opened by approval_services.submit above — so the
     # Notification commits with the submission and rolls back with it. No SAP is
     # involved in this path.
+    return receipt
+
+
+def verify_receipt(receipt_id, user, *, remarks='', ctx=None):
+    """Verify a receipt (the handover check) and send it into approval.
+
+    ONE transaction, deliberately. Verification and submission must not come
+    apart: a receipt marked VERIFIED that never entered the approval chain is
+    invisible in both queues — gone from the verifier's list, absent from the
+    approver's — and only a database read would find it. If the submission
+    raises, the verification is rolled back with it and the receipt stays in
+    the verifier's queue where somebody can act on it.
+
+    Takes an ID rather than an instance: the row is re-read under
+    `select_for_update()` inside the lock, so a caller cannot hand us a stale
+    copy whose verification_status was read before another transaction changed
+    it. This is the pattern `sap_poster.post_document` already uses to keep
+    "one OMS receipt -> one SAP payment" true, applied to the same class of
+    race.
+
+    Returns the verified, submitted receipt.
+    """
+    with transaction.atomic():
+        # The lock is held for the whole body — verification, history and
+        # submission — so a second verifier blocks here and then reads the
+        # committed VERIFIED state below rather than racing past it.
+        receipt = (PaymentReceipt.objects
+                   .select_for_update()
+                   .get(pk=receipt_id))
+
+        # Duplicate verification. Read from the LOCKED row, never from a copy
+        # fetched before the lock: that is the whole point of re-reading here.
+        if receipt.verification_status == PaymentReceipt.VerificationStatus.VERIFIED:
+            who = (getattr(receipt.verified_by, 'name', None)
+                   or getattr(receipt.verified_by, 'username', None)
+                   or 'another user')
+            raise ValidationError(
+                f'{receipt.receipt_no} has already been verified by {who}.')
+
+        # Separation of duties. The reason verification exists is to put a
+        # second pair of eyes on physical money, so the creator verifying their
+        # own entry would return the system to exactly the state it had before
+        # this feature. `approvals` takes the same position on approval
+        # (forbid_self_approval), and this mirrors it.
+        if receipt.created_by_id == getattr(user, 'id', None):
+            raise ValidationError('You cannot verify a payment you created.')
+
+        # A receipt already in SAP is finished; verifying it would imply a
+        # handover check on money that has already been posted and settled.
+        if receipt.sap_doc_entry:
+            raise ValidationError(
+                f'{receipt.receipt_no} is already posted to SAP as DocEntry '
+                f'{receipt.sap_doc_entry} and cannot be verified.')
+
+        previous = receipt.verification_status
+        receipt.verification_status = PaymentReceipt.VerificationStatus.VERIFIED
+        receipt.verified_by = user
+        receipt.verified_at = timezone.now()
+        if remarks:
+            receipt.verification_remarks = remarks
+        receipt.save(update_fields=['verification_status', 'verified_by',
+                                    'verified_at', 'verification_remarks',
+                                    'updated_at'])
+
+        # The audit trail is PaymentStatusHistory and nothing else — the model
+        # columns above are a queryable projection of this row. The status pair
+        # records the VERIFICATION axis, which is what actually changed; the
+        # main status is still DRAFT at this point and is moved by the submit
+        # below, which logs its own row.
+        log_status(receipt, from_status=previous,
+                   to_status=receipt.verification_status,
+                   user=user,
+                   action=PaymentStatusHistory.Action.VERIFIED,
+                   reason=remarks or 'Payment verified.',
+                   ip=(ctx or {}).get('ip'))
+
+        # Into the EXISTING chain, through the one entry point. The guard in
+        # submit_receipt now passes because the row above is VERIFIED within
+        # this transaction. Nothing about the approval engine changes.
+        submit_receipt(receipt, user, ctx=ctx)
+
     return receipt
 
 

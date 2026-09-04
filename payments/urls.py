@@ -64,6 +64,8 @@ urlpatterns = [
          name='payment-receipt-list'),
     path('receipts/<int:pk>/', views.PaymentReceiptDetailView.as_view(),
          name='payment-receipt-detail'),
+    path('receipts/<int:pk>/verify/', views.PaymentReceiptVerifyView.as_view(),
+         name='payment-receipt-verify'),
     path('receipts/<int:pk>/submit/', views.PaymentReceiptSubmitView.as_view(),
          name='payment-receipt-submit'),
     path('receipts/<int:pk>/history/', views.PaymentReceiptHistoryView.as_view(),

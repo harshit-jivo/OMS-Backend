@@ -36,10 +36,13 @@ from .permissions import (
     ACTION_PERMISSION_LABELS,
     CanCreateDeposit,
     CanCreatePayment,
+    CanVerifyPayment,
     CanViewPaymentsDashboard,
+    PAYMENTS_VERIFY,
     ReadOrCreateDeposit,
     ReadOrCreatePayment,
     granted_keys,
+    has_permission_key,
 )
 from . import analytics, analytics_person, bank_master, hana_queries
 from .models import (
@@ -567,6 +570,24 @@ class PaymentReceiptListCreateView(APIView):
             qs = qs.filter(company=value.upper())
         if value := request.query_params.get('card_code'):
             qs = qs.filter(card_code=value)
+        # The verification queue. A plain filter on the existing list endpoint
+        # rather than a dedicated /verification/ route, so it inherits the
+        # pagination, company scoping and every other filter above for free —
+        # and a queue that also wants `?company=` needs no second
+        # implementation of it.
+        #
+        # NO default date window is applied here, deliberately. The plan calls
+        # for the queue to open on the last 2 days, but this endpoint has never
+        # defaulted its dates — `date_from`/`date_to` are opt-in — and adding a
+        # server-side default would silently truncate every EXISTING caller of
+        # /receipts/, which is the tracking screens. The 2-day default is a
+        # property of the queue VIEW, so the client sends
+        # `?verification_status=PENDING&date_from=<today-2>`; a verifier who
+        # widens the range gets everything still pending, which is the correct
+        # behaviour for a queue nobody may leave unworked.
+        if value := request.query_params.get('verification_status'):
+            qs = qs.filter(verification_status__in=[
+                v.strip().upper() for v in value.split(',') if v.strip()])
         # Inclusive date window over payment_date, for the tracking screens.
         if value := request.query_params.get('date_from'):
             qs = qs.filter(payment_date__gte=value)
@@ -675,11 +696,28 @@ def _document_permissions(document, user):
                 and not approved_already)
         )
     )
+    # THE VERIFIER may edit while the receipt is still awaiting verification.
+    # That is the point of the handover: they hold the physical money and are
+    # the one person positioned to correct a mistyped amount or cheque number
+    # against it. Once VERIFIED the receipt is in the approval chain and the
+    # rules above take over again.
+    #
+    # Guarded by `hasattr` because this function is shared with BankDeposit,
+    # which has no verification axis — deposits must be entirely unaffected.
+    verifier_may_edit = (
+        hasattr(document, 'verification_status')
+        and document.verification_status == 'PENDING'
+        and has_permission_key(user, PAYMENTS_VERIFY)
+        # Not the creator: someone who may not verify their own receipt should
+        # not gain an edit right from a permission they cannot exercise on it.
+        and document.created_by_id != user.id
+    )
     return {
         'can_decide': can_decide,
+        'can_verify': verifier_may_edit,
         'can_edit': (
             not document.sap_doc_entry
-            and (can_decide or creator_may_edit)
+            and (can_decide or creator_may_edit or verifier_may_edit)
         ),
         # Only the creator resubmits, and only when no chain is open.
         'can_resubmit': (
@@ -812,6 +850,42 @@ class PaymentReceiptSubmitView(APIView):
         receipt.refresh_from_db()
         return ok(PaymentReceiptSerializer(receipt).data,
                   message='Submitted for approval.')
+
+
+class PaymentReceiptVerifyView(APIView):
+    """Verify a receipt (the handover check) and send it into approval.
+
+    Three independent checks, and all three are required:
+
+      * `CanVerifyPayment` — the capability, from the permission registry.
+      * The receipt is still PENDING and not already in SAP — record state,
+        re-read under a row lock in the service.
+      * The verifier is not the creator — separation of duties.
+
+    The object is fetched through `_receipt_queryset`, the SAME queryset every
+    other receipt endpoint uses, so verification cannot become a way to reach
+    a document the rest of the module would not show. Holding Payments_Verify
+    grants no extra visibility.
+    """
+
+    permission_classes = [IsAuthenticated, CanVerifyPayment]
+
+    def post(self, request, pk):
+        # 404 before the service runs, so an unknown id never reaches the lock.
+        receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
+        remarks = (request.data.get('verification_remarks')
+                   or request.data.get('remarks') or '').strip()
+        try:
+            services.verify_receipt(
+                receipt.pk, request.user,
+                remarks=remarks, ctx=request_context(request))
+        except DjangoValidationError as exc:
+            return fail('; '.join(exc.messages))
+
+        receipt.refresh_from_db()
+        data = PaymentReceiptSerializer(receipt).data
+        data['permissions'] = _document_permissions(receipt, request.user)
+        return ok(data, message='Payment verified and submitted for approval.')
 
 
 class PaymentReceiptHistoryView(APIView):

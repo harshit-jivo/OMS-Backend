@@ -180,6 +180,27 @@ class PaymentReceipt(TimeStampedModel):
         CANCELLED_IN_SAP = 'CANCELLED_IN_SAP', 'Cancelled in SAP'
         CANCELLED = 'CANCELLED', 'Cancelled'
 
+    class VerificationStatus(models.TextChoices):
+        """The handover gate, ORTHOGONAL to `Status` above.
+
+        Deliberately a SEPARATE axis rather than two more `Status` values, and
+        the reason is concrete: `submit_receipt` whitelists three statuses,
+        `analytics.PENDING_STATUSES` enumerates six, `_document_permissions`
+        derives can_edit/can_decide from the enum, and the mobile client has
+        hand-written label and colour maps keyed on it. A new main status would
+        have to be threaded through every one of those, and any miss is a
+        receipt that silently vanishes from a total. As its own field it adds a
+        gate without touching the lifecycle.
+
+        Once VERIFIED, a receipt STAYS verified. An approver's rejection or a
+        SAP failure is a downstream concern — verification attests that the
+        physical cash or cheque matched what was typed, and that fact does not
+        become untrue because a GL period was locked.
+        """
+
+        PENDING = 'PENDING', 'Pending verification'
+        VERIFIED = 'VERIFIED', 'Verified'
+
     class ReceivedFromType(models.TextChoices):
         PARTY = 'PARTY', 'Party'
         PERSON = 'PERSON', 'Company person'
@@ -215,6 +236,24 @@ class PaymentReceipt(TimeStampedModel):
     remarks = models.TextField(blank=True, default='')
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
+
+    # ---- Verification / handover -----------------------------------------
+    # A second person checks the physical money against what was entered before
+    # the receipt may enter the approval chain. Enforced in
+    # `services.submit_receipt`, which is the single choke point every path
+    # into approval goes through.
+    verification_status = models.CharField(
+        max_length=20, choices=VerificationStatus.choices,
+        default=VerificationStatus.PENDING, db_index=True)
+    # SET_NULL, not PROTECT: a verifier can leave the company, and losing the
+    # audit of who verified is worse than keeping a null. The immutable record
+    # of the event is the PaymentStatusHistory row, which also carries the
+    # username as text; these columns are a queryable projection of it.
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='verified_receipts')
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verification_remarks = models.TextField(blank=True, default='')
 
     # SAP write-back
     sap_doc_entry = models.IntegerField(null=True, blank=True, db_index=True)
@@ -282,6 +321,10 @@ class PaymentReceipt(TimeStampedModel):
                          name='idx_rcpt_company_status'),
             models.Index(fields=['card_code', 'company'], name='idx_rcpt_party'),
             models.Index(fields=['status', 'sap_doc_entry'], name='idx_rcpt_sap'),
+            # The verification queue: filter on verification_status, newest
+            # first. Matches the exact filter+sort the queue issues.
+            models.Index(fields=['verification_status', '-created_at'],
+                         name='idx_rcpt_verification'),
         ]
         constraints = [
             models.CheckConstraint(
@@ -700,6 +743,9 @@ class PaymentStatusHistory(models.Model):
     class Action(models.TextChoices):
         CREATED = 'CREATED', 'Created'
         UPDATED = 'UPDATED', 'Updated'
+        # The handover check: a second person confirmed the physical money
+        # against the entry. Sits between CREATED and SUBMITTED in the timeline.
+        VERIFIED = 'VERIFIED', 'Verified'
         SUBMITTED = 'SUBMITTED', 'Submitted for approval'
         RESUBMITTED = 'RESUBMITTED', 'Resubmitted'
         APPROVED = 'APPROVED', 'Approved'

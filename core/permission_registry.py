@@ -75,6 +75,12 @@ REGISTRY: dict[str, dict[str, str]] = {
     # --- payments/permissions.py; the mobile app checks these strings) ------
     'payments': {
         'Payments_Create':          'Payments — Create',
+        # The handover gate between creation and approval: a second person
+        # checks the physical cash/cheque against the entry. Independent of
+        # Create and Approve — holding either confers nothing here, and the
+        # creator of a receipt may never verify it (separation of duties is
+        # enforced in the endpoint, not by this key).
+        'Payments_Verify':          'Payments — Verify (handover)',
         'Payments_Approve':         'Payments — Approve',
         'Deposit_Create':           'Deposit — Create',
         'Deposit_Approve':          'Deposit — Approve',
