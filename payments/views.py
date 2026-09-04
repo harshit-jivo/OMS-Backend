@@ -63,6 +63,7 @@ from .serializers import (
     PaymentReceiptSerializer,
     PaymentStatusHistorySerializer,
     SapCompanyMapSerializer,
+    TECHNICAL_HISTORY_ACTIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -895,9 +896,24 @@ class PaymentReceiptHistoryView(APIView):
         from django.contrib.contenttypes.models import ContentType
 
         receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
-        rows = PaymentStatusHistory.objects.filter(
-            content_type=ContentType.objects.get_for_model(PaymentReceipt),
-            object_id=receipt.pk,
+        rows = (
+            PaymentStatusHistory.objects
+            .filter(
+                content_type=ContentType.objects.get_for_model(PaymentReceipt),
+                object_id=receipt.pk,
+            )
+            # Bare STATUS_CHANGED rows are excluded: they record that a status
+            # moved without saying who or why, which reads as noise between the
+            # events that do carry meaning. Nothing is deleted — every row is
+            # still stored and still visible in the Django admin, which is the
+            # forensic view. `?full=true` returns them for support work.
+            .exclude(
+                **({} if _flag(request, 'full')
+                   else {'action__in': list(TECHNICAL_HISTORY_ACTIONS)})
+            )
+            # Oldest first: a timeline is read top-down, and the default model
+            # ordering is newest-first for the admin's benefit.
+            .order_by('created_at', 'id')
         )
         return ok(PaymentStatusHistorySerializer(rows, many=True).data)
 

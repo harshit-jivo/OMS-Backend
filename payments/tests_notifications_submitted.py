@@ -288,9 +288,13 @@ class SubmissionIntegrationTests(TestCase):
         from payments import services
 
         _workflow("PAYMENT", "", [[self.approver]])
+        # VERIFIED because submit_receipt now requires the handover check to
+        # have happened — which is true of any receipt that reaches submission
+        # in practice. This test is about the submit -> notify wiring.
         receipt = PaymentReceipt.objects.create(
             receipt_no="RC-INT-1", company="OIL", card_code="CUST1",
             payment_date=date.today(), total_amount=Decimal("100"),
+            verification_status=PaymentReceipt.VerificationStatus.VERIFIED,
             created_by=self.submitter,
         )
         PaymentMethodEntry.objects.create(receipt=receipt, method="CASH", amount=Decimal("100"))
@@ -318,6 +322,7 @@ class SubmissionIntegrationTests(TestCase):
         receipt = PaymentReceipt.objects.create(
             receipt_no="RC-INT-RB", company="OIL", card_code="CUST1",
             payment_date=date.today(), total_amount=Decimal("100"),
+            verification_status=PaymentReceipt.VerificationStatus.VERIFIED,
             created_by=self.submitter,
         )
         PaymentMethodEntry.objects.create(receipt=receipt, method="CASH", amount=Decimal("100"))

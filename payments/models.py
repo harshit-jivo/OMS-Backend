@@ -396,7 +396,19 @@ class PaymentMethodEntry(models.Model):
     receipt = models.ForeignKey(
         PaymentReceipt, on_delete=models.CASCADE, related_name='methods')
     method = models.CharField(max_length=20, choices=Method.choices)
-    amount = models.DecimalField(max_digits=15, decimal_places=2)
+    # The validator mirrors the `payment_method_amount_positive` CHECK below,
+    # and is what a serializer actually enforces: ModelSerializer copies field
+    # validators onto the DRF field, so an amount of 0 or less is a 400 with a
+    # field error rather than an IntegrityError from the database.
+    #
+    # Without it the CHECK was the ONLY guard, and a zero amount passed every
+    # serializer rule to fail at the write — a 500 on both create and edit.
+    # 0.01 is the smallest storable value at decimal_places=2, so this and the
+    # CHECK refuse exactly the same set of values. `PaymentReceipt.total_amount`
+    # was already written this way; this brings the line rows into line with it.
+    amount = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))])
 
     # UPI
     upi_reference = models.CharField(max_length=60, blank=True, default='')

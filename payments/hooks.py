@@ -12,6 +12,30 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _decision_detail(action):
+    """(level, level_name, remarks) from an ApprovalAction, safely.
+
+    Coerced to their real column types rather than passed through raw. The
+    rung is an integer and the two labels are text, so anything that is not
+    already of that shape — a missing action, or a test double standing in for
+    one — becomes a null or an empty string instead of reaching the database
+    as an object it cannot store.
+    """
+    if action is None:
+        return None, '', ''
+
+    level = getattr(action, 'level', None)
+    level = level if isinstance(level, int) else None
+
+    name = getattr(action, 'level_name', '')
+    name = name if isinstance(name, str) else ''
+
+    remarks = getattr(action, 'remarks', '')
+    remarks = remarks if isinstance(remarks, str) else ''
+
+    return level, name, remarks
+
+
 def _on_receipt_approved(approval_request):
     """Final approval landed — post to SAP.
 
@@ -31,6 +55,25 @@ def _on_receipt_approved(approval_request):
         return
 
     approver = getattr(approval_request, '_acting_user', None)
+
+    # Record the approval on the payment's own timeline.
+    #
+    # It was missing entirely: approval decisions live in `approval_action`,
+    # so the payment history jumped from VERIFIED straight to SAP_POSTED with
+    # nothing to say who approved it or at which rung. The decision log stays
+    # the authority — this is the business-timeline projection of it, carrying
+    # the rung so a multi-level ladder reads level by level.
+    from .models import PaymentStatusHistory
+    from .services import log_status
+
+    last = approval_request.actions.order_by('-sequence').first()
+    level, level_name, remarks = _decision_detail(last)
+    log_status(receipt, from_status=receipt.status, to_status=receipt.status,
+               user=approver, actor_kind='APPROVAL_ENGINE',
+               action=PaymentStatusHistory.Action.APPROVED,
+               level=level, level_label=level_name,
+               reason=remarks or 'Payment approved.')
+
     transaction.on_commit(lambda: post_receipt_to_sap(receipt, user=approver))
 
     # Notify the submitter that their receipt was approved. Runs inside the
@@ -45,7 +88,7 @@ def _on_receipt_approved(approval_request):
 
 
 def _on_receipt_rejected(approval_request):
-    from .models import PaymentReceipt
+    from .models import PaymentReceipt, PaymentStatusHistory
     from .services import log_status
 
     receipt = approval_request.document
@@ -55,9 +98,16 @@ def _on_receipt_rejected(approval_request):
     receipt.status = PaymentReceipt.Status.REJECTED
     receipt.save(update_fields=['status', 'updated_at'])
     last = approval_request.actions.order_by('-sequence').first()
-    reason = (last.remarks if last else '') or 'Rejected.'
+    level, level_name, remarks = _decision_detail(last)
+    reason = remarks or 'Rejected.'
+    # REJECTED, with the rung it was refused at. Without the explicit action
+    # this fell back to STATUS_CHANGED and the timeline read as an anonymous
+    # transition rather than an approver's decision.
     log_status(receipt, from_status=previous, to_status=receipt.status,
                actor_kind='APPROVAL_ENGINE',
+               action=PaymentStatusHistory.Action.REJECTED,
+               level=level, level_label=level_name,
+               user=getattr(approval_request, '_acting_user', None),
                reason=reason)
 
     # Notify the submitter their receipt was rejected (same transaction safety
@@ -100,7 +150,7 @@ def _on_receipt_level_advanced(approval_request):
 
 
 def _on_receipt_cancelled(approval_request):
-    from .models import PaymentReceipt
+    from .models import PaymentReceipt, PaymentStatusHistory
     from .services import log_status
 
     receipt = approval_request.document
@@ -110,7 +160,9 @@ def _on_receipt_cancelled(approval_request):
     receipt.status = PaymentReceipt.Status.CANCELLED
     receipt.save(update_fields=['status', 'updated_at'])
     log_status(receipt, from_status=previous, to_status=receipt.status,
-               actor_kind='APPROVAL_ENGINE', reason='Cancelled by submitter.')
+               actor_kind='APPROVAL_ENGINE',
+               action=PaymentStatusHistory.Action.CANCELLED,
+               reason='Cancelled by submitter.')
 
 
 def _on_deposit_approved(approval_request):

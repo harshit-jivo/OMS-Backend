@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from attachments.serializers import AttachmentSerializer
@@ -252,11 +253,87 @@ class PaymentAllocationSerializer(serializers.ModelSerializer):
         return value
 
 
+# Which business stage an action belongs to. Derived from the ACTION rather
+# than stored on the row: the stage is a property of the event ("verifying" is
+# what a VERIFIED row means), so storing it would be a second, forgeable copy
+# of a fact the action already carries — and every historical row would need
+# backfilling with a value nobody recorded at the time.
+#
+# The keys are the permission keys the stages correspond to, so the label a
+# client shows matches the permission an admin grants.
+_STAGE_BY_ACTION = {
+    PaymentStatusHistory.Action.CREATED: ('Payments_Create', 'Payments — Create'),
+    PaymentStatusHistory.Action.UPDATED: ('Payments_Create', 'Payments — Create'),
+    PaymentStatusHistory.Action.VERIFIED: ('Payments_Verify', 'Payments — Verify'),
+    PaymentStatusHistory.Action.SUBMITTED: ('Payments_Create', 'Payments — Create'),
+    PaymentStatusHistory.Action.RESUBMITTED: ('Payments_Create', 'Payments — Create'),
+    PaymentStatusHistory.Action.APPROVED: ('Payments_Approve', 'Payments — Approve'),
+    PaymentStatusHistory.Action.REJECTED: ('Payments_Approve', 'Payments — Approve'),
+    PaymentStatusHistory.Action.RETURNED: ('Payments_Approve', 'Payments — Approve'),
+    PaymentStatusHistory.Action.SAP_POST_STARTED: ('SAP', 'SAP Posting'),
+    PaymentStatusHistory.Action.SAP_POSTED: ('SAP', 'SAP Posting'),
+    PaymentStatusHistory.Action.SAP_FAILED: ('SAP', 'SAP Posting'),
+    PaymentStatusHistory.Action.SAP_UNKNOWN: ('SAP', 'SAP Posting'),
+    PaymentStatusHistory.Action.SAP_CANCELLED: ('SAP', 'SAP Posting'),
+}
+
+#: Rows that carry no business meaning on their own. A bare STATUS_CHANGED is
+#: the fallback written when a caller records no action — it says a status
+#: moved without saying who or why, which is noise in a business timeline and
+#: is exactly what the technical view (Django admin) is for. The rows are NOT
+#: deleted; they are simply not part of this representation.
+TECHNICAL_HISTORY_ACTIONS = frozenset({
+    PaymentStatusHistory.Action.STATUS_CHANGED,
+})
+
+
 class PaymentStatusHistorySerializer(serializers.ModelSerializer):
+    """The BUSINESS timeline: who did what, at which stage, and why.
+
+    Deliberately excludes the technical columns — `from_status`, `to_status`,
+    `actor_kind`, `ip_address`, `sap_doc_entry`, `level_label`. Those are all
+    still written and still stored; they are forensic detail, readable through
+    the Django admin, and `ip_address` in particular is retained because it is
+    the audit trail for money movement. Showing an internal state transition or
+    an IP to a collector answers a question they never asked.
+
+    SAP DocEntry is likewise omitted: it lives on the receipt, which is its
+    authoritative home, and repeating it per row invites the two disagreeing.
+    """
+
+    action_display = serializers.CharField(
+        source='get_action_display', read_only=True)
+    stage = serializers.SerializerMethodField()
+    stage_display = serializers.SerializerMethodField()
+    performed_by = serializers.SerializerMethodField()
+
     class Meta:
         model = PaymentStatusHistory
-        fields = ['id', 'from_status', 'to_status', 'reason', 'actor_kind',
-                  'changed_by_username', 'created_at']
+        fields = ['id', 'action', 'action_display',
+                  'stage', 'stage_display',
+                  'level', 'performed_by', 'changed_by_username',
+                  'reason', 'created_at']
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_stage(self, obj):
+        """The permission key this event belongs to, or None."""
+        mapped = _STAGE_BY_ACTION.get(obj.action)
+        return mapped[0] if mapped else None
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_stage_display(self, obj):
+        mapped = _STAGE_BY_ACTION.get(obj.action)
+        return mapped[1] if mapped else None
+
+    @extend_schema_field(serializers.CharField())
+    def get_performed_by(self, obj):
+        """Who did it, ready to display.
+
+        Replaces `actor_kind` as a separate technical column: an event with no
+        user is the system acting, so it says "System" rather than leaking
+        'SAP' / 'APPROVAL_ENGINE' as a value the reader has to decode.
+        """
+        return obj.changed_by_username or 'System'
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +627,10 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
             ])
 
         from .services import log_status
+        # CREATED, not the STATUS_CHANGED default: this is the entry point of
+        # the payment's life and reads as such in the timeline.
         log_status(receipt, to_status=receipt.status, user=user,
+                   action=PaymentStatusHistory.Action.CREATED,
                    reason='Receipt created.')
         return receipt
 
