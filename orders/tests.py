@@ -8,11 +8,14 @@ from .views import OrderListView, WDashboardKPIView, _get_base_orders, _get_rate
 
 
 class RateApprovalReasonTests(SimpleTestCase):
-    def test_price_list_basic_zero_requires_rate_approval_for_any_basic_price(self):
+    def test_no_authorised_rate_means_no_rate_approval(self):
+        # No active party/item assignment (or a zero one) means there is no
+        # agreed rate to measure against: unmapped master data, not a discount.
         item = {"item_name": "Mustard Oil"}
 
-        self.assertIsNotNone(_get_rate_approval_reason(item, 0, 0))
-        self.assertIsNotNone(_get_rate_approval_reason(item, 0, 500))
+        self.assertIsNone(_get_rate_approval_reason(item, None, 500))
+        self.assertIsNone(_get_rate_approval_reason(item, 0, 0))
+        self.assertIsNone(_get_rate_approval_reason(item, 0, 500))
 
     def test_basic_price_below_price_list_basic_requires_rate_approval(self):
         item = {"item_name": "Mustard Oil"}

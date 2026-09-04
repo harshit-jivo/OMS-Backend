@@ -274,21 +274,27 @@ def _get_next_foc_status(current_status, fallback_name='Billing'):
 
     return _get_status_by_name(fallback_name)
 
-def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False, config=None):
+def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False, config=None, requires_rate_approval=None):
     if force_foc_flow:
         if flow_type == ORDER_FLOW_TYPE_BILLING:
             return _get_status_by_name('Auditor Approval'), False
         return _get_status_by_name('Billing'), False
 
     config = config or _get_order_flow_config(flow_type)
-    condition_codes = _get_order_price_condition_codes(items, to_float)
-    selected_conditions = set(config.rate_conditions or [])
 
-    if (
-        config.rate_approval_enabled
-        and selected_conditions
-        and condition_codes.intersection(selected_conditions)
-    ):
+    if requires_rate_approval is None:
+        # Legacy fallback: the admin price-condition codes. The form sends
+        # `price_list_basic` tax-inclusive (computeLandingPrice), so
+        # BASIC_GT_MARKET matches every correctly-priced taxed line — callers
+        # should pass the agreed-rate verdict from _get_rate_approval_reason
+        # instead of relying on this.
+        condition_codes = _get_order_price_condition_codes(items, to_float)
+        selected_conditions = set(config.rate_conditions or [])
+        requires_rate_approval = bool(
+            selected_conditions and condition_codes.intersection(selected_conditions)
+        )
+
+    if config.rate_approval_enabled and requires_rate_approval:
         rate_status = _get_status_by_name('Rate Approval')
         if rate_status:
             return rate_status, True
@@ -2420,6 +2426,7 @@ class UpdateOrderView(APIView):
                 flow_type=order_flow_type,
                 force_foc_flow=order.is_foc,
                 config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
+                requires_rate_approval=needs_approval,
             )
         if next_status:
             order.status = next_status
@@ -2570,6 +2577,7 @@ class CreateOrderView(APIView):
                     flow_type=order_flow_type,
                     force_foc_flow=order.is_foc,
                     config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
+                    requires_rate_approval=needs_approval,
                 )
 
             # If the edit sends the order back into Rate Approval, a fresh approval
@@ -2738,6 +2746,7 @@ class CreateOrderView(APIView):
             flow_type=order_flow_type,
             force_foc_flow=order.is_foc,
             config=party_flow_config,
+            requires_rate_approval=needs_approval,
         )
         if next_status:
             order.status = next_status

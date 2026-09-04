@@ -96,7 +96,10 @@ Source seeds:
 
 - Create order -> status picked by `_get_initial_flow_status()` based on:
   - enabled flow steps
-  - price-diff condition (basic vs market price)
+  - whether any line sells below the party's agreed rate on
+    `party_product_assignments` (`_get_rate_approval_reason()`); the old
+    price-diff condition codes (basic vs market price) are only a fallback
+    when no agreed-rate verdict is passed in
 - Update order -> can recalc totals and possibly re-evaluate next status (update endpoint logic)
 - `update-status` endpoint -> explicit status transitions with logging + notifications
 - `approve` and `reject` are legacy/simple shortcuts for created orders, but current flow has richer `update-status`.
