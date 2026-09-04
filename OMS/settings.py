@@ -804,6 +804,53 @@ EINV_CREDENTIALS = {
     for g in EINV_GSTINS
 }
 
+# ---- Jivo Mart NIC credentials (a DIFFERENT PAN from the Oil/Beverages GSTINs) ----
+# Mart (PAN AAFCJ4102J) is a separate legal entity from Oil/Beverages
+# (PAN AACCJ4223F), so it has its OWN NIC client-id/secret. Those two are shared
+# across all of Mart's state GSTINs (per NIC: client-id/secret are per-PAN); the
+# API username/password are per-GSTIN. This mirrors the Oil multi-GSTIN block
+# above, except the per-GSTIN client-id/secret default to MART's, not Oil's.
+#
+# List Mart's issuing GSTINs in MART_EINV_GSTINS and give each one its own
+# MART_EINV_<GSTIN>_USERNAME / _PASSWORD. The single-GSTIN form the .env shipped
+# with (MART_EINV_GSTIN + MART_EINV_USERNAME/PASSWORD) is still honoured as one
+# entry, so nothing breaks.
+#
+# Each Mart GSTIN is folded into EINV_CREDENTIALS so the per-invoice resolver
+# (`EInvoiceClient(gstin=seller_gstin)` in einvoice.services, keyed off the
+# invoice's own VATRegNum) authenticates as the right Mart registration — no code
+# path is Mart-specific. NOTE: live Mart invoices are issued mostly from the
+# Haryana GSTIN 06AAFCJ4102J1ZU; that GSTIN needs its own username/password here
+# or its IRNs will fail auth. The NIC encryption public key is per-ENVIRONMENT
+# (not per-taxpayer), so it defaults to the shared EINV key.
+_MART_CLIENT_ID = config('MART_EINV_CLIENT_ID', default='')
+_MART_CLIENT_SECRET = config('MART_EINV_CLIENT_SECRET', default='')
+_MART_PUBLIC_KEY = config('MART_EINV_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"])
+
+_MART_GSTINS = [g.strip() for g in config('MART_EINV_GSTINS', default='').split(',') if g.strip()]
+_MART_SINGLE = config('MART_EINV_GSTIN', default='').strip()
+if _MART_SINGLE and _MART_SINGLE not in _MART_GSTINS:
+    _MART_GSTINS.append(_MART_SINGLE)
+
+for _mg in _MART_GSTINS:
+    _u = config(f'MART_EINV_{_mg}_USERNAME', default='')
+    _p = config(f'MART_EINV_{_mg}_PASSWORD', default='')
+    # Back-compat: the bare MART_EINV_USERNAME/PASSWORD belong to MART_EINV_GSTIN.
+    if not _u and _mg == _MART_SINGLE:
+        _u = config('MART_EINV_USERNAME', default='')
+        _p = config('MART_EINV_PASSWORD', default='')
+    EINV_CREDENTIALS[_mg] = {
+        "GSTIN": _mg,
+        "USERNAME": _u,
+        "PASSWORD": _p,
+        "CLIENT_ID": config(f'MART_EINV_{_mg}_CLIENT_ID', default=_MART_CLIENT_ID),
+        "CLIENT_SECRET": config(f'MART_EINV_{_mg}_CLIENT_SECRET', default=_MART_CLIENT_SECRET),
+        "PUBLIC_KEY_PATH": config(f'MART_EINV_{_mg}_PUBLIC_KEY_PATH', default=_MART_PUBLIC_KEY),
+    }
+    # So a DocNum search / company picker that walks EINV_GSTINS sees Mart too.
+    if _mg not in EINV_GSTINS:
+        EINV_GSTINS.append(_mg)
+
 # When true, creating a real invoice (serviceLayer.SAPInvoiceCreateView, type=INVOICE)
 # fires automatic IRN generation for that DocEntry in the background. Every attempt
 # is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
