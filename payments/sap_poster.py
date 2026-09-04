@@ -356,6 +356,20 @@ def post_document(document, payload, *, user=None):
                  response=fresh.sap_response, doc_entry=doc_entry,
                  doc_num=doc_num, user=user)
 
+        # The journey is over — tell the two people who put their name to the
+        # money: the creator and the verifier. SUCCESS only; a failure goes
+        # back to the approver who can retry it.
+        #
+        # Isolated: a notification problem must never turn a payment that SAP
+        # accepted into an error, because the money has already moved.
+        if isinstance(fresh, PaymentReceipt):
+            try:
+                from .notification_events import publish_receipt_posted
+                publish_receipt_posted(fresh)
+            except Exception:                                   # noqa: BLE001
+                logger.exception(
+                    'SAP post notification failed for receipt %s', fresh.pk)
+
     log.status = SapCallLog.Status.SUCCESS
     log.response_data = body
     log.sap_doc_entry = doc_entry

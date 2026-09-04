@@ -113,6 +113,61 @@ class VerifyGrantChainTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn(PAYMENTS_VERIFY, str(resp.data))
 
+    def test_eligible_verifiers_names_only_explicit_holders(self):
+        """The progress timeline names who to CHASE, not everyone who could act.
+
+        Administrators hold every key implicitly, so including them listed most
+        of the office and buried the two or three people actually assigned to
+        the job. They can still verify — they are simply not the answer to
+        "who do I go and ask".
+        """
+        from datetime import date
+        from decimal import Decimal
+
+        from .models import PaymentReceipt
+        from .serializers import PaymentReceiptSerializer
+
+        staff_role, _ = UserRole.objects.get_or_create(name='payments_and_deposit')
+        verifier = User.objects.create(
+            username='ev_verifier', name='Explicit Verifier', role=staff_role,
+            extra_pages=[PAYMENTS_VERIFY])
+        creator = User.objects.create(
+            username='ev_creator', name='Creator', role=staff_role,
+            extra_pages=[PAYMENTS_VERIFY])
+
+        receipt = PaymentReceipt.objects.create(
+            receipt_no='RC-EV-1', company='OIL', card_code='C1',
+            payment_date=date.today(), total_amount=Decimal('10.00'),
+            created_by=creator,
+            verification_status=PaymentReceipt.VerificationStatus.PENDING)
+
+        names = {
+            v['username']
+            for v in PaymentReceiptSerializer(receipt, context={}).data[
+                'eligible_verifiers']
+        }
+        self.assertIn('ev_verifier', names)
+        # The admin from setUp holds the key implicitly — excluded.
+        self.assertNotIn(self.admin.username, names)
+        # The creator holds it explicitly but may not verify their own.
+        self.assertNotIn('ev_creator', names)
+
+    def test_eligible_verifiers_is_empty_once_verified(self):
+        """Once done the answer is `verified_by`; candidates would mislead."""
+        from datetime import date
+        from decimal import Decimal
+
+        from .models import PaymentReceipt
+        from .serializers import PaymentReceiptSerializer
+
+        receipt = PaymentReceipt.objects.create(
+            receipt_no='RC-EV-2', company='OIL', card_code='C1',
+            payment_date=date.today(), total_amount=Decimal('10.00'),
+            created_by=self.target,
+            verification_status=PaymentReceipt.VerificationStatus.VERIFIED)
+        data = PaymentReceiptSerializer(receipt, context={}).data
+        self.assertEqual(data['eligible_verifiers'], [])
+
     # §12 — the editor stays admin-only; the new key changes nothing there.
     def test_a_non_admin_cannot_grant_it(self):
         self.client.force_authenticate(self.target)

@@ -153,7 +153,25 @@ class PaymentMethodEntrySerializer(serializers.ModelSerializer):
         read_only_fields = ['sap_check_key']
 
     def get_deposit_account(self, obj):
-        """Our account for this tender, or None when not configured."""
+        """Our account for this tender, or None when not configured.
+
+        SKIPPED FOR LISTS, like `sap_branch` above. Resolving it reads the
+        admin's method->account mapping (and, for a non-cash tender, SAP's own
+        house-bank master) once PER TENDER LINE — 37 mapping queries on a
+        49-row list, for a field only the detail screen renders.
+
+        Detected by walking UP to the outermost serializer and asking whether
+        THAT one is a list. The nesting is always
+        `methods ListSerializer -> receipt serializer [-> receipt
+        ListSerializer]`, so a nested list alone proves nothing: `methods` is
+        a list on a detail page too. Only the root tells them apart.
+        """
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        if isinstance(root, serializers.ListSerializer):
+            return None
+
         company = getattr(obj.receipt, 'company', None)
         if not company:
             return None
@@ -370,6 +388,11 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
         source='verified_by.name', read_only=True, default='')
     verified_by_username = serializers.CharField(
         source='verified_by.username', read_only=True, default='')
+    # Who CAN verify this receipt, so a creator whose payment is sitting
+    # unverified knows exactly whom to chase. Resolved live from the permission
+    # grants on every read, so adding or removing a verifier takes effect
+    # immediately — there is no stored list to go stale.
+    eligible_verifiers = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentReceipt
@@ -395,16 +418,114 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
                   # carries both, and the verification axis never rewinds.
                   'verification_status', 'verification_status_display',
                   'verified_by', 'verified_by_name', 'verified_by_username',
-                  'verified_at', 'verification_remarks',
+                  'verified_at', 'verification_remarks', 'eligible_verifiers',
                   'created_at', 'updated_at']
         read_only_fields = fields
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_eligible_verifiers(self, obj):
+        """Who could verify this receipt right now.
+
+        Only while it is actually waiting: once verified the answer is
+        `verified_by`, and listing candidates then would invite someone to
+        chase a step already done.
+
+        Two exclusions, both so the list names people worth chasing:
+
+        * The CREATOR — the server refuses their own verification, so naming
+          them would send the creator to themselves.
+        * ADMINISTRATORS — an admin holds every key implicitly (see
+          `granted_keys`), so including them listed most of the office and
+          buried the two or three people actually assigned to this job. An
+          admin can still verify; they are simply not who you go and ask.
+
+        What remains is the explicit grant: users an administrator ticked
+        `Payments_Verify` for. Resolved per read, so a verifier added or
+        removed on the permissions page takes effect immediately.
+        """
+        if obj.verification_status != PaymentReceipt.VerificationStatus.PENDING:
+            return []
+
+        # Resolving this needs a scan of the user table (`extra_pages` is a
+        # JSON list, so the key test cannot be a column filter). That is fine
+        # once for a detail page and wasteful once PER ROW of a list, so the
+        # holder set is resolved ONCE and cached on the serializer context —
+        # which lives for exactly one request.
+        holders = self.context.get('_verifier_cache')
+        if holders is None:
+            from django.contrib.auth import get_user_model
+            from django.db.models import Q
+
+            from core.permissions import ADMIN_ROLE
+
+            from .permissions import PAYMENTS_VERIFY
+
+            User = get_user_model()
+            # Administrators are identified in SQL and then EXCLUDED.
+            #
+            # Resolved as one query rather than by calling
+            # `core.permissions.is_admin` per user: that helper goes through
+            # `User.all_role_names()`, which issues its own `values_list` on
+            # the extra_roles M2M and so defeats any prefetch — it cost 133
+            # queries for seven candidates against the live data. The condition
+            # below is the same rule (admin role held as primary OR extra, or
+            # is_staff, or is_superuser).
+            admin_ids = set(
+                User.objects.filter(is_active=True)
+                .filter(
+                    Q(role__name__iexact=ADMIN_ROLE)
+                    | Q(extra_roles__name__iexact=ADMIN_ROLE)
+                    | Q(is_staff=True)
+                    | Q(is_superuser=True)
+                )
+                .values_list('id', flat=True)
+            )
+            holders = [
+                {
+                    'id': u.pk,
+                    'username': u.get_username(),
+                    'name': (u.name or '').strip() or u.get_username(),
+                    'phone': (getattr(u, 'phone', '') or '').strip(),
+                }
+                for u in User.objects.filter(is_active=True).only(
+                    'id', 'username', 'name', 'phone', 'extra_pages')
+                if u.pk not in admin_ids
+                and PAYMENTS_VERIFY in (u.extra_pages or [])
+            ]
+            # `context` is a plain dict when the serializer is built without
+            # one, so guard rather than assume it is writable.
+            if isinstance(self.context, dict):
+                self.context['_verifier_cache'] = holders
+
+        # The CREATOR is filtered per receipt, not in the cached set: the
+        # server refuses their own verification, and naming them would send
+        # the creator to themselves.
+        return [
+            {k: v for k, v in u.items() if k != 'id'}
+            for u in holders
+            if u['id'] != obj.created_by_id
+        ]
 
     def get_sap_branch(self, obj):
         """{'bpl_id', 'name', 'source', 'editable'} — never raises.
 
         Read paths must keep working when SAP is unreachable, so a failure
         here degrades to "unknown" rather than breaking the whole response.
+
+        SKIPPED FOR LISTS. Resolving this asks HANA which branch the settled
+        invoice belongs to — one round trip PER RECEIPT. On a detail page that
+        is a single call for a field the user is looking at; on a list it was
+        49 calls for a field no list renders, and measured at 58 seconds and
+        212 queries for 49 rows on the live data. The home dashboard and the
+        tracking lists all go through here, which is why they were slow.
+
+        `many=True` builds a ListSerializer around this one, so `self.parent`
+        is the reliable signal — it is set for a list and None for a single
+        object, without every call site having to remember to pass a flag.
         """
+        if isinstance(self.parent, serializers.ListSerializer):
+            return None
+
         allocations = list(obj.allocations.all())
         if allocations:
             try:
@@ -440,15 +561,30 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
         }
 
     def get_approval(self, obj):
-        request = obj.approvals.order_by('-created_at').first()
+        # Sorted in PYTHON, not with .order_by(). The view prefetches
+        # `approvals`, but any queryset method on that manager — order_by,
+        # filter — clones it and silently discards the prefetched rows,
+        # issuing a fresh query PER RECEIPT. That was 50 queries for a
+        # 49-row list; iterating `.all()` reuses what was already fetched.
+        requests = sorted(
+            obj.approvals.all(),
+            key=lambda r: (r.created_at is not None, r.created_at),
+            reverse=True,
+        )
+        request = requests[0] if requests else None
         if not request:
             return None
         # The last REJECT of the CURRENT round, so a creator opening a rejected
         # entry sees why without hunting through the approval history. Scoped to
         # the round: an older round's rejection was already acted on.
-        rejection = (request.actions
-                     .filter(action='REJECT', round_number=request.round_number)
-                     .order_by('-sequence').first())
+        #
+        # Filtered in Python for the same reason as above.
+        rejections = [
+            a for a in request.actions.all()
+            if a.action == 'REJECT' and a.round_number == request.round_number
+        ]
+        rejections.sort(key=lambda a: a.sequence, reverse=True)
+        rejection = rejections[0] if rejections else None
         return {
             'id': request.id,
             'status': request.status,
@@ -632,6 +768,14 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         log_status(receipt, to_status=receipt.status, user=user,
                    action=PaymentStatusHistory.Action.CREATED,
                    reason='Receipt created.')
+
+        # Hand off to the verifiers. Inside this atomic block, so the
+        # notifications commit with the receipt and roll back with it — nobody
+        # is ever told to verify something that failed to save. Failures are
+        # isolated by the framework and never break the create.
+        if receipt.verification_status == PaymentReceipt.VerificationStatus.PENDING:
+            from .notification_events import publish_receipt_verification_required
+            publish_receipt_verification_required(receipt, user)
         return receipt
 
     @transaction.atomic
@@ -825,15 +969,30 @@ class BankDepositSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_approval(self, obj):
-        request = obj.approvals.order_by('-created_at').first()
+        # Sorted in PYTHON, not with .order_by(). The view prefetches
+        # `approvals`, but any queryset method on that manager — order_by,
+        # filter — clones it and silently discards the prefetched rows,
+        # issuing a fresh query PER RECEIPT. That was 50 queries for a
+        # 49-row list; iterating `.all()` reuses what was already fetched.
+        requests = sorted(
+            obj.approvals.all(),
+            key=lambda r: (r.created_at is not None, r.created_at),
+            reverse=True,
+        )
+        request = requests[0] if requests else None
         if not request:
             return None
         # The last REJECT of the CURRENT round, so a creator opening a rejected
         # entry sees why without hunting through the approval history. Scoped to
         # the round: an older round's rejection was already acted on.
-        rejection = (request.actions
-                     .filter(action='REJECT', round_number=request.round_number)
-                     .order_by('-sequence').first())
+        #
+        # Filtered in Python for the same reason as above.
+        rejections = [
+            a for a in request.actions.all()
+            if a.action == 'REJECT' and a.round_number == request.round_number
+        ]
+        rejections.sort(key=lambda a: a.sequence, reverse=True)
+        rejection = rejections[0] if rejections else None
         return {
             'id': request.id,
             'status': request.status,

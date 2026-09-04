@@ -420,6 +420,72 @@ def _participants(company, start, end):
     return people
 
 
+#: A handover is late once the money has been in someone's hand this long.
+#: Matches the verification queue's own default window, so "still in the queue
+#: when it opens" and "late" mean the same number of days.
+VERIFICATION_SLA_DAYS = 2
+
+
+def _verification_delays(company, start, end):
+    """Per creator: how long their collections wait to be verified.
+
+    Measured from `payment_date` — the day the collector actually took the
+    money — to `verified_at`. NOT from `created_at`: cash collected on Monday
+    and typed up on Thursday sat in a pocket for three days, and an
+    entry-to-verification figure would score that as same-day.
+
+    Deliberately NOT restricted to POSTED receipts (unlike every other figure
+    on this dashboard). The whole point is money that has NOT completed its
+    journey — a receipt still waiting to be verified is exactly the case this
+    exists to surface, and filtering to posted would hide it.
+
+    Still-unverified receipts are measured against TODAY, so an entry nobody
+    has touched for a week reads as seven days late rather than as absent.
+    """
+    from django.utils import timezone
+
+    receipts = PaymentReceipt.objects.filter(
+        payment_date__gte=start,
+        payment_date__lte=end,
+    ).exclude(status=PaymentReceipt.Status.CANCELLED)
+    if company:
+        receipts = receipts.filter(company=company)
+
+    today = timezone.localdate()
+    # Keyed by BOTH identities — ('person', id) for who the money came from,
+    # ('user', id) for the login that recorded it — so the same figure serves
+    # whichever view the table is showing. A receipt contributes to both, and
+    # they are different questions: how long the collector held the cash, and
+    # how long that operator's entries take to clear.
+    by_key = {}
+    for person_id, user_id, payment_date, verified_at in receipts.values_list(
+        'received_from_person', 'created_by', 'payment_date', 'verified_at',
+    ):
+        if payment_date is None:
+            continue
+        # An unverified receipt is measured to today — it is still waiting.
+        end_date = timezone.localtime(verified_at).date() if verified_at else today
+        days = (end_date - payment_date).days
+        # A negative span means the payment_date was entered in the future;
+        # clamped rather than dropped, so the row still counts as same-day.
+        days = max(days, 0)
+
+        for key in (('person', person_id), ('user', user_id)):
+            if key[1] is None:
+                continue
+            stats = by_key.setdefault(
+                key, {'total_days': 0, 'count': 0, 'late': 0, 'worst': 0,
+                      'pending': 0})
+            stats['total_days'] += days
+            stats['count'] += 1
+            stats['worst'] = max(stats['worst'], days)
+            if days > VERIFICATION_SLA_DAYS:
+                stats['late'] += 1
+            if verified_at is None:
+                stats['pending'] += 1
+    return by_key
+
+
 ROLE_LABELS = {
     'collected': 'Collected payments',
     'banked': 'Banked deposits',
@@ -427,7 +493,7 @@ ROLE_LABELS = {
     'submitted': 'Submitted deposits',
 }
 
-SORT_FIELDS = {'name', 'received', 'deposited', 'total'}
+SORT_FIELDS = {'name', 'received', 'deposited', 'total', 'avg_verify_days'}
 
 
 def _name_lookup(people):
@@ -453,7 +519,8 @@ def _name_lookup(people):
 
 
 def collection_performance(company, start, end, *, search='', sort='total',
-                           direction='desc', page=1, page_size=25):
+                           direction='desc', page=1, page_size=25,
+                           participants='person'):
     """Every participant, searchable, sortable and paginated.
 
     Not limited to a top few: the point of the table is to show the whole team,
@@ -468,17 +535,43 @@ def collection_performance(company, start, end, *, search='', sort='total',
     the same fixed number of queries however large the window.
     """
     people = _participants(company, start, end)
+
+    # WHO the table is about: the collection people named on the documents —
+    # who the money was received FROM and who banked it — not the OMS logins
+    # that typed the entries.
+    #
+    # An admin reading this asks "how much has Goldy collected and banked, and
+    # when". Listing the login as well answered a different question next to
+    # it, and double-counted the same money under two names: a receipt raised
+    # by `gagan_P&D` from `Goldy` appeared in full on both rows, so the column
+    # summed to roughly twice the money that exists.
+    #
+    # `participants='user'` keeps the old view for anyone who wants
+    # per-operator activity, and 'all' restores the mixed list.
+    if participants in ('person', 'user'):
+        people = {k: v for k, v in people.items() if k[0] == participants}
+
     if not people:
-        return {'results': [], 'pagination': {
-            'page': 1, 'page_size': page_size, 'total': 0, 'total_pages': 0}}
+        # The SLA is published on this branch too: a client that reads it once
+        # to configure its table must not get a different shape back just
+        # because a window happened to be empty.
+        return {'results': [],
+                'pagination': {'page': 1, 'page_size': page_size,
+                               'total': 0, 'total_pages': 0},
+                'verification_sla_days': VERIFICATION_SLA_DAYS}
 
     names = _name_lookup(people)
+    # How long this participant's collections wait for their handover check,
+    # keyed the same way the rows are — so it answers for the collection
+    # person on a person row and for the login on a user row.
+    delays = _verification_delays(company, start, end)
 
     rows = []
     for (kind, pk), v in people.items():
         who = names.get((kind, pk))
         if who is None:
             continue                       # deleted between aggregate and read
+        d = delays.get((kind, pk))
         rows.append({
             'id': pk,
             'kind': kind,                  # 'person' | 'user'
@@ -492,6 +585,18 @@ def collection_performance(company, start, end, *, search='', sort='total',
             'deposit_count': v['deposit_count'],
             'roles': sorted(v['roles']),
             'role_labels': [ROLE_LABELS[r] for r in sorted(v['roles'])],
+            # Days from collection to verification. Null for a collection
+            # person, and for a user who recorded nothing in the window — a
+            # zero there would read as "always same-day", which is a claim.
+            'avg_verify_days': (
+                round(d['total_days'] / d['count'], 1)
+                if d and d['count'] else None
+            ),
+            'worst_verify_days': d['worst'] if d else None,
+            # Handed over later than the SLA allows.
+            'late_verify_count': d['late'] if d else None,
+            # Still not verified at all — the money is outstanding right now.
+            'pending_verify_count': d['pending'] if d else None,
         })
 
     if search:
@@ -501,10 +606,21 @@ def collection_performance(company, start, end, *, search='', sort='total',
 
     sort = sort if sort in SORT_FIELDS else 'total'
     reverse = direction != 'asc'
-    # Name sorts alphabetically; the money columns sort by magnitude. Name is
-    # cased-folded so "amit" and "Amit" do not end up in separate blocks.
-    rows.sort(key=(lambda r: r['name'].lower()) if sort == 'name'
-              else (lambda r: r[sort]), reverse=reverse)
+    # Name sorts alphabetically; the money and delay columns sort by magnitude.
+    # Name is case-folded so "amit" and "Amit" do not end up in separate blocks.
+    #
+    # `avg_verify_days` is None for a collection person and for anyone who
+    # recorded nothing, which cannot be compared against a float. Those rows
+    # sort as -1 so they sit at the bottom of a descending "slowest first"
+    # view rather than raising a TypeError.
+    if sort == 'name':
+        key = lambda r: r['name'].lower()                       # noqa: E731
+    elif sort == 'avg_verify_days':
+        key = lambda r: (r['avg_verify_days'] if r['avg_verify_days']  # noqa: E731
+                         is not None else -1)
+    else:
+        key = lambda r: r[sort]                                 # noqa: E731
+    rows.sort(key=key, reverse=reverse)
 
     # Bars are a share of the strongest performer across the WHOLE result set,
     # not the current page — otherwise the same person's bar would change
@@ -527,12 +643,16 @@ def collection_performance(company, start, end, *, search='', sort='total',
         'results': rows[start_at:start_at + page_size],
         'pagination': {'page': page, 'page_size': page_size,
                        'total': total, 'total_pages': total_pages},
+        # Published so the client colours a late figure against the SAME
+        # threshold the server counted `late_verify_count` with, rather than
+        # hardcoding its own and drifting.
+        'verification_sla_days': VERIFICATION_SLA_DAYS,
     }
 
 
 def dashboard(*, company='', preset=DEFAULT_PRESET, date_from=None,
               date_to=None, today=None, search='', sort='total',
-              direction='desc', page=1, page_size=25):
+              direction='desc', page=1, page_size=25, participants='all'):
     """Every figure the dashboard shows, for one company and date window.
 
     `company` blank means all companies — the aggregate across OIL, BEVERAGES
@@ -565,7 +685,13 @@ def dashboard(*, company='', preset=DEFAULT_PRESET, date_from=None,
             'methods': {'total': method_total, 'slices': methods},
             'deposits': {'total': deposit_total, 'slices': deposit_types},
         },
+        # `participants='all'` here, unlike the standalone endpoint: this
+        # bundled payload is the whole dashboard, and narrowing it would
+        # change a shape other callers already read. The dedicated
+        # /collection-performance/ endpoint is where the person-only view
+        # lives, and the web table calls that.
         'collection_performance': collection_performance(
             company, start, end, search=search, sort=sort,
-            direction=direction, page=page, page_size=page_size),
+            direction=direction, page=page, page_size=page_size,
+            participants=participants),
     }

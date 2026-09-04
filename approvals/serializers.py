@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import serializers
 
 from .models import (
@@ -177,12 +178,23 @@ class ApprovalWorkflowSerializer(serializers.ModelSerializer):
 
 class ApprovalActionSerializer(serializers.ModelSerializer):
     action_display = serializers.CharField(source='get_action_display', read_only=True)
+    # The decider's display name, so a timeline can say "Priya Sharma" rather
+    # than "p.sharma". Read LIVE from the user, falling back to the username
+    # snapshot the row stores — that snapshot is deliberately kept (it survives
+    # a rename or a deactivated account), so it stays the authority when the
+    # user record is gone.
+    approver_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ApprovalAction
         fields = ['id', 'sequence', 'round_number', 'level', 'level_name',
                   'action', 'action_display', 'remarks', 'approver',
-                  'approver_username', 'approver_role', 'acted_at']
+                  'approver_name', 'approver_username', 'approver_role',
+                  'acted_at']
+
+    def get_approver_name(self, obj):
+        name = (getattr(obj.approver, 'name', '') or '').strip()
+        return name or obj.approver_username or ''
 
 
 class ApprovalRequestSerializer(serializers.ModelSerializer):
@@ -225,10 +237,28 @@ class ApprovalRequestDetailSerializer(ApprovalRequestSerializer):
         rungs = []
         levels = obj.workflow.levels.filter(is_active=True).order_by('sequence')
         for position, level in enumerate(levels, start=1):
+            # Grants are per-company: a blank `company` applies everywhere, a
+            # named one only to that company. Filtering here means the timeline
+            # names the people who can actually act on THIS document, rather
+            # than every approver configured on the rung for any company.
+            grants = (
+                level.approvers
+                .select_related('user')
+                .filter(is_active=True, user__is_active=True)
+                .filter(Q(company='') | Q(company=obj.company))
+            )
+            # Name AND username: the name is who to ask for, the username is
+            # how to find them in the system, and a display name alone is
+            # ambiguous when two people share one. Falls back to the username
+            # so a user with no name set still appears.
             approvers = [
-                grant.user.get_username()
-                for grant in level.approvers.select_related('user')
-                                            .filter(is_active=True)
+                {
+                    'username': grant.user.get_username(),
+                    'name': (getattr(grant.user, 'name', '') or '').strip()
+                            or grant.user.get_username(),
+                    'phone': (getattr(grant.user, 'phone', '') or '').strip(),
+                }
+                for grant in grants
                 if grant.user_id
             ]
             rungs.append({

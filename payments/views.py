@@ -174,6 +174,11 @@ class PaymentDashboardView(APIView):
             direction=params.get('direction') or 'desc',
             page=_int(params.get('page'), 1),
             page_size=_int(params.get('page_size'), 25),
+            # Same default as the standalone endpoint below. The clients read
+            # page 1 from THIS payload and page 2 onward from that one, so a
+            # different default here meant the table changed who it was about
+            # as soon as the user paged.
+            participants=(params.get('participants') or 'person').strip().lower(),
         ))
 
 
@@ -202,6 +207,10 @@ class CollectionPerformanceView(APIView):
             direction=params.get('direction') or 'desc',
             page=_int(params.get('page'), 1),
             page_size=_int(params.get('page_size'), 25),
+            # Defaults to the collection PEOPLE — who the money came from and
+            # who banked it. `user` gives per-operator activity instead, and
+            # `all` the mixed list this used to return.
+            participants=(params.get('participants') or 'person').strip().lower(),
         ))
 
 
@@ -540,8 +549,11 @@ def _receipt_queryset(user):
     return (
         PaymentReceipt.objects
         .select_related('received_from_person', 'created_by')
+        # `approvals__actions` is here because the serializer reads each
+        # request's rejection reason: without it every row cost a second query
+        # for its actions, on top of the one for the request itself.
         .prefetch_related('methods__denominations', 'allocations',
-                          'attachments', 'approvals')
+                          'attachments', 'approvals__actions')
     )
 
 
