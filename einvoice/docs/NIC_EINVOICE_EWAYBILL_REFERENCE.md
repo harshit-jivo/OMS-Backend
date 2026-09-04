@@ -131,6 +131,57 @@ Business APIs: `client_id`, `client_secret`, `Gstin`, `user_name`, `AuthToken`,
 
 ---
 
+
+### Credential resolution — per seller GSTIN, across MULTIPLE PANs
+
+The generate/cancel/get flow authenticates as the invoice's **own seller GSTIN**,
+not one global identity. `einvoice.services.generate_and_store` reads
+`invoice["SellerDtls"]["Gstin"]` (mapped from the SAP document's `VATRegNum`, i.e.
+the issuing branch's registration) and does `EInvoiceClient(gstin=seller_gstin)`.
+The client looks that GSTIN up in `settings.EINV_CREDENTIALS`; a miss falls back to
+the primary `settings.EINV`.
+
+Two credential *layers* feed `EINV_CREDENTIALS`, built in `OMS/settings.py`:
+
+1. **Same-PAN state GSTINs** (`EINV_GSTINS` + `EINV_<GSTIN>_*`). NIC issues one
+   client-id/secret **per PAN**, reusable across every state GSTIN of that PAN; only
+   the API username/password are per-GSTIN. So these entries **default their
+   client-id/secret to the primary** and usually set only username/password. This is
+   the Oil PAN (`AACCJ4223F`): primary `06AACCJ4223F1Z0` + Punjab/Rajasthan.
+
+2. **A different PAN — Jivo Mart** (`MART_EINV_*`). Mart (`AAFCJ4102J`) is a separate
+   legal entity with its **own** client-id/secret, so it cannot inherit the Oil
+   client-id the way layer 1 does. `MART_EINV_CLIENT_ID/SECRET` are Mart's, shared
+   across Mart's state GSTINs; `MART_EINV_GSTINS` lists them, each with its own
+   `MART_EINV_<GSTIN>_USERNAME/PASSWORD` (the single `MART_EINV_GSTIN` +
+   `MART_EINV_USERNAME/PASSWORD` form is honoured as one entry). Each is folded into
+   `EINV_CREDENTIALS` keyed by GSTIN, so the resolver above is oblivious to which PAN
+   an invoice belongs to.
+
+The **NIC encryption public key is per-ENVIRONMENT, not per-taxpayer** — sandbox and
+production each have one key that every GSTIN uses. `PUBLIC_KEY_PATH` therefore
+defaults to the shared `EINV` key; a per-GSTIN path only points at a *copy* of the
+same file.
+
+**A resolver miss is silent and fatal at NIC.** If a seller GSTIN has no
+`EINV_CREDENTIALS` entry, the client authenticates as the Oil primary while the
+payload carries a different seller — NIC then rejects the mismatch (2301 / GSTIN
+errors). So every GSTIN that actually issues invoices **must** have credentials
+wired, or its IRNs fail. Verify what a company issues from before assuming one GSTIN:
+
+```
+# distinct issuing GSTINs a company actually uses (read-only)
+GET {ServiceLayer}/Invoices?$select=DocEntry,VATRegNum&$orderby=DocEntry desc&$top=20
+```
+
+**Mart status (verified 2026-09-04 against `JIVO_MART_HANADB`):** Mart issues from
+**two** GSTINs — Haryana `06AAFCJ4102J1ZU` (the dominant one, ~19/20 recent invoices)
+and Delhi `07AAFCJ4102J1ZS` (rare). Delhi's credentials are wired (`API_MART_DL` in
+production, `Jivo_Mart` in sandbox). **Haryana `06AAFCJ4102J1ZU` has no username/**
+**password yet**, so its IRNs will fail until one is created on the e-invoice portal
+under that GSTIN and added as `MART_EINV_06AAFCJ4102J1ZU_USERNAME/PASSWORD`. (Sandbox
+only registers the 07 test GSTIN, so sandbox testing exercises Delhi only.)
+
 ## 4. e-Invoice schema (v1.1) — blocks & business validations
 
 ### Top-level blocks
@@ -482,9 +533,12 @@ Maps a SAP Business One Service Layer **`Invoices`** (OINV) document straight to
   `validation._check_party_lengths` also flags any `LglNm/Addr1/Addr2/Loc` outside NIC limits.
 - **HSN must resolve** — if `/IndiaHsn(<entry>)` returns nothing, `HsnCd` is left `""` and
   validation raises `HSN_REQUIRED` rather than silently sending a blank code.
-- **Seller GSTIN must equal the authenticated GSTIN** for the environment (same PAN across
-  sister concerns). The live `JIVO_OIL_HANADB` seller `06AACCJ4223F1Z0` matches the sandbox
-  auth GSTIN, which is why sandbox generation succeeds.
+- **Seller GSTIN must equal the authenticated GSTIN.** The client picks the credential
+  set for the invoice's own seller GSTIN — see *Credential resolution* in §3. This spans
+  more than one PAN (Oil `AACCJ4223F`, Mart `AAFCJ4102J`), so "authenticate as Oil" is not
+  a safe assumption; a seller GSTIN with no wired credentials fails at NIC. The live
+  `JIVO_OIL_HANADB` seller `06AACCJ4223F1Z0` matches the sandbox auth GSTIN, which is why
+  Oil sandbox generation succeeds.
 - Only **priced** lines contribute value; `AssVal`/`TotInvVal` reconcile to SAP `DocTotal`
   within the ±1 rupee tolerance (§4).
 - **`Loc` (Place) is mandatory** and SAP `BillToCity` is often empty. `mapping._loc()` falls
