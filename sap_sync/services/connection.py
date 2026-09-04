@@ -12,6 +12,17 @@ class SAPConnection:
             return value
         return str(value).strip().strip("'").strip('"')
 
+    @staticmethod
+    def _schemas():
+        """(oil, beverage, mart) company-DB schema names, sourced from settings
+        (which reads them from .env). No schema name is hardcoded in this module;
+        the SQL builders below interpolate these."""
+        return (
+            settings.HANA_OIL_COMPANY_DB,
+            settings.HANA_BEVERAGE_COMPANY_DB,
+            settings.HANA_MART_COMPANY_DB,
+        )
+
     def __init__(self):
         # Read straight off settings, with no `getattr` fallback. Every one of
         # these used to carry the production host, database, user and password
@@ -88,29 +99,31 @@ class SAPConnection:
     
     @staticmethod
     def get_products_query():
-        return """
+        oil, bev, mart = SAPConnection._schemas()
+        return f"""
             SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, U_Sub_Group, SalPackUn, U_Brand, OnHand, U_TYPE,validFor
             FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''OIL'' AS "Category", "SalFactor2", "U_Rev_tax_Rate","Deleted", "U_Variety", "U_Sub_Group","SalPackUn", "U_Brand", "OnHand", "U_TYPE", "validFor"
-            FROM "JIVO_OIL_HANADB"."OITM" 
+            FROM "{oil}"."OITM"
             WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' OR "ItemCode" LIKE ''CG%''  ')
-            UNION ALL 
+            UNION ALL
             SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, U_Sub_Group, SalPackUn, U_Brand, OnHand, U_TYPE,    validFor
             FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''BEVERAGES'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "U_Sub_Group","SalPackUn", "U_Brand", "OnHand", "U_TYPE", "validFor"
-            FROM "JIVO_BEVERAGES_HANADB"."OITM" 
+            FROM "{bev}"."OITM"
             WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' OR "ItemCode" LIKE ''CG%'' ')
             UNION ALL
             SELECT ItemCode, ItemName, Category, SalFactor2, U_Rev_tax_Rate,Deleted, U_Variety, U_Sub_Group, SalPackUn, U_Brand, OnHand, U_TYPE, validFor
             FROM OPENQUERY(HANADB112, 'SELECT "ItemCode", "ItemName", ''MART'' AS "Category", "SalFactor2", "U_Rev_tax_Rate", "Deleted", "U_Variety", "U_Sub_Group","SalPackUn", "U_Brand", "OnHand", "U_TYPE", "validFor"
-            FROM "JIVO_MART_HANADB"."OITM" 
+            FROM "{mart}"."OITM"
             WHERE "ItemCode" LIKE ''FG%'' OR "ItemCode" LIKE ''SCH%'' OR "ItemCode" LIKE ''RM%'' OR "ItemCode" LIKE ''PM%'' OR "ItemCode" LIKE ''SC%'' OR "ItemCode" LIKE ''CG%''')
         """
 
     @staticmethod
     def get_live_stock_query(category, item_codes):
+        oil, bev, mart = SAPConnection._schemas()
         db_by_category = {
-            "OIL": "JIVO_OIL_HANADB",
-            "BEVERAGES": "JIVO_BEVERAGES_HANADB",
-            "MART": "JIVO_MART_HANADB",
+            "OIL": oil,
+            "BEVERAGES": bev,
+            "MART": mart,
         }
         normalized_category = str(category or "").strip().upper()
         database = db_by_category.get(normalized_category)
@@ -137,62 +150,64 @@ class SAPConnection:
     
     @staticmethod
     def get_parties_query():
-        return """
+        oil, bev, mart = SAPConnection._schemas()
+        return f"""
             SELECT CardCode, CardName, Address, State1, U_Main_Group, U_Chain, Country, CardType, LicTradNum, Category
             FROM OPENQUERY(HANADB112, '
-                SELECT 
-                    "CardCode", 
-                    "CardName", 
-                    "Address", 
-                    "State1", 
-                    "U_Main_Group", 
-                    "U_Chain", 
-                    "Country", 
-                    "CardType", 
+                SELECT
+                    "CardCode",
+                    "CardName",
+                    "Address",
+                    "State1",
+                    "U_Main_Group",
+                    "U_Chain",
+                    "Country",
+                    "CardType",
                     "LicTradNum",
                     ''OIL'' AS "Category"
-                FROM "JIVO_OIL_HANADB"."OCRD" 
+                FROM "{oil}"."OCRD"
                 WHERE "CardType"=''C''
             ')
             UNION ALL
             SELECT CardCode, CardName, Address, State1, U_Main_Group, U_Chain, Country, CardType, LicTradNum, Category
             FROM OPENQUERY(HANADB112, '
-                SELECT 
-                    "CardCode", 
-                    "CardName", 
-                    "Address", 
-                    "State1", 
-                    "U_Main_Group", 
-                    "U_Chain", 
-                    "Country", 
-                    "CardType", 
+                SELECT
+                    "CardCode",
+                    "CardName",
+                    "Address",
+                    "State1",
+                    "U_Main_Group",
+                    "U_Chain",
+                    "Country",
+                    "CardType",
                     "LicTradNum",
                     ''BEVERAGES'' AS "Category"
-                FROM "JIVO_BEVERAGES_HANADB"."OCRD" 
+                FROM "{bev}"."OCRD"
                 WHERE "CardType"=''C''
             ')
             UNION ALL
             SELECT CardCode, CardName, Address, State1, U_Main_Group, U_Chain, Country, CardType, LicTradNum, Category
             FROM OPENQUERY(HANADB112, '
-                SELECT 
-                    "CardCode", 
-                    "CardName", 
-                    "Address", 
-                    "State1", 
-                    "U_Main_Group", 
-                    "U_Chain", 
-                    "Country", 
-                    "CardType", 
+                SELECT
+                    "CardCode",
+                    "CardName",
+                    "Address",
+                    "State1",
+                    "U_Main_Group",
+                    "U_Chain",
+                    "Country",
+                    "CardType",
                     "LicTradNum",
                     ''MART'' AS "Category"
-                FROM "JIVO_MART_HANADB"."OCRD" 
+                FROM "{mart}"."OCRD"
                 WHERE "CardType"=''C''
             ')
         """
 
     @staticmethod
     def get_party_addresses_query():
-        return """
+        oil, bev, mart = SAPConnection._schemas()
+        return f"""
             SELECT CardCode, Address, AdresType, GSTRegnNo, State, City, ZipCode, Country, Category,
             CONCAT(ISNULL(Address2,''), ' ', ISNULL(Address3,''), ' ', ISNULL(Street,''), ' ', ISNULL(Block,''), ' ', ISNULL(City,''), ' ', ISNULL(State,''), ' ', ISNULL(Country,''), ' ', ISNULL(ZipCode,'')) AS MainAddress 
             FROM OPENQUERY(HANADB112, '
@@ -210,7 +225,7 @@ class SAPConnection:
                     "Street", 
                     "Block",
                     ''OIL'' AS "Category"
-                FROM "JIVO_OIL_HANADB"."CRD1"
+                FROM "{oil}"."CRD1"
             ')
             UNION ALL
             SELECT CardCode, Address, AdresType, GSTRegnNo, State, City, ZipCode, Country, Category,
@@ -230,7 +245,7 @@ class SAPConnection:
                     "Street", 
                     "Block",
                     ''BEVERAGES'' AS "Category"
-                FROM "JIVO_BEVERAGES_HANADB"."CRD1"
+                FROM "{bev}"."CRD1"
             ')
             UNION ALL
             SELECT CardCode, Address, AdresType, GSTRegnNo, State, City, ZipCode, Country, Category,
@@ -250,20 +265,21 @@ class SAPConnection:
                     "Street", 
                     "Block",
                     ''MART'' AS "Category"
-                FROM "JIVO_MART_HANADB"."CRD1"
+                FROM "{mart}"."CRD1"
             ')
         """
 
     @staticmethod
     def get_branches_query():
         """Get branches from OBPL table across all 3 databases"""
-        return """
+        oil, bev, mart = SAPConnection._schemas()
+        return f"""
             SELECT BPLId, BPLName, Category
-            FROM OPENQUERY(HANADB112, 'SELECT "BPLId", "BPLName", ''OIL'' AS "Category" FROM "JIVO_OIL_HANADB"."OBPL"')
+            FROM OPENQUERY(HANADB112, 'SELECT "BPLId", "BPLName", ''OIL'' AS "Category" FROM "{oil}"."OBPL"')
             UNION ALL
             SELECT BPLId, BPLName, Category
-            FROM OPENQUERY(HANADB112, 'SELECT "BPLId", "BPLName", ''BEVERAGES'' AS "Category" FROM "JIVO_BEVERAGES_HANADB"."OBPL"')
+            FROM OPENQUERY(HANADB112, 'SELECT "BPLId", "BPLName", ''BEVERAGES'' AS "Category" FROM "{bev}"."OBPL"')
             UNION ALL
             SELECT BPLId, BPLName, Category
-            FROM OPENQUERY(HANADB112, 'SELECT "BPLId", "BPLName", ''MART'' AS "Category" FROM "JIVO_MART_HANADB"."OBPL"')
+            FROM OPENQUERY(HANADB112, 'SELECT "BPLId", "BPLName", ''MART'' AS "Category" FROM "{mart}"."OBPL"')
         """

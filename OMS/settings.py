@@ -254,32 +254,19 @@ DATABASES = {
         'ENGINE': 'django.db.backends.dummy',
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
-        # Default HANA schema / company DB used by raw queries
-        # (hana/services/connection.py:60, tracker/sap.py:21).
-        # `.env` has historically defined this as HANA_DB_OIL_NAME, so accept
-        # that (and HANA_COMPANY_DB, which holds the same value) rather than
-        # requiring a duplicate HANA_DB_NAME key. Explicit HANA_DB_NAME still
-        # wins if it is set.
-        'SCHEMA': config(
-            'HANA_DB_NAME',
-            default=config(
-                'HANA_DB_OIL_NAME',
-                default=config('HANA_COMPANY_DB', default=''),
-            ),
-        ),
+        # Company-DB schemas — every value comes from .env, NOTHING hardcoded.
+        # OIL is required (bare config, boots-loud if missing); beverage/mart/
+        # test fall back only across other .env keys, ending in '' (which
+        # disables that company) rather than any literal schema name.
+        'SCHEMA': config('HANA_DB_NAME', default=config('HANA_DB_OIL_NAME')),
         'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
-        # Same story as SCHEMA above: `.env` carries the beverage company DB as
-        # HANA_BEVERAGE_COMPANY_DB / HANA_COMPANY_DB_BEVERAGES, and has
-        # HANA_DB_BEVERAGE_NAME commented out. Fall back through those instead
-        # of hard-requiring a key that isn't set, which stops Django booting.
         'BEVERAGE_SCHEMA': config(
             'HANA_DB_BEVERAGE_NAME',
-            default=config(
-                'HANA_BEVERAGE_COMPANY_DB',
-                default=config('HANA_COMPANY_DB_BEVERAGES', default=''),
-            ),
+            default=config('HANA_BEVERAGE_COMPANY_DB',
+                           default=config('HANA_COMPANY_DB_BEVERAGES', default='')),
         ),
         'MART_SCHEMA': config('HANA_DB_MART_NAME', default=''),
+        'TEST_SCHEMA': config('HANA_DB_TEST_NAME', default=''),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     },
@@ -298,27 +285,22 @@ CRYSTAL_URL = config('CRYSTAL_URL')
 SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
 SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
 
+# Company DBs — all sourced from .env, NO hardcoded schema names. OIL is
+# required; beverage/mart fall back only across other .env keys and end in ''
+# (blank disables that company) instead of a literal default.
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
-# Same fallback chain as DATABASES['hana']['BEVERAGE_SCHEMA'] above. `.env`
-# carries this value under any of three names and has had each of them
-# commented out at different times, so requiring one outright stops Django
-# booting — which is exactly what a bare config() call here did.
 HANA_BEVERAGE_COMPANY_DB = config(
-    'HANA_BEVERAGE_COMPANY_DB',
-    default=config(
-        'HANA_DB_BEVERAGE_NAME',
-        default=config('HANA_COMPANY_DB_BEVERAGES',
-                       default='JIVO_BEVERAGES_HANADB'),
-    ),
+    'HANA_DB_BEVERAGE_NAME',
+    default=config('HANA_BEVERAGE_COMPANY_DB',
+                   default=config('HANA_COMPANY_DB_BEVERAGES', default='')),
 )
 # Third company (Mart). Blank disables everything Mart-specific.
-# The .env defines this as HANA_DB_MART_NAME (matching HANA_DB_OIL_NAME /
-# HANA_DB_BEVERAGE_NAME); keep the legacy HANA_MART_COMPANY_DB name as a
-# fallback so older environments keep working.
 HANA_MART_COMPANY_DB = config(
     'HANA_DB_MART_NAME',
-    default=config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB'),
+    default=config('HANA_MART_COMPANY_DB', default=''),
 )
+# Test / non-production company DB (blank when not testing).
+HANA_TEST_COMPANY_DB = config('HANA_DB_TEST_NAME', default='')
 # Profit center (OPRC.PrcCode) to stamp on Mart sales-order lines. Mart does not
 # use per-sub_group profit centers like Oil/Beverage, so this is a single code.
 # Blank (default) omits CostingCode entirely, letting SAP apply its own default
@@ -942,15 +924,16 @@ PAYMENTS_SMB_PASSWORD = config(
 # HANA_OIL_COMPANY_DB is always tried first). Comma-separated in .env.
 EINV_COMPANY_DBS = [d.strip() for d in config(
     'EINV_COMPANY_DBS',
-    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,JIVO_MART_HANADB,'
-            'TEST_OIL_15122025',
+    default=','.join(d for d in (
+        HANA_OIL_COMPANY_DB, HANA_BEVERAGE_COMPANY_DB,
+        HANA_MART_COMPANY_DB, HANA_TEST_COMPANY_DB) if d),
 ).split(',') if d.strip()]
 
 # Non-production (test) company DBs. Generating an IRN from one of these while the
 # NIC target is PRODUCTION still works, but produces a real live e-invoice for test
 # data — so a loud "cancel it immediately" warning is attached to the result.
 EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
-    'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
+    'EINV_TEST_COMPANY_DBS', default=HANA_TEST_COMPANY_DB,
 ).split(',') if d.strip()]
 
 # ---------------------------------------------------------------------------
