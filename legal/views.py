@@ -1,14 +1,30 @@
 """Nutrition-label extraction and label/nutrition master-data endpoints.
 
-Phase 2.4 audit: none of these views declared `permission_classes` at all —
-they relied solely on the project-wide default (`IsAuthenticated`,
-OMS/settings.py). None is admin-only by current design (no comparable view in
-this app is already gated with `core.permissions.IsAdminRole`, and inventing
-that restriction here would silently tighten access rather than document it),
-so the fix is to make the existing default explicit per view. The
-`RetrieveUpdateDestroyAPIView`s below do allow PUT/PATCH/DELETE on label and
-nutrition-UOM master rows — flagged as the borderline case in the Phase 2.4
-report rather than guessed at.
+The Phase 2.4 audit made the project default (`IsAuthenticated`) explicit on
+every view here rather than invent a tighter gate — the
+`RetrieveUpdateDestroyAPIView`s that let ANY signed-in user rewrite label and
+nutrition master rows were flagged as the borderline case in the report, not
+guessed at.
+
+POLICY CHANGE, deliberate and visible: that decision has now been made. Legal
+was the one desk with no grantable permission at all — access existed only as
+the `legal` role, so an admin had nothing to tick. Every endpoint now carries
+the module's one gate: the `Legal` registry key
+(`core/permission_registry.py`), grantable per-user on the Permissions page
+or through a role's bundle on the Role Permissions matrix, with the `legal`
+role as the transitional fallback. The frontend mirrors it — routeAccess.ts
+gates /Label_Checker and /Nutrition_Manager with the same key + role pair.
+
+One key for the whole module, not one per endpoint: the two pages are one
+job, the way the `Distributor` grant covers both distributor routes. If the
+desks ever split, the new keys belong in the registry with a back-grant, as
+the registry's HANA note prescribes for `Reports`.
+
+The role fallback follows the `HasKeyOrRole` cleanup contract, with one
+difference from the order endpoints: there is no seed migration granting
+`Legal` to the `legal` role's bundle (this database takes no new migrations),
+so the fallback stays until the bundle is ticked on the Role Permissions
+matrix and verified live. Then every gate here drops to `HasKey('Legal')`.
 """
 from django.shortcuts import render
 from rest_framework.views import APIView
@@ -16,15 +32,34 @@ from rest_framework import status
 from .service import run_extraction
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasKeyOrRole
 from .serializers import LabelUploadSerializer, LabelItemSerializer , NutritionUOMSerializer , LabelNutritionSerializers
 from.models import LabelData , LabelItem , LabelNutrition , NutritionUOM
 from rest_framework import generics
 from rest_framework.response import Response
 from pathlib import Path
 
-class FeedtoAIView(APIView):
-    permission_classes = [IsAuthenticated]
+#: The module's registry key — must match core/permission_registry.py and the
+#: frontend's adminPages.ts / routeAccess.ts entries exactly.
+LEGAL_PAGE_KEY = 'Legal'
 
+
+class LegalEndpointGate:
+    """The one gate every legal view carries, stated once.
+
+    `HasKeyOrRole` is parameterized, so it is INSTANTIATED in
+    `get_permissions()` rather than listed in `permission_classes` — the same
+    shape as the order endpoints (orders/views/lifecycle.py). A mixin instead
+    of eight copies because the whole module is one desk with one gate; a view
+    that ever needs a different rule should declare its own
+    `get_permissions()` and say why.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasKeyOrRole(LEGAL_PAGE_KEY, 'legal')]
+
+
+class FeedtoAIView(LegalEndpointGate, APIView):
     parser_class = (MultiPartParser , FormParser)
     def post(self , request , *args , **kwargs):
         label_file = request.data.get('label_file')
@@ -51,44 +86,36 @@ class FeedtoAIView(APIView):
           }, status=status.HTTP_201_CREATED)
 
 
-class LabelItemListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+class LabelItemListCreateView(LegalEndpointGate, generics.ListCreateAPIView):
     queryset = LabelItem.objects.all()
     serializer_class =  LabelItemSerializer
 
-class NutritionUOMListCreatView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+class NutritionUOMListCreatView(LegalEndpointGate, generics.ListCreateAPIView):
     queryset = NutritionUOM.objects.all()
     serializer_class = NutritionUOMSerializer
 
-class LabelNutritionListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+class LabelNutritionListCreateView(LegalEndpointGate, generics.ListCreateAPIView):
     queryset = LabelNutrition.objects.all()
     serializer_class = LabelNutritionSerializers
 
-class LabelItemRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+class LabelItemRetrieveUpdateDestroyView(LegalEndpointGate, generics.RetrieveUpdateDestroyAPIView):
     queryset = LabelItem.objects.all()
     serializer_class =  LabelItemSerializer
     lookup_field = 'id'
 
-class NutritionUOMRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+class NutritionUOMRetrieveUpdateDestroyView(LegalEndpointGate, generics.RetrieveUpdateDestroyAPIView):
     queryset = NutritionUOM.objects.all()
     serializer_class = NutritionUOMSerializer
     lookup_field = 'id'
 
 
-class LabelNutritionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+class LabelNutritionRetrieveUpdateDestroyView(LegalEndpointGate, generics.RetrieveUpdateDestroyAPIView):
     queryset = LabelNutrition.objects.all()
     serializer_class = LabelNutritionSerializers
     lookup_field = 'id'
 
 
-class NutrientByItemView(APIView):
-    permission_classes = [IsAuthenticated]
-
+class NutrientByItemView(LegalEndpointGate, APIView):
     def get(self , request):
 
         item_id = request.query_params.get('item_id')
