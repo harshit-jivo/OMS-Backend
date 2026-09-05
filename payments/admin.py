@@ -10,15 +10,7 @@ from .models import (
     PaymentReceipt,
     PaymentStatusHistory,
     SapCallLog,
-    SapCompanyMap,
 )
-
-
-@admin.register(SapCompanyMap)
-class SapCompanyMapAdmin(admin.ModelAdmin):
-    list_display = ('company', 'display_name', 'company_db', 'hana_schema',
-                    'default_bpl_id', 'is_active')
-    list_editable = ('is_active',)
 
 
 @admin.register(CollectionPerson)

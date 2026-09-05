@@ -342,42 +342,41 @@ class SourceGlAccountTests(TestCase):
     def test_the_field_is_exposed(self):
         self.assertIn('source_gl_account', self._data())
 
-    def test_it_resolves_the_configured_source_account(self):
-        from .models import SapCompanyMap
-        SapCompanyMap.objects.update_or_create(
-            company='OIL',
-            defaults={'company_db': 'TEST_OIL', 'hana_schema': 'TEST_OIL',
-                      'cash_gl_account': '1105001',
-                      'deposit_source_gl_account': '1105099',
+    def _cash_mapping(self, gl_account):
+        from .models import PaymentMethodMapping
+        PaymentMethodMapping.objects.update_or_create(
+            company='OIL', payment_method='CASH',
+            defaults={'bank_key': '', 'gl_account': gl_account,
                       'is_active': True})
-        self.assertEqual(self._data()['source_gl_account'], '1105099')
 
-    def test_it_falls_back_to_the_cash_account_when_unset(self):
-        """Pre-existing behaviour: cash is the source unless overridden."""
-        from .models import SapCompanyMap
-        SapCompanyMap.objects.update_or_create(
-            company='OIL',
-            defaults={'company_db': 'TEST_OIL', 'hana_schema': 'TEST_OIL',
-                      'cash_gl_account': '1105001',
-                      'deposit_source_gl_account': '', 'is_active': True})
+    def test_it_resolves_the_cash_mapping_account(self):
+        """The deposit empties the drawer the CASH receipts filled."""
+        self._cash_mapping('1105001')
         self.assertEqual(self._data()['source_gl_account'], '1105001')
+
+    def test_it_follows_the_cash_account_when_that_changes(self):
+        """There is no separate override any more — one drawer, one account.
+
+        A second configurable value could only ever disagree with the cash
+        G/L, and then the clearing account would not net to zero.
+        """
+        self._cash_mapping('1105003')
+        self.assertEqual(self._data()['source_gl_account'], '1105003')
 
     def test_an_unmapped_company_reports_null_not_a_blank(self):
         """The UI omits the row rather than printing an empty account."""
-        from .models import SapCompanyMap
-        SapCompanyMap.objects.filter(company='OIL').delete()
+        from .models import PaymentMethodMapping
+        PaymentMethodMapping.objects.filter(
+            company='OIL', payment_method='CASH').delete()
         self.assertIsNone(self._data()['source_gl_account'])
 
-    def test_it_is_distinct_from_the_destination(self):
-        from .models import SapCompanyMap
-        SapCompanyMap.objects.update_or_create(
-            company='OIL',
-            defaults={'company_db': 'TEST_OIL', 'hana_schema': 'TEST_OIL',
-                      'cash_gl_account': '1105001',
-                      'deposit_source_gl_account': '1105001',
-                      'is_active': True})
-        data = self._data()
-        self.assertNotEqual(data['source_gl_account'], data['bank_gl_account'])
+    def test_an_inactive_mapping_is_ignored(self):
+        """Deactivating the mapping must not leave a stale account in use."""
+        from .models import PaymentMethodMapping
+        self._cash_mapping('1105001')
+        PaymentMethodMapping.objects.filter(
+            company='OIL', payment_method='CASH').update(is_active=False)
+        self.assertIsNone(self._data()['source_gl_account'])
 
 
 class AttachmentUploadIsLoggedTests(TestCase):

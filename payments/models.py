@@ -32,48 +32,21 @@ CATEGORY_CHOICES = [
 # Masters
 # ---------------------------------------------------------------------------
 
-class SapCompanyMap(models.Model):
-    """category -> SAP company DB / HANA schema.
-
-    Replaces `resolve_company_db_for_order` (sap_sync/services/sync_service.py:301),
-    which derives the DB from ITEM category (a payment has no items), only
-    handles BEVERAGES, and silently routes MART to the OIL database. It also
-    supplies the allow-list that makes schema interpolation in raw SQL safe.
-    """
-
-    company = models.CharField(max_length=20, choices=CATEGORY_CHOICES, unique=True)
-    display_name = models.CharField(max_length=100)
-    company_db = models.CharField(max_length=100)
-    hana_schema = models.CharField(max_length=100)
-    default_bpl_id = models.IntegerField(null=True, blank=True)
-    # SAP G/L for cash receipts. NOT from DSC1: a cash drawer is not a house
-    # bank account, so SAP has no row for it and it must be named here. Every
-    # other G/L is resolved live from the bank the user selected.
-    cash_gl_account = models.CharField(max_length=50, blank=True, default='')
-    # SAP G/L credited when collected cash is BANKED (the deposit's CardCode).
-    #
-    # It cannot be `cash_gl_account`. A deposit posts as a DocType 'A' account
-    # transfer, and SAP refuses a cash-flow account (OACT.Finanse='Y') as the
-    # CardCode of one — which is exactly what a cash drawer G/L is. The same
-    # account is required, and valid, as CashAccount on a receipt, so one field
-    # cannot serve both: receipts need Finanse='Y', deposits need Finanse='N'.
-    #
-    # Set this to a clearing account with Finanse='N'. Falls back to
-    # `cash_gl_account` when blank, which preserves the previous behaviour for
-    # any company that has not been configured yet.
-    deposit_source_gl_account = models.CharField(
-        max_length=50, blank=True, default='')
-    is_active = models.BooleanField(default=True)
-    sort_order = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        db_table = 'payment_sap_company_map'
-        ordering = ['sort_order', 'company']
-        verbose_name = 'SAP company mapping'
-        verbose_name_plural = 'SAP company mappings'
-
-    def __str__(self):
-        return f'{self.company} -> {self.company_db}'
+# `SapCompanyMap` lived here and was removed in migration 0034. It mapped a
+# company key to a SAP company database, a HANA schema, a default branch and
+# two G/L accounts. Each part now has a better home:
+#
+#   company DB / HANA schema -> the environment, via payments.sap_company,
+#                               which delegates to the same resolver the rest
+#                               of the application already uses. Moving TEST to
+#                               LIVE is a deployment change, not a database
+#                               edit nobody reviews.
+#   default branch           -> HANA_<COMPANY>_DEFAULT_BPL_ID settings
+#   cash G/L                 -> the CASH row of PaymentMethodMapping, beside
+#                               every other tender's account
+#   deposit source G/L       -> the same cash G/L; one drawer, one account
+#
+# The company list itself is CATEGORY_CHOICES above.
 
 
 class CollectionPerson(TimeStampedModel):
@@ -120,14 +93,25 @@ class PaymentMethodMapping(models.Model):
     purpose: SAP is the master, so a foreign key is impossible, and resolution
     happens against the live cache every time it is used.
 
-    CASH has no row — a cash drawer is not a house bank, so it draws on
-    SapCompanyMap.cash_gl_account instead.
+    CASH is the exception, and the reason `gl_account` exists: a cash drawer
+    is not a house bank, has no DSC1 row in SAP and therefore no `bank_key` to
+    point at. Its G/L is named directly instead. The two columns are mutually
+    exclusive by tender, never both.
     """
 
     company = models.CharField(max_length=20, choices=CATEGORY_CHOICES,
                                db_index=True)
     payment_method = models.CharField(max_length=20)
-    bank_key = models.CharField(max_length=80)
+    # SAP "BANKCODE:GLACCOUNT" for a banked tender. Blank for CASH.
+    bank_key = models.CharField(max_length=80, blank=True, default='')
+    # The G/L a CASH tender debits, and the same account a deposit of that
+    # cash later credits — one drawer, so one account, which is what makes the
+    # clearing account provably net to zero.
+    #
+    # Blank for every banked method: those resolve through `bank_key` against
+    # SAP's live house-bank master, and a second account here could disagree
+    # with it.
+    gl_account = models.CharField(max_length=30, blank=True, default='')
     # Reserved for future fallback ordering; the unique constraint below means
     # exactly one active mapping per (company, method) today.
     priority = models.PositiveSmallIntegerField(default=0)

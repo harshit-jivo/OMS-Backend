@@ -46,13 +46,13 @@ from .permissions import (
 )
 from . import analytics, analytics_person, bank_master, hana_queries
 from .models import (
+    CATEGORY_CHOICES,
     BankDeposit,
     CollectionPerson,
     PaymentMethodEntry,
     PaymentMethodMapping,
     PaymentReceipt,
     PaymentStatusHistory,
-    SapCompanyMap,
 )
 from .serializers import (
     BankDepositCreateSerializer,
@@ -62,7 +62,6 @@ from .serializers import (
     PaymentMethodMappingSerializer,
     PaymentReceiptSerializer,
     PaymentStatusHistorySerializer,
-    SapCompanyMapSerializer,
     TECHNICAL_HISTORY_ACTIONS,
 )
 
@@ -81,7 +80,7 @@ def _flag(request, name):
 
 
 def user_companies(user):
-    """Companies this user may transact in — every configured company.
+    """Companies this user may transact in — every canonical company.
 
     Previously narrowed by UserPartyAssignment. That is an ORDERS concept (a
     salesperson's territory) and does not apply here: a collection agent handles
@@ -91,8 +90,24 @@ def user_companies(user):
     Access to the payments module is governed by the action permissions
     (Payments_Create, Deposit_Approve, ...) — not by which parties someone sells
     to.
+
+    Read from CATEGORY_CHOICES rather than a table: the list is OIL, BEVERAGES
+    and MART, the same three the rest of the application uses, and a row per
+    company existed only to carry the SAP database name that now comes from the
+    environment.
     """
-    return SapCompanyMap.objects.filter(is_active=True)
+    return [
+        {
+            # A stable id per company, because the mobile client keys its
+            # dropdown on one. Positional, so it survives the table's removal
+            # and cannot drift the way an auto-increment could.
+            'id': index,
+            'company': key,
+            'display_name': label,
+            'is_active': True,
+        }
+        for index, (key, label) in enumerate(CATEGORY_CHOICES, start=1)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +120,9 @@ class CompanyListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        rows = user_companies(request.user).order_by('sort_order', 'company')
-        return ok(SapCompanyMapSerializer(rows, many=True).data)
+        # Already plain dicts in CATEGORY_CHOICES order, so no serializer and
+        # no sort: the declaration order IS the display order.
+        return ok(user_companies(request.user))
 
 
 def _int(value, default):
@@ -496,11 +512,24 @@ class PaymentMethodMappingStatusView(APIView):
         rows = []
         for value, label in PaymentMethodEntry.Method.choices:
             if value == PaymentMethodEntry.Method.CASH:
+                # `mapping_id` is the row's own id now, not None. CASH lives in
+                # this table like every other tender, so the admin screen needs
+                # the id to PATCH it — returning None left the row uneditable.
+                cash_row = stored.get(value)
                 gl = resolver.cash_gl()
                 rows.append({
                     'payment_method': value, 'label': label,
-                    'is_cash': True, 'mapping_id': None, 'bank_key': '',
+                    'is_cash': True,
+                    'mapping_id': cash_row.id if cash_row else None,
+                    'bank_key': '',
                     'gl_account': gl, 'bank_code': '', 'bank_name': '',
+                    # Cash has no house bank, but it DOES have a G/L, and that
+                    # account has a name in the chart of accounts. Reading it
+                    # gives the row a real label instead of a dash.
+                    'account_name': (
+                        hana_queries.fetch_account_name(company=company,
+                                                        gl_account=gl)
+                        if gl else ''),
                     'account_number': '', 'branch': '',
                     'configured': bool(gl), 'valid': bool(gl),
                     'error': '' if gl else
@@ -517,6 +546,10 @@ class PaymentMethodMappingStatusView(APIView):
                 'gl_account': bank['gl_account'] if bank else '',
                 'bank_code': bank['bank_code'] if bank else '',
                 'bank_name': bank['display_name'] if bank else '',
+                # The ACCOUNT's name from SAP's chart of accounts, which
+                # already carries the account number — so the table can show
+                # one column instead of three.
+                'account_name': bank.get('account_name', '') if bank else '',
                 'account_number': bank['account_number'] if bank else '',
                 'branch': bank['branch'] if bank else '',
                 'configured': row is not None,
@@ -1295,25 +1328,6 @@ class CollectionPersonAdminDetailView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated, IsApprovalAdmin]
     serializer_class = CollectionPersonSerializer
     queryset = CollectionPerson.objects.all()
-
-
-class CompanyMappingListCreateView(ListCreateAPIView):
-    """Admin CRUD for company -> SAP database mappings.
-
-    Previously only reachable through Django admin, which meant an admin had to
-    leave the app to make the payments module usable at all — nothing works
-    until these rows exist.
-    """
-
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
-    serializer_class = SapCompanyMapSerializer
-    queryset = SapCompanyMap.objects.all().order_by('sort_order', 'company')
-
-
-class CompanyMappingDetailView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
-    serializer_class = SapCompanyMapSerializer
-    queryset = SapCompanyMap.objects.all()
 
 
 class MyPaymentPermissionsView(APIView):

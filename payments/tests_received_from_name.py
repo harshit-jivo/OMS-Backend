@@ -19,7 +19,6 @@ from .models import (
     CollectionPerson,
     PaymentMethodEntry,
     PaymentReceipt,
-    SapCompanyMap,
 )
 from .permissions import PAYMENTS_CREATE
 from .serializers import PaymentReceiptCreateSerializer, PaymentReceiptSerializer
@@ -33,11 +32,11 @@ def _user(username, keys=()):
 
 
 def _company():
-    """Creating a receipt resolves the company's SAP database mapping."""
-    SapCompanyMap.objects.get_or_create(
-        company='OIL',
-        defaults={'company_db': 'TEST_OIL', 'hana_schema': 'TEST_OIL',
-                  'default_bpl_id': 1, 'is_active': True})
+    """No-op: the SAP company database comes from settings, not a table.
+
+    Kept as a call so the fixtures still read as "this test has a configured
+    company" rather than silently dropping the concept.
+    """
 
 
 def _person(name, code):

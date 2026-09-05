@@ -33,50 +33,12 @@ from .models import (
     PaymentMethodMapping,
     PaymentReceipt,
     PaymentStatusHistory,
-    SapCompanyMap,
 )
 
 
 # ---------------------------------------------------------------------------
 # Masters
 # ---------------------------------------------------------------------------
-
-class SapCompanyMapSerializer(serializers.ModelSerializer):
-    """Company -> SAP database mapping.
-
-    `company_db` and `hana_schema` were previously omitted, so the admin UI
-    rendered blank columns for the two fields that actually matter — and there
-    was no way to see or fix a mapping outside Django admin.
-
-    `cash_gl_account` lives here rather than in the payment-method mapping for
-    a physical reason: every other tender lands in a BANK, and SAP publishes
-    those as House Bank Accounts (DSC1). Cash lands in a drawer, which is not a
-    bank and has no DSC1 row — so there is nothing to pick from and the G/L has
-    to be named directly.
-
-    `deposit_source_gl_account` is the account a DEPOSIT credits. It is a
-    second field rather than a reuse of `cash_gl_account` because SAP
-    validates the two roles differently: a receipt's CashAccount must be a
-    cash-flow account (OACT.Finanse='Y'), a deposit's CardCode must not be.
-    """
-
-    class Meta:
-        model = SapCompanyMap
-        fields = ['id', 'company', 'display_name', 'company_db', 'hana_schema',
-                  'default_bpl_id', 'cash_gl_account',
-                  'deposit_source_gl_account', 'is_active',
-                  'sort_order']
-
-    def validate_company(self, value):
-        """`company` is unique — report the clash as a field error, not a 500."""
-        qs = SapCompanyMap.objects.filter(company=value)
-        if self.instance is not None:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
-            raise serializers.ValidationError(
-                f'A mapping for {value} already exists. Edit that one instead.')
-        return value
-
 
 logger = logging.getLogger(__name__)
 
@@ -1189,8 +1151,9 @@ class PaymentMethodMappingSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PaymentMethodMapping
-        fields = ['id', 'company', 'payment_method', 'bank_key', 'priority',
-                  'is_active', 'resolved', 'created_at', 'updated_at']
+        fields = ['id', 'company', 'payment_method', 'bank_key', 'gl_account',
+                  'priority', 'is_active', 'resolved', 'created_at',
+                  'updated_at']
         # The partial unique constraint reports "must make a unique set",
         # naming neither the method nor the row already holding it. validate()
         # below owns the message; the DB still backs it up.
@@ -1223,10 +1186,36 @@ class PaymentMethodMappingSerializer(serializers.ModelSerializer):
         company = current('company')
         method = current('payment_method')
 
-        if method == PaymentMethodEntry.Method.CASH:
-            raise serializers.ValidationError({'payment_method': (
-                'Cash does not use a house bank account. Set the cash G/L on '
-                'the company mapping instead.')})
+        # CASH and the banked tenders are configured the opposite way round,
+        # and each is refused the other's field rather than silently ignoring
+        # it — a row carrying both would leave which account it posts to
+        # ambiguous.
+        #
+        # CASH used to be rejected outright here, on the grounds that a cash
+        # drawer is not a house bank. That is still true, but the conclusion
+        # changed: the cash G/L moved INTO this table (migration 0033), so
+        # this is now exactly where CASH belongs.
+        is_cash = method == PaymentMethodEntry.Method.CASH
+        gl_account = (current('gl_account') or '').strip()
+        bank_key_value = (current('bank_key') or '').strip()
+
+        if is_cash:
+            if not gl_account:
+                raise serializers.ValidationError({'gl_account': (
+                    'Cash needs a G/L account — it has no house bank to '
+                    'resolve one from.')})
+            if bank_key_value:
+                raise serializers.ValidationError({'bank_key': (
+                    'Cash does not use a house bank account. Leave the bank '
+                    'blank and set the G/L account instead.')})
+        else:
+            if not bank_key_value:
+                raise serializers.ValidationError({'bank_key': (
+                    f'{method} is banked, so it needs a house bank account.')})
+            if gl_account:
+                raise serializers.ValidationError({'gl_account': (
+                    'A banked tender takes its G/L from the house bank '
+                    'account in SAP, so it must not be set here.')})
 
         if current('is_active', True) and company and method:
             clash = PaymentMethodMapping.objects.filter(

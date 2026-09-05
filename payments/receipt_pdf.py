@@ -167,11 +167,10 @@ def _fetch_sap_document(receipt):
     company = getattr(receipt, "company", "") or ""
     try:
         from . import sap_client, services
-        # Resolve the SAP company DB from the ACTIVE company mapping table
-        # (SapCompanyMap), NOT from receipt.company_db — that column can hold a
-        # stale name from when the receipt was created (e.g. an old
-        # TEST_OIL_15122025 before the DB was renamed). The mapping is the single
-        # source of truth the admin maintains on the Masters page.
+        # Resolve the SAP company DB from the ENVIRONMENT, NOT from
+        # receipt.company_db — that column can hold a stale name from when the
+        # receipt was created (e.g. an old TEST_OIL_15122025 before the DB was
+        # renamed). Settings are the single source of truth.
         company_db = services.resolve_company_db(company)
         if not company_db:
             return None

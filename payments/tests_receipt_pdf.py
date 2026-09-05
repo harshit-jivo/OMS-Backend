@@ -1,11 +1,30 @@
 """Tests for the OMS-generated SAP-style receipt PDF endpoint.
 
 GET /api/payments/receipts/{id}/sap-report/ — posted-only, access-controlled,
-returns application/pdf built from OMS data (no SAP call).
+returns application/pdf.
+
+THE PDF PATH DOES CALL SAP. `_fetch_sap_document` reads the live
+IncomingPayment through the Service Layer and `_fetch_party_master` reads OCRD
+through HANA, so the rendered document shows what SAP actually holds.
+
+Both are stubbed for the whole suite in `setUp` below. They were not, and the
+tests passed anyway for the wrong reason: the company->schema lookup used to go
+through a `SapCompanyMap` row that no test created, so both calls raised, both
+`except` branches returned None, and every test silently exercised the OMS
+fallback. Once the schema came from settings the lookups succeeded, the suite
+started reaching a real SAP company, and assertions began failing against live
+customer data.
+
+A test that reaches SAP is not a unit test — it is slow, it depends on whichever
+environment is configured, and it can read production. The stub is applied in
+`setUp` rather than per-test so a NEW test cannot reintroduce the problem by
+forgetting it; individual tests still override it with their own `mock.patch`
+to assert SAP-specific rendering.
 """
 
 from datetime import date
 from decimal import Decimal
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
@@ -44,7 +63,41 @@ def _pdf_text(pdf_bytes):
     return "\n".join(out)
 
 
-class ReceiptPdfEndpointTests(APITestCase):
+class _NoSapMixin:
+    """Cut both external calls the PDF path makes, for every test in the class.
+
+    Patched where the code LOOKS THEM UP (`payments.receipt_pdf`), not where
+    they are defined, so the module-level names the builder actually calls are
+    the ones replaced.
+
+    Returning None from both is exactly what a SAP outage produces, and the
+    builder is documented to degrade to OMS data — so the default here renders
+    the receipt from fixtures alone, deterministically. Tests that assert
+    SAP-sourced content patch over this with their own return value.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for target in ("_fetch_sap_document", "_fetch_party_master"):
+            patcher = mock.patch(f"payments.receipt_pdf.{target}",
+                                 return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        # The THIRD call, and the least obvious: the invoice table is built by
+        # `receipt_invoices`, which reads OINV for the real DocNum and totals
+        # and prefers them over the OMS snapshot. Left live, a fixture's
+        # sap_doc_num never reaches the page — the PDF showed a genuine
+        # invoice number instead. Empty dict = "SAP said nothing", which is
+        # the documented fallback to the stored snapshot.
+        patcher = mock.patch(
+            "payments.receipt_invoices.hana_queries.fetch_invoice_details",
+            return_value={})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class ReceiptPdfEndpointTests(_NoSapMixin, APITestCase):
     @classmethod
     def setUpTestData(cls):
         User = get_user_model()
@@ -320,7 +373,7 @@ class ReceiptPdfEndpointTests(APITestCase):
         self.assertIn("555001", text)
 
 
-class ReceiptPdfBuilderTests(APITestCase):
+class ReceiptPdfBuilderTests(_NoSapMixin, APITestCase):
     """Directly exercise build_receipt_pdf — no HTTP, no SAP, no DB mutation."""
 
     def test_builder_returns_pdf_bytes_and_does_not_mutate(self):

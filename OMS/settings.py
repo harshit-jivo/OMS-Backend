@@ -325,6 +325,27 @@ HANA_MART_COMPANY_DB = config(
 # profit center (General Center). Set e.g. 'Centr_z' to force an explicit one.
 HANA_MART_COSTING_CODE = config('HANA_MART_COSTING_CODE', default='')
 
+# --- Payments: default SAP branch (OBPL.BPLId) ------------------------------
+# The branch a payment posts to when there is nothing to inherit it from.
+#
+# A branch is normally a property of the DOCUMENT, not a setting: an invoice
+# payment takes the invoice's branch (SAP refuses a mismatch) and an advance
+# takes the one the user picked. This default only covers the two cases with
+# neither — a legacy advance saved before the branch picker existed, and a
+# bank deposit, which settles no invoice and has no picker.
+#
+# Per company because the companies really do differ: BPL 1 is DELHI in both
+# OIL and BEVERAGES, but the branch lists diverge after that (OIL has 8, and
+# BEVERAGES 6). Named to match HANA_<COMPANY>_COMPANY_DB above.
+#
+# Replaces payments.SapCompanyMap.default_bpl_id, so that TEST and LIVE are
+# separated by environment rather than by editing a database row.
+HANA_OIL_DEFAULT_BPL_ID = config('HANA_OIL_DEFAULT_BPL_ID', default=1, cast=int)
+HANA_BEVERAGE_DEFAULT_BPL_ID = config(
+    'HANA_BEVERAGE_DEFAULT_BPL_ID', default=1, cast=int)
+HANA_MART_DEFAULT_BPL_ID = config(
+    'HANA_MART_DEFAULT_BPL_ID', default=1, cast=int)
+
 # --- JSAP (budget approval) SQL Server -------------------------------------
 # Read-only source for budget-approval status of a SAP *draft* document.
 # Blank host disables every JSAP lookup (the tracker degrades to "unknown").

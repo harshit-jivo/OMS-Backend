@@ -218,10 +218,10 @@ class SeriesNameTests(SimpleTestCase):
 
 class SeriesLookupTests(TestCase):
     def _map(self, company='OIL'):
-        from payments.models import SapCompanyMap
-        return SapCompanyMap.objects.create(
-            company=company, display_name=company, company_db='DB',
-            hana_schema='SCHEMA', is_active=True)
+        # No-op: the SAP company database comes from settings now, so there
+        # is no row to create. Kept so the call sites below still read as
+        # "this test has a configured company".
+        return None
 
     @patch('payments.hana_queries.HANAConnection')
     def test_missing_series_fails_before_posting(self, conn):

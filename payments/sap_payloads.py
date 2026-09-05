@@ -80,7 +80,7 @@ def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None, series=None):
 
     `bank_accounts` maps method -> sap_gl_account for this company, resolved by
     the caller so this stays a pure function. `bpl_id` is the SAP branch, from
-    SapCompanyMap.default_bpl_id — omitted entirely when not configured.
+    the environment default branch — omitted entirely when not configured.
     `series` is the numbering series for the POSTING month, resolved from NNM1
     by the caller (hana_queries.fetch_incoming_payment_series); omitted when not
     supplied so nothing changes for callers that do not pass it.

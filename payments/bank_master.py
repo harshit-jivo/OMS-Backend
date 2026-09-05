@@ -153,26 +153,35 @@ class PaymentAccountResolver:
         return self._mappings.get(method)
 
     def cash_gl(self):
-        """The company's configured cash G/L. Never from DSC1."""
-        from .models import SapCompanyMap
-        row = SapCompanyMap.objects.filter(company=self.company).first()
-        return ((getattr(row, 'cash_gl_account', '') or '').strip()
-                if row else '')
+        """The company's configured cash G/L. Never from DSC1.
+
+        Read from the CASH payment-method mapping — the same table every other
+        tender resolves through. A cash drawer has no DSC1 row in SAP, so it
+        names its G/L directly instead of a house bank.
+        """
+        from .models import PaymentMethodMapping
+        row = (PaymentMethodMapping.objects
+               .filter(company=self.company, payment_method='CASH',
+                       is_active=True)
+               .first())
+        return (row.gl_account or '').strip() if row else ''
 
     def deposit_source_gl(self):
         """The G/L a deposit CREDITS — the drawer being emptied.
 
-        Separate from cash_gl() because SAP validates the two roles
-        differently: a receipt's CashAccount must be a cash-flow account
-        (OACT.Finanse='Y'), while a deposit's CardCode must NOT be. Falls back
-        to the cash G/L when unset, which is the pre-existing behaviour.
+        THE SAME ACCOUNT the cash receipt debited. One drawer, one account, so
+        the clearing account provably nets to zero; a separately configured
+        value could only ever make it not.
+
+        This used to read `SapCompanyMap.deposit_source_gl_account`, on the
+        stated grounds that SAP rejects a cash-flow account (OACT.Finanse='Y')
+        as the CardCode of a DocType 'A' transfer. That is not true, and the
+        live data says so: 1105001 has Finanse='Y' and SAP accepted it as the
+        CardCode of deposits 21977 and 21963, whose journals read
+        Dr 2201102 / Cr 1105001. Every configured row held the same value in
+        both columns anyway.
         """
-        from .models import SapCompanyMap
-        row = SapCompanyMap.objects.filter(company=self.company).first()
-        if not row:
-            return ''
-        configured = (getattr(row, 'deposit_source_gl_account', '') or '').strip()
-        return configured or (row.cash_gl_account or '').strip()
+        return self.cash_gl()
 
     def resolve(self, payment_method, *, bank_key=None):
         """Our deposit account for one method, or None when nothing is mapped.

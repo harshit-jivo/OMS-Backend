@@ -109,14 +109,6 @@ class VerificationNotificationTests(TestCase):
 
         from .serializers import PaymentReceiptCreateSerializer
 
-        from .models import SapCompanyMap
-
-        # create() resolves the SAP company database from this mapping.
-        SapCompanyMap.objects.get_or_create(
-            company='OIL',
-            defaults={'display_name': 'Oil', 'company_db': 'TESTDB',
-                      'is_active': True})
-
         class _Req:
             user = self.creator
 

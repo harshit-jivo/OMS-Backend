@@ -280,12 +280,6 @@ class LifecycleSequenceTests(TestCase):
             ApprovalWorkflow,
         )
         # The poster resolves the SAP company database from this mapping.
-        from .models import SapCompanyMap
-        SapCompanyMap.objects.get_or_create(
-            company='OIL',
-            defaults={'display_name': 'Oil', 'company_db': 'TESTDB',
-                      'is_active': True})
-
         self.creator = _user('seq_creator', [PAYMENTS_CREATE])
         self.verifier = _user('seq_verifier', [PAYMENTS_VERIFY])
         self.approver = _user('seq_approver', [PAYMENTS_APPROVE])

@@ -14,12 +14,12 @@ from django.utils import timezone
 from approvals import services as approval_services
 
 from . import bank_master, hana_queries
+from . import sap_company
 from .models import (
     BankDeposit,
     PaymentMethodEntry,
     PaymentReceipt,
     PaymentStatusHistory,
-    SapCompanyMap,
 )
 from .sap_payloads import build_deposit, build_incoming_payment
 
@@ -119,21 +119,14 @@ def record_sap_history(document, *, action, status, response='',
 
 
 def resolve_company_db(company):
-    """category -> SAP company DB, from the mapping table.
+    """category -> SAP company DB, from the ENVIRONMENT.
 
-    Replaces resolve_company_db_for_order (sync_service.py:301), which reads
-    ITEM categories (a payment has none) and silently routes MART to OIL.
+    Delegates to the canonical resolver every other module already uses, so a
+    payment and the invoice it settles can never disagree about which company
+    they belong to. TEST and LIVE are separated by deployment configuration
+    rather than by a row in a payments table.
     """
-    return _company_mapping(company).company_db
-
-
-def _company_mapping(company):
-    mapping = SapCompanyMap.objects.filter(company=company, is_active=True).first()
-    if not mapping:
-        raise ValidationError(
-            f'No active SAP company mapping for "{company}". '
-            f'Configure it before taking payments for this company.')
-    return mapping
+    return sap_company.resolve_company_db(company)
 
 
 def resolve_bpl_id(company, receipt=None):
@@ -149,7 +142,8 @@ def resolve_bpl_id(company, receipt=None):
       1. the branch on the SAP invoice being settled (the authority)
       2. `branches` (sap_sync.Branch) when the invoice names a branch but not
          its id — the mapping table already mirrored from SAP per company
-      3. SapCompanyMap.default_bpl_id, ONLY for an advance, which settles no
+      3. the environment default branch, ONLY for an advance with no branch
+         selected (legacy rows) and for a deposit, neither of which settles an
          invoice and so has no branch to inherit
 
     Raises ValidationError rather than guessing when invoices disagree, when a
@@ -157,7 +151,10 @@ def resolve_bpl_id(company, receipt=None):
     wrong ledger is worse than not posting.
     """
     if receipt is None:
-        return _company_mapping(company).default_bpl_id
+        # A deposit: it settles no invoice and has no branch picker, so the
+        # environment default is the only source. Unchanged behaviour — this
+        # read the company mapping's default_bpl_id before.
+        return sap_company.default_bpl_id(company)
 
     doc_entries = [a.sap_doc_entry for a in receipt.allocations.all()
                    if a.sap_doc_entry]
@@ -172,9 +169,9 @@ def resolve_bpl_id(company, receipt=None):
             return chosen
         # Legacy rows only — raised before this field existed. A new advance
         # cannot be submitted without a branch (see validate_receipt).
-        bpl = _company_mapping(company).default_bpl_id
+        bpl = sap_company.default_bpl_id(company)
         logger.info('BPL resolve %s: advance, no branch selected -> BPLID %s '
-                    '(source: company default, legacy)',
+                    '(source: environment default, legacy)',
                     receipt.receipt_no, bpl)
         return bpl
 
@@ -505,7 +502,7 @@ def _bank_accounts_for(company, receipt=None):
     administrator's payment-method mapping. No user ever types or picks a G/L:
     they choose a tender, and the account follows from configuration.
 
-        CASH   -> SapCompanyMap.cash_gl_account (a drawer is not a house bank)
+        CASH   -> the CASH method mapping's gl_account (not a house bank)
         UPI    -> the account mapped for UPI
         CHEQUE -> the account mapped for cheques; the payer's bank is a
                   separate field on the line and is sent as BankCode
@@ -745,20 +742,16 @@ def post_deposit_to_sap(deposit, user=None):
     # full physical amount (cash + cheques), which is what the employee
     # actually carried to the bank; the two figures answer different questions
     # and must not be reconciled into one.
-    # The G/L being emptied. Same field the RECEIPTS debited
-    # (bank_master.cash_gl -> SapCompanyMap.cash_gl_account), so the clearing
-    # account provably nets to zero. Fail here rather than post a document
-    # with a blank CardCode.
-    # The G/L being emptied. NOT cash_gl(): SAP rejects a cash-flow account
-    # (OACT.Finanse='Y') as the CardCode of a DocType 'A' transfer, and the
-    # cash drawer G/L is exactly that. deposit_source_gl() returns the
-    # configured clearing account, falling back to the cash G/L when unset.
+    # The G/L being emptied — the same account the RECEIPTS debited, so the
+    # clearing account provably nets to zero. Verified against live SAP:
+    # deposits 21977 and 21963 posted Dr 2201102 / Cr 1105001 with 1105001 as
+    # the CardCode. Fail here rather than post a document with a blank one.
     source_gl = bank_master.PaymentAccountResolver(
         deposit.company).deposit_source_gl()
     if not source_gl:
         raise ValidationError(
-            f'No deposit source G/L is configured for {deposit.company}. Set '
-            f'it on the company mapping before depositing.')
+            f'No cash G/L is configured for {deposit.company}. Set it on the '
+            f'CASH payment-method mapping before depositing.')
 
     payload = build_deposit(
         deposit,

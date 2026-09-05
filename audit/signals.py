@@ -28,7 +28,6 @@ AUDITED_MODELS = [
     # which also capture IP and user agent, and routing high-volume financial
     # writes through the per-field signal handler would only add write
     # amplification for strictly worse data.
-    'payments.SapCompanyMap',
     'payments.CollectionPerson',
     'approvals.ApprovalWorkflow',
     'approvals.ApprovalLevel',

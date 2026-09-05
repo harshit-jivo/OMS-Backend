@@ -11,10 +11,6 @@ urlpatterns = [
 
     # Admin CRUD for master data — all manageable from the web UI so nothing
     # here requires Django admin.
-    path('company-mappings/', views.CompanyMappingListCreateView.as_view(),
-         name='payment-company-mapping-list'),
-    path('company-mappings/<int:pk>/', views.CompanyMappingDetailView.as_view(),
-         name='payment-company-mapping-detail'),
     path('admin/collection-persons/',
          views.CollectionPersonAdminListCreateView.as_view(),
          name='payment-admin-collection-person-list'),
