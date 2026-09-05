@@ -80,6 +80,11 @@ pydantic-settings==2.14.1
 pydantic_core==2.46.4
 pymssql==2.3.13
 pypdfium2==5.3.0
+# Wrapper around the Tesseract OCR binary, which pip does NOT install: the
+# host needs `tesseract-ocr` (apt) or the Windows installer, and
+# settings.TESSERACT_CMD set if it is not on PATH. legal/ocr.py degrades to a
+# model-only check when it is missing rather than failing the request.
+pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-decouple==3.8
 python-dotenv==1.2.1

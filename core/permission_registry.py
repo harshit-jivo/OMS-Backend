@@ -69,6 +69,11 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Distributor':              'Distributor',
         'Mart_Approval':            'Mart Approval',
         'Device_Management':        'Device Management',
+        # One key for the whole Legal module — Label Checker and Nutrition
+        # Manager are one desk, the way `Distributor` covers both distributor
+        # routes. Gates every legal/ endpoint via HasKeyOrRole, with the
+        # `legal` role as the transitional fallback (see legal/views.py).
+        'Legal':                    'Legal (Labels & Nutrition)',
     },
 
     # --- Payments actions (legacy keys, verbatim from
