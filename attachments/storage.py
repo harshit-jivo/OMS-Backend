@@ -106,7 +106,13 @@ def _register_smb(directory):
 def save_upload(upload, attachment_type):
     """Write an uploaded file to the share under a fresh UUID name.
 
-    Returns the stored filename. Validation must already have passed.
+    Returns the FULL path the bytes were written to — the row's identity.
+    Returned rather than recomputed by the caller because only this function
+    knows which branch ran: the SMB path is built with ntpath and the local one
+    with os.path, and on a POSIX server those produce different separators for
+    the same share.
+
+    Validation must already have passed.
     """
     ext = _extension(upload.name)
     stored_name = f'{uuid.uuid4().hex[:20]}.{ext}'
@@ -137,35 +143,114 @@ def save_upload(upload, attachment_type):
         os.replace(tmp, path)                       # atomic swap into place
 
     logger.info('Stored payment attachment %s -> %s', upload.name, path)
-    return stored_name
+    return path
 
 
-def open_stored(stored_name, attachment_type):
-    """Open a stored file for reading. Caller is responsible for closing it."""
+def _basename(path):
+    """Last path segment, whichever separator style the path uses.
+
+    os.path.basename on POSIX does not split on backslashes, so a Windows share
+    path stored on a Linux server would come back whole — and the filename is
+    what the download response's MIME type is derived from.
+    """
+    return str(path).replace('\\', '/').rstrip('/').rsplit('/', 1)[-1]
+
+
+def _allowed_directories():
+    """Every configured attachment root. The allow-list for stored paths."""
+    return [d for d in (getattr(settings, 'PAYMENTS_IMAGES', '') or '',
+                        getattr(settings, 'DEPOSIT_PAYMENTS_IMAGES', '') or '')
+            if d]
+
+
+def _normalise(path):
+    """Collapse separators and resolve `..` without touching the filesystem.
+
+    normpath, not realpath: the share may be unreachable, and a security check
+    that depends on the network being up is not a security check.
+    """
+    return os.path.normpath(str(path).replace('\\', os.sep).replace('/', os.sep))
+
+
+def resolve_stored_path(stored_path, attachment_type):
+    """The path to read, having proved it is one we are allowed to read.
+
+    A path out of the database is data, not an instruction. Trusting it
+    unchecked would turn one SQL write — or one mis-parsed upload — into an
+    arbitrary file read anywhere the server user can reach. So a stored path
+    is only used when it passes all three of:
+
+      1. it has a basename — a bare directory is not a file;
+      2. it contains no `..` segment after normalisation;
+      3. it sits inside one of the configured attachment roots.
+
+    The name-mismatch check that used to sit here compared the path against a
+    separately stored `stored_name`. That column is gone: the name IS the
+    path's basename now, so the two can no longer disagree and the check has
+    nothing left to catch. Root containment is what actually confines the read.
+
+    Anything failing a check falls back to the configured directory joined
+    with the basename, which cannot escape the share. A rejection is logged
+    loudly — a legitimate row never fails these, so a failure is either a bad
+    migration or an attack, and both need to be visible.
+    """
+    candidate = (stored_path or '').strip()
+    safe_name = _basename(candidate)
+
+    if candidate and safe_name:
+        normalised = _normalise(candidate)
+        if '..' in normalised.split(os.sep):
+            logger.error('Attachment path rejected (traversal): %r', candidate)
+        else:
+            for root in _allowed_directories():
+                root_n = _normalise(root)
+                # The separator guard stops '/share/payments_evil' matching the
+                # root '/share/payments'.
+                if (normalised == root_n
+                        or normalised.startswith(root_n.rstrip(os.sep) + os.sep)):
+                    return normalised, candidate
+            logger.error('Attachment path rejected (outside configured roots): '
+                         '%r', candidate)
+
+    # Failed a check, or nothing usable: rebuild inside the configured share.
     directory = directory_for(attachment_type)
-    # `stored_name` is a UUID we generated, but treat it as untrusted anyway —
-    # basename() guarantees it can never escape the configured directory.
-    safe_name = os.path.basename(str(stored_name))
+    if _uses_smb(directory):
+        return ntpath.join(directory, safe_name), directory
+    return os.path.join(directory, safe_name), directory
+
+
+def open_stored(stored_path, attachment_type):
+    """Open a stored file for reading. Caller is responsible for closing it.
+
+    Takes the PATH, not a filename: the path is the row's identity now, and
+    the name it must match is derived from it inside the resolver.
+    """
+    path, _ = resolve_stored_path(stored_path, attachment_type)
+    directory = directory_for(attachment_type)
 
     if _uses_smb(directory):
         smbclient = _register_smb(directory)
-        return smbclient.open_file(ntpath.join(directory, safe_name), mode='rb')
-    return open(os.path.join(directory, safe_name), 'rb')
+        return smbclient.open_file(path, mode='rb')
+    return open(path, 'rb')
 
 
-def delete_stored(stored_name, attachment_type):
-    """Best-effort removal from the share. Never raises."""
+def delete_stored(stored_path, attachment_type):
+    """Best-effort removal from the share. Never raises.
+
+    Deletes through the same validated resolver as the reader — a delete is an
+    even worse thing to point at an arbitrary path than a read.
+    """
     try:
         directory = directory_for(attachment_type)
-        safe_name = os.path.basename(str(stored_name))
+        path, _ = resolve_stored_path(stored_path, attachment_type)
         if _uses_smb(directory):
             smbclient = _register_smb(directory)
-            smbclient.remove(ntpath.join(directory, safe_name))
+            smbclient.remove(path)
         else:
-            os.remove(os.path.join(directory, safe_name))
+            os.remove(path)
         return True
     except Exception:  # noqa: BLE001 — a missing file must not break the caller
-        logger.warning('Could not delete attachment %s', stored_name, exc_info=True)
+        logger.warning('Could not delete attachment %s', stored_path, exc_info=True)
         return False
 
 

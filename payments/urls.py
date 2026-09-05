@@ -83,6 +83,8 @@ urlpatterns = [
          name='bank-deposit-list'),
     path('deposits/<int:pk>/', views.BankDepositDetailView.as_view(),
          name='bank-deposit-detail'),
+    path('deposits/<int:pk>/history/', views.BankDepositHistoryView.as_view(),
+         name='bank-deposit-history'),
     path('deposits/<int:pk>/submit/', views.BankDepositSubmitView.as_view(),
          name='bank-deposit-submit'),
     path('deposits/<int:pk>/attachments/',

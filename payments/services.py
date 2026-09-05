@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def log_status(document, *, to_status, from_status='', user=None,
                actor_kind='USER', reason='', ip=None,
                action=None, level=None, level_label='',
-               sap_doc_entry=None, sap_doc_num=None):
+               sap_doc_entry=None, sap_doc_num=None, change_data=None):
     """Append one row to the activity timeline. Never updated after insert.
 
     THE single history call for the payments module — approvals, edits and SAP
@@ -38,22 +38,34 @@ def log_status(document, *, to_status, from_status='', user=None,
     `action` says WHAT happened; the status pair says what it changed. When no
     action is given it falls back to STATUS_CHANGED, which keeps older callers
     working without claiming an event they did not record.
+
+    `change_data` describes WHICH FIELDS an edit changed, and is accepted only
+    on UPDATED. Every other action is a transition, not a field change, so a
+    diff on one would be describing something that did not happen — it is
+    dropped rather than stored, so no caller can quietly create that row.
+
+    `actor_kind`, `ip`, `sap_doc_entry` and `sap_doc_num` are STILL ACCEPTED and
+    deliberately ignored — their columns were dropped in migration 0031. Keeping
+    the keywords means the dozen call sites that pass them (hooks.py,
+    sap_poster.py, the test suite) keep working untouched; removing them would
+    turn a schema cleanup into a rewrite of every writer, with a TypeError at
+    each one that was missed. They can be deleted from the signature once the
+    call sites are tidied, which is a separate, mechanical change.
     """
+    resolved_action = action or PaymentStatusHistory.Action.STATUS_CHANGED
+    if resolved_action != PaymentStatusHistory.Action.UPDATED:
+        change_data = None
     return PaymentStatusHistory.objects.create(
         content_type=ContentType.objects.get_for_model(document.__class__),
         object_id=document.pk,
-        action=action or PaymentStatusHistory.Action.STATUS_CHANGED,
+        action=resolved_action,
         from_status=from_status or '',
         to_status=to_status,
         reason=reason or '',
-        actor_kind=actor_kind,
         level=level,
         level_label=level_label or '',
-        sap_doc_entry=sap_doc_entry,
-        sap_doc_num=sap_doc_num,
-        changed_by=user,
         changed_by_username=getattr(user, 'username', '') or '',
-        ip_address=ip,
+        change_data=change_data,
     )
 
 
@@ -376,8 +388,14 @@ def submit_receipt(receipt, user, ctx=None):
     )
     receipt.status = PaymentReceipt.Status.PENDING_APPROVAL
     receipt.save(update_fields=['status', 'updated_at'])
+    # PENDING_APPROVAL, not the STATUS_CHANGED default: entering the approval
+    # chain is the business event, and an untagged row read as an anonymous
+    # transition sitting between VERIFIED and APPROVED. The status assignment
+    # above is untouched.
     log_status(receipt, from_status=previous, to_status=receipt.status,
-               user=user, reason='Submitted for approval.',
+               user=user,
+               action=PaymentStatusHistory.Action.PENDING_APPROVAL,
+               reason='Submitted for approval.',
                ip=(ctx or {}).get('ip'))
 
     # Only a resubmission after a SAP failure belongs in the SAP history — a

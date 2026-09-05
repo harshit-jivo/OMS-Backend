@@ -930,6 +930,39 @@ class PaymentReceiptHistoryView(APIView):
         return ok(PaymentStatusHistorySerializer(rows, many=True).data)
 
 
+class BankDepositHistoryView(APIView):
+    """The deposit's business timeline — the same shape as a receipt's.
+
+    Deposits went without this while receipts had it, so a deposit's progress
+    screen could only ever show the remark stored on the document itself: the
+    creator's. Every later remark — an approver's reason, a SAP outcome — was
+    written to PaymentStatusHistory and then never read back by any client.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        from django.contrib.contenttypes.models import ContentType
+
+        deposit = get_object_or_404(_deposit_queryset(request.user), pk=pk)
+        rows = (
+            PaymentStatusHistory.objects
+            .filter(
+                content_type=ContentType.objects.get_for_model(BankDeposit),
+                object_id=deposit.pk,
+            )
+            # Same exclusion as the receipt timeline: bare STATUS_CHANGED rows
+            # say a status moved without saying who or why. `?full=true`
+            # returns them for support work.
+            .exclude(
+                **({} if _flag(request, 'full')
+                   else {'action__in': list(TECHNICAL_HISTORY_ACTIONS)})
+            )
+            .order_by('created_at', 'id')
+        )
+        return ok(PaymentStatusHistorySerializer(rows, many=True).data)
+
+
 # ---------------------------------------------------------------------------
 # Deposits
 # ---------------------------------------------------------------------------
@@ -1186,6 +1219,38 @@ class _AttachmentUploadBase(APIView):
                              self.model.__name__, pk)
             return fail('The file store is currently unavailable.',
                         status=http_status.HTTP_502_BAD_GATEWAY)
+
+        # Recorded on the document's timeline, not just in the attachment
+        # table. An upload is an edit — it changes what an approver is being
+        # asked to sign off — but it arrives through its own endpoint and
+        # never touches the document's `update()`, so nothing used to write a
+        # history row and the Edit History card could not show it.
+        #
+        # Logged as UPDATED with a one-field diff so it reads like any other
+        # change: old value is what was attached before, new value includes
+        # the file just added.
+        from .services import log_status
+        try:
+            rows = list(attachment_services.for_document(document))
+            after = sorted(a.get_attachment_type_display() for a in rows)
+            # Excluded BY ID, not by type name: two cheque images are two
+            # separate files, and filtering on the label would show the first
+            # one disappearing when the second was added.
+            before = sorted(a.get_attachment_type_display()
+                            for a in rows if a.pk != attachment.pk)
+            log_status(
+                document,
+                from_status=document.status, to_status=document.status,
+                user=request.user,
+                action=PaymentStatusHistory.Action.UPDATED,
+                change_data={'attachments': {'old': before, 'new': after}},
+                reason=f'Attached {attachment.get_attachment_type_display()}.',
+            )
+        except Exception:                                   # noqa: BLE001
+            # The file is already stored and the row already written — a
+            # failure to log must not turn a successful upload into an error.
+            logger.exception('Could not log attachment upload for %s %s',
+                             self.model.__name__, pk)
 
         return created(AttachmentSerializer(attachment).data, message='File uploaded.')
 

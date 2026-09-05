@@ -309,14 +309,21 @@ class PaymentStatusHistorySerializer(serializers.ModelSerializer):
     """The BUSINESS timeline: who did what, at which stage, and why.
 
     Deliberately excludes the technical columns — `from_status`, `to_status`,
-    `actor_kind`, `ip_address`, `sap_doc_entry`, `level_label`. Those are all
-    still written and still stored; they are forensic detail, readable through
-    the Django admin, and `ip_address` in particular is retained because it is
-    the audit trail for money movement. Showing an internal state transition or
-    an IP to a collector answers a question they never asked.
+    and `level_label`. Those are still written and still stored; they are
+    forensic detail, readable through the Django admin. Showing an internal
+    state transition to a collector answers a question they never asked.
+
+    `actor_kind`, `ip_address` and the SAP document columns were dropped from
+    the table entirely in migration 0031 — this serializer never exposed them,
+    so its output is unchanged.
 
     SAP DocEntry is likewise omitted: it lives on the receipt, which is its
     authoritative home, and repeating it per row invites the two disagreeing.
+
+    `change_data` IS included, and is the exception that proves the rule: it is
+    business detail, not forensic — "the amount went from 1,000 to 1,200" is
+    exactly what a reader wants from an edit. It is null on every row but an
+    edit, so a client must handle null rather than assume the shape.
     """
 
     action_display = serializers.CharField(
@@ -324,13 +331,53 @@ class PaymentStatusHistorySerializer(serializers.ModelSerializer):
     stage = serializers.SerializerMethodField()
     stage_display = serializers.SerializerMethodField()
     performed_by = serializers.SerializerMethodField()
+    performed_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentStatusHistory
         fields = ['id', 'action', 'action_display',
                   'stage', 'stage_display',
-                  'level', 'performed_by', 'changed_by_username',
-                  'reason', 'created_at']
+                  'level', 'performed_by', 'performed_by_name',
+                  'changed_by_username',
+                  'reason', 'change_data', 'created_at']
+
+    @extend_schema_field(serializers.CharField())
+    def get_performed_by_name(self, obj):
+        """The actor's FULL name, for a reader who does not know usernames.
+
+        The history stores only the username — deliberately, since text
+        outlives a deleted account and an audit row must not blank out when
+        someone leaves. So the name is resolved here, against the live user
+        table, and falls back to the username when the account is gone. That
+        fallback is the point: the row still names who acted.
+
+        Resolved ONCE for the whole list and cached on the serializer context,
+        not per row. A timeline of 20 events would otherwise issue 20 queries
+        to put a name on each one.
+        """
+        username = obj.changed_by_username
+        if not username:
+            return 'System'
+
+        names = self.context.get('_history_names')
+        if names is None:
+            from django.contrib.auth import get_user_model
+            root = self
+            while root.parent is not None:
+                root = root.parent
+            rows = getattr(root, 'instance', None) or []
+            usernames = {
+                r.changed_by_username for r in rows
+                if getattr(r, 'changed_by_username', '')
+            } or {username}
+            names = dict(
+                get_user_model().objects
+                .filter(username__in=usernames)
+                .values_list('username', 'name')
+            )
+            self.context['_history_names'] = names
+
+        return names.get(username) or username
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_stage(self, obj):
@@ -365,8 +412,7 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
     allocations = PaymentAllocationSerializer(many=True, read_only=True)
     attachments = AttachmentSerializer(many=True, read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    received_from_name = serializers.CharField(
-        source='received_from_person.name', read_only=True, default='')
+
     unallocated_amount = serializers.DecimalField(
         max_digits=15, decimal_places=2, read_only=True)
     approval = serializers.SerializerMethodField()
@@ -609,9 +655,14 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         model = PaymentReceipt
         fields = ['id', 'company', 'card_code', 'card_name',
                   'received_from_type', 'received_from_person',
+                  'received_from_name',
                   'payment_date', 'is_advance', 'currency', 'remarks',
                   'sap_branch_id',
                   'methods', 'allocations']
+        # Derived in validate() from the chosen person, never accepted from the
+        # client: a caller who could set the name independently of the FK could
+        # put any name on a receipt pointing at someone else.
+        read_only_fields = ['received_from_name']
 
     def validate(self, attrs):
         """Cross-field rules, for both a create and a partial update.
@@ -635,6 +686,17 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'received_from_person':
                     'Required when the payment is received from a company person.'})
+
+        # Freeze the collector's name onto the receipt.
+        #
+        # Keyed on `'received_from_person' in attrs` — the person was SENT —
+        # rather than on the resolved value, so it fires exactly when the
+        # choice is made or changed and never on an unrelated PATCH. A rename
+        # of the master afterwards must not reach receipts already written, so
+        # there is deliberately no other path that rewrites this.
+        if 'received_from_person' in attrs:
+            person = attrs['received_from_person']
+            attrs['received_from_name'] = person.name if person else ''
 
         # Children are replaced wholesale when sent, so an omitted key means
         # "leave the stored rows alone" — validate against those instead.
@@ -800,6 +862,9 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         was_verified = (instance.verification_status
                         == PaymentReceipt.VerificationStatus.VERIFIED)
         before = self._material_snapshot(instance) if was_verified else None
+        # Taken UNCONDITIONALLY, unlike the material snapshot above: every edit
+        # gets a change log, not only edits to a verified receipt.
+        audit_before = self._audit_snapshot(instance)
 
         for field, value in validated_data.items():
             setattr(instance, field, value)
@@ -841,9 +906,15 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         # A remarks or branch edit is NOT material and leaves verification
         # intact; re-verifying for a typo fix would make the gate a nuisance
         # and train people to click through it.
+        # Re-read before either comparison. The method and allocation rows
+        # were deleted and recreated above, so the in-memory instance still
+        # holds the OLD children in its prefetch cache and would report no
+        # change at all.
+        instance.refresh_from_db()
+        audit_after = self._audit_snapshot(instance)
+
         reset_verification = False
         if was_verified:
-            instance.refresh_from_db()
             if self._material_snapshot(instance) != before:
                 instance.verification_status = (
                     PaymentReceipt.VerificationStatus.PENDING)
@@ -862,10 +933,77 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
         log_status(instance, from_status=instance.status,
                    to_status=instance.status, user=user,
                    action=PaymentStatusHistory.Action.UPDATED,
+                   change_data=self._diff(audit_before, audit_after),
                    reason=('Receipt edited — verification reset, the amounts '
                            'changed after it was verified.'
                            if reset_verification else 'Receipt edited.'))
         return instance
+
+    @staticmethod
+    def _audit_snapshot(instance):
+        """The editable business fields, JSON-safe, for the change log.
+
+        SEPARATE from `_material_snapshot` on purpose. That one answers "did
+        the figures a verifier checked change?" and holds tuples of Decimals
+        because it only ever needs `==`. This one is written into a JSON
+        column and read by a person, so every value is a string and the shape
+        is stable.
+
+        Only fields a user can actually edit through the form. Deliberately
+        absent: `created_at`/`updated_at` (not edits), SAP responses and
+        DocEntry (written by the poster, not the user), attachments (large,
+        and their own audit), and anything identifying — no IPs, no headers,
+        no tokens.
+        """
+        def money(value):
+            # str(Decimal) keeps the scale the database stores. float() would
+            # render 1000.00 as 999.9999999999999 in an audit record.
+            return str(value) if value is not None else None
+
+        methods = list(instance.methods.all())
+        # One method per receipt is the business rule, so the tender is a
+        # single value rather than a list — a list would read as though a
+        # receipt could mix cash and cheque.
+        first = methods[0] if methods else None
+
+        return {
+            'amount': money(instance.total_amount),
+            'payment_date': (instance.payment_date.isoformat()
+                             if instance.payment_date else None),
+            'is_advance': instance.is_advance,
+            'remarks': instance.remarks or '',
+            'received_from': instance.received_from_name or '',
+            'payment_method': first.method if first else None,
+            'upi_reference': (first.upi_reference or '') if first else '',
+            'cheque_number': (first.cheque_number or '') if first else '',
+            'cheque_bank': (first.bank_name or '') if first else '',
+            'cheque_date': (first.cheque_date.isoformat()
+                            if first and first.cheque_date else None),
+            # Sorted by the invoice key so re-sending the same rows in a
+            # different order is not reported as a change.
+            'allocations': sorted(
+                ({'invoice': a.sap_doc_num or a.sap_doc_entry,
+                  'amount': money(a.amount_applied)}
+                 for a in instance.allocations.all()),
+                key=lambda row: str(row['invoice']),
+            ),
+        }
+
+    @staticmethod
+    def _diff(before, after):
+        """{field: {'old': ..., 'new': ...}} for the fields that changed.
+
+        None when nothing did: an UPDATED row with an empty object would claim
+        an edit it cannot describe, and `{}` reads as "we did not look".
+        """
+        if not before:
+            return None
+        changed = {
+            key: {'old': before.get(key), 'new': after.get(key)}
+            for key in after
+            if before.get(key) != after.get(key)
+        }
+        return changed or None
 
     @staticmethod
     def _material_snapshot(instance):
@@ -917,7 +1055,13 @@ class BankDepositLineSerializer(serializers.ModelSerializer):
     receipt_remarks = serializers.CharField(
         source='receipt.remarks', read_only=True)
     collected_by = serializers.CharField(
-        source='receipt.received_from_person.name', read_only=True, default='')
+        source='receipt.received_from_name', read_only=True, default='')
+    # When the RECEIPT reached SAP. Paired with the deposit's own date, this is
+    # how long the money sat in hand between being booked and being banked —
+    # the question "we took this on the 1st, why was it banked on the 9th?".
+    # Null until the receipt posts, and on receipts that never did.
+    receipt_posted_at = serializers.DateTimeField(
+        source='receipt.sap_posted_at', read_only=True)
     # Cash / cheque lines, each with its cheque number, payer bank and date.
     methods = PaymentMethodEntrySerializer(
         source='receipt.methods', many=True, read_only=True)
@@ -925,8 +1069,9 @@ class BankDepositLineSerializer(serializers.ModelSerializer):
     class Meta:
         model = BankDepositLine
         fields = ['id', 'receipt', 'receipt_no', 'card_name', 'card_code',
-                  'payment_date', 'receipt_status', 'receipt_total',
-                  'receipt_remarks', 'collected_by', 'methods', 'amount']
+                  'payment_date', 'receipt_posted_at', 'receipt_status',
+                  'receipt_total', 'receipt_remarks', 'collected_by',
+                  'methods', 'amount']
 
 
 class BankDepositSerializer(serializers.ModelSerializer):
@@ -940,6 +1085,7 @@ class BankDepositSerializer(serializers.ModelSerializer):
     shortfall = serializers.DecimalField(
         max_digits=15, decimal_places=2, read_only=True)
     approval = serializers.SerializerMethodField()
+    source_gl_account = serializers.SerializerMethodField()
     # `deposited_by` is the person who physically banked the cash; `created_by`
     # is the user who raised the entry in OMS. They are frequently different.
     created_by_name = serializers.CharField(
@@ -952,7 +1098,7 @@ class BankDepositSerializer(serializers.ModelSerializer):
         fields = ['id', 'deposit_no', 'company', 'deposit_date',
                   'deposited_by', 'deposited_by_name',
                   'bank_key', 'bank_code', 'bank_gl_account',
-                  'bank_account_name', 'deposit_type',
+                  'bank_account_name', 'source_gl_account', 'deposit_type',
                   'collected_amount', 'deposit_amount', 'shortfall',
                   'shortfall_reason', 'bank_charge', 'currency',
                   'slip_number', 'remarks', 'status', 'status_display',
@@ -967,6 +1113,30 @@ class BankDepositSerializer(serializers.ModelSerializer):
                   'created_by', 'created_by_name', 'created_by_username',
                   'created_at', 'updated_at']
         read_only_fields = fields
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_source_gl_account(self, obj):
+        """The G/L this deposit EMPTIES — the other half of the movement.
+
+        A deposit moves money between two accounts: out of the cash/collection
+        G/L and into the bank G/L. `bank_gl_account` is only the destination,
+        so a reader could see where the money landed but not where it came
+        from — and `bank_display_name` already carries the destination number,
+        which made the header repeat one side twice and never show the other.
+
+        Resolved from the company mapping rather than stored on the deposit,
+        because it is configuration, not a per-document fact. Returns None when
+        unconfigured, so the UI omits the row instead of printing a blank
+        account number.
+        """
+        company = getattr(obj, 'company', None)
+        if not company:
+            return None
+        try:
+            return bank_master.PaymentAccountResolver(company).deposit_source_gl() or None
+        except Exception:                                   # noqa: BLE001
+            # Never let a SAP or config outage break reading a deposit.
+            return None
 
     def get_approval(self, obj):
         # Sorted in PYTHON, not with .order_by(). The view prefetches
@@ -1229,6 +1399,8 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
 
         from .services import log_status
 
+        audit_before = self._audit_snapshot(instance)
+
         for field, value in validated_data.items():
             setattr(instance, field, value)
         if collected is not None:
@@ -1247,10 +1419,52 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
                 for r in receipts
             ])
 
+        # Re-read before diffing: the lines were deleted and recreated above,
+        # so the in-memory instance still holds the OLD ones in its prefetch
+        # cache and would report no change at all.
+        instance.refresh_from_db()
+
         # Same reasoning as the receipt edit above: record WHO changed it,
-        # under an action that reads as an edit rather than a status move.
+        # under an action that reads as an edit rather than a status move —
+        # and WHAT they changed, so an approver reviewing a corrected deposit
+        # does not have to guess which figure moved.
         log_status(instance, from_status=instance.status,
                    to_status=instance.status, user=user,
                    action=PaymentStatusHistory.Action.UPDATED,
+                   change_data=PaymentReceiptCreateSerializer._diff(
+                       audit_before, self._audit_snapshot(instance)),
                    reason='Deposit updated.')
         return instance
+
+    @staticmethod
+    def _audit_snapshot(instance):
+        """The editable business fields of a deposit, JSON-safe.
+
+        The deposit twin of `PaymentReceiptCreateSerializer._audit_snapshot`,
+        and it follows the same two rules: every value is a string so the JSON
+        column holds no floats, and only fields a user can actually edit
+        through the form appear. SAP columns, timestamps and the deposit number
+        are all absent — none of them is something a person changed.
+        """
+        def money(value):
+            # str(Decimal) keeps the stored scale; float() would render
+            # 1000.00 as 999.9999999999999 in an audit record.
+            return str(value) if value is not None else None
+
+        return {
+            'deposit_date': (instance.deposit_date.isoformat()
+                             if instance.deposit_date else None),
+            'deposit_amount': money(instance.deposit_amount),
+            'collected_amount': money(instance.collected_amount),
+            'bank': instance.bank_display_name or instance.bank_code or '',
+            'slip_number': instance.slip_number or '',
+            'shortfall_reason': instance.shortfall_reason or '',
+            'remarks': instance.remarks or '',
+            'deposited_by': (instance.deposited_by.name
+                             if instance.deposited_by_id else ''),
+            # Sorted by receipt number so re-sending the same set in a
+            # different order is not reported as a change.
+            'receipts': sorted(
+                line.receipt.receipt_no for line in instance.lines.all()
+            ),
+        }

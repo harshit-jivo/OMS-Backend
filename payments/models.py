@@ -221,6 +221,19 @@ class PaymentReceipt(TimeStampedModel):
     received_from_person = models.ForeignKey(
         CollectionPerson, on_delete=models.PROTECT,
         null=True, blank=True, related_name='receipts')
+    # The person's name AS RECORDED ON THIS RECEIPT, frozen at the moment the
+    # person was chosen.
+    #
+    # The FK above answers "who", and stays the identity used for grouping and
+    # analytics — two collectors can share a name, so a string cannot be the
+    # key. This column answers a different question: "what name was written on
+    # this receipt at the time". Resolving the display name through the FK
+    # instead made every historical receipt follow a later rename, so a
+    # document printed last year would silently disagree with the paper copy.
+    #
+    # Blank, not null, when the money came from a party directly — matching the
+    # `card_name` convention above rather than introducing a second empty.
+    received_from_name = models.CharField(max_length=120, blank=True, default='')
 
     payment_date = models.DateField(db_index=True)
     is_advance = models.BooleanField(default=False)
@@ -718,14 +731,21 @@ class SapCallLog(models.Model):
     sap_error_code = models.CharField(max_length=30, blank=True, default='')
     error_message = models.TextField(blank=True, default='')
 
-    sap_doc_entry = models.IntegerField(null=True, blank=True)
-    sap_doc_num = models.IntegerField(null=True, blank=True)
+    # `sap_doc_entry` / `sap_doc_num` were here and were dropped in migration
+    # 0030. They restated what the linked document already holds — the generic
+    # FK below reaches the receipt or deposit, whose own columns are the
+    # authoritative SAP identifiers. Every populated row agreed with its
+    # document, so nothing was lost.
+    #
+    # `duration_ms` and `completed_at` were dropped in the same migration. Both
+    # were written and never read: the retry decision turns on the exception,
+    # not on elapsed time, and request timing is instrumented independently in
+    # core/middleware.py. That timing data was NOT reconstructable, so it was
+    # exported before removal.
 
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.STARTED)
-    duration_ms = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'payment_sap_call_log'
@@ -758,6 +778,14 @@ class PaymentStatusHistory(models.Model):
         # The handover check: a second person confirmed the physical money
         # against the entry. Sits between CREATED and SUBMITTED in the timeline.
         VERIFIED = 'VERIFIED', 'Verified'
+        # The document entered the approval chain.
+        #
+        # Named for the STAGE it reaches rather than the act of submitting,
+        # because that is what the timeline reader is looking for — "where is
+        # it now". `SUBMITTED` below predates this and is still unused by any
+        # writer; it is kept because historical rows may carry it and the
+        # value costs nothing, but new writers use PENDING_APPROVAL.
+        PENDING_APPROVAL = 'PENDING_APPROVAL', 'Pending approval'
         SUBMITTED = 'SUBMITTED', 'Submitted for approval'
         RESUBMITTED = 'RESUBMITTED', 'Resubmitted'
         APPROVED = 'APPROVED', 'Approved'
@@ -786,17 +814,40 @@ class PaymentStatusHistory(models.Model):
     # Null for anything that is not an approval event.
     level = models.PositiveSmallIntegerField(null=True, blank=True)
     level_label = models.CharField(max_length=60, blank=True, default='')
-    # SAP identifiers, so a posting row carries its own outcome rather than
-    # forcing a join back to the document.
-    sap_doc_entry = models.IntegerField(null=True, blank=True)
-    sap_doc_num = models.IntegerField(null=True, blank=True)
-    actor_kind = models.CharField(max_length=20, default='USER')   # USER|SYSTEM|SAP_WORKER
+    # `sap_doc_entry` / `sap_doc_num` lived here and were dropped in migration
+    # 0031. A posting row carried its own copy to avoid a join, but the document
+    # this row points at already holds the authoritative pair, and every
+    # populated row agreed with it.
+    #
+    # `actor_kind` was dropped in the same migration. The business timeline
+    # never showed it — `performed_by` renders `changed_by_username or "System"`,
+    # so a blank username is already the system marker — and `action` says which
+    # system acted far more precisely than USER/SAP/SYSTEM/APPROVAL_ENGINE did.
 
-    changed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='payment_status_changes')
+    # WHAT an edit changed: {field: {'old': ..., 'new': ...}} for the changed
+    # fields only.
+    #
+    # Written for UPDATED rows and NOTHING else — every other action is a
+    # transition, not a field change, and a snapshot on those would turn this
+    # table into an event store. NULL when nothing tracked changed, so a row
+    # never claims an edit it cannot describe.
+    #
+    # Money is stored as a STRING: JSON has no decimal type, and a float would
+    # make 1000.00 read back as 999.9999999999999 in an audit record.
+    change_data = models.JSONField(null=True, blank=True, default=None)
+
+    # WHO acted, as text. Deliberately NOT a ForeignKey any more: the FK was
+    # dropped in migration 0031 because it added a join and a SET_NULL failure
+    # mode to answer a question the denormalised username already answers. All
+    # 488 rows carrying the FK also carried the username, so nothing was lost.
+    #
+    # Text also outlives the user row, which is the property an audit trail
+    # needs — a deleted account must not blank out who approved a payment.
     changed_by_username = models.CharField(max_length=150, blank=True, default='')
-    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    # `ip_address` was dropped in migration 0031. It was never shown in the
+    # business timeline, and `approval_action.ip_address` remains the forensic
+    # record for approval decisions, which is where that question is actually
+    # asked of money movement.
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:

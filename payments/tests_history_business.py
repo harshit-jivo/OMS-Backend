@@ -70,6 +70,9 @@ class BusinessHistoryApiTests(TestCase):
     # 10 — the technical columns are absent from the business representation.
     def test_technical_fields_are_not_exposed(self):
         row = self._history()[0]
+        # `actor_kind`, `ip_address` and `sap_doc_entry` are no longer columns
+        # at all (migration 0031); `from_status`/`to_status`/`level_label` are
+        # still stored and still hidden from this view.
         for hidden in ('from_status', 'to_status', 'actor_kind',
                        'ip_address', 'sap_doc_entry', 'level_label'):
             self.assertNotIn(hidden, row)
@@ -129,7 +132,10 @@ class BusinessHistoryApiTests(TestCase):
         self.assertNotIn('sap_doc_entry', row)
         # ...but it IS still stored, for the forensic view.
         stored = _rows(self.receipt).filter(action=Action.SAP_POSTED).first()
-        self.assertEqual(stored.sap_doc_entry, 20802)
+        # The column is gone: log_status still ACCEPTS sap_doc_entry so the
+        # SAP writers need no edit, but it is no longer persisted. The receipt
+        # remains the authoritative home for the document key.
+        self.assertFalse(hasattr(stored, 'sap_doc_entry'))
 
     def test_stage_maps_each_action(self):
         cases = {
@@ -180,7 +186,8 @@ class WriterActionTests(TestCase):
 
         verified = _rows(receipt).filter(action=Action.VERIFIED)
         self.assertEqual(verified.count(), 1)
-        self.assertEqual(verified.first().changed_by_id, self.verifier.id)
+        self.assertEqual(verified.first().changed_by_username,
+                         self.verifier.username)
 
     # 4 — attribution: creator created, verifier verified.
     def test_attribution_is_correct_across_the_timeline(self):
@@ -244,3 +251,158 @@ class WriterActionTests(TestCase):
         self.assertIn(Action.CREATED, actions)
         self.assertIn(Action.UPDATED, actions)
         self.assertNotIn(Action.STATUS_CHANGED, actions)
+
+class LifecycleSequenceTests(TestCase):
+    """The WHOLE timeline, in order, with no generic rows between events.
+
+    Asserted as a SEQUENCE rather than as "contains X": the defect these
+    guard against was an extra anonymous STATUS_CHANGED sitting between two
+    real events, which a membership check cannot see.
+    """
+
+    def setUp(self):
+        # Everything the posting path reads from SAP is stubbed: the G/L
+        # account per tender, the document series and the branch. All are
+        # payload preparation, unreachable from a test box, and none of them
+        # is what these tests are about — the HISTORY the posting writes is.
+        for target, value in (
+            ('payments.services._bank_accounts_for', {'CASH': '100001'}),
+            ('payments.hana_queries.fetch_incoming_payment_series', 1),
+            ('payments.services.resolve_bpl_id', 1),
+        ):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        from approvals.models import (
+            ApprovalLevel,
+            ApprovalLevelApprover,
+            ApprovalWorkflow,
+        )
+        # The poster resolves the SAP company database from this mapping.
+        from .models import SapCompanyMap
+        SapCompanyMap.objects.get_or_create(
+            company='OIL',
+            defaults={'display_name': 'Oil', 'company_db': 'TESTDB',
+                      'is_active': True})
+
+        self.creator = _user('seq_creator', [PAYMENTS_CREATE])
+        self.verifier = _user('seq_verifier', [PAYMENTS_VERIFY])
+        self.approver = _user('seq_approver', [PAYMENTS_APPROVE])
+        workflow = ApprovalWorkflow.objects.create(
+            code='PAYMENT_OIL_SEQ', name='OIL payments',
+            document_type='PAYMENT', company='OIL')
+        level = ApprovalLevel.objects.create(
+            workflow=workflow, sequence=1, name='Accountant Review')
+        ApprovalLevelApprover.objects.create(
+            level=level, user=self.approver, company='OIL')
+
+    def _actions(self, receipt):
+        return [str(a) for a in
+                _rows(receipt).values_list('action', flat=True)]
+
+    def test_verify_records_pending_approval_not_status_changed(self):
+        receipt = _receipt('RC-SEQ-1', self.creator)
+        services.log_status(receipt, to_status='DRAFT', user=self.creator,
+                            action=Action.CREATED.value, reason='Receipt created.')
+        services.verify_receipt(receipt.pk, self.verifier)
+
+        self.assertEqual(
+            self._actions(receipt),
+            [Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value])
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.status,
+                         PaymentReceipt.Status.PENDING_APPROVAL)
+
+    def test_sap_success_sequence(self):
+        """CREATED -> VERIFIED -> PENDING_APPROVAL -> APPROVED -> started -> posted."""
+        from approvals import services as approval_services
+
+        receipt = _receipt('RC-SEQ-2', self.creator)
+        services.log_status(receipt, to_status='DRAFT', user=self.creator,
+                            action=Action.CREATED.value, reason='Receipt created.')
+        services.verify_receipt(receipt.pk, self.verifier)
+
+        request = receipt.approvals.first()
+        with patch('payments.sap_poster.sap_post_payment') as post:
+            post.return_value = {'DocEntry': 999, 'DocNum': 555, 'TransId': 77}
+            # The SAP call is deferred to transaction.on_commit so a 5-second
+            # posting does not hold the approval's row locks. A TestCase rolls
+            # back and never commits, so the callbacks must be run explicitly.
+            with self.captureOnCommitCallbacks(execute=True):
+                approval_services.approve(request_id=request.pk,
+                                          user=self.approver, remarks='ok')
+
+        self.assertEqual(self._actions(receipt), [
+            Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
+            Action.APPROVED.value, Action.SAP_POST_STARTED.value, Action.SAP_POSTED.value,
+        ])
+        self.assertNotIn(Action.STATUS_CHANGED.value, self._actions(receipt))
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.status, PaymentReceipt.Status.POSTED)
+        self.assertEqual(receipt.sap_doc_entry, 999)
+
+    def test_sap_failure_sequence(self):
+        """A SAP rejection reads as SAP_FAILED, with no anonymous row."""
+        from approvals import services as approval_services
+
+        from .sap_client import SapError
+
+        receipt = _receipt('RC-SEQ-3', self.creator)
+        services.log_status(receipt, to_status='DRAFT', user=self.creator,
+                            action=Action.CREATED.value, reason='Receipt created.')
+        services.verify_receipt(receipt.pk, self.verifier)
+
+        request = receipt.approvals.first()
+        with patch('payments.sap_poster.sap_post_payment') as post:
+            post.side_effect = SapError('Posting period locked',
+                                        status_code=400, sap_code='-4013')
+            with self.captureOnCommitCallbacks(execute=True):
+                approval_services.approve(request_id=request.pk,
+                                          user=self.approver, remarks='ok')
+
+        self.assertEqual(self._actions(receipt), [
+            Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
+            Action.APPROVED.value, Action.SAP_POST_STARTED.value, Action.SAP_FAILED.value,
+        ])
+        self.assertNotIn(Action.STATUS_CHANGED.value, self._actions(receipt))
+        receipt.refresh_from_db()
+        # The state machine is untouched by this change.
+        self.assertEqual(receipt.status, PaymentReceipt.Status.PENDING_ERROR)
+
+    def test_retry_after_failure_appends_a_clean_second_attempt(self):
+        """The exact sequence from the reported receipt."""
+        from approvals import services as approval_services
+
+        from .sap_client import SapError
+
+        receipt = _receipt('RC-SEQ-4', self.creator)
+        services.log_status(receipt, to_status='DRAFT', user=self.creator,
+                            action=Action.CREATED.value, reason='Receipt created.')
+        services.verify_receipt(receipt.pk, self.verifier)
+
+        request = receipt.approvals.first()
+        with patch('payments.sap_poster.sap_post_payment') as post:
+            post.side_effect = SapError('Posting period locked',
+                                        status_code=400, sap_code='-4013')
+            with self.captureOnCommitCallbacks(execute=True):
+                approval_services.approve(request_id=request.pk,
+                                          user=self.approver, remarks='first')
+
+        # The failure reopens the approval at its final rung; the approver
+        # retries from their own queue. Existing behaviour, unchanged.
+        request.refresh_from_db()
+        with patch('payments.sap_poster.sap_post_payment') as post:
+            post.return_value = {'DocEntry': 21971, 'DocNum': 826246664}
+            with self.captureOnCommitCallbacks(execute=True):
+                approval_services.approve(request_id=request.pk,
+                                          user=self.approver, remarks='retry')
+
+        self.assertEqual(self._actions(receipt), [
+            Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
+            Action.APPROVED.value, Action.SAP_POST_STARTED.value, Action.SAP_FAILED.value,
+            Action.APPROVED.value, Action.SAP_POST_STARTED.value, Action.SAP_POSTED.value,
+        ])
+        self.assertNotIn(Action.STATUS_CHANGED.value, self._actions(receipt))
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.status, PaymentReceipt.Status.POSTED)

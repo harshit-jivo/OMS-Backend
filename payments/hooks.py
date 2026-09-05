@@ -190,7 +190,7 @@ def _on_deposit_approved(approval_request):
 
 
 def _on_deposit_rejected(approval_request):
-    from .models import BankDeposit
+    from .models import BankDeposit, PaymentStatusHistory
     from .services import log_status
 
     deposit = approval_request.document
@@ -201,7 +201,11 @@ def _on_deposit_rejected(approval_request):
     deposit.save(update_fields=['status', 'updated_at'])
     last = approval_request.actions.order_by('-sequence').first()
     reason = (last.remarks if last else '') or 'Rejected.'
+    # Tagged REJECTED, like the receipt path above. Untagged it fell through to
+    # STATUS_CHANGED, which the business timeline filters out — so the
+    # approver's rejection reason was written and then never shown to anyone.
     log_status(deposit, from_status=previous, to_status=deposit.status,
+               action=PaymentStatusHistory.Action.REJECTED,
                actor_kind='APPROVAL_ENGINE',
                reason=reason)
 
@@ -237,7 +241,7 @@ def _on_deposit_level_advanced(approval_request):
 
 
 def _on_deposit_cancelled(approval_request):
-    from .models import BankDeposit
+    from .models import BankDeposit, PaymentStatusHistory
     from .services import log_status
 
     deposit = approval_request.document
@@ -247,6 +251,7 @@ def _on_deposit_cancelled(approval_request):
     deposit.status = BankDeposit.Status.CANCELLED
     deposit.save(update_fields=['status', 'updated_at'])
     log_status(deposit, from_status=previous, to_status=deposit.status,
+               action=PaymentStatusHistory.Action.CANCELLED,
                actor_kind='APPROVAL_ENGINE', reason='Cancelled by submitter.')
 
 

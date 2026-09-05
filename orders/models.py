@@ -53,16 +53,12 @@ class DispatchLocation(models.Model):
     def __str__(self):
         return self.name
 
-class PartyAddress(models.Model):
-    card_code = models.CharField(max_length=50)
-    full_address = models.TextField(null=True)
-    gst_number = models.CharField(max_length=50, blank=True, null=True)
-    address_type = models.CharField(max_length=10,null=True) # 'B' or 'S'
-    address_name = models.CharField(max_length=100, blank=True, null=True)
-    category = models.CharField(max_length=50, blank=True, null=True)
-
-    class Meta:
-        db_table = 'party_addresses'
+# `PartyAddress` lived here and was removed in migration 0062. The live party
+# address master is `sap_sync.PartyAddress` (`sap_party_addresses`); this model
+# duplicated a subset of its columns, was never populated, and nothing imported
+# it. Note that `orders.serializers.PartyAddressSerializer` and
+# `orders.views.masters.PartyAddressesView` both point at the sap_sync model
+# despite the names — that collision is why the dead one survived so long.
 
 class ProductDetails(models.Model):
     item_code = models.CharField(max_length=50, unique=True)
@@ -163,7 +159,18 @@ class Order(models.Model):
     
     rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_orders')
     rejected_at = models.DateTimeField(null=True, blank=True)
+    # THE canonical rejection reason. Every write path sets this one, and it is
+    # what `orders/views/mart.py:97` serves to the web approval screen.
     rejection_reason = models.TextField(blank=True,null=True)
+    # DUPLICATE, being retired. It held the same fact, but only some paths wrote
+    # it, so neither column alone was complete — migration 0063 copied the 69
+    # orphaned values across into `rejection_reason`.
+    #
+    # Still written in step with the canonical field, and still in
+    # `serializers.py`, because a client may be reading it. Drop it once the API
+    # contract has moved: remove it from the serializer, confirm no consumer
+    # reads it, THEN migrate the column away. Nothing in this repository reads
+    # it today.
     reject_reason = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 

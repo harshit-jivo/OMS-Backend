@@ -251,7 +251,10 @@ class VerifyActionTests(_NoSapMixin, TestCase):
             object_id=receipt.pk,
             action=PaymentStatusHistory.Action.VERIFIED)
         self.assertEqual(rows.count(), 1)
-        self.assertEqual(rows.first().changed_by_id, self.verifier.id)
+        # By username, not a user FK: the FK was dropped in migration 0031
+        # and the denormalised name is what the audit trail actually keeps.
+        self.assertEqual(rows.first().changed_by_username,
+                         self.verifier.username)
 
     # 7
     def test_creator_cannot_verify_own_receipt(self):

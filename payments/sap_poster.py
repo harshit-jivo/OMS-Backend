@@ -15,7 +15,6 @@ document goes to SAP_UNKNOWN and resubmission is blocked until
 `reconcile_unknown()` — or a human — establishes what really happened.
 """
 import logging
-import time
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
@@ -214,7 +213,6 @@ def post_document(document, payload, *, user=None):
                  response='Posting request sent to SAP.', user=user)
 
     log = _log_start(fresh, payload)
-    started = time.monotonic()
 
     try:
         if isinstance(fresh, PaymentReceipt):
@@ -222,7 +220,6 @@ def post_document(document, payload, *, user=None):
         else:
             body = sap_post_deposit(payload, fresh.company_db)
     except SapError as exc:
-        duration = int((time.monotonic() - started) * 1000)
         # No HTTP status means the request never completed: SAP may still have
         # committed it. That is NOT the same as SAP rejecting the document.
         ambiguous = exc.status_code is None
@@ -249,8 +246,12 @@ def post_document(document, payload, *, user=None):
             fresh.sap_raw_error_code = raw_code[:20]
             fresh.save(update_fields=['status', 'sap_response', 'sap_raw_error',
                                       'sap_raw_error_code', 'updated_at'])
-            log_status(fresh, to_status=fresh.status, user=user,
-                       actor_kind='SAP', reason=message[:500])
+            # NO separate log_status here. `_history(...)` below writes the
+            # SAP outcome through `record_sap_history`, which already records
+            # the document's new status, the reason and the DocEntry. The
+            # extra call duplicated the event: tagged it appeared twice,
+            # untagged it left an anonymous STATUS_CHANGED row between
+            # SAP_POST_STARTED and the outcome. One event, one row.
             if ambiguous:
                 _history(fresh, action='POST_TIMEOUT', status='UNKNOWN',
                          response=('No response received from SAP. Posting '
@@ -273,13 +274,10 @@ def post_document(document, payload, *, user=None):
         log.http_status = exc.status_code
         log.sap_error_code = exc.sap_code or ''
         log.error_message = message[:2000]
-        log.duration_ms = duration
-        log.completed_at = timezone.now()
         log.save()
         logger.warning('SAP post failed for %s: %s', fresh.pk, message[:200])
         return fresh
 
-    duration = int((time.monotonic() - started) * 1000)
     doc_entry, doc_num, trans_id = _sap_keys(body)
 
     if not doc_entry:
@@ -292,15 +290,12 @@ def post_document(document, payload, *, user=None):
             fresh.status = fresh.__class__.Status.SAP_UNKNOWN
             fresh.sap_response = message
             fresh.save(update_fields=['status', 'sap_response', 'updated_at'])
-            log_status(fresh, to_status=fresh.status, user=user,
-                       actor_kind='SAP', reason=message)
+            # See the note above: `_history` alone records this outcome.
             _history(fresh, action='POST_TIMEOUT', status='UNKNOWN',
                      response=message, user=user)
         log.status = SapCallLog.Status.FAILED
         log.response_data = body
         log.error_message = message
-        log.duration_ms = duration
-        log.completed_at = timezone.now()
         log.save()
         return fresh
 
@@ -350,8 +345,7 @@ def post_document(document, payload, *, user=None):
                     entry.sap_check_key = key
                     entry.save(update_fields=['sap_check_key'])
 
-        log_status(fresh, to_status=fresh.status, user=user, actor_kind='SAP',
-                   reason=f'Posted to SAP as DocEntry {doc_entry}.')
+        # See the note above: `_history` alone records this outcome.
         _history(fresh, action='POST_SUCCESS', status='SUCCESS',
                  response=fresh.sap_response, doc_entry=doc_entry,
                  doc_num=doc_num, user=user)
@@ -372,10 +366,6 @@ def post_document(document, payload, *, user=None):
 
     log.status = SapCallLog.Status.SUCCESS
     log.response_data = body
-    log.sap_doc_entry = doc_entry
-    log.sap_doc_num = doc_num
-    log.duration_ms = duration
-    log.completed_at = timezone.now()
     log.save()
     logger.info('Posted %s to SAP: DocEntry=%s DocNum=%s',
                 fresh.pk, doc_entry, doc_num)
@@ -411,9 +401,7 @@ def reconcile_unknown(document):
                                              'sap_posted_at',
                                              'sap_response', 'status',
                                              'updated_at'])
-                log_status(document, to_status=document.status,
-                           actor_kind='SYSTEM',
-                           reason='Confirmed in SAP during reconciliation.')
+                # See the note above: `_history` alone records this outcome.
                 _history(document, action='MANUAL_RECOVERY', status='SUCCESS',
                          response=document.sap_response, doc_entry=doc_entry,
                          doc_num=doc_num)
