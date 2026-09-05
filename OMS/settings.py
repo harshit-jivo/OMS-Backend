@@ -881,6 +881,35 @@ EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
     'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
 ).split(',') if d.strip()]
 
+# ---------------------------------------------------------------------------
+# Legal — label compliance checker (legal/service.py)
+#
+# SECURITY: the Gemini key used to be a string literal in `legal/service.py`,
+# committed to this repository. It is read from `.env` now. Treat the old
+# literal as disclosed and rotate it — everyone with repository access has had
+# it, and it is in the git history regardless of the current file.
+#
+# Blank is a supported state: the module imports and the rest of the app runs;
+# only a label check refuses, with a message naming this setting rather than a
+# 500 from inside the SDK.
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
+
+# The vision model the checker calls. Pinned to an explicit version in .env
+# when a rollout needs to be deliberate; the default tracks the current flash
+# model, which is the accuracy/cost point this workload was chosen for.
+GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-2.5-flash')
+
+# Native binaries the pipeline shells out to. Blank means "on PATH", which is
+# correct on the Linux host; Windows dev boxes install both somewhere else and
+# set these two.
+#   TESSERACT_CMD e.g. C:\Program Files\Tesseract-OCR\tesseract.exe
+#   POPPLER_PATH  e.g. C:\poppler-26.02.0\Library\bin   (was hard-coded in
+#                      legal/service.py, which meant PDF rendering only ever
+#                      worked on the one machine that had that exact path)
+TESSERACT_CMD = config('TESSERACT_CMD', default='')
+POPPLER_PATH = config('POPPLER_PATH', default='')
+
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
 # EWB_* vars in .env only if the e-Way Bill portal issued different ones.
