@@ -69,6 +69,12 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Distributor':              'Distributor',
         'Mart_Approval':            'Mart Approval',
         'Device_Management':        'Device Management',
+        # The order/revenue analytics screen, formerly `/Dashboard`. It was
+        # ungated for one structural reason — it doubled as the landing page,
+        # so denying it would have looped the user — and `/Home` taking that
+        # job is what let it become a normal page with a normal key.
+        # Back-granted to today's dashboard roles by users/0034.
+        'Sales_Dashboard':          'Sales Dashboard',
         # One key for the whole Legal module — Label Checker and Nutrition
         # Manager are one desk, the way `Distributor` covers both distributor
         # routes. Gates every legal/ endpoint via HasKeyOrRole, with the
