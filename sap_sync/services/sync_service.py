@@ -257,13 +257,30 @@ def _get_sap_line_quantity(item):
     return qty
 
 
-def _get_sap_unit_price(item):
+# An FOC line ships free, but SAP still needs a non-zero value: an invoice
+# totalling 0 does not generate an IRN, so the billing team has always keyed a
+# token rate by hand (0.001 on 70 lines, 0.01 on 105, 0.1 on 31). This is that
+# convention made automatic. 0.001 keeps the invoice at the Rs 1 minimum for
+# every realistic quantity.
+FOC_TOKEN_UNIT_PRICE = 0.001
+
+
+def _get_sap_unit_price(item, is_foc=False):
     price_list_basic = _to_float(getattr(item, "price_list_basic", None), 0)
     basic_price = _to_float(getattr(item, "basic_price", None), 0)
 
     if basic_price > 0:
         return basic_price
 
+    if is_foc:
+        # Never fall through to the price list on an FOC order. `basic_price` 0
+        # with a live `price_list_basic` is exactly how a giveaway gets invoiced
+        # at full value -- the line is free, so the token rate is the answer.
+        return FOC_TOKEN_UNIT_PRICE
+
+    # Not FOC: a blank basic price means the operator priced the line off the
+    # price list, which is the intended rate. Returning 0 here would invoice a
+    # real sale as free.
     return price_list_basic
 
 
@@ -1147,7 +1164,8 @@ class SyncService:
             print("\n ============================================\n")
 
             order_qty = _get_sap_line_quantity(item)  
-            item_unit_price = _get_sap_unit_price(item)
+            item_unit_price = _get_sap_unit_price(
+                item, is_foc=bool(getattr(order, "is_foc", False)))
             card_code = getattr(order, "card_code", "")
             item_code = getattr(item, "item_code", "")
             category = getattr(item, "category", "")

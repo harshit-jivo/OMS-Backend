@@ -3,9 +3,9 @@
 Lifted out of `orders/views.py` (plan item 3.2). Two decisions live here:
 
 * whether a line needs approval at all — `_get_rate_approval_reason` compares
-  the price list basic against the entered basic, with deliberate exemptions
-  for scheme lines and the free half of a combo pack, which are priced at zero
-  by design and must not drag the whole order into approval;
+  the entered basic against the rate AGREED WITH THIS PARTY on
+  `party_product_assignments`, and asks for a signature only when the line
+  sells below it;
 * who is asked — `assign_rate_approvers` resolves approvers per item from the
   configured rules, so an order can end up with several, each deciding
   independently.
@@ -23,26 +23,90 @@ from orders.models import (
     RateApproverRule,
 )
 from sap_sync.models import Product as SapProduct
-from users.models import User
+from users.models import PartyProductAssignment, User
 
 
 APPROVER_ACCEPTED_ACTION_ID = 6
 APPROVER_REJECTED_ACTION_ID = 7
 APPROVER_DECISION_ACTION_IDS = [APPROVER_ACCEPTED_ACTION_ID, APPROVER_REJECTED_ACTION_ID]
 
+# Rates are stored to 4dp, and a tax-inclusive round trip lands on 3549.9999
+# rather than 3550, so an exact comparison misfires on correctly-priced lines.
+RATE_APPROVAL_TOLERANCE = 0.05
+
+# Sub groups sold as commodities. Their price moves with the market, so parties
+# carry no fixed agreed rate for them -- `basic_rate` sits at 0 on
+# `party_product_assignments`. That zero is "no rate agreed", not "free", so a
+# commodity line still needs a signature. Mirrors the commodity list in
+# OrderItemSerializer.get_variety_type, which classifies OLIVE as PREMIUM.
+COMMODITY_SUB_GROUPS = {
+    'BLENDED',
+    'COTTON SEED',
+    'GIFT PACK',
+    'GROUNDNUT',
+    'MUSTARD',
+    'PALMOLEIN',
+    'RICE BRAN',
+    'SESAME',
+    'SOYABEAN',
+    'SUNFLOWER',
+}
+
+
 def _rate_approval_remarks(flagged_items):
     return '; '.join(flagged_items) or 'Rate approval required by admin price condition'
 
-def _get_rate_approval_reason(item, price_list_basic, basic_price):
-    if item.get('item_type') == 'SCHEME':
-        return None
 
-    # The free half of a combo pack is priced at 0 by design, so the 0-vs-0
-    # comparison below must not drag the whole order into rate approval.
-    if str(item.get('is_auto_free', '')).lower() in ('true', '1'):
-        return None
+def _item_field(item, *names):
+    """Read a field off either an OrderItem instance or a raw payload dict.
 
+    The order-create path works with the request's dicts before the rows
+    exist, while the approver-matching path works with saved OrderItem
+    objects. Both need the same sub-group lookup, so accept either shape.
+    """
+    for name in names:
+        value = item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+        if value not in (None, ''):
+            return str(value).strip()
+    return ''
+
+
+def _is_commodity_item(item):
+    return _get_item_sub_group(item).upper() in COMMODITY_SUB_GROUPS
+
+
+def _authorised_basic_rate(card_code, item_code, category):
+    """The basic rate this party is authorised to be charged for this item.
+
+    Returns None when no active assignment exists. One query per line; orders
+    average two or three lines, so this is not worth batching yet.
+    """
+    if not (card_code and item_code):
+        return None
+    return (
+        PartyProductAssignment.objects
+        .filter(card_code=card_code, item_code=item_code, category=category, is_active=True)
+        .values_list('basic_rate', flat=True)
+        .first()
+    )
+
+def _get_rate_approval_reason(item, authorised_rate, basic_price):
+    """Why this line needs rate approval, or None.
+
+    Approval means one thing: the line is being sold BELOW the rate agreed with
+    this party on `party_product_assignments`. Selling at or above it is not a
+    concession and needs nobody's signature.
+
+    It deliberately does NOT compare against the `price_list_basic` the form
+    sends. That field is built two different ways -- sometimes the agreed rate,
+    sometimes that rate plus tax (`computeLandingPrice` in the order form) --
+    so comparing a tax-inclusive figure against a pre-tax one flagged every
+    correctly-priced order. Between 28 Jul and 27 Aug that was 94% of orders
+    (613 of 647). The assignment is also the real authority: the form's Price
+    List field can be edited by the salesperson.
+    """
     if item.get('qty') not in (None, ''):
+        # Guarded parse: a malformed qty must not 500 the whole order-create.
         try:
             qty = float(item.get('qty') or 0)
         except (TypeError, ValueError):
@@ -50,16 +114,38 @@ def _get_rate_approval_reason(item, price_list_basic, basic_price):
         if qty <= 0:
             return None
 
-    item_name = item.get('item_name') or item.get('item_code') or 'Item'
+    # A zero-priced line is a giveaway -- a scheme companion, the free half of
+    # a combo, or an FOC order. There is no discount to approve. This also
+    # covers what the old `item_type == 'SCHEME'` and `is_auto_free` guards
+    # were reaching for; the first never fired, because item_type holds the
+    # pack size ('1 LTR', '5 LTR', ...), never 'SCHEME'.
+    if basic_price <= 0:
+        return None
 
-    if price_list_basic == 0 and basic_price == 0:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} = Basic Rs {basic_price}"
-    if price_list_basic == 0 and basic_price > 0:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
-    if price_list_basic > basic_price:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} > Basic Rs {basic_price}"
-    if price_list_basic < basic_price:
-        return f"{item_name}: Price List (Basic) Rs {price_list_basic} < Basic Rs {basic_price}"
+    # No rate agreed for this party and item. Nothing to measure against, so
+    # nothing to approve -- these are unmapped master data rather than
+    # discounts, and at ~43% of lines they buried the real ones. They want a
+    # report of unmapped party/item pairs, not an approval queue.
+    if authorised_rate is None:
+        return None
+    authorised_rate = float(authorised_rate)
+    if authorised_rate <= 0:
+        # A zero agreed rate means no rate was ever agreed, not that the item
+        # is free. For commodities that is the norm rather than an omission --
+        # the price tracks the market -- so there is no benchmark to clear and
+        # the line goes for approval on every order. Non-commodity lines stay
+        # exempt: a zero there is unmapped master data.
+        if _is_commodity_item(item):
+            item_name = item.get('item_name') or item.get('item_code') or 'Item'
+            return (f"{item_name}: commodity sold at Rs {basic_price} with no "
+                    f"agreed rate on record")
+        return None
+
+    if basic_price < authorised_rate - RATE_APPROVAL_TOLERANCE:
+        item_name = item.get('item_name') or item.get('item_code') or 'Item'
+        return (f"{item_name}: Basic Rs {basic_price} < agreed rate "
+                f"Rs {authorised_rate}")
+
     return None
 
 
@@ -99,16 +185,22 @@ def _mark_rate_approval_decision(order, user, decision, remarks=''):
 
 def _get_item_sub_group(item):
     """Resolve an order item's sub group. Prefer the value stored on the order item;
-    fall back to the synced SAP product (sap_products) by item_code (and category)."""
-    stored = str(getattr(item, 'sub_group', '') or '').strip()
+    fall back to the synced SAP product (sap_products) by item_code (and category).
+
+    Reads through `_item_field` because the commodity check above runs on the
+    order-create path, where an item is still a request dict rather than a
+    saved `OrderItem`. `variety` is accepted as an alias: that is what the
+    order form calls this field.
+    """
+    stored = _item_field(item, 'sub_group', 'variety')
     if stored:
         return stored
 
-    item_code = str(getattr(item, 'item_code', '') or '').strip()
+    item_code = _item_field(item, 'item_code')
     if not item_code:
         return ''
 
-    category = str(getattr(item, 'category', '') or '').strip()
+    category = _item_field(item, 'category')
     product_query = SapProduct.objects.filter(item_code__iexact=item_code)
     if category:
         product_query = product_query.filter(category__iexact=category)
