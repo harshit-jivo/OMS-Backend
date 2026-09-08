@@ -585,6 +585,10 @@ REST_FRAMEWORK = {
         "user": config('THROTTLE_USER', default='2000/hour'),
         # Credential-checking endpoints only.
         "login": config('THROTTLE_LOGIN', default='10/min'),
+        # The unauthenticated HAIS device page (a scanned QR sticker). A human
+        # scans one device at a time; this only has to stop a scraper walking a
+        # list of serials for the staff names and emails behind them.
+        "hais_public_device": config('THROTTLE_HAIS_PUBLIC', default='30/min'),
     },
 }
 
