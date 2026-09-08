@@ -364,6 +364,33 @@ def _rate_approval_remarks(flagged_items):
 # rather than 3550, so an exact comparison misfires on correctly-priced lines.
 RATE_APPROVAL_TOLERANCE = 0.05
 
+# The rate an FOC line carries. Free goods still need a non-zero value in SAP --
+# an invoice totalling 0 generates no IRN -- so the billing team has always keyed
+# a token rate by hand. Kept in step with sap_sync FOC_TOKEN_UNIT_PRICE.
+FOC_TOKEN_BASIC_PRICE = 0.001
+
+# Sub groups sold as commodities. Their price moves with the market, so parties
+# carry no fixed agreed rate for them -- `basic_rate` sits at 0 on
+# `party_product_assignments`. That zero is "no rate agreed", not "free", so a
+# commodity line still needs a signature. Mirrors the commodity list in
+# OrderItemSerializer.get_variety_type, which classifies OLIVE as PREMIUM.
+COMMODITY_SUB_GROUPS = {
+    'BLENDED',
+    'COTTON SEED',
+    'GIFT PACK',
+    'GROUNDNUT',
+    'MUSTARD',
+    'PALMOLEIN',
+    'RICE BRAN',
+    'SESAME',
+    'SOYABEAN',
+    'SUNFLOWER',
+}
+
+
+def _is_commodity_item(item):
+    return _get_item_sub_group(item).upper() in COMMODITY_SUB_GROUPS
+
 
 def _authorised_basic_rate(card_code, item_code, category):
     """The basic rate this party is authorised to be charged for this item.
@@ -421,6 +448,16 @@ def _get_rate_approval_reason(item, authorised_rate, basic_price):
         return None
     authorised_rate = float(authorised_rate)
     if authorised_rate <= 0:
+        # A zero agreed rate means no rate was ever agreed, not that the item is
+        # free. For commodities that is the norm rather than an omission -- the
+        # price tracks the market -- so there is no benchmark to clear and the
+        # line goes for approval on every order. Non-commodity lines stay exempt:
+        # a zero there is unmapped master data, which belongs in an unmapped
+        # party/item report rather than in the approver's queue.
+        if _is_commodity_item(item):
+            item_name = item.get('item_name') or item.get('item_code') or 'Item'
+            return (f"{item_name}: commodity sold at Rs {basic_price} with no "
+                    f"agreed rate on record")
         return None
 
     if basic_price < authorised_rate - RATE_APPROVAL_TOLERANCE:
@@ -467,6 +504,21 @@ def _create_order_item(order, item, to_float, to_bool):
     first_scheme = next((scheme_obj for scheme_obj, _ in item_schemes), None)
     total_scheme_qty = sum(scheme_qty for _, scheme_qty in item_schemes)
 
+    qty = to_float(item.get('qty', 0))
+    basic_price = to_float(item.get('basic_price', 0))
+    price_list_basic = to_float(item.get('price_list_basic', 0))
+    total = to_float(item.get('total', 0))
+
+    if getattr(order, 'is_foc', False) and basic_price <= 0:
+        # An FOC line ships free, but a zero rate reaches SAP as either a
+        # zero-value invoice (no IRN) or -- worse -- falls through to the price
+        # list and bills the customer in full. The token rate is what the
+        # billing team has always keyed by hand; apply it here so the flag alone
+        # is enough, whether it was set at entry or added afterwards.
+        basic_price = FOC_TOKEN_BASIC_PRICE
+        price_list_basic = 0
+        total = round(qty * basic_price, 4)
+
     order_item = OrderItem.objects.create(
         order=order,
         item_code=item.get('item_code', ''),
@@ -475,13 +527,13 @@ def _create_order_item(order, item, to_float, to_bool):
         brand=item.get('brand', ''),
         sub_group=item.get('sub_group') or item.get('variety') or '',
         item_type=item.get('item_type', ''),
-        qty=to_float(item.get('qty', 0)),
+        qty=qty,
         pcs=to_float(item.get('pcs', 0)),
         boxes=to_float(item.get('boxes', 0)),
         ltrs=to_float(item.get('ltrs', 0)),
-        price_list_basic=to_float(item.get('price_list_basic', 0)),
-        basic_price=to_float(item.get('basic_price', 0)),
-        total=to_float(item.get('total', 0)),
+        price_list_basic=price_list_basic,
+        basic_price=basic_price,
+        total=total,
         tax_rate=to_float(item.get('tax_rate', 0)),
         scheme=first_scheme,
         qty_scheme=total_scheme_qty,
@@ -1001,18 +1053,32 @@ def _mark_rate_approval_decision(order, user, decision, remarks=''):
     approval.save(update_fields=['status', 'remarks', 'approved_at'])
     return approval
 
+def _item_field(item, *names):
+    """Read a field off either an OrderItem instance or a raw payload dict.
+
+    The order-create path works with the request's dicts before the rows exist,
+    while the approver-matching path works with saved OrderItem objects. Both
+    need the same sub-group lookup, so accept either shape.
+    """
+    for name in names:
+        value = item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+        if value not in (None, ''):
+            return str(value).strip()
+    return ''
+
+
 def _get_item_sub_group(item):
     """Resolve an order item's sub group. Prefer the value stored on the order item;
     fall back to the synced SAP product (sap_products) by item_code (and category)."""
-    stored = str(getattr(item, 'sub_group', '') or '').strip()
+    stored = _item_field(item, 'sub_group', 'variety')
     if stored:
         return stored
 
-    item_code = str(getattr(item, 'item_code', '') or '').strip()
+    item_code = _item_field(item, 'item_code')
     if not item_code:
         return ''
 
-    category = str(getattr(item, 'category', '') or '').strip()
+    category = _item_field(item, 'category')
     product_query = SapProduct.objects.filter(item_code__iexact=item_code)
     if category:
         product_query = product_query.filter(category__iexact=category)

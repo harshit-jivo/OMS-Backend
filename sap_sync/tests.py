@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
-from sap_sync.services.sync_service import SyncService
+from sap_sync.services.sync_service import (
+    FOC_TOKEN_UNIT_PRICE,
+    SyncService,
+    _get_sap_unit_price,
+)
 
 
 class SyncServiceMapOrderToSapTests(SimpleTestCase):
@@ -576,3 +580,42 @@ class SyncServiceMapOrderToSapTests(SimpleTestCase):
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG0000005")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 5.0)
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+
+
+class FocTokenUnitPriceTests(SimpleTestCase):
+    """An FOC line must reach SAP at the token rate: never 0 (a zero-value
+    invoice generates no IRN) and never the price list (which would bill the
+    customer in full for goods that ship free)."""
+
+    @staticmethod
+    def _line(basic_price, price_list_basic):
+        return SimpleNamespace(
+            basic_price=basic_price, price_list_basic=price_list_basic)
+
+    def test_foc_line_with_zero_basic_uses_token_rate(self):
+        self.assertEqual(
+            _get_sap_unit_price(self._line(0, 457.1429), is_foc=True),
+            FOC_TOKEN_UNIT_PRICE)
+
+    def test_foc_line_never_falls_through_to_price_list(self):
+        self.assertNotEqual(
+            _get_sap_unit_price(self._line(0, 457.1429), is_foc=True), 457.1429)
+
+    def test_foc_line_keeps_a_token_rate_the_operator_typed(self):
+        self.assertEqual(
+            _get_sap_unit_price(self._line(0.01, 0), is_foc=True), 0.01)
+
+    def test_foc_order_keeps_a_genuinely_priced_line(self):
+        # A mixed FOC order: the sold line still goes at its real rate.
+        self.assertEqual(
+            _get_sap_unit_price(self._line(902, 902), is_foc=True), 902)
+
+    def test_non_foc_blank_basic_still_uses_price_list(self):
+        # Regression guard: ORD-20260723-0035 carried a Rs 8.1 lakh line with a
+        # blank basic price. Returning 0 here would invoice a real sale as free.
+        self.assertEqual(
+            _get_sap_unit_price(self._line(0, 902), is_foc=False), 902)
+
+    def test_non_foc_zero_line_is_unchanged(self):
+        self.assertEqual(
+            _get_sap_unit_price(self._line(0, 0), is_foc=False), 0)

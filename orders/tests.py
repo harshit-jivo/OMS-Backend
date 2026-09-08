@@ -11,11 +11,50 @@ class RateApprovalReasonTests(SimpleTestCase):
     def test_no_authorised_rate_means_no_rate_approval(self):
         # No active party/item assignment (or a zero one) means there is no
         # agreed rate to measure against: unmapped master data, not a discount.
+        # Commodities are the exception -- see the commodity tests below.
         item = {"item_name": "Mustard Oil"}
 
         self.assertIsNone(_get_rate_approval_reason(item, None, 500))
         self.assertIsNone(_get_rate_approval_reason(item, 0, 0))
         self.assertIsNone(_get_rate_approval_reason(item, 0, 500))
+
+    def test_commodity_with_zero_agreed_rate_requires_rate_approval(self):
+        # Commodity prices track the market, so parties carry no fixed agreed
+        # rate and `basic_rate` sits at 0. That zero means "no rate agreed", not
+        # "free", so the line still needs a signature.
+        item = {"item_name": "Soyabean Oil", "sub_group": "SOYABEAN", "qty": 600}
+
+        self.assertIsNotNone(_get_rate_approval_reason(item, 0, 2285.71))
+
+    def test_commodity_sub_group_match_is_case_insensitive(self):
+        item = {"item_name": "Mustard Oil", "sub_group": "mustard", "qty": 200}
+
+        self.assertIsNotNone(_get_rate_approval_reason(item, 0, 842.85))
+
+    def test_commodity_sub_group_can_come_from_variety_key(self):
+        # The order form sends the sub group as `variety` on some screens.
+        item = {"item_name": "Sesame Oil", "variety": "SESAME", "qty": 10}
+
+        self.assertIsNotNone(_get_rate_approval_reason(item, 0, 900))
+
+    def test_premium_sub_group_with_zero_agreed_rate_stays_exempt(self):
+        # OLIVE is premium, not a commodity, per OrderItemSerializer.get_variety_type.
+        item = {"item_name": "Olive Oil", "sub_group": "OLIVE", "qty": 10}
+
+        self.assertIsNone(_get_rate_approval_reason(item, 0, 999))
+
+    def test_zero_priced_commodity_line_stays_exempt(self):
+        # A giveaway line (FOC order or scheme companion) has no discount to approve.
+        item = {"item_name": "Mustard Oil", "sub_group": "MUSTARD", "qty": 10}
+
+        self.assertIsNone(_get_rate_approval_reason(item, 0, 0))
+
+    def test_commodity_with_no_assignment_row_stays_exempt(self):
+        # A missing assignment is unmapped master data and belongs in a report,
+        # not the approver queue. Only an explicit zero rate routes for approval.
+        item = {"item_name": "Mustard Oil", "sub_group": "MUSTARD", "qty": 10}
+
+        self.assertIsNone(_get_rate_approval_reason(item, None, 842.85))
 
     def test_basic_price_below_price_list_basic_requires_rate_approval(self):
         item = {"item_name": "Mustard Oil"}
