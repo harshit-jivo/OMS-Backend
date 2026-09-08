@@ -69,6 +69,18 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Distributor':              'Distributor',
         'Mart_Approval':            'Mart Approval',
         'Device_Management':        'Device Management',
+        # Staff orders — an internal order raised against an employee ID
+        # rather than a party, priced from each product's staff rate. Two
+        # keys, not one: reading the staff catalogue to PLACE an order and
+        # setting the rates the company sells to its own people at are
+        # different authorities, and the second is the one worth withholding.
+        #
+        # Both were `adminOnly` on the route and grantable to nobody, while
+        # `orders/staff-products/` carried no permission_classes at all — so
+        # the page was admin-only and the endpoint behind it took writes from
+        # any signed-in user. These keys are what closes that.
+        'Staff':                    'Staff Orders',
+        'Staff_Rate_Assignment':    'Staff Rate Assignment',
         # The order/revenue analytics screen, formerly `/Dashboard`. It was
         # ungated for one structural reason — it doubled as the landing page,
         # so denying it would have looped the user — and `/Home` taking that

@@ -28,7 +28,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import serializers
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
+
+from core.permissions import HasAnyKey, HasKey
 from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct, active_product_q
 
 
@@ -631,6 +634,27 @@ class BranchView(APIView):
         return Response(serializer.data)
 
 class StaffProductsAPIView(APIView):
+    """The staff product catalogue, and the rates attached to it.
+
+    Gated per METHOD, because the two are different authorities:
+
+    * GET lists which products staff may order and at what rate. Both the
+      Staff Orders screen and the Staff Rate Assignment screen need it, so
+      either key admits.
+    * POST sets those rates and un-assigns products. That is the Staff Rate
+      Assignment screen alone.
+
+    This view previously declared no ``permission_classes``, so it fell back
+    to the project default of ``IsAuthenticated`` — meaning any signed-in user
+    could read the staff price list AND overwrite it, while the pages in front
+    of it were admin-only. Hiding a route is not access control; this is the
+    server half that was missing.
+    """
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated(), HasKey('Staff_Rate_Assignment')]
+        return [IsAuthenticated(), HasAnyKey('Staff', 'Staff_Rate_Assignment')]
 
     def get(self, request):
         products = SapProduct.objects.filter(active_product_q(), staff_prices__isnull=False).distinct()
