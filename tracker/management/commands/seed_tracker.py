@@ -28,22 +28,30 @@ STAGES = [
     dict(code='pre_audit',    name='Pre-Audit',          order=3,
          status_choices=['OK', 'HOLD', 'DEBIT', 'RETURN'],    requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    dict(code='data_entry',   name='Data Entry',         order=4,
+    # A DETOUR off Pre-Audit, not a step in the line: only Transport-category
+    # invoices go there, and both verdicts hand them straight back to Pre-Audit,
+    # whose SECOND advance then continues to Data Entry. `order` places it in
+    # the flow display only — routing lives in services._detour_target(), and
+    # services.stage_route() excludes it. See migration 0023.
+    dict(code='transport_approval', name='Transport Approval', order=4,
+         status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
+         can_return=True,  is_terminal=False, threshold_days=2),
+    dict(code='data_entry',   name='Data Entry',         order=5,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=2),
     # SAP and JSAP are two separate desks. SAP approval is a person clicking
     # Approve/Reject here; JSAP approval is the budget decision made in the
     # JSAP system, which this stage only mirrors (see tracker/jsap.py).
-    dict(code='sap_approval', name='SAP Approval',       order=5,
+    dict(code='sap_approval', name='SAP Approval',       order=6,
          status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    dict(code='jsap_approval', name='JSAP Approval',     order=6,
+    dict(code='jsap_approval', name='JSAP Approval',     order=7,
          status_choices=['APPROVED', 'REJECTED'],             requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
-    dict(code='save_in_sap',  name='Save in SAP',        order=7,
+    dict(code='save_in_sap',  name='Save in SAP',        order=8,
          status_choices=[],                                   requires_status=False,
          can_return=True,  is_terminal=False, threshold_days=2),
-    dict(code='payment',      name='Payment',            order=8,
+    dict(code='payment',      name='Payment',            order=9,
          status_choices=[],                                   requires_status=False,
          can_return=False, is_terminal=True,  threshold_days=5),
 ]
