@@ -1,32 +1,16 @@
 """Permissions for the UI-label admin API.
 
-Authorization in this project is by the `User.role` relation (a `users.UserRole`
-row), NOT Django's `is_staff` / groups / permissions framework. This mirrors the
-existing check in `users.views.PagePermissionsView._is_admin` and
-`devices.permissions.IsAdminRole` so there is exactly one definition of "admin"
-behaviour across the codebase.
+Like `devices.permissions`, this module carried its own `is_admin_user` under a
+docstring claiming there was "exactly one definition of admin behaviour across
+the codebase". There were five, and they disagreed — this one honoured
+`is_superuser` while the devices copy did not.
+
+`core.permissions` is that one definition now. Re-exported so existing imports
+keep working.
+
+Reading labels is open to any authenticated user (they drive the UI for
+everyone); only editing is admin-gated. That rule is enforced in `uilabels/views.py`.
 """
-from rest_framework.permissions import BasePermission
+from core.permissions import IsAdminRole, is_admin as is_admin_user
 
-
-def is_admin_user(user) -> bool:
-    """True when `user` holds the 'admin' role (or is a Django superuser)."""
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
-    if getattr(user, "is_superuser", False):
-        return True
-    role = getattr(user, "role", None)
-    return bool(role and str(getattr(role, "name", "")).strip().lower() == "admin")
-
-
-class IsAdminRole(BasePermission):
-    """Allow only admins to create/update/delete UI labels.
-
-    Reading labels is open to any authenticated user (they drive the UI for
-    everyone); only editing is admin-gated.
-    """
-
-    message = "Admin access required."
-
-    def has_permission(self, request, view):
-        return is_admin_user(request.user)
+__all__ = ['IsAdminRole', 'is_admin_user']

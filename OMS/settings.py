@@ -11,10 +11,20 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 from corsheaders.defaults import default_headers as cors_default_headers
 from decouple import config
+from django.core.exceptions import ImproperlyConfigured
+
+
+def _csv(value, default=()):
+    """Parse a comma-separated .env value into a list, tolerating an inline
+    comment the same way `_parse_bool` does."""
+    raw = str(value or '').split('#', 1)[0]
+    items = [item.strip() for item in raw.split(',') if item.strip()]
+    return items or list(default)
 
 
 def _parse_bool(value, default=False):
@@ -35,21 +45,65 @@ def _parse_bool(value, default=False):
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-# SECRET_KEY = config('SECRET_KEY')
+
+# ---------------------------------------------------------------------------
+# Core security settings.
+#
+# What was here before, on five lines:
+#
+#     DEBUG = _parse_bool(config('DEBUG', ...))   # correct, env-driven
+#     SECRET_KEY = 'django-insecure-#im8s6...'    # hardcoded and committed
+#     DEBUG = True                                # overrode the line above
+#     ALLOWED_HOSTS = [..., '*']                  # defeated Host validation
+#
+# The hardcoded key is in git history, so it is compromised regardless of what
+# happens now. It signs sessions and — because SIMPLE_JWT.SIGNING_KEY defaults
+# to it — every JWT, so anyone with repo access can forge a valid token for any
+# user. Reading it from the environment stops the NEXT leak; only rotating it
+# (Phase 1.3, needs a maintenance window because it invalidates every issued
+# token) ends this one.
+# ---------------------------------------------------------------------------
+
 DEBUG = _parse_bool(config('DEBUG', default='false'), default=False)
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
+# The key this file used to hardcode. Kept ONLY as the DEBUG-mode fallback so a
+# developer can still run `manage.py` with no .env — it must never be what a
+# deployed server uses, which is why production refuses to start without
+# SECRET_KEY set.
+_INSECURE_DEV_SECRET_KEY = (
+    'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05')
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-#im8s6vmxe)=%xl8$ybjl*fu9(+2=5cf^8$=ok8%bx%0f&^t05'
+SECRET_KEY = config('SECRET_KEY', default='')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = _INSECURE_DEV_SECRET_KEY
+    else:
+        # Deliberately fatal. Falling back to a known key here is how a
+        # committed secret survives being "removed" — the app keeps working and
+        # nobody notices the deploy never set one.
+        raise ImproperlyConfigured(
+            'SECRET_KEY is not set. Add it to .env before starting with '
+            'DEBUG=false. Generate one with:\n'
+            '    python -c "from django.core.management.utils import '
+            'get_random_secret_key as k; print(k())"'
+        )
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Host-header validation. `'*'` used to be in this list, which disabled it
+# entirely. Overridable from .env so a new server does not need a code change.
+ALLOWED_HOSTS = _csv(
+    config('ALLOWED_HOSTS', default=''),
+    default=['138.252.101.118', '10.10.101.118', '127.0.0.1', '10.0.2.2',
+             'localhost', '192.168.1.240'],
+)
+if DEBUG:
+    # Local development reaches the dev server by whatever name is convenient
+    # (a LAN IP, a tunnel host, the Android emulator's 10.0.2.2). Only in DEBUG.
+    ALLOWED_HOSTS.append('*')
 
-ALLOWED_HOSTS = ['138.252.101.118', '10.10.101.118', '127.0.0.1', '10.0.2.2', 'localhost', '192.168.1.240','*']
-CSRF_TRUSTED_ORIGINS = ['https://oms.jivo.in' , 'http://oms.jivo.in']
-# ALLOWED_HOSTS = ['*']
+CSRF_TRUSTED_ORIGINS = _csv(
+    config('CSRF_TRUSTED_ORIGINS', default=''),
+    default=['https://oms.jivo.in', 'http://oms.jivo.in'],
+)
 # Application definition
 
 INSTALLED_APPS = [
@@ -66,7 +120,11 @@ INSTALLED_APPS = [
     # 'rest_framework.authto
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'django_filters',
     'django_apscheduler',
+    # OpenAPI schema at /api/schema/ (Phase 0.6). Already a pinned dependency
+    # before this line; it was simply never installed.
+    'drf_spectacular',
     # Local apps
     'users',
     'orders',
@@ -85,9 +143,31 @@ INSTALLED_APPS = [
     'tracker',
     # Dynamic UI labels — admin-editable field labels served to web + mobile
     'uilabels',
+    # Receive Payment / Bank Deposit. `core` holds the shared base model and
+    # document-number generator; `approvals` is the generic multi-level engine
+    # (usable by any document type); `attachments` stores files on the existing
+    # shared network folders.
+    'core',
+    'approvals',
+    'attachments',
+    'payments',
+    # Reusable notification framework. Empty skeleton for now — Orders still
+    # owns and serves every notification. Registered ahead of any behaviour so
+    # this INSTALLED_APPS change is bisectable on its own.
+    'notifications',
+    # HAIS — Hardware Asset Identification Software. Owns its own `hais`
+    # Postgres schema (created by its initial migration), same as payments.
+    'HAIS',
 ]
 
 MIDDLEWARE = [
+    # FIRST, and it has to be. Middleware wraps inward, so only the outermost
+    # entry sees every request — including the ones SecurityMiddleware
+    # redirects, CorsMiddleware answers as a preflight, or VersionPolicy
+    # rejects with 426. Any later position leaves exactly those requests
+    # without a request ID, and they are disproportionately the ones being
+    # investigated. See core/middleware.py.
+    'core.middleware.RequestContextMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -98,6 +178,11 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'audit.middleware.AuditMiddleware',
+    # Mobile Version Policy: blocks out-of-date ANDROID/IOS clients with HTTP
+    # 426. Placed AFTER CorsMiddleware so it never interferes with the browser
+    # preflight, and only ever acts on requests carrying a mobile X-Platform
+    # header — the web is never gated.
+    'devices.version_policy.VersionPolicyMiddleware',
 ]
 
 ROOT_URLCONF = 'OMS.urls'
@@ -131,17 +216,60 @@ DATABASES = {
         'PASSWORD': config('DB_PASSWORD'),
         'HOST': config('DB_HOST'),
         'PORT': config('DB_PORT'),
+        'OPTIONS': {
+            # The payments module owns its own PostgreSQL schema, so its 19
+            # tables group together in pgAdmin instead of being scattered
+            # through `public` alongside orders, users and Django's own.
+            #
+            # `payments` comes FIRST so unqualified names resolve there, and
+            # `public` stays on the path because everything else — users_user,
+            # django_content_type, the FKs those tables point at — still lives
+            # there. Dropping public would break every cross-schema join.
+            'options': '-c search_path=payments,public',
+        },
+
+        # Phase 4.7 — connection reuse.
+        #
+        # This was unset, which means Django's default of 0: a fresh Postgres
+        # connection opened and torn down on EVERY request. A connection costs
+        # a TCP round trip, a TLS handshake and a backend fork on the server,
+        # and this API's endpoints are mostly small queries — so the connection
+        # was routinely more expensive than the work it carried.
+        #
+        # 60s rather than a large number or None (persist for ever): the value
+        # must stay comfortably BELOW any idle-connection timeout on the
+        # Postgres side, or Django hands out a socket the server has already
+        # closed. CONN_HEALTH_CHECKS covers the remaining race by validating a
+        # reused connection at the start of each request and reconnecting if it
+        # is dead — without it, a connection dropped between requests surfaces
+        # as an InterfaceError on a random query rather than as a reconnect.
+        #
+        # Safe now in a way it was not before 5.1: while the scheduler ran
+        # inside the web process, a long-lived background thread could hold a
+        # connection open indefinitely with no request boundary to close it.
+        'CONN_MAX_AGE': config('CONN_MAX_AGE', default=60, cast=int),
+        'CONN_HEALTH_CHECKS': True,
     },
     'hana': {
-        'ENGINE': 'django.db.backends.dummy', 
+        'ENGINE': 'django.db.backends.dummy',
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
+        # Company-DB schemas — every value comes from .env, NOTHING hardcoded.
+        # OIL is required (bare config, boots-loud if missing); beverage/mart/
+        # test fall back only across other .env keys, ending in '' (which
+        # disables that company) rather than any literal schema name.
+        'SCHEMA': config('HANA_DB_NAME', default=config('HANA_DB_OIL_NAME')),
         'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
-        'BEVERAGE_SCHEMA': config('HANA_DB_BEVERAGE_NAME'),
+        'BEVERAGE_SCHEMA': config(
+            'HANA_DB_BEVERAGE_NAME',
+            default=config('HANA_BEVERAGE_COMPANY_DB',
+                           default=config('HANA_COMPANY_DB_BEVERAGES', default='')),
+        ),
         'MART_SCHEMA': config('HANA_DB_MART_NAME', default=''),
+        'TEST_SCHEMA': config('HANA_DB_TEST_NAME', default=''),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
-    }
+    },
     
     
 }
@@ -157,21 +285,48 @@ CRYSTAL_URL = config('CRYSTAL_URL')
 SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
 SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
 
+# Company DBs — all sourced from .env, NO hardcoded schema names. OIL is
+# required; beverage/mart fall back only across other .env keys and end in ''
+# (blank disables that company) instead of a literal default.
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
-HANA_BEVERAGE_COMPANY_DB = config('HANA_BEVERAGE_COMPANY_DB')
+HANA_BEVERAGE_COMPANY_DB = config(
+    'HANA_DB_BEVERAGE_NAME',
+    default=config('HANA_BEVERAGE_COMPANY_DB',
+                   default=config('HANA_COMPANY_DB_BEVERAGES', default='')),
+)
 # Third company (Mart). Blank disables everything Mart-specific.
-# The .env defines this as HANA_DB_MART_NAME (matching HANA_DB_OIL_NAME /
-# HANA_DB_BEVERAGE_NAME); keep the legacy HANA_MART_COMPANY_DB name as a
-# fallback so older environments keep working.
 HANA_MART_COMPANY_DB = config(
     'HANA_DB_MART_NAME',
-    default=config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB'),
+    default=config('HANA_MART_COMPANY_DB', default=''),
 )
+# Test / non-production company DB (blank when not testing).
+HANA_TEST_COMPANY_DB = config('HANA_DB_TEST_NAME', default='')
 # Profit center (OPRC.PrcCode) to stamp on Mart sales-order lines. Mart does not
 # use per-sub_group profit centers like Oil/Beverage, so this is a single code.
 # Blank (default) omits CostingCode entirely, letting SAP apply its own default
 # profit center (General Center). Set e.g. 'Centr_z' to force an explicit one.
 HANA_MART_COSTING_CODE = config('HANA_MART_COSTING_CODE', default='')
+
+# --- Payments: default SAP branch (OBPL.BPLId) ------------------------------
+# The branch a payment posts to when there is nothing to inherit it from.
+#
+# A branch is normally a property of the DOCUMENT, not a setting: an invoice
+# payment takes the invoice's branch (SAP refuses a mismatch) and an advance
+# takes the one the user picked. This default only covers the two cases with
+# neither — a legacy advance saved before the branch picker existed, and a
+# bank deposit, which settles no invoice and has no picker.
+#
+# Per company because the companies really do differ: BPL 1 is DELHI in both
+# OIL and BEVERAGES, but the branch lists diverge after that (OIL has 8, and
+# BEVERAGES 6). Named to match HANA_<COMPANY>_COMPANY_DB above.
+#
+# Replaces payments.SapCompanyMap.default_bpl_id, so that TEST and LIVE are
+# separated by environment rather than by editing a database row.
+HANA_OIL_DEFAULT_BPL_ID = config('HANA_OIL_DEFAULT_BPL_ID', default=1, cast=int)
+HANA_BEVERAGE_DEFAULT_BPL_ID = config(
+    'HANA_BEVERAGE_DEFAULT_BPL_ID', default=1, cast=int)
+HANA_MART_DEFAULT_BPL_ID = config(
+    'HANA_MART_DEFAULT_BPL_ID', default=1, cast=int)
 
 # --- JSAP (budget approval) SQL Server -------------------------------------
 # Read-only source for budget-approval status of a SAP *draft* document.
@@ -182,6 +337,22 @@ JSAP_DB_NAME = config('JSAP_DB_NAME', default='')
 JSAP_DB_USER = config('JSAP_DB_USER', default='')
 JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='')
 
+# Blank means disabled, and that is a supported mode — but blank-in-PART is a
+# typo, not a decision. Without this, setting the host and forgetting the
+# password gives `is_configured()` a true answer and every JSAP lookup fails at
+# connect time, which reads as "JSAP is down" rather than "JSAP is misspelt".
+if JSAP_DB_HOST and not (JSAP_DB_NAME and JSAP_DB_USER and JSAP_DB_PASSWORD):
+    _missing = [name for name, value in (
+        ('JSAP_DB_NAME', JSAP_DB_NAME),
+        ('JSAP_DB_USER', JSAP_DB_USER),
+        ('JSAP_DB_PASSWORD', JSAP_DB_PASSWORD),
+    ) if not value]
+    raise ImproperlyConfigured(
+        'JSAP_DB_HOST is set but ' + ', '.join(_missing) + ' is not. Either '
+        'set all four, or clear JSAP_DB_HOST to disable JSAP lookups (the '
+        'tracker then reports budget status as "unknown", which is the '
+        'documented off state).')
+
 
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
@@ -189,6 +360,11 @@ HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default=
 # In DEBUG, default to False for local/self-signed SAP endpoints unless explicitly set.
 HANA_SSL_VERIFY = config('HANA_SSL_VERIFY', default=not DEBUG, cast=bool)
 HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')
+# TLS verification for the non-SAP outbound calls (DSR credit limit, Crystal
+# Reports). Both are plain http today, so this has no effect until one of them
+# moves to https — at which point it decides whether the move is verified.
+EXTERNAL_SSL_VERIFY = _parse_bool(config('EXTERNAL_SSL_VERIFY', default='true'),
+                                  default=True)
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
 
@@ -197,21 +373,26 @@ DSR_API_BASE = config('JSAP_API_BASE')
 # Fixed OMS user id stamped as createdBy on DSR credit-limit requests.
 OMS_JSAP_USER_ID = config('OMS_JSAP_USER_ID', default=0, cast=int)
 
-# SAP SQL Server (source for sync)
-SAP_DB_HOST = config('SAP_DB_HOST', default='138.252.101.118')
+# --- SAP SQL Server (source for sap_sync) — REQUIRED ------------------------
+# No defaults. These used to carry the production host, database, user and
+# password as literals, so anyone with repo access had the SAP service
+# account and the app would happily connect to production from a laptop.
+#
+# Required rather than blank-defaulted because there is no meaningful
+# "disabled" mode here: sap_sync exists to read this database. An unset value
+# should stop the process at startup, not surface later as a connection error
+# against an empty host.
+SAP_DB_HOST = config('SAP_DB_HOST')
 SAP_DB_PORT = config('SAP_DB_PORT', default=1433, cast=int)
-SAP_DB_NAME = config('SAP_DB_NAME', default='Jivo_All_Branches_Live')
-SAP_DB_USER = config('SAP_DB_USER', default='ab')
-SAP_DB_PASSWORD = config('SAP_DB_PASSWORD', default='Jivo@!@#$')
+SAP_DB_NAME = config('SAP_DB_NAME')
+SAP_DB_USER = config('SAP_DB_USER')
+SAP_DB_PASSWORD = config('SAP_DB_PASSWORD')
 
-# JSAP SQL Server — the DSR/JSAP application's own database. Read-only here; used
-# to resolve a credit-limit document to its approval flow id without paging the
-# DSR document-list API. Same host as the SAP box, different database.
-JSAP_DB_HOST = config('JSAP_DB_HOST', default='103.89.45.75')
-JSAP_DB_PORT = config('JSAP_DB_PORT', default=1433, cast=int)
-JSAP_DB_NAME = config('JSAP_DB_NAME', default='jsaplive3')
-JSAP_DB_USER = config('JSAP_DB_USER', default='ab')
-JSAP_DB_PASSWORD = config('JSAP_DB_PASSWORD', default='Jivo@!@#$')
+# JSAP SQL Server is configured ~30 lines above, with blank defaults. A SECOND
+# copy of that block used to sit here carrying the production host, database,
+# user and password as literals. Being later in the file, it won overwrite —
+# so the documented "blank host disables every JSAP lookup" behaviour was
+# unreachable, and JSAP was permanently on, against a committed password.
 
 # VAPID (Web Push) keys are configured lower down in this file — see the
 # "Web Push (VAPID)" section near the bottom.
@@ -279,10 +460,118 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 
 # REST Framework
+# ---------------------------------------------------------------------------
+# OpenAPI schema (drf-spectacular) — Phase 0.6
+#
+# The schema is generated from the code, so it cannot drift from it the way the
+# hand-written docs in `docs/` did. It also answers Phase 0.5's question — who
+# may call what — because each operation carries the view's permission classes.
+#
+# The three routes it serves must not be public. They do NOT inherit
+# DEFAULT_PERMISSION_CLASSES: SpectacularAPIView sets its own
+# `permission_classes` from SERVE_PERMISSIONS, which defaults to AllowAny — so
+# installing this app without the setting below publishes a complete map of the
+# API (every endpoint, every field name, every enum) to anonymous callers.
+# `core.tests.SchemaEndpointTests` is what caught that.
+# ---------------------------------------------------------------------------
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'OMS API',
+    'DESCRIPTION': (
+        'Order Management System — orders, schemes, invoices, payments, '
+        'e-invoicing (NIC IRN/e-Way Bill) and the document tracker. '
+        'Generated from the source; see docs/CODEBASE_AND_REFACTOR_PLAN.md '
+        'for the system overview.'
+    ),
+    'VERSION': '1.0.0',
+
+    # The schema endpoint should describe the API, not appear in it.
+    'SERVE_INCLUDE_SCHEMA': False,
+
+    # See the note above: without this the schema routes are AllowAny.
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.IsAuthenticated'],
+
+    # Every route in this project is under /api/. Without this, `spectacular`
+    # would also try to describe the Django admin.
+    'SCHEMA_PATH_PREFIX': r'/api/',
+
+    # Phase 6.2 mounts the whole API at BOTH /api/... and /api/v1/..., so
+    # without this hook every path — and every operationId — appears twice.
+    # See core/schema.py for why the versioned prefix is the documented one.
+    'PREPROCESSING_HOOKS': ['core.schema.only_versioned_routes'],
+
+    # Warnings are noisy on a codebase this size — mostly views whose
+    # serializer cannot be inferred. They are worth fixing view by view, not
+    # worth blocking the schema over, so they are collected rather than raised.
+    'DISABLE_ERRORS_AND_WARNINGS': False,
+
+    'SWAGGER_UI_SETTINGS': {
+        'persistAuthorization': True,
+    },
+}
+
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+
+    # Closed by default. DRF's own default is AllowAny, so before this line
+    # ANY view that forgot to declare `permission_classes` was public — and 57
+    # routes were public for exactly that reason, not by anyone's decision.
+    #
+    # This inverts the failure mode. A forgotten declaration is now a 403 that
+    # someone reports, rather than a hole nobody sees. It is the single
+    # highest-value line in the security work.
+    #
+    # The endpoints that must stay open declare `AllowAny` explicitly, so the
+    # decision is visible in the view that made it. There are two:
+    # `users.LoginView` and `users.AuthTokenRefreshView` — see
+    # `users.tests.PublicEndpointAllowlistTests`, which enumerates the live
+    # URLconf and fails if a third one appears.
+    #
+    # NOTE: this cannot reach a plain Django view (one with no `@api_view`),
+    # because those never enter DRF's dispatch. `scripts/endpoint_inventory.py`
+    # reports them as their own category for that reason.
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+    ),
+
+    # Generates the OpenAPI 3 schema served at /api/schema/. Setting this
+    # replaces DRF's own AutoSchema for every view at once; it changes no
+    # runtime behaviour, only what `manage.py spectacular` can describe.
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+
+    # One error shape across the API (plan 3.8). Strictly additive: it fills in
+    # the `message` / `detail` / `error` keys the clients read without
+    # replacing any key an endpoint already sends. It also turns an unhandled
+    # exception into JSON — previously the API answered those with Django's
+    # HTML 500 page. See core/exception_handler.py.
+    "EXCEPTION_HANDLER": "core.exception_handler.api_exception_handler",
+
+    # Rate limiting. Login was brute-forceable at unlimited speed: no
+    # throttling existed anywhere, and `LoginView` is necessarily AllowAny.
+    #
+    # `anon` is keyed by client IP, `user` by user id. The login-specific scope
+    # is applied in users.views.LoginView; it is far tighter than `anon`
+    # because a human logging in gets it right in a handful of attempts and an
+    # attacker needs thousands.
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        # Generous on purpose: these are a runaway/scraping backstop, not the
+        # login control. The mobile client polls several endpoints on resume,
+        # and a shared office NAT puts a whole branch behind one `anon` bucket.
+        "anon": config('THROTTLE_ANON', default='120/min'),
+        "user": config('THROTTLE_USER', default='2000/hour'),
+        # Credential-checking endpoints only.
+        "login": config('THROTTLE_LOGIN', default='10/min'),
+        # The unauthenticated HAIS device page (a scanned QR sticker). A human
+        # scans one device at a time; this only has to stop a scraper walking a
+        # list of serials for the staff names and emails behind them.
+        "hais_public_device": config('THROTTLE_HAIS_PUBLIC', default='30/min'),
+    },
 }
 
 # JWT Settings (SimpleJWT). Hardened for production while preserving the
@@ -318,7 +607,34 @@ SIMPLE_JWT = {
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
+# ---------------------------------------------------------------------------
+# CORS
+#
+# Was `CORS_ALLOW_ALL_ORIGINS = True`: any website a user visited could call
+# this API from their browser with their session. The header allowlist further
+# down was carefully written and commented; the wildcard undid the benefit.
+#
+# Only browsers are affected — the React Native client is not subject to CORS,
+# so the mobile app cannot break from this change no matter what is listed.
+# ---------------------------------------------------------------------------
+CORS_ALLOWED_ORIGINS = _csv(
+    config('CORS_ALLOWED_ORIGINS', default=''),
+    default=['https://oms.jivo.in', 'http://oms.jivo.in'],
+)
+
+# Regex allowlist for the local dev servers (Vite picks a free port, so the
+# port cannot be pinned). DEBUG-only: an entry here in production would let any
+# page on localhost — including one an attacker got a developer to open — call
+# the live API.
+CORS_ALLOWED_ORIGIN_REGEXES = (
+    [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$'] if DEBUG else []
+)
+
+# Escape hatch for a deployment that hits an origin nobody anticipated. Setting
+# it re-opens the hole above; it exists so the fix is a one-line .env rollback
+# rather than a redeploy, not as a normal configuration.
+CORS_ALLOW_ALL_ORIGINS = _parse_bool(
+    config('CORS_ALLOW_ALL_ORIGINS', default='false'), default=False)
 
 # ---------------------------------------------------------------------------
 # Email (SMTP) — used by the tracker's stuck-invoice alert emails.
@@ -356,6 +672,9 @@ TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
 # Only affects browsers: the React Native client is not subject to CORS.
 CORS_ALLOW_HEADERS = (
     *cors_default_headers,
+    # Lets a browser client SEND its own correlation ID, so one ID spans the
+    # front end and the API.
+    'x-request-id',
     'x-app-version',
     'x-build-number',
     'x-platform',
@@ -363,6 +682,73 @@ CORS_ALLOW_HEADERS = (
     'x-os-version',
     'x-device-id',
 )
+
+# A response header is invisible to browser JavaScript unless it is listed
+# here — the browser receives it and refuses to expose it. Without this the
+# front end cannot show the user a request ID to quote in a bug report, which
+# is most of the point of having one.
+#
+# The three RFC 8594 headers are here for the same reason. `core/deprecation.py`
+# sets them on every deprecated endpoint, and the web client warns in the
+# console the first time it calls one — which is how a retirement gets noticed
+# by the people who have to do the migrating, rather than on the sunset date.
+# Unexposed, those headers arrive and are then withheld from the client that
+# needs them, and the whole mechanism is invisible in a browser.
+CORS_EXPOSE_HEADERS = (
+    'x-request-id',
+    'deprecation',
+    'sunset',
+    'link',
+)
+
+# Whether a reverse proxy sets X-Forwarded-For. Off by default: the header is
+# caller-supplied, so trusting it without a proxy in front lets any client
+# write any address into the access log. See core/middleware.py:_client_ip.
+USE_X_FORWARDED_FOR = _parse_bool(
+    config('USE_X_FORWARDED_FOR', default='false'), default=False)
+
+
+# ---------------------------------------------------------------------------
+# Transport security headers.
+#
+# None of these were set. All are DEBUG-gated: switching them on for local
+# development breaks it (the dev server is plain HTTP, so SSL redirect loops
+# and secure cookies are never sent back).
+#
+# SECURE_PROXY_SSL_HEADER is the load-bearing one. TLS terminates at the
+# reverse proxy, so Django sees plain HTTP on every request; without this it
+# believes the connection is insecure and SECURE_SSL_REDIRECT redirects to
+# https forever. The proxy MUST set `X-Forwarded-Proto` and MUST strip any copy
+# arriving from the client — a client-supplied value would otherwise let anyone
+# tell Django their plain-HTTP request was secure.
+#
+# HSTS is opt-in via .env rather than on by default: it instructs browsers to
+# refuse plain HTTP for this domain for a year, and it cannot be un-sent. Turn
+# it on only once HTTPS is confirmed working on every hostname served,
+# subdomains included.
+# ---------------------------------------------------------------------------
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = _parse_bool(
+        config('SECURE_SSL_REDIRECT', default='true'), default=True)
+
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+
+    # Start at 0. Set SECURE_HSTS_SECONDS=3600 to trial, then raise to
+    # 31536000 (a year) once nothing breaks. Never lower it in a hurry —
+    # browsers honour the LONGEST value they have seen.
+    SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=0, cast=int)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = _parse_bool(
+        config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default='false'), default=False)
+    SECURE_HSTS_PRELOAD = _parse_bool(
+        config('SECURE_HSTS_PRELOAD', default='false'), default=False)
+
+# Safe in every environment, so not gated on DEBUG.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
 
 
 # =========================================================================
@@ -425,6 +811,53 @@ EINV_CREDENTIALS = {
     for g in EINV_GSTINS
 }
 
+# ---- Jivo Mart NIC credentials (a DIFFERENT PAN from the Oil/Beverages GSTINs) ----
+# Mart (PAN AAFCJ4102J) is a separate legal entity from Oil/Beverages
+# (PAN AACCJ4223F), so it has its OWN NIC client-id/secret. Those two are shared
+# across all of Mart's state GSTINs (per NIC: client-id/secret are per-PAN); the
+# API username/password are per-GSTIN. This mirrors the Oil multi-GSTIN block
+# above, except the per-GSTIN client-id/secret default to MART's, not Oil's.
+#
+# List Mart's issuing GSTINs in MART_EINV_GSTINS and give each one its own
+# MART_EINV_<GSTIN>_USERNAME / _PASSWORD. The single-GSTIN form the .env shipped
+# with (MART_EINV_GSTIN + MART_EINV_USERNAME/PASSWORD) is still honoured as one
+# entry, so nothing breaks.
+#
+# Each Mart GSTIN is folded into EINV_CREDENTIALS so the per-invoice resolver
+# (`EInvoiceClient(gstin=seller_gstin)` in einvoice.services, keyed off the
+# invoice's own VATRegNum) authenticates as the right Mart registration — no code
+# path is Mart-specific. NOTE: live Mart invoices are issued mostly from the
+# Haryana GSTIN 06AAFCJ4102J1ZU; that GSTIN needs its own username/password here
+# or its IRNs will fail auth. The NIC encryption public key is per-ENVIRONMENT
+# (not per-taxpayer), so it defaults to the shared EINV key.
+_MART_CLIENT_ID = config('MART_EINV_CLIENT_ID', default='')
+_MART_CLIENT_SECRET = config('MART_EINV_CLIENT_SECRET', default='')
+_MART_PUBLIC_KEY = config('MART_EINV_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"])
+
+_MART_GSTINS = [g.strip() for g in config('MART_EINV_GSTINS', default='').split(',') if g.strip()]
+_MART_SINGLE = config('MART_EINV_GSTIN', default='').strip()
+if _MART_SINGLE and _MART_SINGLE not in _MART_GSTINS:
+    _MART_GSTINS.append(_MART_SINGLE)
+
+for _mg in _MART_GSTINS:
+    _u = config(f'MART_EINV_{_mg}_USERNAME', default='')
+    _p = config(f'MART_EINV_{_mg}_PASSWORD', default='')
+    # Back-compat: the bare MART_EINV_USERNAME/PASSWORD belong to MART_EINV_GSTIN.
+    if not _u and _mg == _MART_SINGLE:
+        _u = config('MART_EINV_USERNAME', default='')
+        _p = config('MART_EINV_PASSWORD', default='')
+    EINV_CREDENTIALS[_mg] = {
+        "GSTIN": _mg,
+        "USERNAME": _u,
+        "PASSWORD": _p,
+        "CLIENT_ID": config(f'MART_EINV_{_mg}_CLIENT_ID', default=_MART_CLIENT_ID),
+        "CLIENT_SECRET": config(f'MART_EINV_{_mg}_CLIENT_SECRET', default=_MART_CLIENT_SECRET),
+        "PUBLIC_KEY_PATH": config(f'MART_EINV_{_mg}_PUBLIC_KEY_PATH', default=_MART_PUBLIC_KEY),
+    }
+    # So a DocNum search / company picker that walks EINV_GSTINS sees Mart too.
+    if _mg not in EINV_GSTINS:
+        EINV_GSTINS.append(_mg)
+
 # When true, creating a real invoice (serviceLayer.SAPInvoiceCreateView, type=INVOICE)
 # fires automatic IRN generation for that DocEntry in the background. Every attempt
 # is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
@@ -470,20 +903,67 @@ EINV_QR_SAVE_DIRS = {k: v for k, v in EINV_QR_SAVE_DIRS.items() if k and v}
 EINV_QR_SMB_USERNAME = config('EINV_QR_SMB_USERNAME', default='')
 EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
 
+# ---------------------------------------------------------------------------
+# Payment attachment storage
+# ---------------------------------------------------------------------------
+# Same shared-folder strategy as EINV_QR_SAVE_DIR above — files are written
+# FLAT into these directories under a generated UUID name. No MEDIA_ROOT, no
+# year/month/company sub-folders.
+#   PAYMENTS_IMAGES=\\JIVO-APP\Payments\Receive_Payments
+#   DEPOSIT_PAYMENTS_IMAGES=\\JIVO-APP\Payments\Deposit_Payments
+PAYMENTS_IMAGES = config('PAYMENTS_IMAGES', default='')
+DEPOSIT_PAYMENTS_IMAGES = config('DEPOSIT_PAYMENTS_IMAGES', default='')
+# Credentials for the share, as with EINV_QR_SMB_*. Blank = write as the
+# process account with no explicit SMB auth.
+PAYMENTS_SMB_USERNAME = config(
+    'PAYMENTS_SMB_USERNAME', default=config('EINV_QR_SMB_USERNAME', default=''))
+PAYMENTS_SMB_PASSWORD = config(
+    'PAYMENTS_SMB_PASSWORD', default=config('EINV_QR_SMB_PASSWORD', default=''))
+
 # Company DBs scanned when looking up an invoice by DocNum (the configured
-# HANA_COMPANY_DB is always tried first). Comma-separated in .env.
+# HANA_OIL_COMPANY_DB is always tried first). Comma-separated in .env.
 EINV_COMPANY_DBS = [d.strip() for d in config(
     'EINV_COMPANY_DBS',
-    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,JIVO_MART_HANADB,'
-            'TEST_OIL_15122025',
+    default=','.join(d for d in (
+        HANA_OIL_COMPANY_DB, HANA_BEVERAGE_COMPANY_DB,
+        HANA_MART_COMPANY_DB, HANA_TEST_COMPANY_DB) if d),
 ).split(',') if d.strip()]
 
 # Non-production (test) company DBs. Generating an IRN from one of these while the
 # NIC target is PRODUCTION still works, but produces a real live e-invoice for test
 # data — so a loud "cancel it immediately" warning is attached to the result.
 EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
-    'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
+    'EINV_TEST_COMPANY_DBS', default=HANA_TEST_COMPANY_DB,
 ).split(',') if d.strip()]
+
+# ---------------------------------------------------------------------------
+# Legal — label compliance checker (legal/service.py)
+#
+# SECURITY: the Gemini key used to be a string literal in `legal/service.py`,
+# committed to this repository. It is read from `.env` now. Treat the old
+# literal as disclosed and rotate it — everyone with repository access has had
+# it, and it is in the git history regardless of the current file.
+#
+# Blank is a supported state: the module imports and the rest of the app runs;
+# only a label check refuses, with a message naming this setting rather than a
+# 500 from inside the SDK.
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
+
+# The vision model the checker calls. Pinned to an explicit version in .env
+# when a rollout needs to be deliberate; the default tracks the current flash
+# model, which is the accuracy/cost point this workload was chosen for.
+GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-2.5-flash')
+
+# Native binaries the pipeline shells out to. Blank means "on PATH", which is
+# correct on the Linux host; Windows dev boxes install both somewhere else and
+# set these two.
+#   TESSERACT_CMD e.g. C:\Program Files\Tesseract-OCR\tesseract.exe
+#   POPPLER_PATH  e.g. C:\poppler-26.02.0\Library\bin   (was hard-coded in
+#                      legal/service.py, which meant PDF rendering only ever
+#                      worked on the one machine that had that exact path)
+TESSERACT_CMD = config('TESSERACT_CMD', default='')
+POPPLER_PATH = config('POPPLER_PATH', default='')
 
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the
@@ -550,6 +1030,23 @@ if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
             "break Web Push for every browser that subscribes."
         )
 
+# --- Notification framework: registration resolvers (Phase 3.6) -------------
+# The generic notification providers resolve a recipient's existing device
+# registrations through these configured callables (dotted paths), so the
+# framework never imports a business module. The concrete resolvers live in
+# orders/notification_resolvers.py and READ (never write) the existing
+# push_tokens / web_push_subscriptions tables. Dependency direction stays
+# business-module -> notifications; the framework only sees a dotted-path string.
+# Override or blank to disable delivery on a given channel.
+NOTIFICATION_MOBILE_TOKEN_RESOLVER = config(
+    "NOTIFICATION_MOBILE_TOKEN_RESOLVER",
+    default="orders.notification_resolvers.resolve_mobile_tokens",
+)
+NOTIFICATION_WEB_SUBSCRIPTION_RESOLVER = config(
+    "NOTIFICATION_WEB_SUBSCRIPTION_RESOLVER",
+    default="orders.notification_resolvers.resolve_web_subscriptions",
+)
+
 # --- Push token cleanup (scheduled) -----------------------------------------
 # `python manage.py prune_push_tokens` deactivates Expo tokens the push service
 # reports as dead. It is meant to run nightly from cron / Task Scheduler --
@@ -577,3 +1074,182 @@ WEB_PUSH_CLEANUP_LOCK = config(
     "WEB_PUSH_CLEANUP_LOCK",
     default=str(BASE_DIR / "logs" / "web_push_cleanup.lock"),
 )
+
+# =========================================================================
+# Logging
+# =========================================================================
+# Until now the project had NO LOGGING configuration at all. Every
+# `logger.info(...)` in the codebase went to Django's default handler, which
+# for a non-DEBUG process means nowhere — so the structured notification
+# delivery lines (`channel=expo outcome=accepted ... duration_ms=...`) could
+# not be read in production, and "was this user actually notified?" was
+# unanswerable after the fact.
+#
+# `disable_existing_loggers` is False so that adding this block cannot silence
+# any logger that is working today.
+#
+# Handlers:
+#   console      always on; how developers already read output
+#   app_file     rotating file for our own code
+#   error_file   rotating file for WARNING and above, across everything, so a
+#                production problem is one file to open rather than a grep
+#
+# RotatingFileHandler rather than TimedRotating or logrotate: this deploys on
+# Windows Server under Task Scheduler, where logrotate does not exist and a
+# size cap is the only thing that reliably bounds disk use.
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Level for our own apps. DEBUG locally, INFO on a server, tunable per
+# environment without a code change.
+APP_LOG_LEVEL = config("APP_LOG_LEVEL", default="DEBUG" if DEBUG else "INFO")
+
+# Phase 5.2 — request correlation.
+#
+# `core.logging.RequestContextFilter` attaches the request ID to every record,
+# so the several hundred existing `logger.*` calls gain correlation without one
+# of them changing. It is attached to the HANDLERS rather than to our own
+# loggers, which is what makes it cover Django's loggers and third-party
+# libraries too.
+#
+# `LOG_FORMAT=json` switches the FILE handlers to one JSON object per line.
+# Text stays the default because these logs are read directly today — by a
+# person, in an editor, on the Windows box that produces them — and JSON is
+# worse for that. The console is always text: it exists to be read by a human
+# standing in front of it.
+LOG_FORMAT = config("LOG_FORMAT", default="text").strip().lower()
+_FILE_FORMATTER = "json" if LOG_FORMAT == "json" else "standard"
+
+# Derived from INSTALLED_APPS rather than listed by hand.
+#
+# The hand-written list had drifted: `HAIS`, `SKU`, `audit` and `notifications`
+# were missing, so their INFO and DEBUG records fell through to root, whose
+# level is WARNING — they were discarded. `audit` is the one that mattered,
+# because it logs the failures of the audit trail itself.
+#
+# A list that must be edited whenever an app is added WILL be missed again,
+# and the symptom is silence, which nobody notices. Deriving it means a new
+# app is configured the moment it is installed.
+_THIRD_PARTY_PREFIXES = (
+    "django", "rest_framework", "corsheaders", "whitenoise", "drf_",
+)
+_LOCAL_APP_LOGGERS = sorted({
+    app.split(".")[0] for app in INSTALLED_APPS
+    if not app.startswith(_THIRD_PARTY_PREFIXES)
+})
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "request_context": {
+            "()": "core.logging.RequestContextFilter",
+        },
+    },
+    "formatters": {
+        # Structured-ish and greppable. The notification code already emits
+        # `key=value` pairs in the message itself, so the prefix only has to
+        # supply time, level, origin — and now the request ID.
+        #
+        # `context_tag` is the first 8 characters of the request ID in
+        # brackets, or `[-]` outside a request. Short because it prefixes
+        # every line and a full 32-character UUID would push the message off
+        # the readable width; 8 hex characters is 4 billion values, which is
+        # ample for telling apart the requests in flight at one moment.
+        "standard": {
+            "format": "{asctime} {levelname:<8} {context_tag} {name}: {message}",
+            "style": "{",
+        },
+        "console": {
+            "format": "{levelname:<8} {context_tag} {name}: {message}",
+            "style": "{",
+        },
+        "json": {
+            "()": "core.logging.JsonFormatter",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "console",
+            "filters": ["request_context"],
+        },
+        "app_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(LOG_DIR / "oms.log"),
+            "maxBytes": 10 * 1024 * 1024,   # 10 MB
+            "backupCount": 5,               # ~50 MB ceiling
+            "encoding": "utf-8",
+            "formatter": _FILE_FORMATTER,
+            "filters": ["request_context"],
+        },
+        "error_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(LOG_DIR / "oms_errors.log"),
+            "maxBytes": 5 * 1024 * 1024,
+            "backupCount": 5,
+            "encoding": "utf-8",
+            "level": "WARNING",
+            "formatter": _FILE_FORMATTER,
+            "filters": ["request_context"],
+        },
+    },
+    "root": {
+        "handlers": ["console", "error_file"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        # Our own apps. propagate=False so a record is not written twice
+        # (once here, once by root).
+        app: {
+            "handlers": ["console", "app_file", "error_file"],
+            "level": APP_LOG_LEVEL,
+            "propagate": False,
+        }
+        for app in _LOCAL_APP_LOGGERS
+    },
+}
+
+# django.request logs a full traceback for every 5xx; keep it, but only in the
+# error file so the app log stays readable.
+LOGGING["loggers"]["django.request"] = {
+    "handlers": ["console", "error_file"],
+    "level": "ERROR",
+    "propagate": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# Error tracking (Sentry) — Phase 5.4.
+#
+# Entirely opt-in. With SENTRY_DSN unset — the default, and what CI and every
+# developer machine run under — nothing initialises and nothing is sent
+# anywhere.
+#
+# The restrictive defaults are in core/error_tracking.py along with the
+# reasoning: an error tracker posts the contents of a failing request to a
+# third party, and requests here carry SAP credentials, GSTINs, party master
+# data and NIC e-invoice tokens. `send_default_pii` stays False and a
+# `before_send` scrubber runs before anything leaves the process.
+# ---------------------------------------------------------------------------
+SENTRY_DSN = config('SENTRY_DSN', default='')
+
+# Separates production events from staging ones in the Sentry UI. Defaults
+# from DEBUG so a developer who does set a DSN does not pollute production.
+SENTRY_ENVIRONMENT = config(
+    'SENTRY_ENVIRONMENT', default='development' if DEBUG else 'production')
+
+# Optional. Lets Sentry attribute an error to a deploy; blank is fine.
+SENTRY_RELEASE = config('SENTRY_RELEASE', default='')
+
+# Performance tracing: samples spans (including SQL text) from live requests
+# and is billed per event. Off unless asked for.
+SENTRY_TRACES_SAMPLE_RATE = config(
+    'SENTRY_TRACES_SAMPLE_RATE', default=0.0, cast=float)
+
+# Initialised here rather than in an AppConfig.ready() so that errors raised
+# during app loading — the ones hardest to diagnose from a stack trace alone —
+# are already captured. Never raises; see core/error_tracking.init.
+from core.error_tracking import init as _init_error_tracking  # noqa: E402
+
+_init_error_tracking(sys.modules[__name__])

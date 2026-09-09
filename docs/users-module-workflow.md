@@ -3,6 +3,13 @@
 This is the second module doc (after `orders`).  
 It documents how `users` feeds login, role assignment, party scope, and product-price mapping across the project.
 
+> **2026-09 update:** authorization moved to a key-based model — roles carry
+> editable permission bundles (`users_role_permissions`), resolved by
+> `core.permissions.effective_keys` and managed on the `/Role_Permissions`
+> admin page. Role/permission behaviour described below still holds, but read
+> [`PERMISSIONS.md`](PERMISSIONS.md) first for the current authority model,
+> the API, and the migration/cleanup contract.
+
 ## 1) Why this module is important
 
 `orders` (workflow engine) depends on this module for:

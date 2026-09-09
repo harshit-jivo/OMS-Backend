@@ -1,31 +1,20 @@
 """Permissions for the device-management admin API.
 
-Authorization in this project is by the `User.role` relation (a `users.UserRole`
-row), NOT Django's `is_staff` / groups / permissions framework. This mirrors the
-existing check in `users.views.PagePermissionsView._is_admin` so there is exactly
-one definition of "admin" behaviour across the codebase.
+This module used to define its own `is_admin_user`, under a docstring claiming
+it mirrored the others "so there is exactly one definition of admin behaviour
+across the codebase". It did not: it was one of FIVE definitions that disagreed
+with each other. This one ignored `is_superuser`, so a Django superuser could
+edit UI labels but not read device policy — a difference nobody chose.
+
+The real single definition now lives in `core.permissions`. Both names are
+re-exported so existing imports keep working; the behaviour they resolve to has
+widened to include `is_superuser`, `is_staff` and roles held through
+`extra_roles`.
+
+NOTE, unchanged and still true: the device tables expose every user's device
+names, activity and software inventory across the org, so these endpoints must
+never be AllowAny.
 """
-from rest_framework.permissions import BasePermission
+from core.permissions import IsAdminRole, is_admin as is_admin_user
 
-
-def is_admin_user(user) -> bool:
-    """True when `user` holds the 'admin' role."""
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
-    role = getattr(user, "role", None)
-    return bool(role and str(getattr(role, "name", "")).strip().lower() == "admin")
-
-
-class IsAdminRole(BasePermission):
-    """Allow only users whose role is 'admin'.
-
-    NOTE: the device tables expose every user's device names, activity and
-    software inventory across the org, so these endpoints must never be
-    AllowAny — unlike the older dashboard views in `orders.views`, whose
-    permission choice is deliberately not copied here.
-    """
-
-    message = "Admin access required."
-
-    def has_permission(self, request, view):
-        return is_admin_user(request.user)
+__all__ = ['IsAdminRole', 'is_admin_user']

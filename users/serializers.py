@@ -1,8 +1,58 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.password_validation import validate_password
 from django.db.utils import ProgrammingError
 from django.contrib.auth import authenticate
+from core.permissions import PRIVILEGED_ROLE_NAMES, is_admin
 from .models import User, Company, MainGroup, State, UserRole, SchemeProduct, UserState
 from orders.models import Categories
+
+
+def _run_password_validators(value):
+    """Apply AUTH_PASSWORD_VALIDATORS to a password set through the API.
+
+    `CreateUserSerializer` / `UpdateUserSerializer` are plain `Serializer`s that
+    call `set_password()` themselves, which does NOT validate — so the project's
+    configured validators (length, common-password, numeric-only, similarity)
+    were bypassed on every account created through the API. Only the
+    serializer's own `min_length=6` applied, which is weaker than the settings.
+    """
+    if not value:
+        return value
+    try:
+        validate_password(value)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError(list(exc.messages)) from exc
+    return value
+
+
+def assert_may_assign_roles(request, roles):
+    """Refuse to let a non-admin hand out a privileged role.
+
+    Defence in depth behind the view-level `IsAdminRole` guard. The two are not
+    redundant: the view guard answers "may you manage accounts at all", this
+    answers "may you create an account more powerful than your own". If the
+    first is ever loosened — to let a regional manager onboard their own staff,
+    say — this is what stops that becoming a path to `admin`.
+
+    `request` may be None (management commands, tests constructing serializers
+    directly); the check is skipped then, since there is no requester to judge.
+    """
+    if request is None:
+        return
+    wanted = {
+        str(getattr(r, 'name', '') or '').strip().lower()
+        for r in roles if r is not None
+    }
+    escalating = wanted & PRIVILEGED_ROLE_NAMES
+    if escalating and not is_admin(getattr(request, 'user', None)):
+        raise serializers.ValidationError({
+            'role': [
+                'Only an administrator may assign the '
+                f'{", ".join(sorted(escalating))} role.'
+            ]
+        })
 
 class SchemeProductSerializer(serializers.ModelSerializer):
     class Meta:
@@ -44,6 +94,18 @@ class UserSerializer(serializers.ModelSerializer):
     categories = serializers.SerializerMethodField()
     role = serializers.CharField(source='role.name', read_only=True)
     role_display = serializers.CharField(source='role.display_name', default= None, read_only=True)
+    # Additional roles (e.g. payment_approver) held alongside the primary one.
+    # `roles` is the union of both — clients should check that rather than
+    # `role` alone, or a user granted a function role looks like they hold none.
+    extra_roles = serializers.SerializerMethodField()
+    roles = serializers.SerializerMethodField()
+    # The user's effective permission keys: union of every held role's bundle
+    # (users.RolePermissions) and personal `extra_pages`, computed by
+    # `core.permissions.effective_keys`. Clients should prefer this over
+    # reading `extra_pages` directly — it is the server's own answer, and it
+    # already accounts for admin (who receives every registered key). Additive:
+    # clients that ignore it keep working exactly as before.
+    permissions = serializers.SerializerMethodField()
     is_active = serializers.BooleanField(read_only=True)
     # Read-only account flags/timestamps surfaced on the mobile Profile screen.
     # Kept read_only so they can never be set through this serializer.
@@ -54,32 +116,60 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
+        # `password` is deliberately ABSENT. It used to be listed here, and
+        # because this is a ModelSerializer that meant every response built from
+        # it — including the unauthenticated /auth/users/list/ — serialised each
+        # user's PBKDF2 hash. No client ever read it (the edit form blanks the
+        # field), so removing it is not a contract change. Passwords are written
+        # through CreateUserSerializer / UpdateUserSerializer and never read.
         fields = [
             'id', 'name', 'username', 'email', 'phone',
-            'role','role_display', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'password', 'extra_pages', 'created_at'
+            'role','role_display', 'extra_roles', 'roles', 'permissions', 'company', 'main_group','main_groups', 'state', 'states', 'category', 'categories', 'sub_group', 'is_active', 'is_superuser', 'is_staff', 'last_login', 'date_joined', 'extra_pages', 'created_at'
         ]
 
+    @extend_schema_field(RoleSerializer(many=True))
+    def get_extra_roles(self, obj):
+        return [
+            {'id': r.id, 'name': r.name, 'display_name': r.display_name}
+            for r in obj.extra_roles.all()
+        ]
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_permissions(self, obj):
+        from core.permissions import effective_keys
+        return sorted(effective_keys(obj))
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_roles(self, obj):
+        """Every role name the user holds — primary plus extras."""
+        return sorted(obj.all_role_names())
+
+    @extend_schema_field(CompanySerializer(allow_null=True))
     def get_company(self, obj):
         if not obj.company:
             return None
         return CompanySerializer(obj.company).data
 
+    @extend_schema_field(MainGroupSerializer(allow_null=True))
     def get_main_group(self, obj):
         if not obj.main_group:
             return None
         return MainGroupSerializer(obj.main_group).data
     
+    @extend_schema_field(MainGroupSerializer(many=True))
     def get_main_groups(self, obj):
         groups = obj.main_groups.all()
         if not groups.exists():
             return []
         return MainGroupSerializer(groups, many=True).data
 
+    @extend_schema_field(StateSerializer(allow_null=True))
     def get_state(self, obj):
         if not obj.state:
             return None
         return StateSerializer(obj.state).data
 
+    @extend_schema_field(StateSerializer(many=True))
     def get_states(self, obj):
         assigned_states = []
         seen_state_ids = set()
@@ -108,11 +198,13 @@ class UserSerializer(serializers.ModelSerializer):
 
         return []
         
+    @extend_schema_field(CategorySerializer(allow_null=True))
     def get_category(self, obj):
         if not obj.category:
             return None
         return CategorySerializer(obj.category).data
 
+    @extend_schema_field(CategorySerializer(many=True))
     def get_categories(self, obj):
         categories = obj.categories.all()
         if not categories.exists():
@@ -146,6 +238,9 @@ class CreateUserSerializer(serializers.Serializer):
 
     # Accept integer IDs for foreign keys
     role = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, allow_null=True)
+    # Additional function roles (payment_approver, deposit_creator, …) held
+    # alongside `role`, which stays the user's primary.
+    extra_roles = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, many=True)
     company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.all(), required=False, allow_null=True)
     main_group = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, allow_null=True)
     state = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, allow_null=True)
@@ -165,12 +260,25 @@ class CreateUserSerializer(serializers.Serializer):
     def validate_email(self, value):
         if value and User.objects.filter(email=value).exists():
             raise serializers.ValidationError('Email already exists')
-        return value    
+        return value
+
+    def validate_password(self, value):
+        return _run_password_validators(value)
+
+    def validate(self, data):
+        assert_may_assign_roles(
+            self.context.get('request'),
+            [data.get('role'), *(data.get('extra_roles') or [])],
+        )
+        return data
+
     def create(self, validated_data):
         password = validated_data.pop('password')
         main_groups = validated_data.pop('main_groups', [])
         states_list = validated_data.pop('states', [])
         categories_list = validated_data.pop('categories', [])
+        # M2M — must be popped before create() and set once the row exists.
+        extra_roles = validated_data.pop('extra_roles', [])
 
         if main_groups and not validated_data.get('main_group'):
             validated_data['main_group'] = main_groups[0]
@@ -193,8 +301,11 @@ class CreateUserSerializer(serializers.Serializer):
         if categories_list:
             user.categories.set(categories_list)
 
+        if extra_roles:
+            user.extra_roles.set(extra_roles)
+
         return user
-    
+
 
 class UpdateUserSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=150, required=False)
@@ -205,6 +316,7 @@ class UpdateUserSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(required=False)
 
     role = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, allow_null=True)
+    extra_roles = serializers.PrimaryKeyRelatedField(queryset=UserRole.objects.all(), required=False, many=True)
     company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.all(), required=False, allow_null=True)
     main_group = serializers.PrimaryKeyRelatedField(queryset=MainGroup.objects.all(), required=False, allow_null=True)
     state = serializers.PrimaryKeyRelatedField(queryset=State.objects.all(), required=False, allow_null=True)
@@ -214,10 +326,24 @@ class UpdateUserSerializer(serializers.Serializer):
     categories = serializers.PrimaryKeyRelatedField(queryset=Categories.objects.all(), required=False, many=True)
     sub_group = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
+    def validate_password(self, value):
+        # Blank/None means "leave the password alone" here — only a real value
+        # is validated. `update()` applies the same rule before set_password().
+        return _run_password_validators(value)
+
+    def validate(self, data):
+        assert_may_assign_roles(
+            self.context.get('request'),
+            [data.get('role'), *(data.get('extra_roles') or [])],
+        )
+        return data
+
     def update(self, instance, validated_data):
         main_groups = validated_data.pop('main_groups', None)
         states_list = validated_data.pop('states', None)
         categories_list = validated_data.pop('categories', None)
+        # None = key absent (leave as-is); [] = explicitly clear all extras.
+        extra_roles = validated_data.pop('extra_roles', None)
 
         instance.name = validated_data.get('name', instance.name)
       
@@ -241,6 +367,9 @@ class UpdateUserSerializer(serializers.Serializer):
         for field in ['role', 'company', 'main_group', 'state', 'category', 'sub_group', 'is_active']:
             if field in validated_data:
                 setattr(instance, field, validated_data.get(field))
+
+        if extra_roles is not None:
+            instance.extra_roles.set(extra_roles)
 
         if main_groups is not None:
             instance.main_groups.set(main_groups)

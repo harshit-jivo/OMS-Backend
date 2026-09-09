@@ -16,6 +16,7 @@ import requests
 import urllib3
 from django.conf import settings
 
+from core.sap_client_base import base_url as _base, verify_setting as _verify
 from einvoice.mapping import gstin as _gstin
 from serviceLayer.service import SAPServiceLayerManager
 
@@ -28,14 +29,31 @@ class SapFetchError(Exception):
     """Raised when the invoice (or HSN) could not be fetched from Service Layer."""
 
 
-def _base() -> str:
-    return settings.HANA_SERVICE_LAYER_URL.rstrip("/")
-
-
-def _verify():
-    return getattr(settings, "HANA_SSL_VERIFY", False)
-
-
+# TLS verification now comes from core.sap_client_base.verify_setting (imported
+# above as `_verify`), so all three Service Layer clients resolve it the same
+# way: a configured HANA_SSL_CA_BUNDLE wins, else the HANA_SSL_VERIFY boolean.
+#
+# The local version this replaced differed in TWO ways, and only one of them was
+# ever documented: it never consulted HANA_SSL_CA_BUNDLE, AND it defaulted to
+# False where the shared helper defaults to True. That second difference is why
+# a "two-line cleanup" was refused once before — switching a deployment that
+# leaves HANA_SSL_VERIFY unset would flip it from not-verifying to verifying and
+# could break live e-invoice calls against a self-signed cert.
+#
+# It is safe here because HANA_SSL_VERIFY is set explicitly in .env, so the
+# default is never reached and this module's resolved value does not change.
+# The defaults now differ only for a deployment that omits the setting, and for
+# that case verifying (the shared default) is the correct fail-safe — so
+# HANA_SSL_VERIFY and HANA_SSL_CA_BUNDLE were added to .env.example, which had
+# been missing both.
+#
+# `_timeout()` stays local deliberately. It differs from the shared
+# timeout_setting() only when HANA_CONNECT_TIMEOUT/HANA_READ_TIMEOUT are
+# explicitly falsy (0 or empty), where the shared version substitutes its
+# 15/120 defaults and this one passes the 0 straight through to requests as
+# "no timeout". Both are set to real values here so the two agree today, but
+# unifying them is a behaviour decision about what an explicit 0 should mean,
+# not a deduplication — left for whoever wants to make that call.
 def _timeout():
     return (getattr(settings, "HANA_CONNECT_TIMEOUT", 15), getattr(settings, "HANA_READ_TIMEOUT", 120))
 

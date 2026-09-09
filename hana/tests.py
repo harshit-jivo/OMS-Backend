@@ -1,3 +1,227 @@
+"""HANA query builders — parameter binding and schema resolution.
+
+`hana` had zero tests across 2,020 lines while holding every direct read of the
+three SAP company databases, and its query builders formatted request values
+straight into SQL. `get_customer_details` took
+`request.query_params.get('card_code')` and dropped it into
+
+    WHERE T0."CardCode" = '{party_code}'
+
+on an endpoint that answered anonymous requests until this refactor.
+
+Nothing here contacts HANA. The builders are pure functions returning
+`(sql, params)`, so what they produce can be asserted directly — which is the
+only way to test this without a live SAP connection.
+
+Run with::
+
+    python manage.py test hana --settings=OMS.test_settings
+"""
 from django.test import TestCase
 
-# Create your tests here.
+from hana.services.connection import HanaSchemaError, Queries
+
+#: (name, args) for every builder that takes a caller-supplied value.
+#: `_placeholders_match_params` runs the whole table, so a new builder added
+#: without binding its values shows up as soon as it is listed here.
+VALUE_BUILDERS = [
+    ('get_customer_details', ('C001', 'OIL')),
+    ('get_warehouse_details', ('WH1', 'OIL')),
+    ('get_salesperson_details', ('7', 'OIL')),
+    ('get_addresse', ('C001', 'OIL')),
+    ('get_state_chain', ('OIL', 'PB')),
+    ('get_next_doc_no', ('17', 'OIL')),
+    ('get_batch_details', ('FG1', 'WH1', 'OIL')),
+    ('get_inventory_details', ('FG1', 'OIL')),
+    ('get_item_price', ('FG1', 1, 'OIL')),
+    ('get_costing_code', ('SUNFLOWER', 'OIL')),
+    ('get_series', ('24', '1', 'OIL')),
+    ('get_duplicate_num_at_card', ('PO-1', 'C001', 'OIL', 'ORDR')),
+    ('get_draft_verification', ('REF1', 'OIL')),
+    ('get_invoice_status', ('W', 'OIL')),
+    ('get_docEntry', (1001, 'OIL')),
+    ('get_quotation_status', ([1, 2, 3], 'OIL')),
+    ('get_sales_orders_for_party', ('C001', 'OIL')),
+    ('get_sales_orders_for_product', ('FG1',)),
+    ('get_fg_warehouse_stock', ('OIL', ['A', 'B'], 'WH1')),
+    ('get_inventory_report', ('OIL', ['W1', 'W2'])),
+]
+
+#: A classic quote-break, a comment terminator, and a stacked statement.
+INJECTION_PAYLOADS = [
+    "' OR '1'='1",
+    "x'; DROP TABLE OITM; --",
+    "'--",
+    "' UNION SELECT * FROM OCRD --",
+]
+
+
+class ParameterBindingTests(TestCase):
+
+    def test_every_builder_returns_sql_and_params(self):
+        for name, args in VALUE_BUILDERS:
+            with self.subTest(builder=name):
+                out = getattr(Queries, name)(*args)
+                self.assertIsInstance(out, tuple, f'{name} still returns a bare string')
+                self.assertEqual(len(out), 2)
+
+    def test_placeholders_match_params(self):
+        """The failure this catches is silent, not loud.
+
+        hdbcli binds positionally, so a count mismatch is an error but a
+        WRONG-ORDER list is not — it filters by the wrong column and returns
+        the wrong rows. `get_fg_warehouse_stock` is the one at risk: its
+        warehouse placeholder sits in the JOIN, above the WHERE clause, so its
+        value has to bind before the item codes even though the item filter is
+        built first.
+        """
+        for name, args in VALUE_BUILDERS:
+            with self.subTest(builder=name):
+                sql, params = getattr(Queries, name)(*args)
+                self.assertEqual(
+                    sql.count('?'), len(params),
+                    f'{name}: {sql.count("?")} placeholders, {len(params)} params')
+
+    def test_no_caller_value_is_interpolated(self):
+        """Feed each builder an injection payload and assert it lands in the
+        PARAMS, never in the SQL text."""
+        for name, args in VALUE_BUILDERS:
+            for payload in INJECTION_PAYLOADS:
+                # Substitute the payload into each string argument in turn.
+                for i, arg in enumerate(args):
+                    if not isinstance(arg, str) or arg in {'OIL', 'ORDR'}:
+                        continue
+                    probe = list(args)
+                    probe[i] = payload
+                    with self.subTest(builder=name, arg=i, payload=payload):
+                        try:
+                            sql, params = getattr(Queries, name)(*probe)
+                        except (HanaSchemaError, ValueError):
+                            continue  # rejected outright, which is also correct
+                        self.assertNotIn(
+                            payload, sql,
+                            f'{name} interpolated a caller value into the SQL')
+                        # Compared case-insensitively: `get_duplicate_num_at_card`
+                        # uppercases the reference before binding, because SAP
+                        # stores NumAtCard uppercased. That is a matching rule,
+                        # not escaping, so it is preserved.
+                        self.assertIn(payload.upper(),
+                                      [str(p).upper() for p in params])
+
+    def test_a_list_argument_binds_one_placeholder_per_element(self):
+        sql, params = Queries.get_quotation_status([11, 22, 33], 'OIL')
+        self.assertEqual(sql.count('?'), 3)
+        self.assertEqual(params, [11, 22, 33])
+
+    def test_a_union_binds_its_value_once_per_branch(self):
+        """`get_sales_orders_for_product` UNIONs across every configured company
+        DB. A single bound value would fill only the first branch's
+        placeholder, and hdbcli would reject the count — but the earlier
+        string-formatted version had no such check."""
+        sql, params = Queries.get_sales_orders_for_product('FG1')
+        self.assertEqual(sql.count('?'), len(params))
+        self.assertEqual(set(params), {'FG1'})
+        self.assertEqual(len(params), len(Queries._open_so_schemas()))
+
+    def test_product_sales_orders_accepts_the_branch_its_caller_passes(self):
+        """`services.syncSalesOrderByProduct` has always passed `branch`, and
+        the builder did not accept it — so every call raised TypeError and
+        `GET /api/hana/product-so/` could never have worked.
+
+        The argument is accepted and ignored: the query UNIONs across every
+        company DB on purpose, because open sales orders for one item live in
+        different databases by category.
+        """
+        with_branch = Queries.get_sales_orders_for_product('FG1', 'OIL')
+        without = Queries.get_sales_orders_for_product('FG1')
+        self.assertEqual(with_branch, without)
+
+    def test_optional_filters_bind_nothing_when_absent(self):
+        sql, params = Queries.get_fg_warehouse_stock('OIL')
+        self.assertEqual(params, [])
+        self.assertEqual(sql.count('?'), 0)
+
+    def test_the_warehouse_filter_binds_before_the_item_filter(self):
+        """Order, not just count — see `test_placeholders_match_params`."""
+        sql, params = Queries.get_fg_warehouse_stock(
+            'OIL', item_codes=['ITEM-A', 'ITEM-B'], whs_code='WH-9')
+        self.assertEqual(params[0], 'WH-9',
+                         'the JOIN placeholder must bind first')
+        self.assertEqual(params[1:], ['ITEM-A', 'ITEM-B'])
+        # And the JOIN placeholder really does precede the WHERE ones.
+        self.assertLess(sql.index('AND T1."WhsCode" = ?'), sql.index('WHERE'))
+
+
+class SchemaResolutionTests(TestCase):
+    """Only a schema name may be interpolated, because HANA cannot bind an
+    identifier — so it must come from settings, never a request."""
+
+    def test_known_branches_resolve(self):
+        self.assertEqual(Queries._schema_for_branch('OIL'), Queries.OIL_SCHEMA)
+        self.assertEqual(Queries._schema_for_branch('BEVERAGE'),
+                         Queries.BEVERAGE_SCHEMA)
+
+    def test_resolution_is_case_and_whitespace_insensitive(self):
+        self.assertEqual(Queries._schema_for_branch('  oil '), Queries.OIL_SCHEMA)
+
+    def test_an_unknown_branch_raises_rather_than_defaulting(self):
+        """Not a style point. The three company databases hold DIFFERENT
+        documents under the same DocNum, so falling back to OIL does not fail —
+        it silently returns another company's data.
+
+        The old `if/elif` with no `else` left `s` unbound, so this surfaced as
+        `UnboundLocalError` from inside a query builder.
+        """
+        for branch in ('', None, 'NOPE', 'oil; DROP TABLE OITM'):
+            with self.subTest(branch=branch):
+                with self.assertRaises(HanaSchemaError):
+                    Queries._schema_for_branch(branch)
+
+    def test_a_branch_name_cannot_smuggle_sql_into_the_schema_position(self):
+        with self.assertRaises(HanaSchemaError):
+            Queries.get_customer_details('C001', '"; DROP TABLE OITM; --')
+
+
+class ExecuteContractTests(TestCase):
+    """`execute` accepts the `(sql, params)` pair, which is what let the
+    builders convert without touching all 29 callers in `services.py`."""
+
+    class _FakeCursor:
+        description = None
+
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+    class _FakeConn:
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    def _conn(self):
+        from hana.services.connection import HANAConnection
+
+        conn = HANAConnection()
+        conn.cursor = self._FakeCursor()
+        conn.connection = self._FakeConn()
+        return conn
+
+    def test_a_pair_is_unpacked(self):
+        conn = self._conn()
+        conn.execute(('SELECT ?', ['x']))
+        self.assertEqual(conn.cursor.calls, [('SELECT ?', ['x'])])
+
+    def test_a_plain_string_still_works(self):
+        conn = self._conn()
+        conn.execute('SELECT 1')
+        self.assertEqual(conn.cursor.calls, [('SELECT 1', [])])
+
+    def test_passing_params_twice_is_refused(self):
+        """Silently preferring one source would bind the wrong values."""
+        conn = self._conn()
+        with self.assertRaises(TypeError):
+            conn.execute(('SELECT ?', ['a']), ['b'])

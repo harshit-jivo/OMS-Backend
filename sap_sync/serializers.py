@@ -23,16 +23,32 @@ class PartyAddressSerializer(serializers.ModelSerializer):
 
 
 class PartySerializer(serializers.ModelSerializer):
-    addresses = PartyAddressSerializer(many=True, read_only=True)
-    
+    # `addresses = PartyAddressSerializer(many=True, read_only=True)` was here,
+    # and had not worked since migration 0004 removed `PartyAddress.party` (the
+    # FK that backed the related name). `PartyAddress.card_code` is a plain
+    # indexed CharField now, so `Party` has no `addresses` relation at all.
+    #
+    # It failed SILENTLY rather than loudly, which is why it survived: DRF sets
+    # `required=False` for a `read_only=True` field, so the AttributeError from
+    # the missing attribute became a `SkipField` and the key was simply dropped
+    # from every response. No error, no log line, no 500 — the field just never
+    # appeared. (A note elsewhere in this repo claimed these endpoints returned
+    # 500s; they did not. Verified by serializing a real Party.)
+    #
+    # The damage was in the CONTRACT, not the runtime: drf-spectacular
+    # introspects this serializer, so the published schema advertised
+    # `addresses`, and the frontend's generated types declared it
+    # `readonly addresses: PartyAddress[]` — REQUIRED, not optional. Every
+    # consumer was told to expect an array that has never once been sent.
+    #
+    # Removed rather than repaired: nothing reads it (the frontend gets
+    # addresses from `/sap/addresses/` — PartyAddressListView — which works),
+    # and making it resolve by `card_code` would add data to a live API's
+    # responses plus an N+1, to serve no caller. Response bodies are byte-for-
+    # byte unchanged by this deletion; only the advertised contract moves, to
+    # match what the endpoints actually return.
     class Meta:
         model = Party
-        # fields = [
-        #     'id', 'card_code', 'card_name', 'address', 'state',
-        #     'main_group', 'chain', 'country', 'card_type', 'category',
-        #     'synced_at', 'created_at', 'addresses'
-        # ]
-
         fields = '__all__'
 
 class PartyListSerializer(serializers.ModelSerializer):

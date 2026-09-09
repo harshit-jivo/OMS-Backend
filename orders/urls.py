@@ -1,8 +1,8 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, ai_order_summary, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView, QuotationStatusView, CancelSalesQuotationView, QuotationOverviewView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView
+from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
 
 urlpatterns=[
     
@@ -43,7 +43,7 @@ urlpatterns=[
     path("<int:order_id>/orderdetails/",OrderDetailsByOrderView.as_view(),name="order-details-by-orderid"),
     path("ordersbyuser/<int:user_id>/",OrdersByUserView.as_view(),name="orders-by-user"),
     path("create-scheme/",CreateSchemeView.as_view(), name="create-scheme"),
-    path("api/ai-order-summary/", ai_order_summary),
+    path("api/ai-order-summary/", AiOrderSummaryView.as_view(), name="ai-order-summary"),
     path('templates/parties/', TemplatePartyListView.as_view(), name='template_parties'),
     path('templates/orders/', TemplateOrderListView.as_view(), name='template_orders'),
     path("stock-check/",OrderStockCheckView.as_view(), name="stock-check"),
@@ -54,9 +54,21 @@ urlpatterns=[
     path("web-push/public-key/",WebPushPublicKeyView.as_view(), name="web-push-public-key"),
     path("web-push/subscribe/",WebPushSubscriptionView.as_view(), name="web-push-subscribe"),
     path("staff-products/",StaffProductsAPIView.as_view(),name="staff-products"),
-    path("quotation-status/", QuotationStatusView.as_view(), name="quotation-status"),
-    path("quotation-overview/", QuotationOverviewView.as_view(), name="quotation-overview"),
-    path("<int:order_id>/cancel-quotation/", CancelSalesQuotationView.as_view(), name="cancel-quotation"),
+# Sales Quotation routes — DISABLED 2026-08-27, the flow is closed and no
+# longer used. The view classes are commented out in views.py; the
+# SalesQuotationLog model and its table are kept, so history stays queryable.
+    # path("quotation-status/", QuotationStatusView.as_view(), name="quotation-status"),
+    # path("quotation-overview/", QuotationOverviewView.as_view(), name="quotation-overview"),
+    # path("<int:order_id>/cancel-quotation/", CancelSalesQuotationView.as_view(), name="cancel-quotation"),
     path("orders-by-item/", GetOrdersByItemView.as_view(), name="orders-by-item"),
 
+    # --- Scheme engine v2 (docs/scheme-architecture.md) ---------------------
+    # Kept on a /v2/ prefix so the legacy /orders/schemes/ endpoints feeding the
+    # current Add Sales picker stay untouched until the migration completes.
+    path("v2/schemes/", SchemeV2ListCreateView.as_view(), name="scheme-v2-list"),
+    path("v2/schemes/preview/", SchemePreviewView.as_view(), name="scheme-v2-preview"),
+    path("v2/schemes/applicable/", SchemeApplicableView.as_view(), name="scheme-v2-applicable"),
+    path("v2/schemes/<int:scheme_id>/", SchemeV2DetailView.as_view(), name="scheme-v2-detail"),
+    path("v2/schemes/<int:scheme_id>/assignments/", SchemeAssignmentView.as_view(),
+         name="scheme-v2-assignments"),
 ]

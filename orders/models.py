@@ -53,16 +53,12 @@ class DispatchLocation(models.Model):
     def __str__(self):
         return self.name
 
-class PartyAddress(models.Model):
-    card_code = models.CharField(max_length=50)
-    full_address = models.TextField(null=True)
-    gst_number = models.CharField(max_length=50, blank=True, null=True)
-    address_type = models.CharField(max_length=10,null=True) # 'B' or 'S'
-    address_name = models.CharField(max_length=100, blank=True, null=True)
-    category = models.CharField(max_length=50, blank=True, null=True)
-
-    class Meta:
-        db_table = 'party_addresses'
+# `PartyAddress` lived here and was removed in migration 0062. The live party
+# address master is `sap_sync.PartyAddress` (`sap_party_addresses`); this model
+# duplicated a subset of its columns, was never populated, and nothing imported
+# it. Note that `orders.serializers.PartyAddressSerializer` and
+# `orders.views.masters.PartyAddressesView` both point at the sap_sync model
+# despite the names — that collision is why the dead one survived so long.
 
 class ProductDetails(models.Model):
     item_code = models.CharField(max_length=50, unique=True)
@@ -77,16 +73,22 @@ class ProductDetails(models.Model):
     class Meta:
         db_table = 'product_details'
 
-class Branches(models.Model):
-    bpl_id = models.CharField(max_length=50, blank=True, null=True)
-    bpl_name = models.CharField(max_length=100, blank=True, null=True)
-    category = models.CharField(max_length=50, blank=True, null=True)
+# `Branches` used to be declared here: a second unmanaged model on the SAME
+# `branches` table that `sap_sync.Branch` owns, and wrong about it in every
+# column. The live table is (bpl_id integer, bpl_name varchar(200), category
+# varchar(20), is_active, created_at, updated_at); this model declared bpl_id
+# as CharField(50), bpl_name as 100, category as 50, and omitted the last
+# three entirely.
+#
+# Nothing wrote through it, so the wrong lengths never truncated anything — but
+# reading an integer column through a CharField is why GET /api/orders/branch/
+# returns bpl_id as a JSON string while every sap_sync endpoint returns it as a
+# number, from the same 22 rows.
+#
+# Use `sap_sync.Branch`. It is the model the sync writes and it matches the
+# table. Removing this changes no data and no schema: both models were
+# `managed = False`, so Django never created or altered `branches` from either.
 
-    class Meta:
-        db_table = 'branches'
-        managed = False
-        verbose_name_plural = "Branches"
-    
 class Order(models.Model):
     order_number = models.CharField(max_length=50, unique=True)
     card_code = models.CharField(max_length=50)
@@ -157,7 +159,18 @@ class Order(models.Model):
     
     rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_orders')
     rejected_at = models.DateTimeField(null=True, blank=True)
+    # THE canonical rejection reason. Every write path sets this one, and it is
+    # what `orders/views/mart.py:97` serves to the web approval screen.
     rejection_reason = models.TextField(blank=True,null=True)
+    # DUPLICATE, being retired. It held the same fact, but only some paths wrote
+    # it, so neither column alone was complete — migration 0063 copied the 69
+    # orphaned values across into `rejection_reason`.
+    #
+    # Still written in step with the canonical field, and still in
+    # `serializers.py`, because a client may be reading it. Drop it once the API
+    # contract has moved: remove it from the serializer, confirm no consumer
+    # reads it, THEN migrate the column away. Nothing in this repository reads
+    # it today.
     reject_reason = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -195,6 +208,14 @@ class OrderItem(models.Model):
     )
     qty_scheme = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
     is_scheme_visible = models.BooleanField(default=False)
+    # Set on the zero-priced line auto-added for the free half of a combo pack.
+    # `combo_source_code` is the item_code of the combo that generated it; NULL/''
+    # both mean "not part of a combo" (scheme_engine treats them identically). The
+    # column is nullable (migration 0055_fix_combo_source_code_nullable drops the
+    # stray NOT NULL that survived on some databases); the create path still writes
+    # '' rather than NULL for tidiness.
+    is_auto_free = models.BooleanField(default=False)
+    combo_source_code = models.CharField(max_length=50, null=True, blank=True)
 
     class Meta:
         db_table = 'order_items'
@@ -300,6 +321,42 @@ class OrderItemScheme(models.Model):
     )
     qty_scheme = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
 
+    # --- Scheme engine v2 ---------------------------------------------------
+    # `scheme` above points at the legacy flat `scheme_product` row and stays
+    # populated for historical orders. New orders resolved by scheme_engine fill
+    # the fields below instead.
+    scheme_v2 = models.ForeignKey(
+        'orders.Scheme',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='order_item_schemes',
+    )
+    benefit = models.ForeignKey(
+        'orders.SchemeBenefit',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_item_schemes',
+    )
+    # Snapshot of the giveaway item as it stood when the order was placed. The
+    # SAP push reads this instead of re-resolving from the scheme tables, so
+    # editing a scheme can no longer change what an already-approved order ships.
+    benefit_item_code = models.CharField(max_length=50, null=True, blank=True)
+    # `qty_scheme` above is always PIECES, because that is what a SAP
+    # DocumentLine quantity means. The pair below records the giveaway as the
+    # scheme actually spelled it — "1 BOX" — so the UI and any later audit can
+    # show the unit instead of a bare converted number. Also a snapshot: a pack
+    # size changing in SAP must not retroactively alter an approved order.
+    benefit_uom = models.CharField(max_length=10, blank=True, default='')
+    benefit_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    # What the engine proposed, kept alongside `qty_scheme` (what was actually
+    # granted) so a manual override stays visible.
+    computed_qty = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    is_manual_override = models.BooleanField(default=False)
+    # Why the scheme applied — 'STATE' / 'PB', 'PARTY' / 'CUSTA000123', ...
+    scope_type = models.CharField(max_length=20, blank=True, default='')
+    scope_value = models.CharField(max_length=100, blank=True, default='')
 
     class Meta:
         db_table = 'order_item_schemes'
@@ -309,6 +366,255 @@ class Categories(models.Model):
     class Meta:
         db_table = 'categories'
 
+
+# ---------------------------------------------------------------------------
+# Scheme engine v2
+#
+# The legacy `users.SchemeProduct` packs three concerns into one flat row: the
+# offer identity (scheme_name), the giveaway item (item_code) and geography
+# (state_code) — and a multi-item scheme is faked as several rows sharing a
+# scheme_name, which sync_service then joins on by string. The four models below
+# separate those concerns so a scheme can be targeted at one vendor or at every
+# vendor in a state, and so its giveaway can hang off either half of a 1+1 combo.
+#
+# See docs/scheme-architecture.md.
+# ---------------------------------------------------------------------------
+
+# Schemes are written in pieces or cartons only. Litres is a derived measure
+# (pack_unit x qty) that nobody prices a giveaway in, and a bare "Qty" was just
+# pieces under another name — offering all four only invited picking the wrong one.
+UOM_CHOICES = (
+    ('PCS', 'Pieces'),
+    ('BOX', 'Boxes'),
+)
+
+# UOM code -> the OrderItem field holding that measure.
+#
+# PCS maps to `qty`, NOT to `pcs`: on an order line `qty` is the total pieces
+# (boxes x sal_factor2) while `pcs` is the pack size copied off the product, a
+# constant. Measuring a scheme against `pcs` compared the slab to the carton
+# size instead of to what was ordered.
+UOM_FIELDS = {
+    'PCS': 'qty',
+    'BOX': 'boxes',
+}
+
+
+class Scheme(models.Model):
+    """One offer. Carries no product, no geography and no vendor — those live in
+    the benefit / trigger / assignment children."""
+
+    CATEGORY_CHOICES = (
+        ('OIL', 'Oil'),
+        ('BEVERAGES', 'Beverages'),
+        ('MART', 'Mart'),
+    )
+
+    code = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
+
+    # The business line this offer belongs to. An OIL scheme never fires on a
+    # MART or BEVERAGES line, however it was targeted — targeting says *who*
+    # gets an offer, this says *what it is an offer on*. Blank = every category,
+    # which is what every scheme created before this field existed means.
+    category = models.CharField(
+        max_length=20, choices=CATEGORY_CHOICES, blank=True, default='', db_index=True,
+    )
+
+    valid_from = models.DateField(null=True, blank=True)
+    valid_to = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    # Higher priority wins when two schemes target the same line and the winner
+    # is not stackable.
+    priority = models.IntegerField(default=0)
+    stackable = models.BooleanField(default=False)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_schemes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'schemes'
+        ordering = ['-priority', 'name']
+        indexes = [
+            models.Index(fields=['is_active', 'valid_from', 'valid_to'],
+                         name='scheme_active_window_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.code} — {self.name}'
+
+    def is_live_on(self, on_date):
+        if not self.is_active:
+            return False
+        if self.valid_from and on_date < self.valid_from:
+            return False
+        if self.valid_to and on_date > self.valid_to:
+            return False
+        return True
+
+
+class SchemeBenefit(models.Model):
+    """What a scheme gives away. Several rows = several giveaway items, replacing
+    the old "N scheme_product rows sharing a scheme_name" fan-out."""
+
+    scheme = models.ForeignKey(Scheme, on_delete=models.CASCADE, related_name='benefits')
+
+    # NULL means "the same item as the trigger line" — buy 10 boxes, get 1 free.
+    free_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    free_uom = models.CharField(max_length=10, choices=UOM_CHOICES, default='PCS')
+
+    # Ratio rule: buy `per_qty`, get `free_qty`. per_qty = 0 means a flat
+    # giveaway of `free_qty` regardless of how much was ordered; free_qty = 0
+    # with per_qty = 0 means the quantity is supplied by the user (this is what
+    # every migrated legacy scheme becomes, preserving today's behaviour).
+    per_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    free_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    max_free_qty = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+
+    class Meta:
+        db_table = 'scheme_benefits'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.scheme.code} -> {self.free_item_code or "(same item)"}'
+
+
+class SchemeTrigger(models.Model):
+    """What earns a scheme."""
+
+    MATCH_ITEM = 'ITEM'
+    MATCH_CHOICES = (
+        (MATCH_ITEM, 'Item code'),
+        ('SUB_GROUP', 'Sub group'),
+        ('VARIETY', 'Variety'),
+        ('BRAND', 'Brand'),
+        ('CATEGORY', 'Category'),
+        ('ALL', 'Any item'),
+    )
+
+    # Which half of a combo pack supplies the qualifying quantity.
+    #   PAID_LINE — the ordered, priced quantity (ordinary single-FG scheme)
+    #   FREE_LINE — the auto-added zero-priced companion of a 1+1
+    #               (OrderItem.is_auto_free, combo_source_code = this item), so
+    #               the giveaway is computed on top of the combo's free half
+    #   BOTH      — the sum of the two
+    APPLIES_TO_CHOICES = (
+        ('PAID_LINE', 'Paid line'),
+        ('FREE_LINE', 'Free (combo) line'),
+        ('BOTH', 'Both'),
+    )
+
+    scheme = models.ForeignKey(Scheme, on_delete=models.CASCADE, related_name='triggers')
+
+    match_type = models.CharField(max_length=20, choices=MATCH_CHOICES, default=MATCH_ITEM)
+    match_value = models.CharField(max_length=100, blank=True, default='')
+
+    min_qty = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+    min_uom = models.CharField(max_length=10, choices=UOM_CHOICES, default='PCS')
+
+    applies_to = models.CharField(max_length=20, choices=APPLIES_TO_CHOICES, default='PAID_LINE')
+
+    class Meta:
+        db_table = 'scheme_triggers'
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['match_type', 'match_value'], name='scheme_trigger_match_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.scheme.code}: {self.match_type}={self.match_value or "*"}'
+
+
+class SchemeAssignment(models.Model):
+    """Who a scheme reaches.
+
+    One STATE row covers every vendor in that state, including ones onboarded
+    later; one PARTY row covers a single vendor. Specificity decides which wins
+    (see SCOPE_SPECIFICITY), so a per-party row overrides the state default, and
+    `is_exclusion` carves a vendor out of a state-wide scheme in one row.
+    """
+
+    SCOPE_PARTY = 'PARTY'
+    SCOPE_MAIN_GROUP = 'MAIN_GROUP'
+    SCOPE_STATE = 'STATE'
+    SCOPE_CATEGORY = 'CATEGORY'
+    SCOPE_ALL = 'ALL'
+
+    SCOPE_CHOICES = (
+        (SCOPE_PARTY, 'Party (card code)'),
+        (SCOPE_MAIN_GROUP, 'Main group'),
+        (SCOPE_STATE, 'State'),
+        (SCOPE_CATEGORY, 'Category'),
+        (SCOPE_ALL, 'All vendors'),
+    )
+
+    # Most specific scope wins. Ties are impossible — the unique constraint
+    # allows at most one row per (scheme, scope_type, scope_value, category).
+    SCOPE_SPECIFICITY = {
+        SCOPE_PARTY: 100,
+        SCOPE_MAIN_GROUP: 60,
+        SCOPE_STATE: 50,
+        SCOPE_CATEGORY: 20,
+        SCOPE_ALL: 0,
+    }
+
+    scheme = models.ForeignKey(Scheme, on_delete=models.CASCADE, related_name='assignments')
+
+    scope_type = models.CharField(max_length=20, choices=SCOPE_CHOICES, default=SCOPE_PARTY)
+    # card_code / main_group / state code / category. Blank for ALL.
+    scope_value = models.CharField(max_length=100, blank=True, default='')
+
+    # Optional extra narrowing: the same item_code exists under OIL, BEVERAGES
+    # and MART, so any scope can be limited to one of them. Blank = all.
+    category = models.CharField(max_length=20, blank=True, default='')
+
+    # A carve-out. Exclusions are absolute at every level, not specificity-ranked
+    # — an explicit carve-out is always deliberate.
+    is_exclusion = models.BooleanField(default=False)
+
+    # Optional per-assignment narrowing of the scheme's own validity window.
+    valid_from = models.DateField(null=True, blank=True)
+    valid_to = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_scheme_assignments',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'scheme_assignments'
+        unique_together = ('scheme', 'scope_type', 'scope_value', 'category')
+        ordering = ['scheme_id', 'scope_type', 'scope_value']
+        indexes = [
+            models.Index(fields=['scope_type', 'scope_value', 'is_active'],
+                         name='scheme_assign_scope_idx'),
+        ]
+
+    def __str__(self):
+        target = self.scope_value or '*'
+        prefix = 'EXCLUDE ' if self.is_exclusion else ''
+        return f'{prefix}{self.scheme_id}: {self.scope_type}={target}'
+
+    @property
+    def specificity(self):
+        return self.SCOPE_SPECIFICITY.get(self.scope_type, 0)
+
+    def is_live_on(self, on_date):
+        if not self.is_active:
+            return False
+        if self.valid_from and on_date < self.valid_from:
+            return False
+        if self.valid_to and on_date > self.valid_to:
+            return False
+        return True
 
 class Notification(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')

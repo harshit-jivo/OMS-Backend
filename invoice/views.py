@@ -1,3 +1,17 @@
+"""Sales-invoice review/approval screen, credit-limit requests, bill printing.
+
+Phase 2.4 audit: two views (`UsedSalesOrdersView`, `ReservedBatchesView`)
+already declared `permission_classes = [IsAuthenticated]`; every other view
+relied silently on the project-wide default. All of them are now explicit,
+matching the two that already were. None is gated with
+`core.permissions.IsAdminRole`: create/approve/reject/delete here are ordinary
+reviewer actions on the billing desk, not org-wide admin functions — the same
+distinction `sap_sync` draws for its own (deliberately non-admin-gated) order
+approval views. `branches_for_user` below is the one place this app's access
+logic genuinely needed `core.permissions`: it used to check `is_superuser`
+alone for "sees every branch", the exact bug class `core.permissions.is_admin`
+exists to close (an admin via role/`extra_roles`/`is_staff` wasn't recognised).
+"""
 import json
 import logging
 import re
@@ -21,11 +35,27 @@ from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
 from django.http import HttpResponse
 
+from core.permissions import is_admin
 from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
 from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_item_name_map
+
+
+def _external_verify():
+    """TLS verification for the DSR and Crystal calls below.
+
+    These four call sites passed `verify=_external_verify()` as a literal. Both services are
+    plain http today, where requests ignores `verify` entirely — so it was not
+    a live exposure, it was a TRAP: the day either URL gains an `s`, the calls
+    would keep working and silently stop verifying anything, and nothing in the
+    code would say so.
+
+    Defaults to on. A self-signed certificate on either box is then an explicit
+    decision (`EXTERNAL_SSL_VERIFY=false`) rather than a default nobody chose.
+    """
+    return getattr(settings, 'EXTERNAL_SSL_VERIFY', True)
 
 logger = logging.getLogger(__name__)
 
@@ -55,14 +85,21 @@ def branches_for_user(user):
     An OIL user has no business reviewing beverage bills and vice versa, so the
     review screens are scoped to the branches behind the user's own categories.
 
-    None — meaning unrestricted — is returned for superusers and for anyone with
-    no category assigned at all. That last case matters: admins and auditors are
+    None — meaning unrestricted — is returned for admins and for anyone with no
+    category assigned at all. That last case matters: admins and auditors are
     set up without categories, and scoping them to nothing would empty the
     review screen for the very people who have to work it.
+
+    Phase 2.4: this used to check `is_superuser` alone, which is exactly the
+    bug `core.permissions` was built to close (see its module docstring) — an
+    admin holding the role via `extra_roles`, or via `is_staff`, was not
+    recognised here and could have been scoped down to their own categories
+    instead of seeing the whole review screen. `core.permissions.is_admin`
+    covers all three; this is a widening, not a new restriction.
     """
     if not user or not getattr(user, 'is_authenticated', False):
         return None
-    if getattr(user, 'is_superuser', False):
+    if is_admin(user):
         return None
 
     names = {
@@ -87,6 +124,8 @@ def scope_logs_to_user(invoice_logs, request):
 
 
 class InvoiceLogCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def post(self, request):
         # A resubmit from the "Edit" action on a rejected invoice carries the id of
         # the log it replaces. It is not a model field, so keep it out of the
@@ -162,6 +201,7 @@ class InvoiceLogCreateView(APIView):
 
 
 class InvoicelogStatusUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
         try:
@@ -231,6 +271,8 @@ class InvoiceLogDeleteView(APIView):
     and a DELETED entry is appended to the timeline so the removal is itself
     part of the audit trail.
     """
+
+    permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk):
         try:
@@ -335,6 +377,7 @@ class InvoiceLogDeleteView(APIView):
 
 
 class InvoiceLogListView(APIView):
+  permission_classes = [IsAuthenticated]
 
   def get(self, request):
     inv_status = request.query_params.get('status')
@@ -375,6 +418,7 @@ class InvoiceLogListView(APIView):
     return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self ,  request , pk):
         try:
@@ -396,6 +440,7 @@ class InvoiceHistoryView(APIView):
 
 
 class InvoiceRefLogCreateView(CreateAPIView):
+    permission_classes = [IsAuthenticated]
 
     serializer_class = InvoiceRefLogsSerializer
     queryset = InvoiceRefLogs.objects.all()
@@ -452,6 +497,7 @@ class InvoiceRefLogCreateView(CreateAPIView):
 
 
 class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated]
     # Deleted entries are excluded rather than merely hidden: editing one would
     # write a history entry against a log nobody can see.
     queryset = InvoiceLog.objects.filter(is_deleted=False)
@@ -475,12 +521,13 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
 
 
 class CreditLimitCardsView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         company = request.query_params.get('company', '1')
         url = f"{settings.DSR_API_BASE}/api/CreditLimit/GetCustomerCards"
         try:
-            dsr_response = requests.get(url, params={'company': company}, timeout=20, verify=False)
+            dsr_response = requests.get(url, params={'company': company}, timeout=20, verify=_external_verify())
             try:
                 body = dsr_response.json()
             except ValueError:
@@ -491,6 +538,7 @@ class CreditLimitCardsView(APIView):
 
 
 class CreditLimitRequestView(APIView):
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -563,7 +611,7 @@ class CreditLimitRequestView(APIView):
                 data={'documentData': document_data},
                 files={'attachment': (attachment.name, attachment, attachment.content_type)},
                 timeout=30,
-                verify=False,
+                verify=_external_verify(),
             )
             try:
                 body = dsr_response.json()
@@ -608,6 +656,8 @@ class CreditLimitRequestView(APIView):
 
 
 class GetCreditLimitJSAPFlow(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         invoice_id = request.query_params.get('invoice_id')
         # `company` is still accepted (callers send it) but no longer used: the
@@ -654,7 +704,7 @@ class GetCreditLimitJSAPFlow(APIView):
                 flow_url,
                 params={'flowId': flow_id},
                 timeout=20,
-                verify=False
+                verify=_external_verify()
             )
 
 
@@ -676,6 +726,8 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response({'error':'Invalid JSON received from JSAP API'}, status=status.HTTP_502_BAD_GATEWAY)
         
 class GetPrintReport(APIView):
+    permission_classes = [IsAuthenticated]
+
     # Characters Windows/macOS refuse in a filename, plus control chars.
     _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
@@ -729,7 +781,7 @@ class GetPrintReport(APIView):
 
         url = f"{settings.CRYSTAL_URL}/{self._CRYSTAL_PATHS[branch]}/{doc_entry}"
         try:
-            crystal_response = requests.get(url, timeout=60, verify=False)
+            crystal_response = requests.get(url, timeout=60, verify=_external_verify())
         except requests.RequestException as exc:
             return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -761,7 +813,8 @@ class GetPrintReport(APIView):
 
   
 class InvoiceLogListwoWhsView(APIView):
-    
+  permission_classes = [IsAuthenticated]
+
   def get(self, request):
     inv_status = request.query_params.get('status')
     # select_related/prefetch_related keep the lineage fields on the serializer

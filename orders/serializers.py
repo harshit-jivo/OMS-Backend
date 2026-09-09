@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Parties,DispatchLocation,ProductDetails,OrderItem,Branches,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice, OrderRateApproval, OrderItemApprovalMapping
+from sap_sync.models import Branch
+from .models import Parties,DispatchLocation,ProductDetails,OrderItem,OrdersLog,OrderItemScheme, Order,Notification,StaffProductPrice, OrderRateApproval, OrderItemApprovalMapping
 from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
@@ -120,8 +121,27 @@ class CreateOrderSerializer(serializers.Serializer):
    
 
 class BranchSerializer(serializers.ModelSerializer):
+    """The `branches` table, as `/api/orders/branch/` has always returned it.
+
+    `sap_sync.Branch` replaces the local `orders.Branches`, which was a second
+    model on the same table and wrong about every column. sap_sync already has
+    a serializer of this name, but it exposes seven fields; this one stays at
+    three because that is the response this endpoint has always sent.
+    """
+
+    # The column is `integer`, and sap_sync.Branch declares it as one — so
+    # switching models would silently change this field in the JSON from "5"
+    # to 5. `orders.Branches` read it through a CharField, so every existing
+    # client of THIS endpoint has only ever seen a string.
+    #
+    # Kept as a string deliberately. OMS-Frontend wraps it in String() at each
+    # of its nine use sites and would not notice, but the React Native client
+    # is a separate repository that is not in this workspace and cannot be
+    # checked. A refactor should not be the thing that finds out.
+    bpl_id = serializers.CharField()
+
     class Meta:
-        model = Branches
+        model = Branch
         fields = ['bpl_id', 'bpl_name', 'category']
 
 class OrderStatusUpdateSerializer(serializers.Serializer):
@@ -206,31 +226,82 @@ class OrdersLogSerializer(serializers.ModelSerializer):
         ]
 
 class OrderItemSchemeSerializer(serializers.ModelSerializer):
+    """One giveaway attached to an order line.
+
+    TWO ENGINES WRITE THIS ROW, and only one of them was being read.
+
+    `scheme` points at the legacy flat `scheme_product` row. The v2 engine
+    leaves it null and fills `scheme_v2` / `benefit_item_code` instead — so
+    every v2 giveaway serialised as `scheme_name: null`, and the approval
+    screens rendered it as a bare "-" beside a quantity. An auditor was being
+    asked to approve a free line with no way to see what it was.
+
+    Both paths now answer the same two questions — what the offer is called,
+    and which item it gives away — whichever engine wrote the row.
+    """
+
     scheme_id = serializers.IntegerField(read_only=True, allow_null=True)
     scheme_name = serializers.SerializerMethodField()
     scheme_item_code = serializers.SerializerMethodField()
+    scheme_item_name = serializers.SerializerMethodField()
     scheme_qty = serializers.DecimalField(source='qty_scheme', max_digits=10, decimal_places=2, read_only=True)
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
-        if not raw_scheme_id:
-            return None
-        return (
-            SchemeProduct.objects
-            .filter(scheme_id=raw_scheme_id)
-            .values_list('scheme_name', flat=True)
-            .first()
-        )
+        if raw_scheme_id:
+            return (
+                SchemeProduct.objects
+                .filter(scheme_id=raw_scheme_id)
+                .values_list('scheme_name', flat=True)
+                .first()
+            )
+        # v2: the offer's own name, off `orders.Scheme`.
+        return getattr(getattr(obj, 'scheme_v2', None), 'name', None)
 
     def get_scheme_item_code(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
-        if not raw_scheme_id:
+        if raw_scheme_id:
+            return get_scheme_item_code_raw(raw_scheme_id)
+        # v2 snapshots the giveaway item on the row itself, so an edit to the
+        # scheme afterwards cannot change what an approved order shipped.
+        return (getattr(obj, 'benefit_item_code', '') or '').strip() or None
+
+    def get_scheme_item_name(self, obj):
+        """The giveaway item's NAME.
+
+        The approval table showed a code where every other line showed a name.
+        A STATE- or VENDOR-scoped scheme gives away items the party holds no
+        assignment for, so the client's own catalogues cannot name them — which
+        is why this is resolved here.
+        """
+        item_code = self.get_scheme_item_code(obj)
+        if not item_code:
             return None
-        return get_scheme_item_code_raw(raw_scheme_id)
+        from django.apps import apps
+
+        try:
+            Product = apps.get_model('sap_sync', 'Product')
+        except LookupError:
+            return None
+        name = (
+            Product.objects
+            .filter(item_code__iexact=item_code)
+            .values_list('item_name', flat=True)
+            .first()
+        )
+        return (name or '').strip() or None
 
     class Meta:
         model = OrderItemScheme
-        fields = ['id', 'scheme_id', 'scheme_name', 'scheme_item_code', 'scheme_qty', 'qty_scheme']
+        fields = [
+            'id', 'scheme_id', 'scheme_name',
+            'scheme_item_code', 'scheme_item_name',
+            'scheme_qty', 'qty_scheme',
+            # v2 provenance. `scope_type` / `scope_value` are how an approver
+            # sees that a giveaway came from a state-wide offer rather than
+            # something the salesperson chose.
+            'scheme_v2_id', 'benefit_item_code', 'scope_type', 'scope_value',
+        ]
 
 class OrderItemSerializer(serializers.ModelSerializer):
     scheme_id = serializers.IntegerField(read_only=True, allow_null=True)
@@ -244,6 +315,34 @@ class OrderItemSerializer(serializers.ModelSerializer):
     variety = serializers.CharField(source='sub_group', read_only=True)
     variety_type = serializers.SerializerMethodField()
     last_purchase_price = serializers.SerializerMethodField()
+    combo_parent_item_code = serializers.SerializerMethodField()
+
+    def get_combo_parent_item_code(self, obj):
+        """The paid product a mapped combo actually bills as, or None.
+
+        A combo pack ("A + B") is a wrapper around two real products. The order
+        deliberately keeps the COMBO's own code — it is what the customer
+        bought, what history shows, and what scheme triggers match on — while
+        SAP is sent the parent's code instead.
+
+        That split left the approval screens showing a code SAP never receives:
+        an auditor approved FG0000003 and FG0000076 shipped. Exposing the
+        resolved parent lets those screens show what will actually go, without
+        changing a single stored value.
+
+        The resolver is `sap_sync`'s, imported here rather than reimplemented,
+        so the two answers cannot drift. Imported inside the method because
+        `sap_sync.services.sync_service` imports from `orders`.
+        """
+        try:
+            from sap_sync.services.sync_service import _resolve_combo_parent_item_code
+        except Exception:  # pragma: no cover - sap_sync optional at import time
+            return None
+        try:
+            return _resolve_combo_parent_item_code(obj)
+        except Exception:
+            # Display only. A lookup failure must never break the order view.
+            return None
 
 
     def get_scheme_name(self, obj):
@@ -588,8 +687,13 @@ class SchemeWriteSerializer(serializers.ModelSerializer):
 
 
 class NotificationSerializer(serializers.ModelSerializer):
-    order_id = serializers.IntegerField(source='order.id', read_only=True)
-    
+    # Reads the local `order_id` COLUMN rather than traversing to `order.id`.
+    # The traversal loaded the whole related Order per row, so serialising a
+    # page without select_related('order') cost one extra query per
+    # notification. Sourcing the column keeps the output byte-identical while
+    # making the query plan independent of how the caller built the queryset.
+    order_id = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Notification
         fields = ['id', 'message', 'is_read', 'created_at', 'order_id']
@@ -626,3 +730,144 @@ class OrdersByItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = ['id', 'order', 'item_code', 'item_name', 'category', 'brand', 'sub_group']
+
+# ---------------------------------------------------------------------------
+# Scheme engine v2 (see docs/scheme-architecture.md)
+# ---------------------------------------------------------------------------
+
+from .models import Scheme, SchemeBenefit, SchemeTrigger, SchemeAssignment
+
+
+class SchemeBenefitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchemeBenefit
+        fields = ['id', 'free_item_code', 'free_uom', 'per_qty', 'free_qty', 'max_free_qty']
+
+    def validate(self, attrs):
+        per_qty = attrs.get('per_qty', getattr(self.instance, 'per_qty', 0)) or 0
+        free_qty = attrs.get('free_qty', getattr(self.instance, 'free_qty', 0)) or 0
+        # per_qty is a divisor; a ratio with nothing on the giveaway side would
+        # silently produce zero free stock on every order.
+        if per_qty > 0 and free_qty <= 0:
+            raise serializers.ValidationError({
+                'free_qty': 'A ratio benefit (per_qty > 0) must give away a positive free_qty.'
+            })
+        return attrs
+
+
+class SchemeTriggerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchemeTrigger
+        fields = ['id', 'match_type', 'match_value', 'min_qty', 'min_uom', 'applies_to']
+
+    def validate(self, attrs):
+        match_type = attrs.get('match_type', getattr(self.instance, 'match_type', None))
+        match_value = attrs.get('match_value', getattr(self.instance, 'match_value', '')) or ''
+        if match_type != 'ALL' and not str(match_value).strip():
+            raise serializers.ValidationError({
+                'match_value': f'match_value is required when match_type is {match_type}.'
+            })
+        return attrs
+
+
+class SchemeAssignmentSerializer(serializers.ModelSerializer):
+    scheme_code = serializers.CharField(source='scheme.code', read_only=True)
+
+    class Meta:
+        model = SchemeAssignment
+        fields = [
+            'id', 'scheme', 'scheme_code', 'scope_type', 'scope_value', 'category',
+            'is_exclusion', 'valid_from', 'valid_to', 'is_active', 'created_at',
+        ]
+        # `scheme` is a non-null FK, so DRF would demand it in the request body —
+        # but the parent is always known from context: the URL for the assignments
+        # endpoint, or the enclosing scheme for a nested write. Read-only keeps it
+        # in the response without requiring callers to repeat it.
+        read_only_fields = ['id', 'scheme', 'created_at']
+
+    def validate(self, attrs):
+        scope_type = attrs.get('scope_type', getattr(self.instance, 'scope_type', None))
+        scope_value = attrs.get('scope_value', getattr(self.instance, 'scope_value', '')) or ''
+        if scope_type == SchemeAssignment.SCOPE_ALL:
+            attrs['scope_value'] = ''
+        elif not str(scope_value).strip():
+            raise serializers.ValidationError({
+                'scope_value': f'scope_value is required when scope_type is {scope_type}.'
+            })
+        return attrs
+
+
+class SchemeV2Serializer(serializers.ModelSerializer):
+    """Read/write a scheme together with its benefits, triggers and assignments.
+
+    Children are written wholesale: whatever list arrives replaces what is there.
+    Partial updates that omit a child key leave that child set untouched.
+    """
+
+    benefits = SchemeBenefitSerializer(many=True, required=False)
+    triggers = SchemeTriggerSerializer(many=True, required=False)
+    assignments = SchemeAssignmentSerializer(many=True, required=False)
+
+    class Meta:
+        model = Scheme
+        fields = [
+            'id', 'code', 'name', 'description', 'category',
+            'valid_from', 'valid_to', 'is_active', 'priority', 'stackable',
+            'benefits', 'triggers', 'assignments',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        valid_from = attrs.get('valid_from', getattr(self.instance, 'valid_from', None))
+        valid_to = attrs.get('valid_to', getattr(self.instance, 'valid_to', None))
+        if valid_from and valid_to and valid_to < valid_from:
+            raise serializers.ValidationError({'valid_to': 'valid_to cannot precede valid_from.'})
+        return attrs
+
+    def _write_children(self, scheme, benefits, triggers, assignments):
+        if benefits is not None:
+            # PROTECT on OrderItemScheme.scheme_v2 guards the parent; benefits use
+            # SET_NULL, so replacing them blanks the link on historical rows but
+            # leaves benefit_item_code — the snapshot that actually ships — intact.
+            scheme.benefits.all().delete()
+            SchemeBenefit.objects.bulk_create(
+                [SchemeBenefit(scheme=scheme, **row) for row in benefits]
+            )
+        if triggers is not None:
+            scheme.triggers.all().delete()
+            SchemeTrigger.objects.bulk_create(
+                [SchemeTrigger(scheme=scheme, **row) for row in triggers]
+            )
+        if assignments is not None:
+            scheme.assignments.all().delete()
+            user = getattr(self.context.get('request'), 'user', None)
+            SchemeAssignment.objects.bulk_create([
+                SchemeAssignment(
+                    scheme=scheme,
+                    created_by=user if getattr(user, 'is_authenticated', False) else None,
+                    **{k: v for k, v in row.items() if k != 'scheme'},
+                )
+                for row in assignments
+            ])
+
+    def create(self, validated_data):
+        benefits = validated_data.pop('benefits', [])
+        triggers = validated_data.pop('triggers', [])
+        assignments = validated_data.pop('assignments', [])
+        user = getattr(self.context.get('request'), 'user', None)
+        if getattr(user, 'is_authenticated', False):
+            validated_data['created_by'] = user
+        scheme = Scheme.objects.create(**validated_data)
+        self._write_children(scheme, benefits, triggers, assignments)
+        return scheme
+
+    def update(self, instance, validated_data):
+        benefits = validated_data.pop('benefits', None)
+        triggers = validated_data.pop('triggers', None)
+        assignments = validated_data.pop('assignments', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        self._write_children(instance, benefits, triggers, assignments)
+        return instance

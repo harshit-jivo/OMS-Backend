@@ -9,6 +9,7 @@ from .admin_views import (
     AdminDeviceAnalyticsView,
     AdminDeviceDetailView,
     AdminDeviceListView,
+    AdminVersionPolicyView,
 )
 from .views import (
     CurrentDevicesView,
@@ -35,5 +36,11 @@ urlpatterns = [
         "admin/devices/<int:pk>/",
         AdminDeviceDetailView.as_view(),
         name="admin-device-detail",
+    ),
+    # Mobile version policy (ANDROID / IOS). GET both, PUT one platform.
+    path(
+        "admin/version-policy/",
+        AdminVersionPolicyView.as_view(),
+        name="admin-version-policy",
     ),
 ]

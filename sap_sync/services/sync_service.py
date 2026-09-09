@@ -13,7 +13,7 @@ from .connection import SAPConnection
 import requests
 from django.conf import settings
 from ..models import SalesQuotationLog , SalesOrderLog
-from orders.scheme_rules import (
+from orders.services.scheme_rules import (
     get_party_product_scheme,
 )
 from users.models import PartyProductAssignment, SchemeProduct
@@ -181,6 +181,53 @@ def get_party_combo_component_item_codes(card_code, item_name, category=None, ex
 
     logger.warning("COMBO_COMPONENT_DEBUG | final item_codes=%r", item_codes)
     return item_codes
+
+
+def _resolve_combo_parent_item_code(item):
+    """The paid product a mapped combo bills as, or None.
+
+    A combo pack ("A + B") is a wrapper around two real products. OMS keeps the
+    combo itself on the order -- it is what the customer bought, what the order
+    history shows, and what scheme triggers match on -- while SAP is sent the
+    products the pack actually consists of. Swapping the code here, at the
+    boundary, is the only place that needs to know the two representations
+    differ.
+
+    Quantity and price are deliberately untouched: the customer agreed the
+    combo's rate, so the parent line carries it and the SAP document total still
+    matches the order.
+
+    Returns None when the combo has no parent mapped, in which case its own code
+    goes to SAP exactly as before -- so an unmapped combo is unaffected.
+
+    Gated on the "+" in the stored line name so an order without a combo never
+    queries the mapping table: this runs per line on every SAP post, and
+    map_order_to_sap is otherwise pure for orders that carry no combo.
+    """
+    if "+" not in str(getattr(item, "item_name", "") or ""):
+        return None
+
+    code = str(getattr(item, "item_code", "") or "").strip()
+    if not code:
+        return None
+    category = getattr(item, "category", "")
+
+    mapped = PartyProductAssignment.objects.filter(
+        item_code=code, is_active=True,
+    ).exclude(parent_item_code__isnull=True).exclude(parent_item_code="")
+
+    # A combo maps to the same two products for every party, so any row will do.
+    # Prefer the line's own category, then fall back across categories the same
+    # way the order path's donor lookup does.
+    parent = None
+    if category:
+        parent = mapped.filter(category=category).values_list(
+            "parent_item_code", flat=True).first()
+    if not parent:
+        parent = mapped.values_list("parent_item_code", flat=True).first()
+
+    parent = str(parent or "").strip()
+    return parent or None
 
 
 def print_sap_payload(label, payload):
@@ -351,23 +398,30 @@ class SyncService:
         )
 
     def _post_with_ssl_fallback(self, url, payload):
-        try:
-            return self.sap_session.post(
-                url,
-                json=payload,
-                verify=self.sap_verify,
-                timeout=self.sap_timeout,
-            )
-        except requests.exceptions.SSLError:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            self.sap_verify = False
-            self.sap_session.verify = False
-            return self.sap_session.post(
-                url,
-                json=payload,
-                verify=False,
-                timeout=self.sap_timeout,
-            )
+        """POST to the Service Layer, honouring the configured TLS setting.
+
+        The name is kept because callers use it; the FALLBACK is deliberately
+        gone. It used to catch SSLError, retry with `verify=False`, and leave
+        verification off for the rest of this object's life.
+
+        That is worse than never verifying at all. It yields at exactly the
+        moment verification is doing its job — a certificate that does not
+        validate is the case it exists to catch — and then sends the SAP
+        credential and a sales order over the connection it just failed to
+        authenticate. Worse, it did so silently, so a deployment could believe
+        it had TLS verification on for months.
+
+        A certificate failure is now a failure. The two supported ways to talk
+        to a SAP box with a self-signed certificate are both explicit:
+        `HANA_SSL_CA_BUNDLE` to trust that certificate, or
+        `HANA_SSL_VERIFY=false` to accept the risk on purpose.
+        """
+        return self.sap_session.post(
+            url,
+            json=payload,
+            verify=self.sap_verify,
+            timeout=self.sap_timeout,
+        )
 
     @contextmanager
     def _sync_lock(self, sync_type):
@@ -1115,6 +1169,7 @@ class SyncService:
             card_code = getattr(order, "card_code", "")
             item_code = getattr(item, "item_code", "")
             category = getattr(item, "category", "")
+            sub_group = getattr(item, "sub_group", "")
 
             # Prefer the item's stored sub_group; fall back to the product master
             # by item_code + category (MART products for a Mart line).
@@ -1141,10 +1196,19 @@ class SyncService:
 
             is_scheme_line = getattr(item, 'item_type', '') == 'SCHEME'
 
+            # A mapped combo reaches SAP as the product it actually is; the
+            # combo code stays on the OMS order and never leaves it.
+            sap_item_code = _resolve_combo_parent_item_code(item) or item_code
+            if sap_item_code != item_code:
+                logger.info(
+                    "Combo %s posted to SAP as its parent %s (order %s)",
+                    item_code, sap_item_code, getattr(order, "id", None),
+                )
+
             # Line 1: always the ordered item at its price
             if not is_scheme_line and (order_qty > 0 or item_unit_price > 0):
                 line = {
-                    "ItemCode": item_code,
+                    "ItemCode": sap_item_code,
                     "Quantity": order_qty,
                     "UnitPrice": item_unit_price,
                     "U_SchemeAgst": sub_group,

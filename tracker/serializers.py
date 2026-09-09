@@ -243,14 +243,33 @@ class InvoiceListSerializer(serializers.ModelSerializer):
         user = getattr(request, 'user', None)
         if not user:
             return False
-        # Shared head-office / entry desk: any entry-desk user can edit an
-        # unlocked invoice sitting at the entry stage.
-        from .permissions import PAGE_ENTRY, tracker_pages_for
-        return (
-            not obj.is_locked
-            and obj.current_stage.code == 'entry'
-            and (user.is_superuser or PAGE_ENTRY in tracker_pages_for(user))
-        )
+        from .permissions import PAGE_ENTRY
+        if not obj.is_locked and obj.current_stage.code == 'entry' and not user.is_superuser:
+            return PAGE_ENTRY in self._tracker_pages(request, user)
+        return not obj.is_locked and obj.current_stage.code == 'entry'
+
+    @staticmethod
+    def _tracker_pages(request, user):
+        """`tracker_pages_for(user)`, computed once per request.
+
+        Phase 4.2 query audit: `tracker_pages_for` -> `role_names` ->
+        `User.all_role_names()` re-runs the `extra_roles` M2M query (a fresh
+        `.values_list()`, uncached) on every call -- and this getter runs once
+        per row when a list of invoices is serialized. `request.user` is the
+        same object for every row in one `many=True` pass, so caching the
+        result on the request is a real fix, not a workaround: it turns a
+        query count that scaled with the number of invoices returned into one
+        query per request, with no behaviour change (a user's roles cannot
+        change mid-request).
+        """
+        from .permissions import tracker_pages_for
+        if request is None:
+            return tracker_pages_for(user)
+        cached = getattr(request, '_tracker_pages_cache', None)
+        if cached is None:
+            cached = tracker_pages_for(user)
+            request._tracker_pages_cache = cached
+        return cached
 
 
 class StuckAlertSerializer(serializers.ModelSerializer):
@@ -277,9 +296,18 @@ class StuckAlertSerializer(serializers.ModelSerializer):
         return float(obj.days_stuck) - obj.threshold_days
 
     def get_notified(self, obj):
-        """Distinct users mailed about this alert, each with their latest send."""
+        """Distinct users mailed about this alert, each with their latest send.
+
+        Phase 4.2 query audit: `AlertsView` prefetches `notifications__user` for
+        exactly this loop, but calling `.select_related('user')` here cloned
+        the manager's queryset and threw that prefetch cache away -- Django
+        does not carry `_result_cache` across a `.select_related()` clone, so
+        this re-queried the DB once per alert (a real N+1). Reading
+        `obj.notifications.all()` uses the already-prefetched notifications
+        (and their already-prefetched `.user`) instead.
+        """
         latest = {}
-        for n in obj.notifications.select_related('user').all():
+        for n in obj.notifications.all():
             name = (getattr(n.user, 'name', '') or getattr(n.user, 'username', '')
                     or n.email) if n.user_id else n.email
             cur = latest.get(n.user_id)

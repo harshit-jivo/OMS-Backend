@@ -41,6 +41,8 @@ httpx==0.28.1
 httpx-sse==0.4.3
 idna==3.11
 inflection==0.5.1
+reportlab==4.2.5
+PyMuPDF==1.28.2
 itsdangerous==2.2.0
 Jinja2==3.1.6
 jsonpatch==1.33
@@ -78,6 +80,11 @@ pydantic-settings==2.14.1
 pydantic_core==2.46.4
 pymssql==2.3.13
 pypdfium2==5.3.0
+# Wrapper around the Tesseract OCR binary, which pip does NOT install: the
+# host needs `tesseract-ocr` (apt) or the Windows installer, and
+# settings.TESSERACT_CMD set if it is not on PATH. legal/ocr.py degrades to a
+# model-only check when it is missing rather than failing the request.
+pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-decouple==3.8
 python-dotenv==1.2.1
@@ -111,3 +118,7 @@ yarl==1.24.2
 zstandard==0.25.0
 
 smbprotocol==1.15.0
+
+# Error tracking (Phase 5.4). Inert unless SENTRY_DSN is set — see
+# core/error_tracking.py for why the defaults there are restrictive.
+sentry-sdk==2.42.1

@@ -42,15 +42,31 @@ class JSAPConnection:
         return str(value).strip().strip("'").strip('"')
 
     def __init__(self):
-        self.host = self._clean(getattr(settings, 'JSAP_DB_HOST', '103.89.45.75'))
-        self.port = int(getattr(settings, 'JSAP_DB_PORT', 1433))
-        self.database = self._clean(getattr(settings, 'JSAP_DB_NAME', 'jsaplive3'))
-        self.username = self._clean(getattr(settings, 'JSAP_DB_USER', 'ab'))
-        self.password = self._clean(getattr(settings, 'JSAP_DB_PASSWORD', ''))
+        # No `getattr` fallbacks: the production host, database and user were
+        # literals here as well as in settings.py, which meant clearing the
+        # .env did not disable JSAP — it reconnected to production with three
+        # of the four values still hardcoded.
+        #
+        # JSAP is optional by design (a blank host disables it), so unlike
+        # SAP_DB_* these are blank-defaulted in settings rather than required.
+        self.host = self._clean(settings.JSAP_DB_HOST)
+        self.port = int(settings.JSAP_DB_PORT)
+        self.database = self._clean(settings.JSAP_DB_NAME)
+        self.username = self._clean(settings.JSAP_DB_USER)
+        self.password = self._clean(settings.JSAP_DB_PASSWORD)
         self.connection = None
         self.cursor = None
 
     def connect(self):
+        # `tracker.jsap.is_configured()` guards the tracker's callers; this
+        # class is reached from the invoice app, which had no such check. Say
+        # which key is unset instead of handing pymssql an empty server name
+        # and reporting the resulting timeout as "JSAP is down".
+        if not (self.host and self.database):
+            raise RuntimeError(
+                'JSAP is not configured — set JSAP_DB_HOST and JSAP_DB_NAME in '
+                '.env, or do not call JSAPConnection.')
+
         # Same fallback ladder as SAPConnection: this host only answers to the
         # separate host/port form, but the others are kept so a move to a named
         # instance or a different FreeTDS build keeps working.

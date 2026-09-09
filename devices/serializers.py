@@ -10,8 +10,10 @@ from rest_framework import serializers
 
 from .models import (
     APP_TYPE_CHOICES,
+    MOBILE_PLATFORM_CHOICES,
     PLATFORM_CHOICES,
     UserDevice,
+    VersionPolicy,
 )
 from .status import compute_status
 from .utils import is_valid_device_id
@@ -116,6 +118,9 @@ class AdminUserDeviceSerializer(serializers.ModelSerializer):
     # Derived, never stored. Computed server-side so the badge can never
     # disagree with the ?status= filter (a skewed browser clock would).
     status = serializers.SerializerMethodField()
+    # "latest" | "old" | "unknown" — vs the active version policy for this
+    # device's platform. "unknown" when the platform has no policy (or is web).
+    update_status = serializers.SerializerMethodField()
 
     class Meta:
         model = UserDevice
@@ -128,6 +133,7 @@ class AdminUserDeviceSerializer(serializers.ModelSerializer):
             "email",
             "role",
             "status",
+            "update_status",
             "platform",
             "app_type",
             "app_version",
@@ -159,3 +165,45 @@ class AdminUserDeviceSerializer(serializers.ModelSerializer):
         # the same instant (and we don't re-read the clock per row).
         now = self.context.get("now") or timezone.now()
         return compute_status(obj.last_active, now)
+
+    def get_update_status(self, obj) -> str:
+        # `policies` is passed in via context (one lookup for the whole page)
+        # to avoid a query per row. Only ANDROID/IOS with an active policy are
+        # classified; everything else is "unknown" (the web is never gated).
+        policies = self.context.get("policies") or {}
+        policy = policies.get(obj.platform)
+        if not policy:
+            return "unknown"
+        return "latest" if obj.build_number == policy["required_build"] else "old"
+
+
+class VersionPolicySerializer(serializers.ModelSerializer):
+    """Admin CRUD for a mobile version policy (ANDROID / IOS only).
+
+    ``platform`` is restricted to the two mobile choices, so the web can never
+    be given a policy through this endpoint. The one-active-per-platform rule is
+    a DB constraint (partial unique index); this validates the version format
+    and surfaces a duplicate as a clean field error instead of an IntegrityError.
+    """
+
+    platform = serializers.ChoiceField(choices=MOBILE_PLATFORM_CHOICES)
+
+    class Meta:
+        model = VersionPolicy
+        fields = [
+            "id",
+            "platform",
+            "required_version",
+            "required_build",
+            "store_url",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_required_version(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Required version cannot be blank.")
+        return value

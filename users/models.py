@@ -53,6 +53,22 @@ class PartyProductAssignment(models.Model):
     is_active = models.BooleanField(default=True)
     is_scheme = models.BooleanField(default=False)
 
+    # Combo packs ("COLD PRESS 5 LTR + EXTRA LIGHT OLIVE 1 LTR 4 PCS") are a
+    # wrapper around two real products: the paid half before the "+" and the
+    # free half after it. Both are mapped explicitly on the Combo Mapping page
+    # rather than parsed out of the name -- the names are inconsistent enough
+    # that guessing gets it wrong.
+    #
+    # Ordering a mapped combo puts BOTH halves on the order as separate lines
+    # (parent priced, free at zero) and the combo's own item_code never reaches
+    # SAP. An unmapped combo still behaves the old way: the combo line itself.
+    #
+    # `free_qty_per_unit` is how many free units ride along per combo unit --
+    # left blank it falls back to DEFAULT_COMBO_FREE_QTY_PER_UNIT.
+    parent_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    free_item_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    free_qty_per_unit = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
     scheme = models.ForeignKey(
         'users.SchemeProduct',
         on_delete=models.SET_NULL,
@@ -177,7 +193,48 @@ class UserRole(models.Model):
         ordering = ['name']
 
     def __str__(self):
-        return self.display_name        
+        return self.display_name
+
+
+class RolePermissions(models.Model):
+    """The permission keys a role bundles — the role's ticked boxes.
+
+    One row per role, holding a JSON list of keys from
+    `core.permission_registry`. A user's effective permissions are the union
+    of every held role's bundle plus their personal `extra_pages` grants —
+    see `core.permissions.effective_keys`, the only reader.
+
+    Why a separate table instead of a field on `UserRole`
+    -----------------------------------------------------
+    Adding a column to `users_role` makes EVERY existing query on it —
+    including `user.role` during login — fail with UndefinedColumn on any
+    database that has not applied the migration yet. A separate table fails
+    only when *it* is queried, and `effective_keys` treats that failure as
+    "no bundles yet": the system degrades to exactly today's behaviour
+    (extra_pages only) instead of taking login down. When the user-model
+    consolidation lands (roles M2M), this can fold into the role table in
+    the same deployment window.
+
+    Keys are validated against the registry ON READ, not on write: a stale
+    key left behind by a code change is inert, and a migration never has to
+    chase data. `set_keys` still filters on write so the admin UI cannot
+    store junk.
+    """
+
+    role = models.OneToOneField(
+        UserRole,
+        on_delete=models.CASCADE,
+        related_name='permission_bundle',
+    )
+    keys = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'users_role_permissions'
+
+    def __str__(self):
+        return f'{self.role.name}: {len(self.keys or [])} keys'
+
 
 class User(AbstractUser):
     first_name = None
@@ -195,7 +252,24 @@ class User(AbstractUser):
         null=True,
         blank=True
     )
-    
+
+    # ADDITIONAL roles, on top of the primary `role` above.
+    #
+    # `role` is a single FK, so a user who is a Manager cannot also be a
+    # Payment Approver without losing "manager" — and with it their access to
+    # orders, reports and everything else keyed off that role. This M2M lets a
+    # user hold function-specific roles (payment_approver, deposit_creator, …)
+    # while keeping the primary role that defines the rest of their access.
+    #
+    # Anything resolving "does this user hold role X" must check BOTH — see
+    # users.models.User.has_role and approvals.services.eligible_approver_ids.
+    extra_roles = models.ManyToManyField(
+        'users.UserRole',
+        blank=True,
+        related_name='extra_users',
+        help_text='Additional roles beyond the primary one, e.g. Payment Approver.',
+    )
+
     company = models.ForeignKey(
         'Company',
         on_delete=models.PROTECT,
@@ -277,8 +351,57 @@ class User(AbstractUser):
     class Meta:
         db_table = 'users_user'
 
-    def __str__(self):  
+    def __str__(self):
         return self.username
+
+    # -- Role helpers --------------------------------------------------------
+    # A user's roles are the primary FK plus any extra_roles. Every "does this
+    # user hold role X" check must go through these, or a grant made via
+    # extra_roles would be invisible to half the codebase.
+
+    def all_role_ids(self):
+        """IDs of every role this user holds (primary + extras)."""
+        ids = set(self.extra_roles.values_list('id', flat=True))
+        if self.role_id:
+            ids.add(self.role_id)
+        return ids
+
+    def all_role_names(self):
+        """Lower-cased names of every role this user holds."""
+        names = {
+            str(n).strip().lower()
+            for n in self.extra_roles.values_list('name', flat=True)
+        }
+        primary = getattr(self.role, 'name', '')
+        if primary:
+            names.add(str(primary).strip().lower())
+        return names
+
+    def has_role(self, name):
+        """True when the user holds `name` as either their primary or an extra role."""
+        return str(name).strip().lower() in self.all_role_names()
+
+    def category_names(self):
+        """Upper-cased names of every category this user is scoped to —
+        the primary `category` FK plus the full `categories` M2M.
+
+        The M2M's own comment states the rule: `categories` is the full set
+        used for data scoping, with the FK kept as the primary for backward
+        compatibility. Same shape as `all_role_names`: consult BOTH, or a
+        user assigned MART through the M2M is invisible to half the scoping.
+
+        An EMPTY set means "not category-scoped" — the user sees every
+        category. Categories are an opt-in restriction, not a grant.
+        """
+        names = {
+            str(n).strip().upper()
+            for n in self.categories.values_list('category', flat=True)
+        }
+        primary = getattr(self.category, 'category', '')
+        if primary:
+            names.add(str(primary).strip().upper())
+        names.discard('')
+        return names
 
 
     

@@ -4,14 +4,35 @@ Access is decided in ONE place — `tracker_pages_for(user)` — driven entirely
 the user's role. Every view (and, mirrored, the frontend) reads from it, so to
 change who sees what you change a user's role, never page code.
 
-Three tracker sub-roles:
+Four tracker sub-roles:
 
-  * tracker_admin  -> ALL tracker pages (incl. Invoice Entry + Stuck Alerts)
+  * tracker_admin  -> ALL tracker pages (incl. Invoice Entry + Stuck Alerts + AP)
   * tracker_entry  -> Invoice Entry + My Stage Queue
   * tracker_user   -> My Stage Queue
+  * tracker_ap     -> AP Invoice Entry (vendor invoices copied from a GRPO)
 
-Stuck Alerts is admin-only. Superusers and the OMS 'admin' role see every
-tracker page. Non-tracker OMS users see none of them.
+Stuck Alerts is admin-only (tracker-admin, that is).
+
+Since the registry fold (Phase 5), the sub-roles are no longer the ONLY way
+in: the seven page keys are registered in `core.permission_registry`, so a
+page can also be granted through a role's bundle on the Role Permissions
+matrix or per-user on the Permissions page — `tracker_pages_for` unions both
+sources. The sub-roles keep meaning exactly what they meant; the keys are for
+the cases the roles could not express (a manager who needs Reports without a
+tracker role).
+
+POLICY CHANGE, deliberate and visible: because `effective_keys` expands
+administrators to every registered key, the OMS `admin` role and superusers
+now hold every tracker page too. Before the fold they held none — a
+documented choice — but a permission system whose admin cannot see a module
+is a permission system with two definitions of admin, which is the disease
+this work cures. To take tracker away from admins again, resolve the keys
+without the admin expansion here.
+
+"Their role" means any role they hold — the primary `role` FK OR one of
+`extra_roles` — and the pages of all of them are unioned. `extra_roles` was
+ignored here until 2026-08-27, which meant a user had to give up their primary
+role to run the tracker. See `tracker_pages_for`.
 """
 from rest_framework.permissions import BasePermission
 
@@ -22,34 +43,66 @@ PAGE_ALERTS = 'Tracker_Alerts'
 PAGE_REPORTS = 'Tracker_Reports'
 PAGE_ADMIN = 'Tracker_Admin'
 PAGE_INVOICES = 'Tracker_Invoices'  # admin master list of every invoice
+PAGE_AP = 'Ap_Invoice_Entry'        # A/P vendor invoice entry (copy from GRPO)
 
 ALL_TRACKER_PAGES = {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS,
-                     PAGE_ADMIN, PAGE_INVOICES}
+                     PAGE_ADMIN, PAGE_INVOICES, PAGE_AP}
 
 # The single source of truth: tracker sub-role -> visible pages.
 # Stuck Alerts and the all-invoices list are admin-only.
 ROLE_PAGE_MAP = {
     'tracker_admin': {PAGE_ENTRY, PAGE_QUEUE, PAGE_ALERTS, PAGE_REPORTS,
-                      PAGE_ADMIN, PAGE_INVOICES},
+                      PAGE_ADMIN, PAGE_INVOICES, PAGE_AP},
     'tracker_entry': {PAGE_ENTRY, PAGE_QUEUE},
     'tracker_user': {PAGE_QUEUE},
+    # AP data entry is a distinct job from document tracking: these users post
+    # vendor invoices into SAP and have no reason to see the tracker queues.
+    'tracker_ap': {PAGE_AP},
 }
-
-
-def _role_name(user):
-    role = getattr(user, 'role', None)
-    return (getattr(role, 'name', '') or '').strip().lower()
 
 
 def tracker_pages_for(user):
     """The set of tracker page keys this user may access.
 
-    Purely role-driven — tracker pages are for the three tracker sub-roles only.
-    The OMS 'admin' role and superusers are NOT special-cased here.
+    Purely role-driven — tracker pages are for the four tracker sub-roles only.
+    The OMS 'admin' role and superusers are NOT special-cased here; that is
+    deliberate and documented in the module docstring above.
+
+    Consults EVERY role the user holds, primary and `extra_roles`, and unions
+    the pages. It previously read the `role` FK alone, which contradicted the
+    rule stated in `users/models.py`:
+
+        "Anything resolving 'does this user hold role X' must check BOTH."
+
+    The consequence was a real access bug, not a theoretical one: `role` is a
+    single FK, so a manager who also runs the tracker had to choose between
+    `manager` and `tracker_admin`. `extra_roles` exists precisely to remove that
+    choice — and here it did nothing, so the user got no tracker access at all
+    while every other module honoured the grant.
+
+    Unioning rather than first-match-wins is what makes the multi-role case
+    behave: a `tracker_entry` who is also `tracker_ap` gets all three pages,
+    which is the only reading under which holding two roles is not worse than
+    holding one.
     """
     if not (user and user.is_authenticated):
         return set()
-    return set(ROLE_PAGE_MAP.get(_role_name(user), set()))
+
+    # `core.permissions` resolvers are imported here rather than at module
+    # level to keep this module importable during migrations, when the M2M
+    # table may not exist yet.
+    from core.permissions import effective_keys, role_names
+
+    pages = set()
+    for name in role_names(user):
+        pages |= ROLE_PAGE_MAP.get(name, set())
+
+    # Registry fold: tracker page keys granted through a role's bundle or the
+    # user's personal grants count too. Intersecting with ALL_TRACKER_PAGES
+    # keeps this function's contract (it returns tracker pages, nothing else)
+    # even though effective_keys returns the user's whole key set.
+    pages |= effective_keys(user) & ALL_TRACKER_PAGES
+    return pages
 
 
 class _BaseTrackerPermission(BasePermission):
@@ -85,3 +138,9 @@ class IsTrackerAdmin(_BaseTrackerPermission):
     """Manage tracker configuration (stages, lookups, stage assignments)."""
     required_page = PAGE_ADMIN
     message = 'Tracker administration is restricted to tracker admins.'
+
+
+class IsTrackerAP(_BaseTrackerPermission):
+    """Post A/P (vendor) invoices into SAP — tracker_ap and tracker_admin."""
+    required_page = PAGE_AP
+    message = 'AP invoice entry is restricted to AP users.'

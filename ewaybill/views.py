@@ -1,5 +1,15 @@
-"""Views for the standalone NIC e-Way Bill system."""
-from rest_framework.decorators import api_view
+"""Views for the standalone NIC e-Way Bill system.
+
+Phase 2.4 audit: none of these views declared `permission_classes` at all —
+they relied solely on the project-wide default (`IsAuthenticated`,
+OMS/settings.py). None is admin-only by current design: generating/updating/
+cancelling an e-Way Bill is a per-document business action, mirroring
+`einvoice`'s own (deliberately non-admin-gated) IRN actions this module reuses
+SAP/validation helpers from. So the fix is to make that default explicit per
+view rather than invent a role restriction that would tighten access.
+"""
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from einvoice import mapping as irn_mapping, sap, services, validation as einv_validation
@@ -27,6 +37,7 @@ def _ewb_error(exc):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def ewb_token(request):
     """Run the EWB auth handshake; returns a masked token."""
     try:
@@ -51,6 +62,7 @@ def _lookup_irn(irn_payload):
 
 
 @api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
 def ewb_from_invoice(request, docentry):
     """
     Build an e-Way Bill straight from a SAP B1 invoice (OINV DocEntry).
@@ -136,6 +148,7 @@ def ewb_from_invoice(request, docentry):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def generate_ewb(request):
     """Body: full GENEWAYBILL payload (supply + transport details).
     Optional query param ?order_id=<oms order id>. Persists to einvoice_ewaybill."""
@@ -160,12 +173,14 @@ def generate_ewb(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def update_part_b(request):
     """Body: VEHEWB payload (ewbNo, vehicleNo, fromPlace, fromState, transMode, ...)."""
     return _run(EwbClient().update_part_b, request.data if isinstance(request.data, dict) else {})
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def cancel_ewb(request):
     """Body: { "ewbNo": 123, "reason_code": 2, "remarks": "..." }. Updates the stored record."""
     d = request.data if isinstance(request.data, dict) else {}
@@ -186,6 +201,7 @@ def cancel_ewb(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def reject_ewb(request):
     d = request.data if isinstance(request.data, dict) else {}
     if not d.get("ewbNo"):
@@ -194,11 +210,13 @@ def reject_ewb(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def extend_validity(request):
     return _run(EwbClient().extend_validity, request.data if isinstance(request.data, dict) else {})
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def update_transporter(request):
     d = request.data if isinstance(request.data, dict) else {}
     if not d.get("ewbNo") or not d.get("transporterId"):
@@ -207,6 +225,7 @@ def update_transporter(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def close_ewb(request):
     """Voluntary closure of an EWB after delivery (GSTN advisory 17.06.2026).
     Body: { "ewbNo": 123, "closureDate": "dd/mm/yyyy", "remarks": "..." }"""
@@ -230,15 +249,18 @@ def close_ewb(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_ewb(request, ewb_no):
     return _run(EwbClient().get_ewb, ewb_no)
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def ewb_gstin_details(request, gstin):
     return _run(EwbClient().get_gstin_details, gstin)
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def ewb_transporter_details(request, trans_id):
     return _run(EwbClient().get_transporter_details, trans_id)

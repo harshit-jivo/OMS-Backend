@@ -35,6 +35,44 @@ class PublicLabelsView(APIView):
         return Response(dict(labels))
 
 
+class PublicFieldsView(APIView):
+    """Field-behaviour config for input fields (as opposed to plain labels).
+
+    Returns, for EVERY row, its label plus the two behaviour flags clients need
+    to render an input dynamically::
+
+        {"po_number": {"label": "PO Number", "enabled": true, "required": false}}
+
+    IMPORTANT: unlike ``/labels/``, this endpoint must include INACTIVE rows.
+    An inactive row means the admin turned the whole entry off, which for a
+    field is the same intent as "hide it". If inactive rows were omitted the
+    client would fall back to its built-in default (enabled) and the field would
+    reappear — the opposite of what the admin wanted. So the effective
+    ``enabled`` folds in ``is_active``: a row that is inactive OR not enabled is
+    reported as ``enabled: false``; ``required`` is likewise false unless the
+    field is actually shown.
+
+    Kept separate from the flat ``/labels/`` map so that endpoint stays a simple
+    string→string dictionary.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rows = UILabel.objects.all().values(
+            'field_key', 'display_name', 'is_active', 'is_enabled',
+            'is_required')
+        data = {}
+        for row in rows:
+            enabled = bool(row['is_active']) and bool(row['is_enabled'])
+            data[row['field_key']] = {
+                'label': row['display_name'],
+                'enabled': enabled,
+                # A hidden field can never be required.
+                'required': enabled and bool(row['is_required']),
+            }
+        return Response(data)
+
+
 class AdminLabelListCreateView(APIView):
     """List every label (active or not) and create new ones. Admin only."""
     permission_classes = [IsAuthenticated, IsAdminRole]
