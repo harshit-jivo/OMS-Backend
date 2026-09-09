@@ -10,15 +10,7 @@ from .models import (
     PaymentReceipt,
     PaymentStatusHistory,
     SapCallLog,
-    SapCompanyMap,
 )
-
-
-@admin.register(SapCompanyMap)
-class SapCompanyMapAdmin(admin.ModelAdmin):
-    list_display = ('company', 'display_name', 'company_db', 'hana_schema',
-                    'default_bpl_id', 'is_active')
-    list_editable = ('is_active',)
 
 
 @admin.register(CollectionPerson)
@@ -82,7 +74,7 @@ class SapCallLogAdmin(admin.ModelAdmin):
     """Read-only forensic log of every Service Layer call."""
 
     list_display = ('created_at', 'endpoint', 'company_db',
-                    'status', 'http_status', 'sap_doc_num', 'duration_ms')
+                    'status', 'http_status')
     list_filter = ('status', 'company_db', 'created_at')
     search_fields = ('endpoint', 'error_message')
 
@@ -95,10 +87,11 @@ class SapCallLogAdmin(admin.ModelAdmin):
 
 @admin.register(PaymentStatusHistory)
 class PaymentStatusHistoryAdmin(admin.ModelAdmin):
-    list_display = ('created_at', 'content_type', 'object_id',
-                    'from_status', 'to_status', 'actor_kind',
-                    'changed_by_username')
-    list_filter = ('actor_kind', 'to_status', 'created_at')
+    list_display = ('created_at', 'content_type', 'object_id', 'action',
+                    'from_status', 'to_status', 'changed_by_username')
+    # Filtering on `action` rather than the dropped `actor_kind`: it is the
+    # event identity, so it answers "show me every SAP failure" directly.
+    list_filter = ('action', 'to_status', 'created_at')
 
     def has_add_permission(self, request):
         return False

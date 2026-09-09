@@ -307,6 +307,27 @@ HANA_TEST_COMPANY_DB = config('HANA_DB_TEST_NAME', default='')
 # profit center (General Center). Set e.g. 'Centr_z' to force an explicit one.
 HANA_MART_COSTING_CODE = config('HANA_MART_COSTING_CODE', default='')
 
+# --- Payments: default SAP branch (OBPL.BPLId) ------------------------------
+# The branch a payment posts to when there is nothing to inherit it from.
+#
+# A branch is normally a property of the DOCUMENT, not a setting: an invoice
+# payment takes the invoice's branch (SAP refuses a mismatch) and an advance
+# takes the one the user picked. This default only covers the two cases with
+# neither — a legacy advance saved before the branch picker existed, and a
+# bank deposit, which settles no invoice and has no picker.
+#
+# Per company because the companies really do differ: BPL 1 is DELHI in both
+# OIL and BEVERAGES, but the branch lists diverge after that (OIL has 8, and
+# BEVERAGES 6). Named to match HANA_<COMPANY>_COMPANY_DB above.
+#
+# Replaces payments.SapCompanyMap.default_bpl_id, so that TEST and LIVE are
+# separated by environment rather than by editing a database row.
+HANA_OIL_DEFAULT_BPL_ID = config('HANA_OIL_DEFAULT_BPL_ID', default=1, cast=int)
+HANA_BEVERAGE_DEFAULT_BPL_ID = config(
+    'HANA_BEVERAGE_DEFAULT_BPL_ID', default=1, cast=int)
+HANA_MART_DEFAULT_BPL_ID = config(
+    'HANA_MART_DEFAULT_BPL_ID', default=1, cast=int)
+
 # --- JSAP (budget approval) SQL Server -------------------------------------
 # Read-only source for budget-approval status of a SAP *draft* document.
 # Blank host disables every JSAP lookup (the tracker degrades to "unknown").
@@ -546,6 +567,10 @@ REST_FRAMEWORK = {
         "user": config('THROTTLE_USER', default='2000/hour'),
         # Credential-checking endpoints only.
         "login": config('THROTTLE_LOGIN', default='10/min'),
+        # The unauthenticated HAIS device page (a scanned QR sticker). A human
+        # scans one device at a time; this only has to stop a scraper walking a
+        # list of serials for the staff names and emails behind them.
+        "hais_public_device": config('THROTTLE_HAIS_PUBLIC', default='30/min'),
     },
 }
 
@@ -910,6 +935,35 @@ EINV_COMPANY_DBS = [d.strip() for d in config(
 EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
     'EINV_TEST_COMPANY_DBS', default=HANA_TEST_COMPANY_DB,
 ).split(',') if d.strip()]
+
+# ---------------------------------------------------------------------------
+# Legal — label compliance checker (legal/service.py)
+#
+# SECURITY: the Gemini key used to be a string literal in `legal/service.py`,
+# committed to this repository. It is read from `.env` now. Treat the old
+# literal as disclosed and rotate it — everyone with repository access has had
+# it, and it is in the git history regardless of the current file.
+#
+# Blank is a supported state: the module imports and the rest of the app runs;
+# only a label check refuses, with a message naming this setting rather than a
+# 500 from inside the SDK.
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
+
+# The vision model the checker calls. Pinned to an explicit version in .env
+# when a rollout needs to be deliberate; the default tracks the current flash
+# model, which is the accuracy/cost point this workload was chosen for.
+GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-2.5-flash')
+
+# Native binaries the pipeline shells out to. Blank means "on PATH", which is
+# correct on the Linux host; Windows dev boxes install both somewhere else and
+# set these two.
+#   TESSERACT_CMD e.g. C:\Program Files\Tesseract-OCR\tesseract.exe
+#   POPPLER_PATH  e.g. C:\poppler-26.02.0\Library\bin   (was hard-coded in
+#                      legal/service.py, which meant PDF rendering only ever
+#                      worked on the one machine that had that exact path)
+TESSERACT_CMD = config('TESSERACT_CMD', default='')
+POPPLER_PATH = config('POPPLER_PATH', default='')
 
 # ---- NIC e-Way Bill (standalone system; shares einvoice.crypto) ----
 # Defaults reuse the e-Invoice credentials/public key (same PAN); override the

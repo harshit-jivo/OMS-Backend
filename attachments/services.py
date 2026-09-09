@@ -18,8 +18,7 @@ def attach(*, document, upload, attachment_type, user):
     share does not accumulate unreferenced blobs.
     """
     validate_upload(upload)
-    original_name = (upload.name or 'file')[:255]
-    stored_name = save_upload(upload, attachment_type)
+    stored_path = save_upload(upload, attachment_type)
 
     try:
         with transaction.atomic():
@@ -27,22 +26,21 @@ def attach(*, document, upload, attachment_type, user):
                 content_type=ContentType.objects.get_for_model(document.__class__),
                 object_id=document.pk,
                 attachment_type=attachment_type,
-                stored_name=stored_name,
-                original_name=original_name,
+                stored_path=stored_path,
                 uploaded_by=user,
             )
     except Exception:
-        delete_stored(stored_name, attachment_type)
+        delete_stored(stored_path, attachment_type)
         raise
 
 
 def detach(attachment):
     """Remove the row, then the file. Row first so a stale file is the worst
     case rather than a row pointing at nothing."""
-    stored_name = attachment.stored_name
     attachment_type = attachment.attachment_type
+    stored_path = attachment.stored_path
     attachment.delete()
-    delete_stored(stored_name, attachment_type)
+    delete_stored(stored_path, attachment_type)
 
 
 def for_document(document):

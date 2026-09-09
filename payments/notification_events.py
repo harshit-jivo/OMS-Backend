@@ -36,6 +36,16 @@ logger = logging.getLogger("payments")
 PAYMENT_SUBMITTED = "PAYMENT_SUBMITTED"
 PAYMENT_APPROVED = "PAYMENT_APPROVED"
 PAYMENT_REJECTED = "PAYMENT_REJECTED"
+# A receipt now waits for a HANDOVER CHECK before it reaches an approver, so
+# the first hand-off in its life is creator -> verifier. Without this the
+# people who have to count the cash learned about it only by opening the queue.
+PAYMENT_VERIFICATION_REQUIRED = "PAYMENT_VERIFICATION_REQUIRED"
+# The end of the journey. Sent to the creator AND the verifier — they are the
+# two people who put their name to the money, and neither otherwise learns
+# that it finally reached SAP. Success only: a FAILURE is the approver's to
+# retry (see `_on_receipt_approved`), and telling the creator about a posting
+# problem they cannot act on is noise.
+PAYMENT_POSTED = "PAYMENT_POSTED"
 
 # Bank Deposits live inside the payments app (payments.BankDeposit), so their
 # event names are owned here too. Same rule as above: the framework only
@@ -126,6 +136,108 @@ def _notify_current_approvers(document, submitter, *, event_type, title, noun,
         recipients=recipients,
         entity=document,
         actor=submitter,
+    )
+
+
+def publish_receipt_verification_required(receipt, creator):
+    """Tell the eligible VERIFIERS that a new receipt needs checking.
+
+    The first hand-off in a receipt's life. Recipients are resolved the same
+    way the progress timeline resolves them, so the people notified are exactly
+    the people that screen names:
+
+      * holders of an explicit `Payments_Verify` grant;
+      * NOT administrators — they hold every key implicitly, so including them
+        would notify most of the office about every payment raised;
+      * NOT the creator — the server refuses their own verification.
+
+    Resolved at send time from live grants, so adding or removing a verifier
+    takes effect on the next receipt with no redeploy.
+    """
+    from django.contrib.auth import get_user_model
+    from django.db.models import Q
+
+    from core.permissions import ADMIN_ROLE
+
+    from .permissions import PAYMENTS_VERIFY
+
+    User = get_user_model()
+    # One query for admins (see PaymentReceiptSerializer.get_eligible_verifiers
+    # for why `core.permissions.is_admin` is not called per user here).
+    admin_ids = set(
+        User.objects.filter(is_active=True)
+        .filter(
+            Q(role__name__iexact=ADMIN_ROLE)
+            | Q(extra_roles__name__iexact=ADMIN_ROLE)
+            | Q(is_staff=True)
+            | Q(is_superuser=True)
+        )
+        .values_list('id', flat=True)
+    )
+    creator_id = getattr(creator, "pk", None)
+    recipients = [
+        u for u in User.objects.filter(is_active=True).only(
+            'id', 'username', 'name', 'extra_pages', 'company')
+        if u.pk != creator_id
+        and u.pk not in admin_ids
+        and PAYMENTS_VERIFY in (u.extra_pages or [])
+    ]
+    if not recipients:
+        logger.info(
+            "payments notification skipped: receipt %s has no eligible verifier",
+            getattr(receipt, "pk", None),
+        )
+        return []
+
+    from notifications.services import notify
+
+    return notify(
+        event_type=PAYMENT_VERIFICATION_REQUIRED,
+        title="Payment verification required",
+        message=(
+            f"Payment {receipt.receipt_no} from {_display_name(creator)} "
+            f"needs to be verified."
+        ),
+        recipients=recipients,
+        entity=receipt,
+        actor=creator,
+    )
+
+
+def publish_receipt_posted(receipt):
+    """Tell the creator AND the verifier that the receipt reached SAP.
+
+    The two people who put their name to the money. Sent on SUCCESS only — a
+    posting failure goes back to the approver holding it, and telling the
+    creator about a GL problem they cannot fix is noise.
+
+    Both fields can be null (a legacy receipt, a deleted account), and the two
+    can be the same person on a backend where self-verification was possible,
+    so recipients are de-duplicated.
+    """
+    seen = set()
+    recipients = []
+    for user in (receipt.created_by, receipt.verified_by):
+        if user is None or user.pk in seen:
+            continue
+        seen.add(user.pk)
+        recipients.append(user)
+    if not recipients:
+        return []
+
+    from notifications.services import notify
+
+    return notify(
+        event_type=PAYMENT_POSTED,
+        title="Payment posted to SAP",
+        message=(
+            f"Payment {receipt.receipt_no} has been posted to SAP"
+            + (f" as document {receipt.sap_doc_num}."
+               if receipt.sap_doc_num else ".")
+        ),
+        recipients=recipients,
+        entity=receipt,
+        actor=None,
     )
 
 

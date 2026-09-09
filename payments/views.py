@@ -36,20 +36,23 @@ from .permissions import (
     ACTION_PERMISSION_LABELS,
     CanCreateDeposit,
     CanCreatePayment,
+    CanVerifyPayment,
     CanViewPaymentsDashboard,
+    PAYMENTS_VERIFY,
     ReadOrCreateDeposit,
     ReadOrCreatePayment,
     granted_keys,
+    has_permission_key,
 )
 from . import analytics, analytics_person, bank_master, hana_queries
 from .models import (
+    CATEGORY_CHOICES,
     BankDeposit,
     CollectionPerson,
     PaymentMethodEntry,
     PaymentMethodMapping,
     PaymentReceipt,
     PaymentStatusHistory,
-    SapCompanyMap,
 )
 from .serializers import (
     BankDepositCreateSerializer,
@@ -59,7 +62,7 @@ from .serializers import (
     PaymentMethodMappingSerializer,
     PaymentReceiptSerializer,
     PaymentStatusHistorySerializer,
-    SapCompanyMapSerializer,
+    TECHNICAL_HISTORY_ACTIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,7 +80,7 @@ def _flag(request, name):
 
 
 def user_companies(user):
-    """Companies this user may transact in — every configured company.
+    """Companies this user may transact in — every canonical company.
 
     Previously narrowed by UserPartyAssignment. That is an ORDERS concept (a
     salesperson's territory) and does not apply here: a collection agent handles
@@ -87,8 +90,24 @@ def user_companies(user):
     Access to the payments module is governed by the action permissions
     (Payments_Create, Deposit_Approve, ...) — not by which parties someone sells
     to.
+
+    Read from CATEGORY_CHOICES rather than a table: the list is OIL, BEVERAGES
+    and MART, the same three the rest of the application uses, and a row per
+    company existed only to carry the SAP database name that now comes from the
+    environment.
     """
-    return SapCompanyMap.objects.filter(is_active=True)
+    return [
+        {
+            # A stable id per company, because the mobile client keys its
+            # dropdown on one. Positional, so it survives the table's removal
+            # and cannot drift the way an auto-increment could.
+            'id': index,
+            'company': key,
+            'display_name': label,
+            'is_active': True,
+        }
+        for index, (key, label) in enumerate(CATEGORY_CHOICES, start=1)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +120,9 @@ class CompanyListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        rows = user_companies(request.user).order_by('sort_order', 'company')
-        return ok(SapCompanyMapSerializer(rows, many=True).data)
+        # Already plain dicts in CATEGORY_CHOICES order, so no serializer and
+        # no sort: the declaration order IS the display order.
+        return ok(user_companies(request.user))
 
 
 def _int(value, default):
@@ -170,6 +190,11 @@ class PaymentDashboardView(APIView):
             direction=params.get('direction') or 'desc',
             page=_int(params.get('page'), 1),
             page_size=_int(params.get('page_size'), 25),
+            # Same default as the standalone endpoint below. The clients read
+            # page 1 from THIS payload and page 2 onward from that one, so a
+            # different default here meant the table changed who it was about
+            # as soon as the user paged.
+            participants=(params.get('participants') or 'person').strip().lower(),
         ))
 
 
@@ -198,6 +223,10 @@ class CollectionPerformanceView(APIView):
             direction=params.get('direction') or 'desc',
             page=_int(params.get('page'), 1),
             page_size=_int(params.get('page_size'), 25),
+            # Defaults to the collection PEOPLE — who the money came from and
+            # who banked it. `user` gives per-operator activity instead, and
+            # `all` the mixed list this used to return.
+            participants=(params.get('participants') or 'person').strip().lower(),
         ))
 
 
@@ -483,11 +512,24 @@ class PaymentMethodMappingStatusView(APIView):
         rows = []
         for value, label in PaymentMethodEntry.Method.choices:
             if value == PaymentMethodEntry.Method.CASH:
+                # `mapping_id` is the row's own id now, not None. CASH lives in
+                # this table like every other tender, so the admin screen needs
+                # the id to PATCH it — returning None left the row uneditable.
+                cash_row = stored.get(value)
                 gl = resolver.cash_gl()
                 rows.append({
                     'payment_method': value, 'label': label,
-                    'is_cash': True, 'mapping_id': None, 'bank_key': '',
+                    'is_cash': True,
+                    'mapping_id': cash_row.id if cash_row else None,
+                    'bank_key': '',
                     'gl_account': gl, 'bank_code': '', 'bank_name': '',
+                    # Cash has no house bank, but it DOES have a G/L, and that
+                    # account has a name in the chart of accounts. Reading it
+                    # gives the row a real label instead of a dash.
+                    'account_name': (
+                        hana_queries.fetch_account_name(company=company,
+                                                        gl_account=gl)
+                        if gl else ''),
                     'account_number': '', 'branch': '',
                     'configured': bool(gl), 'valid': bool(gl),
                     'error': '' if gl else
@@ -504,6 +546,10 @@ class PaymentMethodMappingStatusView(APIView):
                 'gl_account': bank['gl_account'] if bank else '',
                 'bank_code': bank['bank_code'] if bank else '',
                 'bank_name': bank['display_name'] if bank else '',
+                # The ACCOUNT's name from SAP's chart of accounts, which
+                # already carries the account number — so the table can show
+                # one column instead of three.
+                'account_name': bank.get('account_name', '') if bank else '',
                 'account_number': bank['account_number'] if bank else '',
                 'branch': bank['branch'] if bank else '',
                 'configured': row is not None,
@@ -536,8 +582,11 @@ def _receipt_queryset(user):
     return (
         PaymentReceipt.objects
         .select_related('received_from_person', 'created_by')
+        # `approvals__actions` is here because the serializer reads each
+        # request's rejection reason: without it every row cost a second query
+        # for its actions, on top of the one for the request itself.
         .prefetch_related('methods__denominations', 'allocations',
-                          'attachments', 'approvals')
+                          'attachments', 'approvals__actions')
     )
 
 
@@ -567,6 +616,24 @@ class PaymentReceiptListCreateView(APIView):
             qs = qs.filter(company=value.upper())
         if value := request.query_params.get('card_code'):
             qs = qs.filter(card_code=value)
+        # The verification queue. A plain filter on the existing list endpoint
+        # rather than a dedicated /verification/ route, so it inherits the
+        # pagination, company scoping and every other filter above for free —
+        # and a queue that also wants `?company=` needs no second
+        # implementation of it.
+        #
+        # NO default date window is applied here, deliberately. The plan calls
+        # for the queue to open on the last 2 days, but this endpoint has never
+        # defaulted its dates — `date_from`/`date_to` are opt-in — and adding a
+        # server-side default would silently truncate every EXISTING caller of
+        # /receipts/, which is the tracking screens. The 2-day default is a
+        # property of the queue VIEW, so the client sends
+        # `?verification_status=PENDING&date_from=<today-2>`; a verifier who
+        # widens the range gets everything still pending, which is the correct
+        # behaviour for a queue nobody may leave unworked.
+        if value := request.query_params.get('verification_status'):
+            qs = qs.filter(verification_status__in=[
+                v.strip().upper() for v in value.split(',') if v.strip()])
         # Inclusive date window over payment_date, for the tracking screens.
         if value := request.query_params.get('date_from'):
             qs = qs.filter(payment_date__gte=value)
@@ -675,11 +742,28 @@ def _document_permissions(document, user):
                 and not approved_already)
         )
     )
+    # THE VERIFIER may edit while the receipt is still awaiting verification.
+    # That is the point of the handover: they hold the physical money and are
+    # the one person positioned to correct a mistyped amount or cheque number
+    # against it. Once VERIFIED the receipt is in the approval chain and the
+    # rules above take over again.
+    #
+    # Guarded by `hasattr` because this function is shared with BankDeposit,
+    # which has no verification axis — deposits must be entirely unaffected.
+    verifier_may_edit = (
+        hasattr(document, 'verification_status')
+        and document.verification_status == 'PENDING'
+        and has_permission_key(user, PAYMENTS_VERIFY)
+        # Not the creator: someone who may not verify their own receipt should
+        # not gain an edit right from a permission they cannot exercise on it.
+        and document.created_by_id != user.id
+    )
     return {
         'can_decide': can_decide,
+        'can_verify': verifier_may_edit,
         'can_edit': (
             not document.sap_doc_entry
-            and (can_decide or creator_may_edit)
+            and (can_decide or creator_may_edit or verifier_may_edit)
         ),
         # Only the creator resubmits, and only when no chain is open.
         'can_resubmit': (
@@ -814,6 +898,42 @@ class PaymentReceiptSubmitView(APIView):
                   message='Submitted for approval.')
 
 
+class PaymentReceiptVerifyView(APIView):
+    """Verify a receipt (the handover check) and send it into approval.
+
+    Three independent checks, and all three are required:
+
+      * `CanVerifyPayment` — the capability, from the permission registry.
+      * The receipt is still PENDING and not already in SAP — record state,
+        re-read under a row lock in the service.
+      * The verifier is not the creator — separation of duties.
+
+    The object is fetched through `_receipt_queryset`, the SAME queryset every
+    other receipt endpoint uses, so verification cannot become a way to reach
+    a document the rest of the module would not show. Holding Payments_Verify
+    grants no extra visibility.
+    """
+
+    permission_classes = [IsAuthenticated, CanVerifyPayment]
+
+    def post(self, request, pk):
+        # 404 before the service runs, so an unknown id never reaches the lock.
+        receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
+        remarks = (request.data.get('verification_remarks')
+                   or request.data.get('remarks') or '').strip()
+        try:
+            services.verify_receipt(
+                receipt.pk, request.user,
+                remarks=remarks, ctx=request_context(request))
+        except DjangoValidationError as exc:
+            return fail('; '.join(exc.messages))
+
+        receipt.refresh_from_db()
+        data = PaymentReceiptSerializer(receipt).data
+        data['permissions'] = _document_permissions(receipt, request.user)
+        return ok(data, message='Payment verified and submitted for approval.')
+
+
 class PaymentReceiptHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -821,9 +941,57 @@ class PaymentReceiptHistoryView(APIView):
         from django.contrib.contenttypes.models import ContentType
 
         receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
-        rows = PaymentStatusHistory.objects.filter(
-            content_type=ContentType.objects.get_for_model(PaymentReceipt),
-            object_id=receipt.pk,
+        rows = (
+            PaymentStatusHistory.objects
+            .filter(
+                content_type=ContentType.objects.get_for_model(PaymentReceipt),
+                object_id=receipt.pk,
+            )
+            # Bare STATUS_CHANGED rows are excluded: they record that a status
+            # moved without saying who or why, which reads as noise between the
+            # events that do carry meaning. Nothing is deleted — every row is
+            # still stored and still visible in the Django admin, which is the
+            # forensic view. `?full=true` returns them for support work.
+            .exclude(
+                **({} if _flag(request, 'full')
+                   else {'action__in': list(TECHNICAL_HISTORY_ACTIONS)})
+            )
+            # Oldest first: a timeline is read top-down, and the default model
+            # ordering is newest-first for the admin's benefit.
+            .order_by('created_at', 'id')
+        )
+        return ok(PaymentStatusHistorySerializer(rows, many=True).data)
+
+
+class BankDepositHistoryView(APIView):
+    """The deposit's business timeline — the same shape as a receipt's.
+
+    Deposits went without this while receipts had it, so a deposit's progress
+    screen could only ever show the remark stored on the document itself: the
+    creator's. Every later remark — an approver's reason, a SAP outcome — was
+    written to PaymentStatusHistory and then never read back by any client.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        from django.contrib.contenttypes.models import ContentType
+
+        deposit = get_object_or_404(_deposit_queryset(request.user), pk=pk)
+        rows = (
+            PaymentStatusHistory.objects
+            .filter(
+                content_type=ContentType.objects.get_for_model(BankDeposit),
+                object_id=deposit.pk,
+            )
+            # Same exclusion as the receipt timeline: bare STATUS_CHANGED rows
+            # say a status moved without saying who or why. `?full=true`
+            # returns them for support work.
+            .exclude(
+                **({} if _flag(request, 'full')
+                   else {'action__in': list(TECHNICAL_HISTORY_ACTIONS)})
+            )
+            .order_by('created_at', 'id')
         )
         return ok(PaymentStatusHistorySerializer(rows, many=True).data)
 
@@ -1085,6 +1253,60 @@ class _AttachmentUploadBase(APIView):
             return fail('The file store is currently unavailable.',
                         status=http_status.HTTP_502_BAD_GATEWAY)
 
+        # Recorded on the document's timeline, not just in the attachment
+        # table. An upload arrives through its own endpoint and never touches
+        # the document's `update()`, so nothing used to write a history row and
+        # the Edit History card could not show it.
+        #
+        # But only a LATER upload is an edit. The client attaches the cheque
+        # image moments after POSTing the receipt — that is part of raising it,
+        # not a change to it — so logging that as UPDATED put an "edited"
+        # entry on every receipt the instant it was created, before anyone had
+        # touched it. The Edit History card is meant to answer "what changed
+        # after this was raised", and a creation-time attachment is not that.
+        #
+        # The test is the document's own lifecycle, not a time window: while it
+        # is still DRAFT nobody downstream has seen it, so there is nothing to
+        # have changed FROM. Once it has been verified or sent for approval,
+        # every further attachment genuinely alters what an approver is signing
+        # off and is logged as UPDATED with a one-field diff.
+        from .services import log_status
+        is_initial = document.status == self.model.Status.DRAFT
+        try:
+            rows = list(attachment_services.for_document(document))
+            after = sorted(a.get_attachment_type_display() for a in rows)
+            # Excluded BY ID, not by type name: two cheque images are two
+            # separate files, and filtering on the label would show the first
+            # one disappearing when the second was added.
+            before = sorted(a.get_attachment_type_display()
+                            for a in rows if a.pk != attachment.pk)
+            log_status(
+                document,
+                from_status=document.status, to_status=document.status,
+                user=request.user,
+                # CREATED, not UPDATED, for the first attachment. The Edit
+                # History card selects rows by `action === 'UPDATED'`, so this
+                # is what actually keeps a creation-time file off it — a null
+                # diff alone would still render as an edit with no detail. The
+                # row is still written, so the file remains visible on the main
+                # timeline where it belongs.
+                action=(PaymentStatusHistory.Action.CREATED if is_initial
+                        else PaymentStatusHistory.Action.UPDATED),
+                # No diff on the initial attachment: `change_data` is what the
+                # card renders as "old -> new", and there is no meaningful
+                # "old" for a file that arrived with the document.
+                change_data=(
+                    None if is_initial
+                    else {'attachments': {'old': before, 'new': after}}
+                ),
+                reason=f'Attached {attachment.get_attachment_type_display()}.',
+            )
+        except Exception:                                   # noqa: BLE001
+            # The file is already stored and the row already written — a
+            # failure to log must not turn a successful upload into an error.
+            logger.exception('Could not log attachment upload for %s %s',
+                             self.model.__name__, pk)
+
         return created(AttachmentSerializer(attachment).data, message='File uploaded.')
 
 
@@ -1128,25 +1350,6 @@ class CollectionPersonAdminDetailView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated, IsApprovalAdmin]
     serializer_class = CollectionPersonSerializer
     queryset = CollectionPerson.objects.all()
-
-
-class CompanyMappingListCreateView(ListCreateAPIView):
-    """Admin CRUD for company -> SAP database mappings.
-
-    Previously only reachable through Django admin, which meant an admin had to
-    leave the app to make the payments module usable at all — nothing works
-    until these rows exist.
-    """
-
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
-    serializer_class = SapCompanyMapSerializer
-    queryset = SapCompanyMap.objects.all().order_by('sort_order', 'company')
-
-
-class CompanyMappingDetailView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
-    serializer_class = SapCompanyMapSerializer
-    queryset = SapCompanyMap.objects.all()
 
 
 class MyPaymentPermissionsView(APIView):

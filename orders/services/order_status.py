@@ -144,8 +144,12 @@ def apply_order_status_transition(order, status_id, reason, user):
     # ✅ Update order
     order.status = status_obj
 
-    # Only store reason when providedr
+    # `rejection_reason` is the canonical column. `reject_reason` is written
+    # alongside it only until the duplicate is dropped — see the note on
+    # Order.reject_reason. Both carry the same text, so nothing downstream can
+    # tell which one it read.
     if reason:
+        order.rejection_reason = reason
         order.reject_reason = reason
 
     mark_order_notifications_read(order, user)
@@ -244,8 +248,8 @@ def apply_order_status_transition(order, status_id, reason, user):
             order.rejected_by = user
             order.rejected_at = timezone.now()
             if reason:
-                order.reject_reason = reason
                 order.rejection_reason = reason
+                order.reject_reason = reason
             order.save()
 
             log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)

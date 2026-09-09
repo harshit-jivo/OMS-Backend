@@ -69,12 +69,41 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Distributor':              'Distributor',
         'Mart_Approval':            'Mart Approval',
         'Device_Management':        'Device Management',
+        # Staff orders — an internal order raised against an employee ID
+        # rather than a party, priced from each product's staff rate. Two
+        # keys, not one: reading the staff catalogue to PLACE an order and
+        # setting the rates the company sells to its own people at are
+        # different authorities, and the second is the one worth withholding.
+        #
+        # Both were `adminOnly` on the route and grantable to nobody, while
+        # `orders/staff-products/` carried no permission_classes at all — so
+        # the page was admin-only and the endpoint behind it took writes from
+        # any signed-in user. These keys are what closes that.
+        'Staff':                    'Staff Orders',
+        'Staff_Rate_Assignment':    'Staff Rate Assignment',
+        # The order/revenue analytics screen, formerly `/Dashboard`. It was
+        # ungated for one structural reason — it doubled as the landing page,
+        # so denying it would have looped the user — and `/Home` taking that
+        # job is what let it become a normal page with a normal key.
+        # Back-granted to today's dashboard roles by users/0034.
+        'Sales_Dashboard':          'Sales Dashboard',
+        # One key for the whole Legal module — Label Checker and Nutrition
+        # Manager are one desk, the way `Distributor` covers both distributor
+        # routes. Gates every legal/ endpoint via HasKeyOrRole, with the
+        # `legal` role as the transitional fallback (see legal/views.py).
+        'Legal':                    'Legal (Labels & Nutrition)',
     },
 
     # --- Payments actions (legacy keys, verbatim from
     # --- payments/permissions.py; the mobile app checks these strings) ------
     'payments': {
         'Payments_Create':          'Payments — Create',
+        # The handover gate between creation and approval: a second person
+        # checks the physical cash/cheque against the entry. Independent of
+        # Create and Approve — holding either confers nothing here, and the
+        # creator of a receipt may never verify it (separation of duties is
+        # enforced in the endpoint, not by this key).
+        'Payments_Verify':          'Payments — Verify (handover)',
         'Payments_Approve':         'Payments — Approve',
         'Deposit_Create':           'Deposit — Create',
         'Deposit_Approve':          'Deposit — Approve',

@@ -11,7 +11,7 @@ BIND PARAMETER. `HANAConnection.execute(sql, params)` has always supported them
 `get_customer_details` interpolates request query params straight into SQL.
 
 The schema name still has to be interpolated (HANA cannot bind an identifier),
-so it comes from SapCompanyMap — a DB allow-list — and never from a request.
+so it comes from the environment — an allow-list — and never from a request.
 """
 import logging
 
@@ -21,20 +21,20 @@ from django.core.cache import cache
 
 from hana.services.connection import HANAConnection
 
-from .models import SapCompanyMap
+from . import sap_company
 
 logger = logging.getLogger(__name__)
 
 
 def _schema_for(company):
-    """Allow-listed HANA schema for a company. Raises if not configured."""
-    mapping = SapCompanyMap.objects.filter(company=company, is_active=True).first()
-    if not mapping:
-        raise ValidationError(f'No active SAP mapping for company "{company}".')
-    schema = mapping.hana_schema or mapping.company_db
-    if not schema:
-        raise ValidationError(f'SAP mapping for "{company}" has no HANA schema.')
-    return schema
+    """Allow-listed HANA schema for a company, from the environment.
+
+    Still an ALLOW-LIST, which is the property that matters here: the schema is
+    interpolated into SQL, so it may never come from a request. It now comes
+    from settings via the canonical resolver instead of a database row, and an
+    unknown company is refused rather than defaulted.
+    """
+    return sap_company.resolve_company_db(company)
 
 
 def open_invoices_sql(schema):
@@ -240,12 +240,44 @@ def company_banks_sql(schema):
             IFNULL(T0."Branch", \'\')              AS "branch",
             IFNULL(T0."ControlKey", \'\')          AS "control_key",
             IFNULL(T0."IBAN", \'\')                AS "iban",
-            IFNULL(T1."SwiftNum", \'\')            AS "swift"
+            IFNULL(T1."SwiftNum", \'\')            AS "swift",
+            IFNULL(T2."AcctName", \'\')            AS "account_name"
         FROM "{schema}"."DSC1" AS T0
         LEFT JOIN "{schema}"."ODSC" AS T1 ON T1."BankCode" = T0."BankCode"
+        -- The G/L's own name in the chart of accounts, e.g.
+        -- "ICICI BANK LTD - 629305042195". NOT DSC1."AcctName", which holds
+        -- the legal entity ("JIVO WELLNESS PVT. LTD.") identically on every
+        -- row and so cannot tell two accounts apart.
+        LEFT JOIN "{schema}"."OACT" AS T2 ON T2."AcctCode" = T0."GLAccount"
         WHERE T0."GLAccount" IS NOT NULL AND T0."GLAccount" <> \'\'
         ORDER BY T0."BankCode", T0."GLAccount"
     '''
+
+
+def fetch_account_name(*, company, gl_account):
+    """The chart-of-accounts name for one G/L, or '' when unreadable.
+
+    Used for CASH, which has no house-bank row to take a name from but does
+    have a G/L — so the admin table can name the drawer's account instead of
+    printing a dash.
+
+    Returns '' on ANY failure. This decorates a screen; a SAP outage must not
+    turn reading the configuration into an error.
+    """
+    gl = str(gl_account or '').strip()
+    if not gl:
+        return ''
+    try:
+        schema = _schema_for(company)
+        with HANAConnection() as conn:
+            rows = conn.execute(
+                f'SELECT "AcctName" AS "name" FROM "{schema}"."OACT" '
+                f'WHERE "AcctCode" = ?', [gl])
+        return str(rows[0]['name']).strip() if rows else ''
+    except Exception as error:                              # noqa: BLE001
+        logger.warning('Could not read the name of G/L %s in %s: %s',
+                       gl, company, error)
+        return ''
 
 
 def fetch_company_banks(*, company):
@@ -274,6 +306,10 @@ def fetch_company_banks(*, company):
         out.append({
             'bank_code': code,
             'display_name': name,
+            # The ACCOUNT's name from the chart of accounts. Falls back to the
+            # bank name so a G/L missing from OACT still labels something.
+            'account_name': (str(row.get('account_name') or '').strip()
+                             or name),
             'gl_account': gl,
             'account_number': account,
             'branch': str(row.get('branch') or '').strip(),

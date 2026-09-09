@@ -58,7 +58,8 @@ class AttachmentDownloadView(APIView):
                         status=http_status.HTTP_403_FORBIDDEN)
 
         try:
-            handle = open_stored(attachment.stored_name, attachment.attachment_type)
+            handle = open_stored(attachment.stored_path,
+                                 attachment.attachment_type)
         except FileNotFoundError:
             return fail('The stored file could not be found on the share.',
                         status=http_status.HTTP_404_NOT_FOUND)
@@ -71,7 +72,13 @@ class AttachmentDownloadView(APIView):
             handle,
             content_type=content_type_for(attachment.stored_name),
             as_attachment=True,                       # never render inline
-            filename=attachment.original_name,
+            # Named by TYPE plus the stored extension: the upload's own name
+            # is gone, and it was a camera UUID anyway. "Cheque image.jpg"
+            # is a better thing to find in a downloads folder.
+            filename=(
+                f'{attachment.get_attachment_type_display()}'
+                f'.{attachment.stored_name.rsplit(".", 1)[-1]}'
+            ),
         )
         # Belt and braces against content sniffing.
         response['X-Content-Type-Options'] = 'nosniff'

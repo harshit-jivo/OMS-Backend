@@ -32,48 +32,21 @@ CATEGORY_CHOICES = [
 # Masters
 # ---------------------------------------------------------------------------
 
-class SapCompanyMap(models.Model):
-    """category -> SAP company DB / HANA schema.
-
-    Replaces `resolve_company_db_for_order` (sap_sync/services/sync_service.py:301),
-    which derives the DB from ITEM category (a payment has no items), only
-    handles BEVERAGES, and silently routes MART to the OIL database. It also
-    supplies the allow-list that makes schema interpolation in raw SQL safe.
-    """
-
-    company = models.CharField(max_length=20, choices=CATEGORY_CHOICES, unique=True)
-    display_name = models.CharField(max_length=100)
-    company_db = models.CharField(max_length=100)
-    hana_schema = models.CharField(max_length=100)
-    default_bpl_id = models.IntegerField(null=True, blank=True)
-    # SAP G/L for cash receipts. NOT from DSC1: a cash drawer is not a house
-    # bank account, so SAP has no row for it and it must be named here. Every
-    # other G/L is resolved live from the bank the user selected.
-    cash_gl_account = models.CharField(max_length=50, blank=True, default='')
-    # SAP G/L credited when collected cash is BANKED (the deposit's CardCode).
-    #
-    # It cannot be `cash_gl_account`. A deposit posts as a DocType 'A' account
-    # transfer, and SAP refuses a cash-flow account (OACT.Finanse='Y') as the
-    # CardCode of one — which is exactly what a cash drawer G/L is. The same
-    # account is required, and valid, as CashAccount on a receipt, so one field
-    # cannot serve both: receipts need Finanse='Y', deposits need Finanse='N'.
-    #
-    # Set this to a clearing account with Finanse='N'. Falls back to
-    # `cash_gl_account` when blank, which preserves the previous behaviour for
-    # any company that has not been configured yet.
-    deposit_source_gl_account = models.CharField(
-        max_length=50, blank=True, default='')
-    is_active = models.BooleanField(default=True)
-    sort_order = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        db_table = 'payment_sap_company_map'
-        ordering = ['sort_order', 'company']
-        verbose_name = 'SAP company mapping'
-        verbose_name_plural = 'SAP company mappings'
-
-    def __str__(self):
-        return f'{self.company} -> {self.company_db}'
+# `SapCompanyMap` lived here and was removed in migration 0034. It mapped a
+# company key to a SAP company database, a HANA schema, a default branch and
+# two G/L accounts. Each part now has a better home:
+#
+#   company DB / HANA schema -> the environment, via payments.sap_company,
+#                               which delegates to the same resolver the rest
+#                               of the application already uses. Moving TEST to
+#                               LIVE is a deployment change, not a database
+#                               edit nobody reviews.
+#   default branch           -> HANA_<COMPANY>_DEFAULT_BPL_ID settings
+#   cash G/L                 -> the CASH row of PaymentMethodMapping, beside
+#                               every other tender's account
+#   deposit source G/L       -> the same cash G/L; one drawer, one account
+#
+# The company list itself is CATEGORY_CHOICES above.
 
 
 class CollectionPerson(TimeStampedModel):
@@ -120,14 +93,25 @@ class PaymentMethodMapping(models.Model):
     purpose: SAP is the master, so a foreign key is impossible, and resolution
     happens against the live cache every time it is used.
 
-    CASH has no row — a cash drawer is not a house bank, so it draws on
-    SapCompanyMap.cash_gl_account instead.
+    CASH is the exception, and the reason `gl_account` exists: a cash drawer
+    is not a house bank, has no DSC1 row in SAP and therefore no `bank_key` to
+    point at. Its G/L is named directly instead. The two columns are mutually
+    exclusive by tender, never both.
     """
 
     company = models.CharField(max_length=20, choices=CATEGORY_CHOICES,
                                db_index=True)
     payment_method = models.CharField(max_length=20)
-    bank_key = models.CharField(max_length=80)
+    # SAP "BANKCODE:GLACCOUNT" for a banked tender. Blank for CASH.
+    bank_key = models.CharField(max_length=80, blank=True, default='')
+    # The G/L a CASH tender debits, and the same account a deposit of that
+    # cash later credits — one drawer, so one account, which is what makes the
+    # clearing account provably net to zero.
+    #
+    # Blank for every banked method: those resolve through `bank_key` against
+    # SAP's live house-bank master, and a second account here could disagree
+    # with it.
+    gl_account = models.CharField(max_length=30, blank=True, default='')
     # Reserved for future fallback ordering; the unique constraint below means
     # exactly one active mapping per (company, method) today.
     priority = models.PositiveSmallIntegerField(default=0)
@@ -180,6 +164,27 @@ class PaymentReceipt(TimeStampedModel):
         CANCELLED_IN_SAP = 'CANCELLED_IN_SAP', 'Cancelled in SAP'
         CANCELLED = 'CANCELLED', 'Cancelled'
 
+    class VerificationStatus(models.TextChoices):
+        """The handover gate, ORTHOGONAL to `Status` above.
+
+        Deliberately a SEPARATE axis rather than two more `Status` values, and
+        the reason is concrete: `submit_receipt` whitelists three statuses,
+        `analytics.PENDING_STATUSES` enumerates six, `_document_permissions`
+        derives can_edit/can_decide from the enum, and the mobile client has
+        hand-written label and colour maps keyed on it. A new main status would
+        have to be threaded through every one of those, and any miss is a
+        receipt that silently vanishes from a total. As its own field it adds a
+        gate without touching the lifecycle.
+
+        Once VERIFIED, a receipt STAYS verified. An approver's rejection or a
+        SAP failure is a downstream concern — verification attests that the
+        physical cash or cheque matched what was typed, and that fact does not
+        become untrue because a GL period was locked.
+        """
+
+        PENDING = 'PENDING', 'Pending verification'
+        VERIFIED = 'VERIFIED', 'Verified'
+
     class ReceivedFromType(models.TextChoices):
         PARTY = 'PARTY', 'Party'
         PERSON = 'PERSON', 'Company person'
@@ -200,6 +205,19 @@ class PaymentReceipt(TimeStampedModel):
     received_from_person = models.ForeignKey(
         CollectionPerson, on_delete=models.PROTECT,
         null=True, blank=True, related_name='receipts')
+    # The person's name AS RECORDED ON THIS RECEIPT, frozen at the moment the
+    # person was chosen.
+    #
+    # The FK above answers "who", and stays the identity used for grouping and
+    # analytics — two collectors can share a name, so a string cannot be the
+    # key. This column answers a different question: "what name was written on
+    # this receipt at the time". Resolving the display name through the FK
+    # instead made every historical receipt follow a later rename, so a
+    # document printed last year would silently disagree with the paper copy.
+    #
+    # Blank, not null, when the money came from a party directly — matching the
+    # `card_name` convention above rather than introducing a second empty.
+    received_from_name = models.CharField(max_length=120, blank=True, default='')
 
     payment_date = models.DateField(db_index=True)
     is_advance = models.BooleanField(default=False)
@@ -215,6 +233,24 @@ class PaymentReceipt(TimeStampedModel):
     remarks = models.TextField(blank=True, default='')
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
+
+    # ---- Verification / handover -----------------------------------------
+    # A second person checks the physical money against what was entered before
+    # the receipt may enter the approval chain. Enforced in
+    # `services.submit_receipt`, which is the single choke point every path
+    # into approval goes through.
+    verification_status = models.CharField(
+        max_length=20, choices=VerificationStatus.choices,
+        default=VerificationStatus.PENDING, db_index=True)
+    # SET_NULL, not PROTECT: a verifier can leave the company, and losing the
+    # audit of who verified is worse than keeping a null. The immutable record
+    # of the event is the PaymentStatusHistory row, which also carries the
+    # username as text; these columns are a queryable projection of it.
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='verified_receipts')
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verification_remarks = models.TextField(blank=True, default='')
 
     # SAP write-back
     sap_doc_entry = models.IntegerField(null=True, blank=True, db_index=True)
@@ -282,6 +318,10 @@ class PaymentReceipt(TimeStampedModel):
                          name='idx_rcpt_company_status'),
             models.Index(fields=['card_code', 'company'], name='idx_rcpt_party'),
             models.Index(fields=['status', 'sap_doc_entry'], name='idx_rcpt_sap'),
+            # The verification queue: filter on verification_status, newest
+            # first. Matches the exact filter+sort the queue issues.
+            models.Index(fields=['verification_status', '-created_at'],
+                         name='idx_rcpt_verification'),
         ]
         constraints = [
             models.CheckConstraint(
@@ -309,6 +349,16 @@ class PaymentReceipt(TimeStampedModel):
         if user.is_superuser or user.is_staff:
             return True
         if self.created_by_id == user.id:
+            return True
+        # The verifier's whole job is to check the physical money against the
+        # entry, and the cheque image IS that evidence — so this has to admit
+        # them. It cannot be expressed through `approvals` below: verification
+        # happens BEFORE the document enters the approval chain, so there is no
+        # PENDING request yet and the verifier has taken no approval action.
+        # Without this clause the verify screen showed the receipt but refused
+        # its attachment, which is the one thing the verifier needs to see.
+        from .permissions import has_permission_key, PAYMENTS_VERIFY
+        if has_permission_key(user, PAYMENTS_VERIFY):
             return True
         # Anyone who can act on (or has acted on) its approval may see the file.
         return self.approvals.filter(
@@ -353,7 +403,19 @@ class PaymentMethodEntry(models.Model):
     receipt = models.ForeignKey(
         PaymentReceipt, on_delete=models.CASCADE, related_name='methods')
     method = models.CharField(max_length=20, choices=Method.choices)
-    amount = models.DecimalField(max_digits=15, decimal_places=2)
+    # The validator mirrors the `payment_method_amount_positive` CHECK below,
+    # and is what a serializer actually enforces: ModelSerializer copies field
+    # validators onto the DRF field, so an amount of 0 or less is a 400 with a
+    # field error rather than an IntegrityError from the database.
+    #
+    # Without it the CHECK was the ONLY guard, and a zero amount passed every
+    # serializer rule to fail at the write — a 500 on both create and edit.
+    # 0.01 is the smallest storable value at decimal_places=2, so this and the
+    # CHECK refuse exactly the same set of values. `PaymentReceipt.total_amount`
+    # was already written this way; this brings the line rows into line with it.
+    amount = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))])
 
     # UPI
     upi_reference = models.CharField(max_length=60, blank=True, default='')
@@ -663,14 +725,21 @@ class SapCallLog(models.Model):
     sap_error_code = models.CharField(max_length=30, blank=True, default='')
     error_message = models.TextField(blank=True, default='')
 
-    sap_doc_entry = models.IntegerField(null=True, blank=True)
-    sap_doc_num = models.IntegerField(null=True, blank=True)
+    # `sap_doc_entry` / `sap_doc_num` were here and were dropped in migration
+    # 0030. They restated what the linked document already holds — the generic
+    # FK below reaches the receipt or deposit, whose own columns are the
+    # authoritative SAP identifiers. Every populated row agreed with its
+    # document, so nothing was lost.
+    #
+    # `duration_ms` and `completed_at` were dropped in the same migration. Both
+    # were written and never read: the retry decision turns on the exception,
+    # not on elapsed time, and request timing is instrumented independently in
+    # core/middleware.py. That timing data was NOT reconstructable, so it was
+    # exported before removal.
 
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.STARTED)
-    duration_ms = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'payment_sap_call_log'
@@ -700,6 +769,17 @@ class PaymentStatusHistory(models.Model):
     class Action(models.TextChoices):
         CREATED = 'CREATED', 'Created'
         UPDATED = 'UPDATED', 'Updated'
+        # The handover check: a second person confirmed the physical money
+        # against the entry. Sits between CREATED and SUBMITTED in the timeline.
+        VERIFIED = 'VERIFIED', 'Verified'
+        # The document entered the approval chain.
+        #
+        # Named for the STAGE it reaches rather than the act of submitting,
+        # because that is what the timeline reader is looking for — "where is
+        # it now". `SUBMITTED` below predates this and is still unused by any
+        # writer; it is kept because historical rows may carry it and the
+        # value costs nothing, but new writers use PENDING_APPROVAL.
+        PENDING_APPROVAL = 'PENDING_APPROVAL', 'Pending approval'
         SUBMITTED = 'SUBMITTED', 'Submitted for approval'
         RESUBMITTED = 'RESUBMITTED', 'Resubmitted'
         APPROVED = 'APPROVED', 'Approved'
@@ -728,17 +808,40 @@ class PaymentStatusHistory(models.Model):
     # Null for anything that is not an approval event.
     level = models.PositiveSmallIntegerField(null=True, blank=True)
     level_label = models.CharField(max_length=60, blank=True, default='')
-    # SAP identifiers, so a posting row carries its own outcome rather than
-    # forcing a join back to the document.
-    sap_doc_entry = models.IntegerField(null=True, blank=True)
-    sap_doc_num = models.IntegerField(null=True, blank=True)
-    actor_kind = models.CharField(max_length=20, default='USER')   # USER|SYSTEM|SAP_WORKER
+    # `sap_doc_entry` / `sap_doc_num` lived here and were dropped in migration
+    # 0031. A posting row carried its own copy to avoid a join, but the document
+    # this row points at already holds the authoritative pair, and every
+    # populated row agreed with it.
+    #
+    # `actor_kind` was dropped in the same migration. The business timeline
+    # never showed it — `performed_by` renders `changed_by_username or "System"`,
+    # so a blank username is already the system marker — and `action` says which
+    # system acted far more precisely than USER/SAP/SYSTEM/APPROVAL_ENGINE did.
 
-    changed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='payment_status_changes')
+    # WHAT an edit changed: {field: {'old': ..., 'new': ...}} for the changed
+    # fields only.
+    #
+    # Written for UPDATED rows and NOTHING else — every other action is a
+    # transition, not a field change, and a snapshot on those would turn this
+    # table into an event store. NULL when nothing tracked changed, so a row
+    # never claims an edit it cannot describe.
+    #
+    # Money is stored as a STRING: JSON has no decimal type, and a float would
+    # make 1000.00 read back as 999.9999999999999 in an audit record.
+    change_data = models.JSONField(null=True, blank=True, default=None)
+
+    # WHO acted, as text. Deliberately NOT a ForeignKey any more: the FK was
+    # dropped in migration 0031 because it added a join and a SET_NULL failure
+    # mode to answer a question the denormalised username already answers. All
+    # 488 rows carrying the FK also carried the username, so nothing was lost.
+    #
+    # Text also outlives the user row, which is the property an audit trail
+    # needs — a deleted account must not blank out who approved a payment.
     changed_by_username = models.CharField(max_length=150, blank=True, default='')
-    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    # `ip_address` was dropped in migration 0031. It was never shown in the
+    # business timeline, and `approval_action.ip_address` remains the forensic
+    # record for approval decisions, which is where that question is actually
+    # asked of money movement.
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:

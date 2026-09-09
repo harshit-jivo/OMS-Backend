@@ -130,10 +130,31 @@ def _extract_order_item_schemes(item, to_float, to_bool=bool):
         return [_scheme_entry(item, scheme_obj, scheme_qty, to_float, to_bool)]
     return []
 
+# The rate an FOC line carries. Free goods still need a non-zero value in SAP
+# -- an invoice totalling 0 generates no IRN -- so the billing team has always
+# keyed a token rate by hand. Kept in step with sap_sync's FOC_TOKEN_UNIT_PRICE.
+FOC_TOKEN_BASIC_PRICE = 0.001
+
+
 def _create_order_item(order, item, to_float, to_bool):
     item_schemes = _extract_order_item_schemes(item, to_float, to_bool)
     first_scheme = next((e['scheme'] for e in item_schemes if e['scheme']), None)
     total_scheme_qty = sum(e['qty'] for e in item_schemes)
+
+    qty = to_float(item.get('qty', 0))
+    basic_price = to_float(item.get('basic_price', 0))
+    price_list_basic = to_float(item.get('price_list_basic', 0))
+    total = to_float(item.get('total', 0))
+
+    if getattr(order, 'is_foc', False) and basic_price <= 0:
+        # An FOC line ships free, but a zero rate reaches SAP as either a
+        # zero-value invoice (no IRN) or -- worse -- falls through to the price
+        # list and bills the customer in full. The token rate is what the
+        # billing team has always keyed by hand; apply it here so the FOC flag
+        # alone is enough, whether it was set at entry or added afterwards.
+        basic_price = FOC_TOKEN_BASIC_PRICE
+        price_list_basic = 0
+        total = round(qty * basic_price, 4)
 
     order_item = OrderItem.objects.create(
         order=order,
@@ -143,13 +164,13 @@ def _create_order_item(order, item, to_float, to_bool):
         brand=item.get('brand', ''),
         sub_group=item.get('sub_group') or item.get('variety') or '',
         item_type=item.get('item_type', ''),
-        qty=to_float(item.get('qty', 0)),
+        qty=qty,
         pcs=to_float(item.get('pcs', 0)),
         boxes=to_float(item.get('boxes', 0)),
         ltrs=to_float(item.get('ltrs', 0)),
-        price_list_basic=to_float(item.get('price_list_basic', 0)),
-        basic_price=to_float(item.get('basic_price', 0)),
-        total=to_float(item.get('total', 0)),
+        price_list_basic=price_list_basic,
+        basic_price=basic_price,
+        total=total,
         tax_rate=to_float(item.get('tax_rate', 0)),
         scheme=first_scheme,
         qty_scheme=total_scheme_qty,

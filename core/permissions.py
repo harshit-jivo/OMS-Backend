@@ -296,6 +296,41 @@ class HasKey(BasePermission):
         return self.key in effective_keys(request.user)
 
 
+class HasAnyKey(BasePermission):
+    """Holders of ANY ONE of several registry keys.
+
+    For an endpoint that legitimately serves two screens with different gates.
+    The case it was written for: `orders/dashboardW/charts/` feeds both the
+    Sales Dashboard and the State-Wise report, so `HasKey('Sales_Dashboard')`
+    would have taken the report away from the people who hold `Reports` and
+    nothing else.
+
+    NOT a way to soften a gate. Each key listed must be one whose holder has a
+    real reason to call this endpoint — if that is not true of every key in the
+    list, the endpoint is doing two jobs and wants splitting instead.
+
+    Keys are validated against the registry at CONSTRUCTION, exactly as in
+    `HasKey`: a typo is a crash on boot, not a grant that silently never
+    matches.
+    """
+
+    message = 'You do not have permission for this action.'
+
+    def __init__(self, *keys: str):
+        if len(keys) < 2:
+            raise ValueError('HasAnyKey with fewer than two keys is HasKey — use that')
+        unknown = [k for k in keys if k not in ALL_KEYS]
+        if unknown:
+            raise ValueError(
+                f'HasAnyKey: {unknown!r} — not registered permission keys; '
+                f'add them to core/permission_registry.py first'
+            )
+        self.keys = frozenset(keys)
+
+    def has_permission(self, request, view):
+        return bool(self.keys & effective_keys(request.user))
+
+
 class HasKeyOrRole(BasePermission):
     """Transitional gate for the role -> key migration (Phase 3).
 

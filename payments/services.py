@@ -14,12 +14,12 @@ from django.utils import timezone
 from approvals import services as approval_services
 
 from . import bank_master, hana_queries
+from . import sap_company
 from .models import (
     BankDeposit,
     PaymentMethodEntry,
     PaymentReceipt,
     PaymentStatusHistory,
-    SapCompanyMap,
 )
 from .sap_payloads import build_deposit, build_incoming_payment
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def log_status(document, *, to_status, from_status='', user=None,
                actor_kind='USER', reason='', ip=None,
                action=None, level=None, level_label='',
-               sap_doc_entry=None, sap_doc_num=None):
+               sap_doc_entry=None, sap_doc_num=None, change_data=None):
     """Append one row to the activity timeline. Never updated after insert.
 
     THE single history call for the payments module — approvals, edits and SAP
@@ -38,22 +38,34 @@ def log_status(document, *, to_status, from_status='', user=None,
     `action` says WHAT happened; the status pair says what it changed. When no
     action is given it falls back to STATUS_CHANGED, which keeps older callers
     working without claiming an event they did not record.
+
+    `change_data` describes WHICH FIELDS an edit changed, and is accepted only
+    on UPDATED. Every other action is a transition, not a field change, so a
+    diff on one would be describing something that did not happen — it is
+    dropped rather than stored, so no caller can quietly create that row.
+
+    `actor_kind`, `ip`, `sap_doc_entry` and `sap_doc_num` are STILL ACCEPTED and
+    deliberately ignored — their columns were dropped in migration 0031. Keeping
+    the keywords means the dozen call sites that pass them (hooks.py,
+    sap_poster.py, the test suite) keep working untouched; removing them would
+    turn a schema cleanup into a rewrite of every writer, with a TypeError at
+    each one that was missed. They can be deleted from the signature once the
+    call sites are tidied, which is a separate, mechanical change.
     """
+    resolved_action = action or PaymentStatusHistory.Action.STATUS_CHANGED
+    if resolved_action != PaymentStatusHistory.Action.UPDATED:
+        change_data = None
     return PaymentStatusHistory.objects.create(
         content_type=ContentType.objects.get_for_model(document.__class__),
         object_id=document.pk,
-        action=action or PaymentStatusHistory.Action.STATUS_CHANGED,
+        action=resolved_action,
         from_status=from_status or '',
         to_status=to_status,
         reason=reason or '',
-        actor_kind=actor_kind,
         level=level,
         level_label=level_label or '',
-        sap_doc_entry=sap_doc_entry,
-        sap_doc_num=sap_doc_num,
-        changed_by=user,
         changed_by_username=getattr(user, 'username', '') or '',
-        ip_address=ip,
+        change_data=change_data,
     )
 
 
@@ -107,21 +119,14 @@ def record_sap_history(document, *, action, status, response='',
 
 
 def resolve_company_db(company):
-    """category -> SAP company DB, from the mapping table.
+    """category -> SAP company DB, from the ENVIRONMENT.
 
-    Replaces resolve_company_db_for_order (sync_service.py:301), which reads
-    ITEM categories (a payment has none) and silently routes MART to OIL.
+    Delegates to the canonical resolver every other module already uses, so a
+    payment and the invoice it settles can never disagree about which company
+    they belong to. TEST and LIVE are separated by deployment configuration
+    rather than by a row in a payments table.
     """
-    return _company_mapping(company).company_db
-
-
-def _company_mapping(company):
-    mapping = SapCompanyMap.objects.filter(company=company, is_active=True).first()
-    if not mapping:
-        raise ValidationError(
-            f'No active SAP company mapping for "{company}". '
-            f'Configure it before taking payments for this company.')
-    return mapping
+    return sap_company.resolve_company_db(company)
 
 
 def resolve_bpl_id(company, receipt=None):
@@ -137,7 +142,8 @@ def resolve_bpl_id(company, receipt=None):
       1. the branch on the SAP invoice being settled (the authority)
       2. `branches` (sap_sync.Branch) when the invoice names a branch but not
          its id — the mapping table already mirrored from SAP per company
-      3. SapCompanyMap.default_bpl_id, ONLY for an advance, which settles no
+      3. the environment default branch, ONLY for an advance with no branch
+         selected (legacy rows) and for a deposit, neither of which settles an
          invoice and so has no branch to inherit
 
     Raises ValidationError rather than guessing when invoices disagree, when a
@@ -145,7 +151,10 @@ def resolve_bpl_id(company, receipt=None):
     wrong ledger is worse than not posting.
     """
     if receipt is None:
-        return _company_mapping(company).default_bpl_id
+        # A deposit: it settles no invoice and has no branch picker, so the
+        # environment default is the only source. Unchanged behaviour — this
+        # read the company mapping's default_bpl_id before.
+        return sap_company.default_bpl_id(company)
 
     doc_entries = [a.sap_doc_entry for a in receipt.allocations.all()
                    if a.sap_doc_entry]
@@ -160,9 +169,9 @@ def resolve_bpl_id(company, receipt=None):
             return chosen
         # Legacy rows only — raised before this field existed. A new advance
         # cannot be submitted without a branch (see validate_receipt).
-        bpl = _company_mapping(company).default_bpl_id
+        bpl = sap_company.default_bpl_id(company)
         logger.info('BPL resolve %s: advance, no branch selected -> BPLID %s '
-                    '(source: company default, legacy)',
+                    '(source: environment default, legacy)',
                     receipt.receipt_no, bpl)
         return bpl
 
@@ -346,6 +355,22 @@ def submit_receipt(receipt, user, ctx=None):
         raise ValidationError(
             f'A {receipt.get_status_display().lower()} receipt cannot be submitted.')
 
+    # THE VERIFICATION GATE. Placed here, in the one function every path into
+    # approval calls, so it cannot be bypassed by another route — the submit
+    # endpoint, the verify endpoint and any future caller all pass through it.
+    #
+    # It sits AFTER the status check so the more specific message wins: a
+    # posted receipt should be told it is posted, not that it needs verifying.
+    #
+    # Applies equally to the REJECTED and PENDING_ERROR retry paths. Those
+    # receipts were verified before their first submission and stay VERIFIED
+    # (verification is never rewound), so in practice this never blocks them —
+    # but a receipt that somehow reaches those states unverified must not slip
+    # into approval through the back door.
+    if receipt.verification_status != PaymentReceipt.VerificationStatus.VERIFIED:
+        raise ValidationError(
+            'Payment must be verified before it can be submitted for approval.')
+
     validate_receipt(receipt)
     previous = receipt.status
 
@@ -360,8 +385,14 @@ def submit_receipt(receipt, user, ctx=None):
     )
     receipt.status = PaymentReceipt.Status.PENDING_APPROVAL
     receipt.save(update_fields=['status', 'updated_at'])
+    # PENDING_APPROVAL, not the STATUS_CHANGED default: entering the approval
+    # chain is the business event, and an untagged row read as an anonymous
+    # transition sitting between VERIFIED and APPROVED. The status assignment
+    # above is untouched.
     log_status(receipt, from_status=previous, to_status=receipt.status,
-               user=user, reason='Submitted for approval.',
+               user=user,
+               action=PaymentStatusHistory.Action.PENDING_APPROVAL,
+               reason='Submitted for approval.',
                ip=(ctx or {}).get('ip'))
 
     # Only a resubmission after a SAP failure belongs in the SAP history — a
@@ -383,6 +414,87 @@ def submit_receipt(receipt, user, ctx=None):
     return receipt
 
 
+def verify_receipt(receipt_id, user, *, remarks='', ctx=None):
+    """Verify a receipt (the handover check) and send it into approval.
+
+    ONE transaction, deliberately. Verification and submission must not come
+    apart: a receipt marked VERIFIED that never entered the approval chain is
+    invisible in both queues — gone from the verifier's list, absent from the
+    approver's — and only a database read would find it. If the submission
+    raises, the verification is rolled back with it and the receipt stays in
+    the verifier's queue where somebody can act on it.
+
+    Takes an ID rather than an instance: the row is re-read under
+    `select_for_update()` inside the lock, so a caller cannot hand us a stale
+    copy whose verification_status was read before another transaction changed
+    it. This is the pattern `sap_poster.post_document` already uses to keep
+    "one OMS receipt -> one SAP payment" true, applied to the same class of
+    race.
+
+    Returns the verified, submitted receipt.
+    """
+    with transaction.atomic():
+        # The lock is held for the whole body — verification, history and
+        # submission — so a second verifier blocks here and then reads the
+        # committed VERIFIED state below rather than racing past it.
+        receipt = (PaymentReceipt.objects
+                   .select_for_update()
+                   .get(pk=receipt_id))
+
+        # Duplicate verification. Read from the LOCKED row, never from a copy
+        # fetched before the lock: that is the whole point of re-reading here.
+        if receipt.verification_status == PaymentReceipt.VerificationStatus.VERIFIED:
+            who = (getattr(receipt.verified_by, 'name', None)
+                   or getattr(receipt.verified_by, 'username', None)
+                   or 'another user')
+            raise ValidationError(
+                f'{receipt.receipt_no} has already been verified by {who}.')
+
+        # Separation of duties. The reason verification exists is to put a
+        # second pair of eyes on physical money, so the creator verifying their
+        # own entry would return the system to exactly the state it had before
+        # this feature. `approvals` takes the same position on approval
+        # (forbid_self_approval), and this mirrors it.
+        if receipt.created_by_id == getattr(user, 'id', None):
+            raise ValidationError('You cannot verify a payment you created.')
+
+        # A receipt already in SAP is finished; verifying it would imply a
+        # handover check on money that has already been posted and settled.
+        if receipt.sap_doc_entry:
+            raise ValidationError(
+                f'{receipt.receipt_no} is already posted to SAP as DocEntry '
+                f'{receipt.sap_doc_entry} and cannot be verified.')
+
+        previous = receipt.verification_status
+        receipt.verification_status = PaymentReceipt.VerificationStatus.VERIFIED
+        receipt.verified_by = user
+        receipt.verified_at = timezone.now()
+        if remarks:
+            receipt.verification_remarks = remarks
+        receipt.save(update_fields=['verification_status', 'verified_by',
+                                    'verified_at', 'verification_remarks',
+                                    'updated_at'])
+
+        # The audit trail is PaymentStatusHistory and nothing else — the model
+        # columns above are a queryable projection of this row. The status pair
+        # records the VERIFICATION axis, which is what actually changed; the
+        # main status is still DRAFT at this point and is moved by the submit
+        # below, which logs its own row.
+        log_status(receipt, from_status=previous,
+                   to_status=receipt.verification_status,
+                   user=user,
+                   action=PaymentStatusHistory.Action.VERIFIED,
+                   reason=remarks or 'Payment verified.',
+                   ip=(ctx or {}).get('ip'))
+
+        # Into the EXISTING chain, through the one entry point. The guard in
+        # submit_receipt now passes because the row above is VERIFIED within
+        # this transaction. Nothing about the approval engine changes.
+        submit_receipt(receipt, user, ctx=ctx)
+
+    return receipt
+
+
 def _bank_accounts_for(company, receipt=None):
     """method -> SAP G/L account, for payload building.
 
@@ -390,7 +502,7 @@ def _bank_accounts_for(company, receipt=None):
     administrator's payment-method mapping. No user ever types or picks a G/L:
     they choose a tender, and the account follows from configuration.
 
-        CASH   -> SapCompanyMap.cash_gl_account (a drawer is not a house bank)
+        CASH   -> the CASH method mapping's gl_account (not a house bank)
         UPI    -> the account mapped for UPI
         CHEQUE -> the account mapped for cheques; the payer's bank is a
                   separate field on the line and is sent as BankCode
@@ -630,20 +742,16 @@ def post_deposit_to_sap(deposit, user=None):
     # full physical amount (cash + cheques), which is what the employee
     # actually carried to the bank; the two figures answer different questions
     # and must not be reconciled into one.
-    # The G/L being emptied. Same field the RECEIPTS debited
-    # (bank_master.cash_gl -> SapCompanyMap.cash_gl_account), so the clearing
-    # account provably nets to zero. Fail here rather than post a document
-    # with a blank CardCode.
-    # The G/L being emptied. NOT cash_gl(): SAP rejects a cash-flow account
-    # (OACT.Finanse='Y') as the CardCode of a DocType 'A' transfer, and the
-    # cash drawer G/L is exactly that. deposit_source_gl() returns the
-    # configured clearing account, falling back to the cash G/L when unset.
+    # The G/L being emptied — the same account the RECEIPTS debited, so the
+    # clearing account provably nets to zero. Verified against live SAP:
+    # deposits 21977 and 21963 posted Dr 2201102 / Cr 1105001 with 1105001 as
+    # the CardCode. Fail here rather than post a document with a blank one.
     source_gl = bank_master.PaymentAccountResolver(
         deposit.company).deposit_source_gl()
     if not source_gl:
         raise ValidationError(
-            f'No deposit source G/L is configured for {deposit.company}. Set '
-            f'it on the company mapping before depositing.')
+            f'No cash G/L is configured for {deposit.company}. Set it on the '
+            f'CASH payment-method mapping before depositing.')
 
     payload = build_deposit(
         deposit,

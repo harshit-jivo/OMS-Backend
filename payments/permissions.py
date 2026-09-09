@@ -31,6 +31,12 @@ from core.permissions import is_admin
 # ---------------------------------------------------------------------------
 
 PAYMENTS_CREATE = 'Payments_Create'
+# The handover gate: check the physical money against the entry before it may
+# enter the approval chain. Registered in core/permission_registry.py too —
+# BOTH are required. The registry is what `effective_keys` intersects against,
+# so a key missing there is dropped from the `permissions[]` the clients read;
+# this list is what `granted_keys` and /my-permissions/ answer from.
+PAYMENTS_VERIFY = 'Payments_Verify'
 PAYMENTS_APPROVE = 'Payments_Approve'
 DEPOSIT_CREATE = 'Deposit_Create'
 DEPOSIT_APPROVE = 'Deposit_Approve'
@@ -44,6 +50,7 @@ PAYMENTS_DASHBOARD = 'Payments_Dashboard'
 
 ACTION_PERMISSION_KEYS = [
     PAYMENTS_CREATE,
+    PAYMENTS_VERIFY,
     PAYMENTS_APPROVE,
     DEPOSIT_CREATE,
     DEPOSIT_APPROVE,
@@ -54,6 +61,7 @@ ACTION_PERMISSION_KEYS = [
 # clients never hardcode their own copy of this wording.
 ACTION_PERMISSION_LABELS = {
     PAYMENTS_CREATE: 'Payments — Create',
+    PAYMENTS_VERIFY: 'Payments — Verify (handover)',
     PAYMENTS_APPROVE: 'Payments — Approve',
     DEPOSIT_CREATE: 'Deposit — Create',
     DEPOSIT_APPROVE: 'Deposit — Approve',
@@ -127,6 +135,18 @@ class _KeyPermission(BasePermission):
 class CanCreatePayment(_KeyPermission):
     key = PAYMENTS_CREATE
     message = 'You do not have permission to create payment receipts.'
+
+
+class CanVerifyPayment(_KeyPermission):
+    """Holders may verify (hand over) a payment receipt.
+
+    Capability only. Two further checks live on the endpoint because they are
+    per-record, not per-user: the receipt must still be PENDING verification,
+    and the creator may never verify their own receipt.
+    """
+
+    key = PAYMENTS_VERIFY
+    message = 'You do not have permission to verify payment receipts.'
 
 
 class CanApprovePayment(_KeyPermission):
