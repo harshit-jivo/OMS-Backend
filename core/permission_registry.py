@@ -48,6 +48,15 @@ REGISTRY: dict[str, dict[str, str]] = {
         'orders.decision.simple':   'Approve/reject orders (simple flow)',
         'orders.status.transition': 'Move orders through the status flow',
         'orders.mart.decide':       'Approve/reject Mart (distributor) orders',
+        # Company-wide visibility, as opposed to `orders.sales.view`, which is
+        # the right to see the orders already IN YOUR SCOPE. `_get_base_orders`
+        # decides that scope, and it did so by matching `user.role.name`
+        # against seven literals -- so any role outside that list fell through
+        # to `Order.objects.none()` and its holder got a dashboard of zeroes
+        # rather than a refusal. This key is how a role says "no scoping",
+        # without a new literal having to be added to that function each time
+        # an administrator invents a role.
+        'orders.sales.view_all':    'View every order, company-wide',
     },
 
     # --- Admin pages (legacy extra_pages keys, verbatim from

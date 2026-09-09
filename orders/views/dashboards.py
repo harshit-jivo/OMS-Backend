@@ -34,6 +34,7 @@ from ._shared import (
     BILLING_DECISION_ACTION_IDS,
     BILLING_REJECTED_ACTION_ID,
     _get_base_orders,
+    sees_all_orders,
 )
 
 
@@ -291,7 +292,10 @@ class WDashboardKPIView(APIView):
 
         role = getattr(request.user, 'role', None)
         role_name = getattr(role, 'name', '').lower() if role else ''
-        if role_name == 'admin':
+        # Keyed, not role-named — see `sees_all_orders`. A custom role granted
+        # company-wide visibility gets the headcount tile too, instead of the
+        # tile silently vanishing for everyone who is not literally 'admin'.
+        if sees_all_orders(request.user):
             user_counts = {
                 'manager': User.objects.filter(role__name__iexact='manager', is_active=True).count(),
                 'auditor': User.objects.filter(role__name__iexact='auditor', is_active=True).count(),
@@ -760,7 +764,8 @@ class WDashboardChartsView(APIView):
         ]
 
         # CHART 5: Category-wise Sales (selected month)
-        category_order_scope = completed_orders if role_name == 'admin' else filtered_orders
+        category_order_scope = (completed_orders if sees_all_orders(request.user)
+                                else filtered_orders)
         category_sales = (
             OrderItem.objects
             .filter(order__in=category_order_scope)
