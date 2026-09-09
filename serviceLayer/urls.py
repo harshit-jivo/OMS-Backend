@@ -4,6 +4,7 @@ from .ap_views import (
     OpenGRPOListView,
     GRPODetailView,
     VendorTDSView,
+    APAttachmentUploadView,
     APInvoiceCreateView,
 )
 
@@ -16,5 +17,6 @@ urlpatterns = [
     path('ap/open-grpos/', OpenGRPOListView.as_view()),
     path('ap/grpo/', GRPODetailView.as_view()),
     path('ap/vendor-tds/', VendorTDSView.as_view()),
+    path('ap/attachment/', APAttachmentUploadView.as_view()),
     path('ap/invoice/', APInvoiceCreateView.as_view()),
 ]
