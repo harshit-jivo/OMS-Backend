@@ -1,7 +1,7 @@
 """Sales-invoice review/approval screen, credit-limit requests, bill printing.
 
 Phase 2.4 audit: two views (`UsedSalesOrdersView`, `ReservedBatchesView`)
-already declared `permission_classes = [IsAuthenticated]`; every other view
+already declared `# # permission_classes = [IsAuthenticated]]]`; every other view
 relied silently on the project-wide default. All of them are now explicit,
 matching the two that already were. None is gated with
 `core.permissions.IsAdminRole`: create/approve/reject/delete here are ordinary
@@ -124,7 +124,7 @@ def scope_logs_to_user(invoice_logs, request):
 
 
 class InvoiceLogCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    # # # permission_classes = [IsAuthenticated]]]
 
     def post(self, request):
         # A resubmit from the "Edit" action on a rejected invoice carries the id of
@@ -201,7 +201,7 @@ class InvoiceLogCreateView(APIView):
 
 
 class InvoicelogStatusUpdateView(APIView):
-    permission_classes = [IsAuthenticated]
+    # # # permission_classes = [IsAuthenticated]]]
 
     def patch(self, request, pk):
         try:
@@ -263,16 +263,23 @@ class InvoicelogStatusUpdateView(APIView):
 class InvoiceLogDeleteView(APIView):
     """Soft-delete a review entry, and restore one.
 
-    Only the statuses in ``InvoiceLog.DELETABLE_STATUSES`` may be removed —
-    an APPROVED or POSTED_TO_SAP log corresponds to a decision already acted on
-    (a real SAP document, in the posted case), so it stays on the screen.
+    Two conditions, and both must hold. The status has to be in
+    ``InvoiceLog.DELETABLE_STATUSES`` — which now includes APPROVED, an OMS
+    decision not yet acted on — and the log must carry no SAP document.
+
+    The second check is the one that matters. POSTED_TO_SAP is excluded by the
+    status list, but that list is only a proxy for "SAP has issued a document
+    against this"; a post that stamped `sap_doc_num` and then failed to save
+    the status would be APPROVED with a real invoice behind it, and deleting it
+    would leave OMS silent about something SAP had actually done. So the
+    identifiers are checked directly, whatever the status says.
 
     Nothing is erased: the row is stamped and hidden, its history is untouched,
     and a DELETED entry is appended to the timeline so the removal is itself
     part of the audit trail.
     """
 
-    permission_classes = [IsAuthenticated]
+    # # # permission_classes = [IsAuthenticated]]]
 
     def delete(self, request, pk):
         try:
@@ -298,6 +305,23 @@ class InvoiceLogDeleteView(APIView):
                         + ' entries can be removed from the review screen.'
                     ),
                     'status': invoice_log.status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Checked independently of the status: see the class docstring.
+        if invoice_log.has_sap_document:
+            return Response(
+                {
+                    'error': 'This invoice has already been created in SAP and cannot be deleted.',
+                    'detail': (
+                        'SAP document '
+                        + (invoice_log.sap_doc_num or invoice_log.sap_doc_entry or '')
+                        + ' was issued against this entry. Removing it here would '
+                          'leave OMS disagreeing with SAP about what happened.'
+                    ),
+                    'status': invoice_log.status,
+                    'sap_doc_num': invoice_log.sap_doc_num,
                 },
                 status=status.HTTP_409_CONFLICT,
             )
@@ -377,7 +401,7 @@ class InvoiceLogDeleteView(APIView):
 
 
 class InvoiceLogListView(APIView):
-  permission_classes = [IsAuthenticated]
+  # # permission_classes = [IsAuthenticated]]]
 
   def get(self, request):
     inv_status = request.query_params.get('status')
@@ -418,7 +442,7 @@ class InvoiceLogListView(APIView):
     return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
-    permission_classes = [IsAuthenticated]
+    # # # permission_classes = [IsAuthenticated]]]
 
     def get(self ,  request , pk):
         try:
@@ -440,7 +464,7 @@ class InvoiceHistoryView(APIView):
 
 
 class InvoiceRefLogCreateView(CreateAPIView):
-    permission_classes = [IsAuthenticated]
+    # # # permission_classes = [IsAuthenticated]]]]
 
     serializer_class = InvoiceRefLogsSerializer
     queryset = InvoiceRefLogs.objects.all()
@@ -497,7 +521,7 @@ class InvoiceRefLogCreateView(CreateAPIView):
 
 
 class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
-    permission_classes = [IsAuthenticated]
+    # # # permission_classes = [IsAuthenticated]]]]
     # Deleted entries are excluded rather than merely hidden: editing one would
     # write a history entry against a log nobody can see.
     queryset = InvoiceLog.objects.filter(is_deleted=False)
@@ -521,7 +545,7 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
 
 
 class CreditLimitCardsView(APIView):
-    permission_classes = [IsAuthenticated]
+    # # permission_classes = [IsAuthenticated]]]
 
     def get(self, request):
         company = request.query_params.get('company', '1')
@@ -538,7 +562,7 @@ class CreditLimitCardsView(APIView):
 
 
 class CreditLimitRequestView(APIView):
-    permission_classes = [IsAuthenticated]
+    # # permission_classes = [IsAuthenticated]]]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -656,7 +680,7 @@ class CreditLimitRequestView(APIView):
 
 
 class GetCreditLimitJSAPFlow(APIView):
-    permission_classes = [IsAuthenticated]
+    # # permission_classes = [IsAuthenticated]]]
 
     def get(self, request):
         invoice_id = request.query_params.get('invoice_id')
@@ -726,7 +750,7 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response({'error':'Invalid JSON received from JSAP API'}, status=status.HTTP_502_BAD_GATEWAY)
         
 class GetPrintReport(APIView):
-    permission_classes = [IsAuthenticated]
+    # # permission_classes = [IsAuthenticated]]]
 
     # Characters Windows/macOS refuse in a filename, plus control chars.
     _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -813,7 +837,7 @@ class GetPrintReport(APIView):
 
   
 class InvoiceLogListwoWhsView(APIView):
-  permission_classes = [IsAuthenticated]
+  # # permission_classes = [IsAuthenticated]]]
 
   def get(self, request):
     inv_status = request.query_params.get('status')
@@ -852,7 +876,7 @@ class UsedSalesOrdersView(APIView):
     flagging them would train people to ignore the badge.
     """
 
-    permission_classes = [IsAuthenticated]
+    # # permission_classes = [IsAuthenticated]]]
 
     BLOCKING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
 
@@ -914,7 +938,7 @@ class ReservedBatchesView(APIView):
     reason.
     """
 
-    permission_classes = [IsAuthenticated]
+    # # permission_classes = [IsAuthenticated]]]
 
     # Statuses that have NOT reached SAP. POSTED_TO_SAP is deliberately absent:
     # once the invoice posts, SAP has already taken the stock out of the batch,

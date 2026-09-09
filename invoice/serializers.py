@@ -69,7 +69,14 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
         return item_names_for_log(obj, self.context.get(ITEM_NAME_CONTEXT_KEY))
 
     def get_can_delete(self, obj):
-        return not obj.is_deleted and obj.status in InvoiceLog.DELETABLE_STATUSES
+        # Mirrors InvoiceLogDeleteView exactly, including the SAP-document
+        # guard: offering a button the endpoint then refuses with a 409 is the
+        # worse of the two failures.
+        return (
+            not obj.is_deleted
+            and obj.status in InvoiceLog.DELETABLE_STATUSES
+            and not obj.has_sap_document
+        )
 
 class InvoiceRefLogsSerializer(serializers.ModelSerializer):
     class Meta:
