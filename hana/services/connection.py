@@ -110,6 +110,41 @@ class HANAConnection:
 
 
 
+#: (schema, table, column) -> exists. A SAP user-defined field is created by an
+#: administrator in the SAP client, not at runtime, so caching for the life of
+#: the process is safe; a restart picks up a newly added one.
+_COLUMN_EXISTS_CACHE = {}
+
+
+def column_exists(conn, schema, table, column):
+    """Whether `schema`.`table` actually has `column`.
+
+    SAP user-defined fields are PER COMPANY DATABASE. `U_OMS_REF` was added to
+    the oil company's ORDR and ODRF and to neither of the others, so a query
+    naming it succeeds against OIL and fails against BEVERAGES with
+
+        invalid column name: T0.U_OMS_REF
+
+    That is what took the beverage half of the SO vs AR Invoice report out
+    entirely: the view turns any HANA error into a 502, and the page renders
+    the empty result as "no orders" rather than as a failure.
+
+    Checking beats hardcoding `if branch == 'BEVERAGE'`: the field can be added
+    to another company at any time by someone who will not think to edit this
+    file, and the report should start showing it when they do — and stop if it
+    is ever removed from OIL.
+    """
+    key = (schema, table, column)
+    if key not in _COLUMN_EXISTS_CACHE:
+        rows = conn.execute(
+            'SELECT 1 AS "found" FROM SYS.TABLE_COLUMNS '
+            'WHERE SCHEMA_NAME = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+            [schema, table, column],
+        )
+        _COLUMN_EXISTS_CACHE[key] = bool(rows)
+    return _COLUMN_EXISTS_CACHE[key]
+
+
 class Queries():
     OIL_SCHEMA = settings.DATABASES['hana']['OIL_SCHEMA']
     BEVERAGE_SCHEMA = settings.DATABASES['hana']['BEVERAGE_SCHEMA']
@@ -659,8 +694,15 @@ class Queries():
         """, params
 
     @staticmethod
-    def get_pending_dispatch(branch, from_date=None, to_date=None):
+    def get_pending_dispatch(branch, from_date=None, to_date=None,
+                             has_oms_ref=True):
         """Open sales-order lines and what has been invoiced against them.
+
+        `has_oms_ref` says whether this company's ORDR carries the `U_OMS_REF`
+        user-defined field. It does in OIL and in neither of the others, and
+        naming a column that is not there fails the WHOLE query — so when it is
+        absent the report selects NULL for it and still runs. The caller
+        establishes this with `column_exists`; see the note there.
 
         The "Sales Order vs AR Invoice" report: one row per open SO line, with
         the quantity ordered, the quantity already billed, and what is still
@@ -679,6 +721,12 @@ class Queries():
             s = Queries.BEVERAGE_SCHEMA
         else:
             s = Queries.OIL_SCHEMA
+
+        # NVARCHAR rather than a bare NULL so the column keeps a stable type
+        # across companies and the consumers (and the Excel export) see the
+        # same shape whichever branch was asked for.
+        oms_ref = ('T0."U_OMS_REF"' if has_oms_ref
+                   else 'CAST(NULL AS NVARCHAR(254))')
 
         # Every line of an open order, not just the open ones: a line already
         # billed in full closes and would otherwise vanish, leaving the order's
@@ -704,7 +752,7 @@ class Queries():
                 T0."CardCode"        AS "card_code",
                 T0."CardName"        AS "party_name",
                 T0."NumAtCard"       AS "po_number",
-                T0."U_OMS_REF"       AS "oms_ref",
+                {oms_ref}            AS "oms_ref",
                 T0."U_OMS_Order_No"  AS "oms_order_no",
                 T5."SlpName"         AS "so_name",
                 T4."U_Chain"         AS "chain",
