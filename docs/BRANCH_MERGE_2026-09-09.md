@@ -183,7 +183,50 @@ rollback: the four deleted revert migrations no longer exist on the branch, so
 
 ---
 
-## 8. Known drift between live and the test database
+## 8. What actually happened on the live run (2026-09-09)
+
+Both blockers were data, not code, and both were guards doing their job. Neither
+could have shown up on the test database, because in each case live's data
+differs from test's.
+
+**`orders/0063_consolidate_rejection_reason` refused to run.** It consolidates
+two columns onto `rejection_reason`, and asserts first that no row disagrees.
+On test, 132 rows were affected and *zero* disagreed. On live, 90 did — because
+the two columns hold two different facts here: `rejection_reason` has the human
+reason ('rate revise', 'Wrong party'), while `reject_reason` has also been used
+by the status-transition path for remarks ('Approved', 'Accepted by billing').
+
+The guard mattered more than the 90 rows it named. 0063's UPDATE would have
+written **1,847** rows on live, and **1,503 of them (81%)** carried one of five
+machine-written transition remarks — including `'Approved'` **621 times** —
+into the column `orders/views/mart.py` serves to MartApproval as the rejection
+reason.
+
+Resolution: 0063 faked on live (it ran for real on test, and remains the record
+of that), and `orders/0064_consolidate_rejection_reason_live` added to do the
+copy 0063 intended, excluding those five remarks by exact match. It moved the
+344 genuine orphaned reasons across: `rejection_reason` went 155 → 499
+populated, with zero remarks leaked.
+
+**`tracker/0022_..._one_open_visit_per_stage` could not build its index.** Live
+had 8 `(invoice, stage)` pairs with two open visits. They were two problems:
+
+* six were the legacy artifact `StageEvent.EventType.NOTE` was introduced to
+  fix — an annotation written as RECEIVE with `entered_at` copied from the real
+  visit. Converted to `NOTE`, which is what today's code writes.
+* two were stale REJECTED visits at stage 5 from 24 Aug that never got their
+  written reason, with a genuine re-receive later. The earlier visit was closed
+  at the moment the later one began. This drops them out of the tracker's
+  `awaiting_remarks` queue — intended, but a visible change.
+
+`scripts/fix_duplicate_open_stage_events.sql` does both, and is idempotent.
+
+Final state: 328 migrations recorded (250 + 78), nothing pending,
+`manage.py check` clean, 2,818 orders and 6,741 order items intact.
+
+---
+
+## 9. Known drift between live and the test database
 
 Pre-existing, unrelated to this merge, and invisible to every Django check —
 worth knowing before you treat 10.10.101.117 as a rehearsal for live:
