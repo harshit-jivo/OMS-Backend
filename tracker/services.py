@@ -29,6 +29,15 @@ REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 # Stages that only apply to certain invoices. Bilty/GRPO is a Transport-only
 # desk — non-Transport invoices skip it and go straight to Pre-Audit.
 TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
+
+PRE_AUDIT_STAGE_CODE = 'pre_audit'
+TRANSPORT_APPROVAL_STAGE_CODE = 'transport_approval'
+# Stages reached by a DETOUR, never as the next step along the line. They are
+# excluded from `stage_route` on purpose: Pre-Audit's linear neighbour must stay
+# Data Entry, and the detour is applied as an override in `_detour_target`. If
+# one of these ever appeared in the route, `_route_neighbour` would walk into it
+# for every invoice, Transport or not.
+DETOUR_STAGE_CODES = {TRANSPORT_APPROVAL_STAGE_CODE}
 # The JSAP desk mirrors a decision taken in the JSAP system. Mart invoices are
 # not budget-approved there at all, so they skip the desk entirely.
 JSAP_STAGE_CODE = 'jsap_approval'
@@ -147,14 +156,64 @@ def _is_transport(invoice):
 
 
 def stage_route(invoice):
-    """The ordered stages this invoice actually travels through.
+    """The ordered stages this invoice actually travels through, IN LINE.
 
     Non-Transport invoices skip the Bilty/GRPO desk and go Entry -> Pre-Audit.
+    Detour desks (Transport Approval) are excluded for everyone — they are not
+    a step along the line, they are reached and left via `_detour_target`.
     """
-    stages = list(Stage.objects.filter(is_active=True).order_by('order'))
+    stages = [s for s in Stage.objects.filter(is_active=True).order_by('order')
+              if s.code not in DETOUR_STAGE_CODES]
     if _is_transport(invoice):
         return stages
     return [s for s in stages if s.code not in TRANSPORT_ONLY_STAGE_CODES]
+
+
+def _transport_approved(invoice):
+    """True once Transport Approval has APPROVED this invoice.
+
+    Gating on APPROVED rather than "has visited the desk" is what makes a
+    rejection mean something: a rejected invoice goes back to Pre-Audit and, on
+    the next advance, is sent to Transport Approval AGAIN. Were this merely
+    "has been there", one rejection would let the invoice slip past the desk
+    into Data Entry — the exact approval it was denied.
+    """
+    return invoice.events.filter(
+        stage__code=TRANSPORT_APPROVAL_STAGE_CODE,
+        stage_status='APPROVED',
+    ).exists()
+
+
+def _detour_target(invoice, kind):
+    """The Transport Approval detour, or None to use the normal route.
+
+        Pre-Audit --(advance, Transport, not yet approved)--> Transport Approval
+        Transport Approval --APPROVED or REJECTED----------> Pre-Audit
+
+    Both verdicts hand the invoice straight back to Pre-Audit, so the desk is
+    entered and left from the same place; the SECOND Pre-Audit advance is the
+    one that continues to Data Entry. Only an ADVANCE out of Pre-Audit is
+    diverted — a RETURN from Pre-Audit still walks back down the line.
+    """
+    code = invoice.current_stage.code
+
+    if code == TRANSPORT_APPROVAL_STAGE_CODE:
+        # Leaving the desk: APPROVED (an advance) and REJECTED (a return) both
+        # land on Pre-Audit. The stage is off-route, so `_route_neighbour`
+        # cannot find it and would raise "no adjacent stage" — this is the only
+        # way out.
+        return Stage.objects.filter(
+            code=PRE_AUDIT_STAGE_CODE, is_active=True).first()
+
+    if (kind == 'ADVANCE' and code == PRE_AUDIT_STAGE_CODE
+            and _is_transport(invoice) and not _transport_approved(invoice)):
+        # Detour only exists while the desk is active and assigned; if it has
+        # been deactivated, fall through to the normal route rather than
+        # stranding the invoice.
+        return Stage.objects.filter(
+            code=TRANSPORT_APPROVAL_STAGE_CODE, is_active=True).first()
+
+    return None
 
 
 def _route_neighbour(invoice, step):
@@ -360,8 +419,11 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         )
         return invoice
 
-    # ADVANCE or RETURN both close the current visit.
-    target = _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1)
+    # ADVANCE or RETURN both close the current visit. The Transport Approval
+    # detour overrides the linear neighbour in both directions (see
+    # `_detour_target`); everything else walks the route.
+    target = (_detour_target(invoice, kind)
+              or _route_neighbour(invoice, +1 if kind == 'ADVANCE' else -1))
     if target is None:
         raise ValidationError('No adjacent stage to move to.')
 
