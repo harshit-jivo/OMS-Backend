@@ -514,15 +514,14 @@ class MyQueueView(APIView):
     creator. Returns every stage the user works (so all their desks show as tabs
     even when empty) alongside the pending invoices.
 
-    ORDER IS FIFO BY ARRIVAL AT THE DESK — oldest wait first. This is a
-    deliberate override of `Invoice.Meta.ordering = ['-created_at']`, which
-    sorted the queue by when the invoice was *created*, newest first. Those two
-    are not the same thing and the difference is not cosmetic: an invoice
-    raised weeks ago that reaches this desk today would sink to the bottom of
-    the list, while a brand-new one that just entered the flow sat on top — so
-    the handler worked the newest arrival and the longest-waiting invoice was
-    the last thing seen, which is the opposite of a queue and exactly what the
-    stuck-beyond-threshold alert then fired on.
+    ORDER IS BY ARRIVAL AT THIS DESK, NEWEST FIRST — the invoice that just
+    landed is on top. This is a deliberate override of
+    `Invoice.Meta.ordering = ['-created_at']`, which sorted by when the invoice
+    was *created*. Those two are not the same thing: an invoice raised weeks ago
+    that reaches this desk today belongs at the top (it is the newest ARRIVAL),
+    but `-created_at` buried it below invoices that have sat here for days.
+    Sorting on arrival also makes the order stable — creation order says nothing
+    about a desk an invoice reached later, or reached twice.
 
     `current_stage_entered_at` is the arrival stamp (reset on every hop, including
     a RETURN back to an earlier desk), so a returned invoice correctly re-queues
@@ -547,7 +546,7 @@ class MyQueueView(APIView):
         ).filter(
             current_stage_id__in=stage_ids,
             status=Invoice.Status.IN_PROGRESS,
-        ).order_by('current_stage_entered_at', 'id')
+        ).order_by('-current_stage_entered_at', '-id')
 
         invoices = list(qs)
         counts = {}

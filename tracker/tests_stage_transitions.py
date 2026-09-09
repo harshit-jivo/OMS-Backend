@@ -64,13 +64,13 @@ class TrackerFlowTestCase(TestCase):
             UserStageAccess.objects.get_or_create(
                 user=user, stage=self.stages[code], defaults={'is_active': True})
 
-    def make_invoice(self, category=None, created_by=None):
+    def make_invoice(self, category=None, created_by=None, number='INV-1'):
         return create_invoice(
             created_by=created_by or self.clerk,
             invoice_date=date(2026, 8, 1),
             effective_month=date(2026, 8, 1),
             party_name='ACME',
-            invoice_number='INV-1',
+            invoice_number=number,
             taxable_value=Decimal('1000.00'),
             invoice_value=Decimal('1180.00'),
             gst_type=self.gst_type,
@@ -501,3 +501,74 @@ class StageEventTests(TrackerFlowTestCase):
             invoice=invoice, event_type=StageEvent.EventType.NOTE).first()
         self.assertIsNotNone(note)
         self.assertIsNone(note.exited_at)
+
+
+class TransportApprovalDetourTests(TrackerFlowTestCase):
+    """Transport Approval is a DETOUR off Pre-Audit, not a step in the line.
+
+        Pre-Audit --(1st advance, Transport only)--> Transport Approval
+        Transport Approval --APPROVED or REJECTED--> Pre-Audit
+        Pre-Audit --(advance, once approved)-------> Data Entry
+
+    So a Transport invoice passes Pre-Audit twice and only the SECOND advance
+    continues down the line. See `services._detour_target`.
+    """
+
+    def _advance(self, invoice, status='', remarks='ok'):
+        self.grant(self.clerk, invoice.current_stage.code)
+        return apply_action(invoice=invoice, user=self.clerk,
+                            stage_status=status, remarks=remarks)
+
+    def test_the_desk_is_not_on_anyones_linear_route(self):
+        """If it were, `_route_neighbour` would walk every invoice into it."""
+        for n, category in enumerate((self.oil, self.transport)):
+            invoice = self.make_invoice(category, number=f'ROUTE-{n}')
+            codes = [s.code for s in stage_route(invoice)]
+            self.assertNotIn('transport_approval', codes)
+
+    def test_a_transport_invoice_detours_on_the_first_pre_audit_advance(self):
+        invoice = self.move_to(self.make_invoice(self.transport), 'pre_audit')
+        invoice = self._advance(invoice, 'OK')
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+
+    def test_a_non_transport_invoice_goes_straight_to_data_entry(self):
+        invoice = self.move_to(self.make_invoice(self.oil), 'pre_audit')
+        invoice = self._advance(invoice, 'OK')
+        self.assertEqual(invoice.current_stage.code, 'data_entry')
+
+    def test_approval_hands_it_back_to_pre_audit_then_on_to_data_entry(self):
+        invoice = self.move_to(self.make_invoice(self.transport), 'pre_audit')
+        invoice = self._advance(invoice, 'OK')
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+
+        invoice = self._advance(invoice, 'APPROVED')
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+
+        # The SECOND Pre-Audit advance is the one that continues down the line.
+        invoice = self._advance(invoice, 'OK')
+        self.assertEqual(invoice.current_stage.code, 'data_entry')
+
+    def test_rejection_hands_it_back_and_it_must_go_round_again(self):
+        """The point of the gate. Were it merely "has visited the desk", one
+        rejection would let the invoice slip past into Data Entry — the exact
+        approval it was just denied."""
+        invoice = self.move_to(self.make_invoice(self.transport), 'pre_audit')
+        invoice = self._advance(invoice, 'OK')
+        invoice = self._advance(invoice, 'REJECTED', remarks='wrong bilty')
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+
+        invoice = self._advance(invoice, 'OK')
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+
+        # ...and once actually approved, it proceeds.
+        invoice = self._advance(invoice, 'APPROVED')
+        invoice = self._advance(invoice, 'OK')
+        self.assertEqual(invoice.current_stage.code, 'data_entry')
+
+    def test_a_pre_audit_return_still_walks_back_down_the_line(self):
+        """Only an ADVANCE out of Pre-Audit is diverted."""
+        invoice = self.move_to(self.make_invoice(self.transport), 'pre_audit')
+        # Pre-Audit requires a status, so the send-back carries RETURN.
+        invoice = apply_action(invoice=invoice, user=self.clerk, action='RETURN',
+                               stage_status='RETURN', remarks='send it back')
+        self.assertEqual(invoice.current_stage.code, 'bilty_grpo')
