@@ -226,31 +226,82 @@ class OrdersLogSerializer(serializers.ModelSerializer):
         ]
 
 class OrderItemSchemeSerializer(serializers.ModelSerializer):
+    """One giveaway attached to an order line.
+
+    TWO ENGINES WRITE THIS ROW, and only one of them was being read.
+
+    `scheme` points at the legacy flat `scheme_product` row. The v2 engine
+    leaves it null and fills `scheme_v2` / `benefit_item_code` instead — so
+    every v2 giveaway serialised as `scheme_name: null`, and the approval
+    screens rendered it as a bare "-" beside a quantity. An auditor was being
+    asked to approve a free line with no way to see what it was.
+
+    Both paths now answer the same two questions — what the offer is called,
+    and which item it gives away — whichever engine wrote the row.
+    """
+
     scheme_id = serializers.IntegerField(read_only=True, allow_null=True)
     scheme_name = serializers.SerializerMethodField()
     scheme_item_code = serializers.SerializerMethodField()
+    scheme_item_name = serializers.SerializerMethodField()
     scheme_qty = serializers.DecimalField(source='qty_scheme', max_digits=10, decimal_places=2, read_only=True)
 
     def get_scheme_name(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
-        if not raw_scheme_id:
-            return None
-        return (
-            SchemeProduct.objects
-            .filter(scheme_id=raw_scheme_id)
-            .values_list('scheme_name', flat=True)
-            .first()
-        )
+        if raw_scheme_id:
+            return (
+                SchemeProduct.objects
+                .filter(scheme_id=raw_scheme_id)
+                .values_list('scheme_name', flat=True)
+                .first()
+            )
+        # v2: the offer's own name, off `orders.Scheme`.
+        return getattr(getattr(obj, 'scheme_v2', None), 'name', None)
 
     def get_scheme_item_code(self, obj):
         raw_scheme_id = getattr(obj, 'scheme_id', None)
-        if not raw_scheme_id:
+        if raw_scheme_id:
+            return get_scheme_item_code_raw(raw_scheme_id)
+        # v2 snapshots the giveaway item on the row itself, so an edit to the
+        # scheme afterwards cannot change what an approved order shipped.
+        return (getattr(obj, 'benefit_item_code', '') or '').strip() or None
+
+    def get_scheme_item_name(self, obj):
+        """The giveaway item's NAME.
+
+        The approval table showed a code where every other line showed a name.
+        A STATE- or VENDOR-scoped scheme gives away items the party holds no
+        assignment for, so the client's own catalogues cannot name them — which
+        is why this is resolved here.
+        """
+        item_code = self.get_scheme_item_code(obj)
+        if not item_code:
             return None
-        return get_scheme_item_code_raw(raw_scheme_id)
+        from django.apps import apps
+
+        try:
+            Product = apps.get_model('sap_sync', 'Product')
+        except LookupError:
+            return None
+        name = (
+            Product.objects
+            .filter(item_code__iexact=item_code)
+            .values_list('item_name', flat=True)
+            .first()
+        )
+        return (name or '').strip() or None
 
     class Meta:
         model = OrderItemScheme
-        fields = ['id', 'scheme_id', 'scheme_name', 'scheme_item_code', 'scheme_qty', 'qty_scheme']
+        fields = [
+            'id', 'scheme_id', 'scheme_name',
+            'scheme_item_code', 'scheme_item_name',
+            'scheme_qty', 'qty_scheme',
+            # v2 provenance. `scope_type` / `scope_value` are how an approver
+            # sees that a giveaway came from a state-wide offer rather than
+            # something the salesperson chose.
+            'scheme_v2_id', 'benefit_item_code', 'scope_type', 'scope_value',
+        ]
 
 class OrderItemSerializer(serializers.ModelSerializer):
     scheme_id = serializers.IntegerField(read_only=True, allow_null=True)
@@ -264,6 +315,34 @@ class OrderItemSerializer(serializers.ModelSerializer):
     variety = serializers.CharField(source='sub_group', read_only=True)
     variety_type = serializers.SerializerMethodField()
     last_purchase_price = serializers.SerializerMethodField()
+    combo_parent_item_code = serializers.SerializerMethodField()
+
+    def get_combo_parent_item_code(self, obj):
+        """The paid product a mapped combo actually bills as, or None.
+
+        A combo pack ("A + B") is a wrapper around two real products. The order
+        deliberately keeps the COMBO's own code — it is what the customer
+        bought, what history shows, and what scheme triggers match on — while
+        SAP is sent the parent's code instead.
+
+        That split left the approval screens showing a code SAP never receives:
+        an auditor approved FG0000003 and FG0000076 shipped. Exposing the
+        resolved parent lets those screens show what will actually go, without
+        changing a single stored value.
+
+        The resolver is `sap_sync`'s, imported here rather than reimplemented,
+        so the two answers cannot drift. Imported inside the method because
+        `sap_sync.services.sync_service` imports from `orders`.
+        """
+        try:
+            from sap_sync.services.sync_service import _resolve_combo_parent_item_code
+        except Exception:  # pragma: no cover - sap_sync optional at import time
+            return None
+        try:
+            return _resolve_combo_parent_item_code(obj)
+        except Exception:
+            # Display only. A lookup failure must never break the order view.
+            return None
 
 
     def get_scheme_name(self, obj):
