@@ -25,7 +25,7 @@ from rest_framework.generics import ListAPIView
 from users.models import State, Company, MainGroup, UserRole, User
 from orders.models import Categories, RateApproverRule
 from ._shared import (
-    _get_user_assignment_category,
+    _get_user_assignment_categories,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,24 +69,32 @@ def _selected_csv_names(value):
 
 
 def _sync_rate_approver_rules(user):
+    """Rebuild this approver's rate rules, one per (category, sub group).
+
+    Every category the user holds, not just the primary. An approver set to
+    both OIL and BEVERAGES approves rates in both — reading `user.category`
+    alone gave them rules in one and silent gaps in the other, which shows up
+    as orders sitting in Rate Approval with nobody able to clear them.
+    """
     RateApproverRule.objects.filter(approver=user).delete()
 
     role_name = str(getattr(getattr(user, 'role', None), 'name', '') or '').strip().lower()
-    category = _get_user_assignment_category(user)
+    categories = _get_user_assignment_categories(user)
     sub_groups = _selected_csv_names(getattr(user, 'sub_group', ''))
 
-    if role_name != 'approver' or not category or not sub_groups:
+    if role_name != 'approver' or not categories or not sub_groups:
         return
 
-    for sub_group in sub_groups:
-        RateApproverRule.objects.update_or_create(
-            category=category,
-            sub_group=sub_group,
-            defaults={
-                'approver': user,
-                'is_active': True,
-            },
-        )
+    for category in categories:
+        for sub_group in sub_groups:
+            RateApproverRule.objects.update_or_create(
+                category=category,
+                sub_group=sub_group,
+                defaults={
+                    'approver': user,
+                    'is_active': True,
+                },
+            )
 
 @extend_schema(
     responses={200: ROLE_LIST_RESPONSE},

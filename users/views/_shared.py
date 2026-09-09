@@ -19,6 +19,33 @@ def _get_user_assignment_category(user):
 
 
 
+def _get_user_assignment_categories(user):
+    """All categories assigned to the user (normalized), falling back to the
+    single primary `category` FK for users created before multi-category.
+
+    Lives here rather than in `assignments`, because `orders.views.masters`
+    needs it too: the party picker scopes to the categories a user actually
+    works in, and a helper that answers "which categories is this user scoped
+    to" should have one definition, not one per app that asks.
+    """
+    names = []
+    seen = set()
+    manager = getattr(user, 'categories', None)
+    if manager is not None:
+        try:
+            for cat in manager.all():
+                name = _normalize_category(getattr(cat, 'category', cat))
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        except Exception:
+            names = []
+    if names:
+        return names
+    primary = _get_user_assignment_category(user)
+    return [primary] if primary else []
+
+
 def _normalize_category(value):
     normalized = str(value or '').strip().upper()
     return normalized or None

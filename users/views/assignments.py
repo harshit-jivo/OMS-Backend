@@ -22,6 +22,7 @@ from sap_sync.models import Party, Product, active_product_q
 from decimal import Decimal
 from django.db.models import Q
 from ._shared import (
+    _get_user_assignment_categories,
     _get_user_assignment_category,
     _normalize_category,
 )
@@ -123,27 +124,6 @@ def _get_party_for_assignment(card_code, category):
         if party:
             return party
     return queryset.order_by('id').first()
-
-
-def _get_user_assignment_categories(user):
-    """All categories assigned to the user (normalized), falling back to the
-    single primary `category` FK for users created before multi-category."""
-    names = []
-    seen = set()
-    manager = getattr(user, 'categories', None)
-    if manager is not None:
-        try:
-            for cat in manager.all():
-                name = _normalize_category(getattr(cat, 'category', cat))
-                if name and name not in seen:
-                    seen.add(name)
-                    names.append(name)
-        except Exception:
-            names = []
-    if names:
-        return names
-    primary = _get_user_assignment_category(user)
-    return [primary] if primary else []
 
 
 def _resolve_requested_category(user, requested):
@@ -429,17 +409,23 @@ class BulkAssignUsersPartiesView(APIView):
                 errors.append(f'Row {row_number}: user {user_identifier} not found')
                 continue
 
-            user_category = _get_user_assignment_category(user)
-            if not user_category:
+            # Every category the user holds, in order, rather than the primary
+            # alone. A user set to both OIL and BEVERAGES has parties in both,
+            # and matching only the primary rejected each row from the other
+            # with "party not found in OIL" — which reads as bad data in the
+            # sheet rather than as a limit of the lookup.
+            user_categories = _get_user_assignment_categories(user)
+            if not user_categories:
                 errors.append(f'Row {row_number}: user {user.username} has no category')
                 continue
 
-            party = Party.objects.filter(
-                card_code=card_code,
-                category__iexact=user_category,
-            ).order_by('id').first()
+            party = (Party.objects
+                     .filter(card_code=card_code, category__in=user_categories)
+                     .order_by('id').first())
             if not party:
-                errors.append(f'Row {row_number}: party {card_code} not found in {user_category}')
+                errors.append(
+                    f'Row {row_number}: party {card_code} not found in '
+                    + '/'.join(user_categories))
                 continue
             user_category = _normalize_category(party.category)
 

@@ -23,6 +23,7 @@ from drf_spectacular.utils import (
 from sap_sync.models import Branch
 from orders.serializers import DispatchLocationSerializer, BranchSerializer, PartyAddressSerializer, ProductSerializer, StaffProductSerializer
 from orders.models import PartyProductAssignment, DispatchLocation, UserPartyAssignment, ProductDetails, Order, StaffProductPrice
+from users.views._shared import _get_user_assignment_categories
 from rest_framework.generics import ListAPIView
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -370,12 +371,29 @@ class PartyView(APIView):
             is_active=True
         ).values('card_code', 'category').distinct()
 
+        # Scope to the categories this user actually works in.
+        #
+        # An assignment can outlive the account's category: a salesperson moved
+        # from Oil to Beverages keeps whatever was assigned to them under Oil,
+        # and those parties then sit in the picker offering nothing usable —
+        # their products, rates and addresses are all category-scoped, so an
+        # order against one cannot be priced. Showing them is worse than
+        # hiding them, because the failure only appears two steps later.
+        #
+        # An empty list means "no category set", and that is deliberately NOT
+        # treated as "nothing": admins and auditors are set up without one, and
+        # scoping them to nothing would empty the picker for the people who most
+        # need to see everything. Same posture as `invoice.branches_for_user`.
+        user_categories = _get_user_assignment_categories(request.user)
+
         assignment_filters = Q()
         fallback_card_codes = []
         for assignment in assignments:
             card_code = assignment.get('card_code')
             category = str(assignment.get('category') or '').strip()
             if not card_code:
+                continue
+            if user_categories and category and category.upper() not in user_categories:
                 continue
             if category:
                 assignment_filters |= Q(card_code=card_code, category__iexact=category)
