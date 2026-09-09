@@ -16,7 +16,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from core.permissions import IsAdminRole, is_admin
+from core.permissions import HasKey, IsAdminRole, effective_keys, is_admin
 from users.models import User, UserPartyAssignment, PartyProductAssignment
 from sap_sync.models import Party, Product, active_product_q
 from decimal import Decimal
@@ -25,6 +25,35 @@ from ._shared import (
     _get_user_assignment_category,
     _normalize_category,
 )
+
+
+#: The key that governs the Party Assignment screen, for both reading someone
+#: else's assignments and rewriting them.
+PARTY_ASSIGNMENT_KEY = 'Party_Assignment'
+
+
+def _party_assignment_permissions():
+    """Gate for the Party Assignment screen: the key, not the admin role.
+
+    `Party_Assignment` was already grantable from the Permissions page and from
+    a role's bundle — but it only opened the PAGE, while every write behind it
+    still demanded `IsAdminRole`. A role granted the page therefore got a screen
+    it could read and not use, and because `Party_Assignment.tsx` catches every
+    exception alike, the 403 surfaced to the user as "check your connection".
+
+    Granting the key now carries the authority the grant implies. This is not a
+    widening of who CAN be given the power — an administrator had to tick the
+    box either way — it is the tick box finally meaning what it says.
+
+    Still a real boundary: party assignment decides which customers a
+    salesperson can see, so an ungranted user gets 403 exactly as before.
+    """
+    return [IsAuthenticated(), HasKey(PARTY_ASSIGNMENT_KEY)]
+
+
+def _may_manage_party_assignments(user):
+    """True for admins and for anyone holding the Party Assignment key."""
+    return PARTY_ASSIGNMENT_KEY in effective_keys(user)
 
 
 def _combo_free_defaults(data):
@@ -232,7 +261,8 @@ class PartyUsersView(APIView):
     reading and rewriting it belong to the assignment-management screen.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def get(self, request, card_code):
         category = _normalize_category(request.query_params.get('category'))
@@ -276,7 +306,8 @@ class AssignPartiesView(APIView):
     the company.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def post(self, request):
         user_id = request.data.get('user_id')
@@ -347,7 +378,8 @@ class AssignPartiesView(APIView):
 class BulkAssignUsersPartiesView(APIView):
     """Bulk party assignment from an upload. Administrators only."""
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def post(self, request):
         rows = request.data.get('rows', [])
@@ -954,7 +986,8 @@ class RemoveProductFromPartyView(APIView):
 class RemovePartyAssignmentView(APIView):
     """Revoke a party assignment. Administrators only."""
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def post(self, request):
         user_id = request.data.get('user_id')
@@ -1010,7 +1043,11 @@ class UserPartiesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, user_id):
-        if user_id != request.user.pk and not is_admin(request.user):
+        # Reading someone else's record is the assignment screen's job, so it
+        # follows the same key as the writes — otherwise a user granted
+        # Party_Assignment could open the page and save, but not see which
+        # parties were already ticked.
+        if user_id != request.user.pk and not _may_manage_party_assignments(request.user):
             return Response(
                 {'success': False,
                  'message': 'You may only view your own party assignments'},
