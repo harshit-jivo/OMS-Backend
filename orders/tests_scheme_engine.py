@@ -6,7 +6,7 @@ versus a whole state, and computing a giveaway off the *free* half of a 1+1 comb
 
 from decimal import Decimal
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from orders.services import scheme_engine
 from orders.models import Parties, Scheme, SchemeAssignment, SchemeBenefit, SchemeTrigger
@@ -699,3 +699,60 @@ class SchemeBoxToPiecesTests(TestCase):
         _scheme_id, qty, snapshot = entries[0]
         self.assertEqual(qty, 4.0)
         self.assertEqual(snapshot, 'FREE-4PK')
+
+
+class SchemeProposalShapeTests(SimpleTestCase):
+    """The giveaway carries its own NAME to the client.
+
+    A STATE- or VENDOR-scoped scheme deliberately gives away items the party
+    holds no assignment for, so the order form's catalogues cannot name them.
+    It fell back to the bare item code, and the Items step showed
+    "FG0000031" where every other line showed a product name.
+
+    No database: this pins the wire shape, which is the half the client
+    depends on. `_apply_box_factors` fills the value from sap_products.
+    """
+
+    def _proposal(self, **over):
+        base = dict(
+            line_index=0,
+            trigger_item_code="FG0000012",
+            scheme_id=1,
+            scheme_code="SCH-1",
+            scheme_name="BUY 1 GET 1 FREE",
+            benefit_id=2,
+            benefit_item_code="FG0000031",
+            free_uom="PCS",
+            qty=Decimal("960"),
+            qty_pieces=Decimal("960"),
+            qualifying_qty=Decimal("480"),
+            scope_type="STATE",
+            scope_value="DL",
+        )
+        base.update(over)
+        return scheme_engine.SchemeProposal(**base)
+
+    def test_the_payload_carries_the_benefit_item_name(self):
+        body = self._proposal(benefit_item_name="EXTRA LIGHT OLIVE 1 LTR").as_dict()
+
+        self.assertEqual(body["benefit_item_name"], "EXTRA LIGHT OLIVE 1 LTR")
+
+    def test_the_name_defaults_to_empty_not_missing(self):
+        # The client falls back to the item code on an empty string. A MISSING
+        # key would be an undefined read on a typed field instead.
+        body = self._proposal().as_dict()
+
+        self.assertIn("benefit_item_name", body)
+        self.assertEqual(body["benefit_item_name"], "")
+
+    def test_it_did_not_disturb_the_rest_of_the_contract(self):
+        # The client reads every one of these; adding a field must not move one.
+        body = self._proposal().as_dict()
+
+        for key in (
+            "line_index", "trigger_item_code", "scheme_id", "scheme_code",
+            "scheme_name", "benefit_id", "benefit_item_code", "free_uom",
+            "qty", "qty_pieces", "qualifying_qty", "scope_type", "scope_value",
+            "priority", "stackable", "qty_is_user_supplied",
+        ):
+            self.assertIn(key, body)

@@ -119,6 +119,18 @@ class SchemeProposal:
     # quantity is still the user's to type. Every migrated legacy scheme is one
     # of these, which is how v2 preserves today's behaviour.
     qty_is_user_supplied: bool = False
+    # The giveaway item's NAME, resolved here rather than by the client.
+    #
+    # A scope_type of STATE or VENDOR deliberately targets items the party has
+    # no assignment for, so the order form's own catalogues do not contain the
+    # benefit item and cannot name it — it fell back to showing the bare code
+    # ("FG0000031") where every other line shows a name. Blank when the product
+    # is not in sap_products, which the client renders as the code, exactly as
+    # it did before.
+    #
+    # Down here with the other defaults, because a dataclass will not accept a
+    # defaulted field ahead of a required one.
+    benefit_item_name: str = ''
 
     def as_dict(self):
         return {
@@ -129,6 +141,7 @@ class SchemeProposal:
             'scheme_name': self.scheme_name,
             'benefit_id': self.benefit_id,
             'benefit_item_code': self.benefit_item_code,
+            'benefit_item_name': self.benefit_item_name,
             'free_uom': self.free_uom,
             'qty': str(_tidy(self.qty)),
             'qty_pieces': str(_tidy(self.qty_pieces)),
@@ -415,34 +428,44 @@ def _apply_pack_factors(proposals):
     product with no usable sal_factor2 falls back to 1, which is the same
     behaviour as before this conversion existed.
     """
+    # Every giveaway needs a NAME; only BOX ones need a pack factor. One query
+    # answers both, so naming the items costs nothing on top of a lookup that
+    # was already happening.
+    all_codes = {p.benefit_item_code for p in proposals if p.benefit_item_code}
     box_codes = {
         p.benefit_item_code
         for p in proposals
         if p.free_uom == 'BOX' and p.benefit_item_code
     }
-    if not box_codes:
+    if not all_codes:
         return proposals
 
     from django.apps import apps
 
     factors = {}
+    names = {}
     try:
         Product = apps.get_model('sap_sync', 'Product')
     except LookupError:
         Product = None
 
     if Product is not None:
-        for item_code, factor in (
-            Product.objects.filter(item_code__in=box_codes)
-            .values_list('item_code', 'sal_factor2')
+        for item_code, factor, item_name in (
+            Product.objects.filter(item_code__in=all_codes)
+            .values_list('item_code', 'sal_factor2', 'item_name')
         ):
-            value = _to_decimal(factor)
-            # The same item_code exists once per category; the pack size is a
-            # property of the product, so any row with a usable value will do.
-            if value > ZERO and item_code not in factors:
-                factors[item_code] = value
+            # The same item_code exists once per category; both the pack size
+            # and the name are properties of the product, so any row with a
+            # usable value will do.
+            if item_code not in names and (item_name or '').strip():
+                names[item_code] = item_name.strip()
+            if item_code in box_codes:
+                value = _to_decimal(factor)
+                if value > ZERO and item_code not in factors:
+                    factors[item_code] = value
 
     for proposal in proposals:
+        proposal.benefit_item_name = names.get(proposal.benefit_item_code, '')
         if proposal.free_uom != 'BOX':
             continue
         proposal.qty_pieces = _tidy(
