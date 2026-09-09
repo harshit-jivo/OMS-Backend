@@ -513,6 +513,22 @@ class MyQueueView(APIView):
     invoice at the entry stage (freshly created or returned back), regardless of
     creator. Returns every stage the user works (so all their desks show as tabs
     even when empty) alongside the pending invoices.
+
+    ORDER IS FIFO BY ARRIVAL AT THE DESK — oldest wait first. This is a
+    deliberate override of `Invoice.Meta.ordering = ['-created_at']`, which
+    sorted the queue by when the invoice was *created*, newest first. Those two
+    are not the same thing and the difference is not cosmetic: an invoice
+    raised weeks ago that reaches this desk today would sink to the bottom of
+    the list, while a brand-new one that just entered the flow sat on top — so
+    the handler worked the newest arrival and the longest-waiting invoice was
+    the last thing seen, which is the opposite of a queue and exactly what the
+    stuck-beyond-threshold alert then fired on.
+
+    `current_stage_entered_at` is the arrival stamp (reset on every hop, including
+    a RETURN back to an earlier desk), so a returned invoice correctly re-queues
+    at the time it came back rather than keeping its original place. `id` is the
+    tie-break: a bulk advance stamps many invoices in the same instant, and
+    without it their relative order would be undefined between requests.
     """
     permission_classes = [IsTrackerUser]
 
@@ -531,7 +547,7 @@ class MyQueueView(APIView):
         ).filter(
             current_stage_id__in=stage_ids,
             status=Invoice.Status.IN_PROGRESS,
-        )
+        ).order_by('current_stage_entered_at', 'id')
 
         invoices = list(qs)
         counts = {}
