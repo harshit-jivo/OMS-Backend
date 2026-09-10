@@ -272,7 +272,42 @@ class InvoiceListSerializer(serializers.ModelSerializer):
         return cached
 
 
+def notified_users(alert):
+    """Distinct users mailed about `alert`, each with their latest send.
+
+    Module-level because `AlertsView` builds its rows live and needs the same
+    "Mailed to" shape without going through the serializer — one definition, so
+    the two paths cannot drift.
+
+    Phase 4.2 query audit: callers must prefetch `notifications__user`. Calling
+    `.select_related('user')` here cloned the manager's queryset and threw that
+    prefetch cache away -- Django does not carry `_result_cache` across a
+    `.select_related()` clone, so it re-queried once per alert (a real N+1).
+    Reading `alert.notifications.all()` uses the already-prefetched
+    notifications (and their already-prefetched `.user`) instead.
+    """
+    if alert is None:
+        return []
+    latest = {}
+    for n in alert.notifications.all():
+        name = (getattr(n.user, 'name', '') or getattr(n.user, 'username', '')
+                or n.email) if n.user_id else n.email
+        cur = latest.get(n.user_id)
+        if cur is None or n.sent_at > cur['sent_at']:
+            latest[n.user_id] = {'user': name, 'email': n.email, 'sent_at': n.sent_at}
+    return sorted(latest.values(), key=lambda x: x['sent_at'], reverse=True)
+
+
 class StuckAlertSerializer(serializers.ModelSerializer):
+    """Ledger-row shape for a `StuckAlert`.
+
+    NOT what `/tracker/alerts/` returns any more — that endpoint derives its
+    rows live (see `views._stuck_alert_payload`, which emits these same field
+    names) so the screen does not depend on the `scan_stuck_alerts` sweep having
+    run. Kept as the model-faithful serialization for the ledger itself; if you
+    add a field here, add it there too.
+    """
+
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
     party_name = serializers.CharField(source='invoice.party_name', read_only=True)
     invoice_value = serializers.DecimalField(
@@ -296,24 +331,7 @@ class StuckAlertSerializer(serializers.ModelSerializer):
         return float(obj.days_stuck) - obj.threshold_days
 
     def get_notified(self, obj):
-        """Distinct users mailed about this alert, each with their latest send.
-
-        Phase 4.2 query audit: `AlertsView` prefetches `notifications__user` for
-        exactly this loop, but calling `.select_related('user')` here cloned
-        the manager's queryset and threw that prefetch cache away -- Django
-        does not carry `_result_cache` across a `.select_related()` clone, so
-        this re-queried the DB once per alert (a real N+1). Reading
-        `obj.notifications.all()` uses the already-prefetched notifications
-        (and their already-prefetched `.user`) instead.
-        """
-        latest = {}
-        for n in obj.notifications.all():
-            name = (getattr(n.user, 'name', '') or getattr(n.user, 'username', '')
-                    or n.email) if n.user_id else n.email
-            cur = latest.get(n.user_id)
-            if cur is None or n.sent_at > cur['sent_at']:
-                latest[n.user_id] = {'user': name, 'email': n.email, 'sent_at': n.sent_at}
-        return sorted(latest.values(), key=lambda x: x['sent_at'], reverse=True)
+        return notified_users(obj)
 
 
 class InvoiceDetailSerializer(InvoiceListSerializer):

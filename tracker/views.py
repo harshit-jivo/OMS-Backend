@@ -30,7 +30,7 @@ from .serializers import (
     BranchSerializer, CategorySerializer, GstRateSerializer, GstTypeSerializer,
     InvoiceDetailSerializer, InvoiceListSerializer, InvoiceModeSerializer,
     InvoiceWriteSerializer, PaymentDetailSerializer, StageEventSerializer,
-    StageSerializer, StuckAlertSerializer, UnitSerializer,
+    StageSerializer, UnitSerializer, notified_users,
 )
 
 
@@ -921,18 +921,80 @@ class ReportsView(APIView):
         return Response(build_report(request.query_params))
 
 
+def _stuck_alert_payload(invoice, stage, days, alert):
+    """One live stuck row, in the exact shape `StuckAlertSerializer` emits.
+
+    `alert` is the matching `StuckAlert` ledger row or None. The ledger-only
+    fields are null when the sweep has not yet recorded this visit — the row is
+    still real and still stuck, it just has no email history. `id` is therefore
+    nullable and NOT a usable React key; the client keys on `invoice`, which is
+    unique here because an invoice sits at exactly one stage at a time.
+    """
+    return {
+        'id': alert.id if alert else None,
+        'invoice': invoice.id,
+        'invoice_number': invoice.invoice_number,
+        'party_name': invoice.party_name,
+        'invoice_value': str(invoice.invoice_value),
+        'stage': stage.id,
+        'stage_name': stage.name,
+        'stage_code': stage.code,
+        'stage_entered_at': invoice.current_stage_entered_at,
+        'days_stuck': str(days),
+        'threshold_days': stage.threshold_days,
+        'over_by': float(days) - stage.threshold_days,
+        'is_active': True,          # live-derived rows are stuck by definition
+        'last_notified_at': alert.last_notified_at if alert else None,
+        'notified': notified_users(alert),
+        'created_at': alert.created_at if alert else None,
+        'updated_at': alert.updated_at if alert else None,
+    }
+
+
 class AlertsView(APIView):
-    """Active stuck-invoice alerts, scoped to the stages the user handles.
-    Superusers see all. Pass ?all=true (superuser) to include everything."""
+    """Stuck-invoice alerts, scoped to the stages the user handles.
+
+    Computed LIVE from `services.stuck_visits()`, not read out of the
+    `StuckAlert` table. The table is written only by the `scan_stuck_alerts`
+    sweep, so reading it made this screen a cache of a scheduled job: when the
+    sweep is not running the page renders "0 stuck invoices — every desk is
+    inside its threshold", which is indistinguishable from genuinely good news.
+    That is exactly how 566 overdue invoices showed as an empty screen. Deriving
+    the rows from the same dwell-time rule the sweep uses means the page is
+    correct on its own and cannot silently go blank.
+
+    `StuckAlert` still matters as the EMAIL LEDGER: it records who was mailed
+    about a given visit. Rows are joined in here for the "Mailed to" column, so
+    an alert the sweep has never seen simply shows as not-yet-mailed rather than
+    disappearing.
+    """
     permission_classes = [IsTrackerAlerts]
 
     def get(self, request):
-        qs = StuckAlert.objects.filter(is_active=True).select_related(
-            'invoice', 'stage').prefetch_related('notifications__user')
-        if not request.user.is_superuser:
-            stage_ids = services.accessible_stage_ids(request.user)
-            qs = qs.filter(stage_id__in=stage_ids)
-        return Response(StuckAlertSerializer(qs, many=True).data)
+        stage_ids = (None if request.user.is_superuser
+                     else services.accessible_stage_ids(request.user))
+        visits = services.stuck_visits(stage_ids=stage_ids)
+
+        # One query for the ledger, keyed the same way the sweep keys a row:
+        # (invoice, stage, stage_entered_at) identifies one VISIT, so a second
+        # trip to the same desk does not inherit the first trip's emails.
+        ledger = {}
+        if visits:
+            rows = (StuckAlert.objects
+                    .filter(invoice_id__in=[inv.id for inv, _, _ in visits])
+                    .prefetch_related('notifications__user'))
+            for row in rows:
+                ledger[(row.invoice_id, row.stage_id, row.stage_entered_at)] = row
+
+        data = [
+            _stuck_alert_payload(
+                inv, stage, days,
+                ledger.get((inv.id, stage.id, inv.current_stage_entered_at)))
+            for inv, stage, days in visits
+        ]
+        # Worst offenders first — the point of the screen is triage.
+        data.sort(key=lambda d: d['over_by'], reverse=True)
+        return Response(data)
 
 
 class PaymentDetailView(APIView):
