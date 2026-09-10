@@ -173,24 +173,55 @@ class InvoiceListCreateViewQueryAuditTests(TrackerListQueryAuditTestCase):
 
 
 class AlertsViewQueryAuditTests(TrackerListQueryAuditTestCase):
-    """`StuckAlert` list -- already select_related/prefetch_related; confirms
-    that holds under load rather than assuming it."""
+    """`/tracker/alerts/` -- derives rows live, then joins the StuckAlert ledger
+    once for the "Mailed to" column; confirms that holds under load rather than
+    assuming it.
+
+    The invoices are BACKDATED past the entry threshold. Before the view went
+    live-derived it read the ledger table, so a row with `days_stuck=5` was
+    enough to make it emit output no matter when the invoice actually arrived;
+    now the dwell time is what puts a row on the screen, and a test that only
+    inserted ledger rows would silently assert 0 queries against 0 rows.
+    """
 
     def _add_alerts(self, count, created_by):
-        from .models import StuckAlert
+        from datetime import timedelta
+
         from django.utils import timezone
+
+        from .models import Invoice, StuckAlert
 
         self._add_invoices(count, created_by=created_by)
         entry_stage = self.stages['entry']
         invoices = list(
             entry_stage.current_invoices.order_by('-id')[:count]
         )
+        entered_at = timezone.now() - timedelta(days=entry_stage.threshold_days + 3)
+        Invoice.objects.filter(id__in=[i.id for i in invoices]).update(
+            current_stage_entered_at=entered_at)
         for invoice in invoices:
             StuckAlert.objects.create(
                 invoice=invoice, stage=entry_stage,
-                stage_entered_at=timezone.now(),
+                stage_entered_at=entered_at,
                 days_stuck=Decimal('5'), threshold_days=2, is_active=True,
             )
+
+    def test_stuck_invoices_are_returned_without_a_ledger_row(self):
+        """The bug this endpoint had: 566 overdue invoices, an empty StuckAlert
+        table (the sweep had never run), and a screen reading "0 stuck"."""
+        from .models import StuckAlert
+
+        self._add_alerts(3, created_by=self.admin_user)
+        StuckAlert.objects.all().delete()        # sweep never ran
+
+        response = AlertsView.as_view()(
+            self._request('/api/tracker/alerts/', self.admin_user))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 3)
+        self.assertTrue(all(row['id'] is None for row in response.data),
+                        'ledger-only fields should be null, not fabricated')
+        self.assertTrue(all(row['notified'] == [] for row in response.data))
 
     def test_query_count_does_not_scale_with_alert_count(self):
         self._add_alerts(3, created_by=self.admin_user)
