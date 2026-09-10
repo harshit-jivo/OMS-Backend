@@ -111,14 +111,28 @@ def is_full_hold(invoice):
     ).exists()
 
 
-def stuck_visits(now=None):
+def stuck_visits(now=None, stage_ids=None):
     """Every in-progress invoice sitting at its stage beyond that stage's
-    threshold. Returns a list of (invoice, stage, days_stuck)."""
+    threshold. Returns a list of (invoice, stage, days_stuck).
+
+    `stage_ids` restricts the scan to those stages, which is how `AlertsView`
+    limits a non-superuser to their own desks: filtering in SQL rather than
+    dropping rows after the dwell-time loop keeps the per-invoice work
+    proportional to what the caller can actually see.
+
+    The dwell test is per-invoice Python rather than SQL because the threshold
+    lives on the stage and `days_at_stage` carries the rounding contract; at
+    tracker's scale (hundreds of open invoices) one query plus a loop is
+    cheaper than the alternative, and it keeps one definition of "stuck".
+    """
     now = now or timezone.now()
+    qs = (Invoice.objects
+          .filter(status=Invoice.Status.IN_PROGRESS)
+          .select_related('current_stage'))
+    if stage_ids is not None:
+        qs = qs.filter(current_stage_id__in=stage_ids)
     out = []
-    for inv in (Invoice.objects
-                .filter(status=Invoice.Status.IN_PROGRESS)
-                .select_related('current_stage')):
+    for inv in qs:
         days = days_at_stage(inv, now)
         if days > inv.current_stage.threshold_days:
             out.append((inv, inv.current_stage, days))
