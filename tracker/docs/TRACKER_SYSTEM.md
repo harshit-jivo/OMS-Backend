@@ -414,7 +414,7 @@ All under `/api/tracker/`.
 | GET | `stage-export/?stage=&tab=&ids=` | user | One queue tab as Excel, in the All-Invoices register layout |
 | POST | `actions/bulk/` | user | Apply one action to many invoices |
 | GET | `reports/` | reports | Turnaround analytics |
-| GET | `alerts/` | alerts | Active stuck alerts |
+| GET | `alerts/` | alerts | Stuck invoices, derived live (see §9) |
 | GET | `all-invoices/` | admin | Master list |
 | GET | `all-invoices/export/` | admin | Excel register |
 
@@ -446,6 +446,27 @@ so it must not generate a "stuck" email.
 A re-notify cooldown (`TRACKER_ALERT_EMAIL_COOLDOWN_HOURS`, default 24) stops
 the sweep from mailing the same invoice every run. `AlertNotification` is the
 ledger of who was actually mailed.
+
+### The screen does NOT read the alert table
+
+`GET alerts/` derives its rows **live** from `services.stuck_visits()` and joins
+`StuckAlert` only to fill the "Mailed to" column. This is deliberate. While the
+endpoint read the table, the Stuck Alerts page was a cache of a scheduled job:
+with the sweep unregistered the table stayed empty and the page rendered
+*"0 stuck invoices — every desk is inside its threshold"*, which looks identical
+to genuinely good news. That is exactly what happened — 566 overdue invoices, an
+empty table, and a screen reporting all-clear, because `run_stuck_alerts.bat`
+existed but its Task Scheduler entry had never been created.
+
+So the page is now correct on its own and cannot silently go blank, and
+`StuckAlert` is what it should have been all along: the **email ledger**. Rows
+the sweep has not yet seen come back with `id`, `created_at` and `updated_at`
+null and `notified: []` — still stuck, just not yet mailed. The client keys on
+`invoice`, not `id`.
+
+Note the two paths apply slightly different rules, on purpose: the FULL-hold
+skip below is an *emailing* rule, so a parked invoice still appears on the
+screen (you want to see it) but does not generate mail.
 
 ### The three commands
 
