@@ -1073,6 +1073,26 @@ class Queries():
             FROM "{s}"."OINV"
             WHERE "DocNum" = ?
         """, [docNum]
+
+    @staticmethod
+    def get_order_doc_entry(docNum, branch='OIL'):
+        """Resolve a sales order's internal key (ORDR."DocEntry") from its DocNum.
+
+        The sales-order counterpart of `get_docEntry`, and the branch matters for
+        the same reason: DocNum is only unique within a company database, so the
+        same number names a different order in each of the three.
+
+        Resolves the schema through `_schema_for_branch` rather than a local dict
+        of its own, so an unconfigured branch raises `HanaSchemaError` instead of
+        quietly reading OIL.
+        """
+        s = Queries._schema_for_branch(branch)
+        return f"""
+            SELECT
+                "DocEntry"
+            FROM "{s}"."ORDR"
+            WHERE "DocNum" = ?
+        """, [docNum]
     
 
 

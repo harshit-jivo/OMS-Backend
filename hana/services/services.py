@@ -230,3 +230,10 @@ class SalesOrderService():
             result = conn.execute(query)
             
         return result
+
+    def get_order_doc_entry(self , docNum, branch='OIL'):
+        with HANAConnection() as conn:
+            query = Queries.get_order_doc_entry(docNum, branch)
+            result = conn.execute(query)
+
+        return result

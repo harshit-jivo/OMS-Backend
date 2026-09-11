@@ -14,8 +14,6 @@ exists to close (an admin via role/`extra_roles`/`is_staff` wasn't recognised).
 """
 import json
 import logging
-import re
-from urllib.parse import quote
 
 import pymssql
 import requests
@@ -33,8 +31,8 @@ from rest_framework.permissions import IsAuthenticated , AllowAny
 from rest_framework import status
 from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
-from django.http import HttpResponse
 
+from core import crystal
 from core.permissions import is_admin
 from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
@@ -46,7 +44,7 @@ from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_ite
 def _external_verify():
     """TLS verification for the DSR and Crystal calls below.
 
-    These four call sites passed `verify=_external_verify()` as a literal. Both services are
+    These call sites passed `verify=_external_verify()` as a literal. Both services are
     plain http today, where requests ignores `verify` entirely — so it was not
     a live exposure, it was a TRAP: the day either URL gains an `s`, the calls
     would keep working and silently stop verifying anything, and nothing in the
@@ -728,9 +726,6 @@ class GetCreditLimitJSAPFlow(APIView):
 class GetPrintReport(APIView):
     permission_classes = [AllowAny]
 
-    # Characters Windows/macOS refuse in a filename, plus control chars.
-    _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
-
     # Each company is rendered through its own path on the Crystal service,
     # which maps it to that company's ODBC DSN and HANA schema.
     # 'api/billprint/{DocEntry}' (no company) is the service's legacy OIL route.
@@ -739,19 +734,6 @@ class GetPrintReport(APIView):
         'BEVERAGE': 'api/billprint/bev',
         'MART': 'api/billprint/mart',
     }
-
-    @classmethod
-    def _download_name(cls, doc_num, party_name):
-        """'<DocNum> <Party Name>.pdf', scrubbed so it is a legal filename.
-
-        The party name is whatever the caller passed, so it is sanitised rather
-        than trusted: illegal characters out, whitespace collapsed, and the
-        length capped well inside the 255-byte filesystem limit.
-        """
-        party = cls._BAD_FILENAME_CHARS.sub(' ', str(party_name or ''))
-        party = ' '.join(party.split())[:120].strip(' .')
-        stem = f"{doc_num} {party}".strip() if party else str(doc_num)
-        return f"{stem}.pdf"
 
     def get(self, request):
         docNum = request.query_params.get('docNum')
@@ -779,37 +761,15 @@ class GetPrintReport(APIView):
                 return Response({"error": f"No {branch} invoice found for docNum {docNum}"},
                                 status=status.HTTP_404_NOT_FOUND)
 
-        url = f"{settings.CRYSTAL_URL}/{self._CRYSTAL_PATHS[branch]}/{doc_entry}"
-        try:
-            crystal_response = requests.get(url, timeout=60, verify=_external_verify())
-        except requests.RequestException as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-
-        if not crystal_response.ok:
-            return Response({'error': 'Failed to generate print report',
-                             'details': crystal_response.text},
-                            status=crystal_response.status_code)
-
-        resp = HttpResponse(
-            crystal_response.content,
-            status=crystal_response.status_code,
-            content_type=crystal_response.headers.get('Content-Type', 'application/pdf'),
+        # The fetch, the "<DocNum> <Party Name>.pdf" naming and the inline
+        # Content-Disposition are shared with orders/crystal/ — see core/crystal.py.
+        return crystal.render_pdf(
+            self._CRYSTAL_PATHS[branch],
+            doc_entry,
+            crystal.download_name(docNum or doc_entry,
+                                  request.query_params.get('party')),
+            ascii_fallback='invoice.pdf',
         )
-        # Shown inline in the browser's PDF viewer, but this is also the name the
-        # viewer's Download button uses: "<DocNum> <Party Name>.pdf". The RFC 5987
-        # filename* carries names with non-ASCII characters; the plain filename is
-        # the ASCII fallback for older clients.
-        download_name = self._download_name(docNum or doc_entry,
-                                            request.query_params.get('party'))
-        ascii_name = download_name.encode('ascii', 'ignore').decode() or 'invoice.pdf'
-        resp['Content-Disposition'] = (
-            f'inline; filename="{ascii_name}"; '
-            f"filename*=UTF-8''{quote(download_name)}"
-        )
-
-
-        resp.xframe_options_exempt = True
-        return resp
 
   
 class InvoiceLogListwoWhsView(APIView):
