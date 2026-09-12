@@ -33,7 +33,10 @@ from .models import (
     Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
     Stage, StageEvent, Unit, UserStageAccess,
 )
-from .services import _open_event, apply_action, create_invoice, stage_route
+from .services import (
+    SKIPPED_STATUS, _open_event, apply_action, create_invoice, fast_track,
+    full_hold_invoice_ids, stage_route,
+)
 
 
 class TrackerFlowTestCase(TestCase):
@@ -572,3 +575,114 @@ class TransportApprovalDetourTests(TrackerFlowTestCase):
         invoice = apply_action(invoice=invoice, user=self.clerk, action='RETURN',
                                stage_status='RETURN', remarks='send it back')
         self.assertEqual(invoice.current_stage.code, 'bilty_grpo')
+
+
+class FastTrackTests(TrackerFlowTestCase):
+    """`fast_track` — Invoice Entry straight to SAP Approval.
+
+    The point of interest is what happens to the desks it jumps: they are
+    recorded as zero-day SKIPPED visits rather than omitted, so reports built
+    from `StageEvent` still see every invoice pass through every desk on its
+    route and an audit can tell a bypass from a same-day approval.
+    """
+
+    def test_it_lands_at_sap_approval(self):
+        invoice = self.make_invoice()
+        self.grant(self.clerk, 'entry')
+        invoice = fast_track(invoice, self.clerk, 'urgent — MD approved')
+        self.assertEqual(invoice.current_stage.code, 'sap_approval')
+
+    def test_the_skipped_desks_are_recorded_not_omitted(self):
+        invoice = self.make_invoice()
+        self.grant(self.clerk, 'entry')
+        fast_track(invoice, self.clerk, 'urgent')
+
+        skipped = StageEvent.objects.filter(
+            invoice=invoice, stage_status=SKIPPED_STATUS)
+        codes = sorted(e.stage.code for e in skipped)
+        # Non-transport, so Bilty/GRPO is not on its route to begin with.
+        self.assertEqual(codes, ['data_entry', 'pre_audit'])
+        for ev in skipped:
+            self.assertEqual(ev.days_spent, Decimal('0.00'))
+            self.assertEqual(ev.entered_at, ev.exited_at)
+            self.assertEqual(ev.acted_by, self.clerk)
+
+    def test_a_transport_invoice_also_skips_bilty(self):
+        invoice = self.make_invoice(self.transport)
+        self.grant(self.clerk, 'entry')
+        fast_track(invoice, self.clerk, 'urgent')
+        codes = sorted(
+            e.stage.code for e in StageEvent.objects.filter(
+                invoice=invoice, stage_status=SKIPPED_STATUS))
+        self.assertEqual(codes, ['bilty_grpo', 'data_entry', 'pre_audit'])
+
+    def test_a_reason_is_mandatory(self):
+        """It bypasses Pre-Audit, which is where holds and debits are captured —
+        so the only record of why is the remark."""
+        invoice = self.make_invoice()
+        self.grant(self.clerk, 'entry')
+        with self.assertRaises(ValidationError):
+            fast_track(invoice, self.clerk, '   ')
+
+    def test_it_refuses_from_any_stage_but_entry(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        with self.assertRaises(ValidationError):
+            fast_track(invoice, self.clerk, 'too late')
+
+    def test_it_locks_the_invoice(self):
+        """Same rule as a normal advance out of entry: once it leaves, the entry
+        desk can no longer edit it."""
+        invoice = self.make_invoice()
+        self.grant(self.clerk, 'entry')
+        invoice = fast_track(invoice, self.clerk, 'urgent')
+        self.assertTrue(invoice.is_locked)
+
+    def test_the_entry_visit_keeps_its_real_dwell_time(self):
+        """Only the BYPASSED desks are zero-day. Entry genuinely held it."""
+        invoice = self.make_invoice()
+        self.grant(self.clerk, 'entry')
+        fast_track(invoice, self.clerk, 'urgent')
+        entry_visit = StageEvent.objects.get(
+            invoice=invoice, stage__code='entry', exited_at__isnull=False)
+        self.assertEqual(entry_visit.stage_status, '')
+        self.assertIsNotNone(entry_visit.days_spent)
+
+
+class FullHoldQueueTests(TrackerFlowTestCase):
+    """A FULL hold belongs in the Hold tab only — `full_hold_invoice_ids` is what
+    keeps it out of Current."""
+
+    def _hold(self, invoice):
+        return apply_action(invoice=invoice, user=self.clerk,
+                            stage_status='HOLD', hold_type='FULL',
+                            remarks='waiting on vendor')
+
+    def test_a_full_held_invoice_is_flagged(self):
+        invoice = self._hold(self.move_to(self.make_invoice(), 'pre_audit'))
+        self.assertEqual(full_hold_invoice_ids([invoice.id]), {invoice.id})
+
+    def test_an_ordinary_invoice_is_not(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        self.assertEqual(full_hold_invoice_ids([invoice.id]), set())
+
+    def test_a_partial_hold_is_not_flagged(self):
+        """A partial hold ADVANCES the invoice, so it is never sitting at the
+        desk that recorded it."""
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        invoice = apply_action(invoice=invoice, user=self.clerk,
+                               stage_status='HOLD', hold_type='PARTIAL',
+                               amount=Decimal('100.00'), remarks='part held')
+        self.assertEqual(full_hold_invoice_ids([invoice.id]), set())
+
+    def test_the_flag_does_not_survive_the_invoice_moving_on(self):
+        """The hold is scoped to the VISIT. Once released and advanced, the
+        invoice is a normal row at its new desk — it must not stay hidden from
+        Current forever because of a hold two desks ago."""
+        invoice = self._hold(self.move_to(self.make_invoice(), 'pre_audit'))
+        invoice = apply_action(invoice=invoice, user=self.clerk,
+                               stage_status='OK', remarks='released')
+        self.assertEqual(full_hold_invoice_ids([invoice.id]), set())
+
+    def test_empty_input_costs_no_query(self):
+        with self.assertNumQueries(0):
+            self.assertEqual(full_hold_invoice_ids([]), set())
