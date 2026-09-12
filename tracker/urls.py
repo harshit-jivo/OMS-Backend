@@ -7,8 +7,8 @@ from .admin_views import (
 )
 from .views import (
     AdminInvoicesExportView, AdminInvoicesView, AlertsView, BulkActionView,
-    InvoiceDetailView, InvoiceListCreateView, JsapStatusView, JsapSyncView,
-    LookupsView, MyQueueView, PaymentDetailView, ReportsView,
+    FastTrackView, InvoiceDetailView, InvoiceListCreateView, JsapStatusView,
+    JsapSyncView, LookupsView, MyQueueView, PaymentDetailView, ReportsView,
     StageAdvancedView, StageDecisionsView, StageExportView, VendorsView,
 )
 
@@ -25,6 +25,7 @@ urlpatterns = [
     path('stage-decisions/', StageDecisionsView.as_view(), name='tracker-stage-decisions'),
     path('stage-export/', StageExportView.as_view(), name='tracker-stage-export'),
     path('actions/bulk/', BulkActionView.as_view(), name='tracker-bulk-action'),
+    path('actions/fast-track/', FastTrackView.as_view(), name='tracker-fast-track'),
     path('reports/', ReportsView.as_view(), name='tracker-reports'),
     path('alerts/', AlertsView.as_view(), name='tracker-alerts'),
     path('all-invoices/', AdminInvoicesView.as_view(), name='tracker-all-invoices'),
