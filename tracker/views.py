@@ -1,6 +1,7 @@
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
     OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer,
@@ -285,6 +286,19 @@ def _flag_true(value):
     return str(value or '').strip().lower() in ('1', 'true', 'yes')
 
 
+def _parse_date(value):
+    """`YYYY-MM-DD` from a query param, or None.
+
+    Returns None for anything unparseable rather than raising: a filter is a
+    view of the queue, and a half-typed date in the box should show an
+    unfiltered list, not a 500.
+    """
+    value = (value or '').strip()
+    if not value:
+        return None
+    return parse_date(value)
+
+
 def _can_use_entry(user):
     """True for users who work the head-office / entry desk (entry-page role)."""
     return user.is_superuser or PAGE_ENTRY in tracker_pages_for(user)
@@ -548,7 +562,32 @@ class MyQueueView(APIView):
             status=Invoice.Status.IN_PROGRESS,
         ).order_by('-current_stage_entered_at', '-id')
 
+        # Optional filters. Both narrow the queue itself, so the per-stage tab
+        # counts below reflect what the user is actually looking at rather than
+        # an unfiltered total the visible rows contradict.
+        category = (request.query_params.get('category') or '').strip()
+        if category:
+            qs = qs.filter(category__name__iexact=category)
+        # Dated on ARRIVAL AT THIS DESK, matching how the queue is ordered —
+        # "what reached me in this period", not when the invoice was raised.
+        # `date_to` is taken as inclusive of that whole day: users type a date,
+        # not an instant, and a naive `__lte` on a datetime silently drops
+        # everything after midnight of the end date.
+        date_from = _parse_date(request.query_params.get('date_from'))
+        date_to = _parse_date(request.query_params.get('date_to'))
+        if date_from:
+            qs = qs.filter(current_stage_entered_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(current_stage_entered_at__date__lte=date_to)
+
         invoices = list(qs)
+
+        # A FULL hold parks an invoice on purpose, and it is already listed in
+        # the Hold tab. Leaving it in Current too showed it twice and padded the
+        # desk's actionable count with work nobody can act on. Partial holds are
+        # NOT excluded — they advance, so they are never sitting here anyway.
+        held_ids = services.full_hold_invoice_ids([i.id for i in invoices])
+        invoices = [i for i in invoices if i.id not in held_ids]
         counts = {}
         for inv in invoices:
             counts[inv.current_stage_id] = counts.get(inv.current_stage_id, 0) + 1
@@ -854,6 +893,43 @@ class BulkActionView(APIView):
             return Response(
                 {'detail': str(getattr(exc, 'message', exc))},
                 status=http.HTTP_400_BAD_REQUEST)
+        return Response({
+            'processed': processed,
+            'errors': errors,
+            'processed_count': len(processed),
+        }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
+
+
+class FastTrackView(APIView):
+    """Send invoices straight from Invoice Entry to SAP Approval.
+
+    Separate from `BulkActionView` on purpose. That view walks the route one
+    step at a time and every rule it enforces assumes adjacency; this one
+    deliberately jumps several desks, so giving it its own endpoint keeps the
+    bypass explicit at the API surface instead of hiding it behind an extra flag
+    on the normal advance. It is also the thing you want to be able to find when
+    auditing how an invoice reached SAP Approval without a Pre-Audit decision.
+
+    Permission is the entry desk (`IsTrackerEntry`), and `services.fast_track`
+    additionally requires `can_act` plus mandatory remarks.
+    """
+    permission_classes = [IsTrackerEntry]
+
+    def post(self, request):
+        ids = request.data.get('ids') or []
+        remarks = request.data.get('remarks', '')
+        if not ids:
+            return Response({'detail': 'No invoices selected.'},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        processed, errors = [], []
+        for invoice in _scoped_queryset(request.user).filter(pk__in=ids):
+            try:
+                services.fast_track(invoice, request.user, remarks)
+                processed.append(invoice.id)
+            except (ValidationError, PermissionDenied) as exc:
+                errors.append({'id': invoice.id,
+                               'detail': str(getattr(exc, 'message', exc))})
         return Response({
             'processed': processed,
             'errors': errors,

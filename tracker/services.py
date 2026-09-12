@@ -44,6 +44,12 @@ JSAP_STAGE_CODE = 'jsap_approval'
 # Category names (normalised) that don't require a hold amount on a partial hold.
 NO_HOLD_AMOUNT_CATEGORIES = {'rm-pm', 'pm-pm', 'pm/pm'}
 
+# Stamped on the zero-length visits `fast_track` writes for the desks an invoice
+# was sent past. It is deliberately NOT in any Stage.status_choices — no desk can
+# choose it, it only ever appears on a bypassed visit — so reports can separate
+# "this desk decided X" from "this desk never saw it".
+SKIPPED_STATUS = 'SKIPPED'
+
 
 # ---------------------------------------------------------------------------
 # Permission helpers
@@ -98,17 +104,58 @@ def stage_recipients(stage):
     )
 
 
+def _full_hold_note(invoice):
+    """The FULL-hold NOTE on the invoice's CURRENT visit, or None.
+
+    Keyed on (stage, entered_at) so it is scoped to THIS visit — an invoice that
+    was held here, released, and later came back is not still considered held.
+    Earliest first: if a desk somehow records two holds on one visit, the clock
+    stopped at the first.
+    """
+    return (StageEvent.objects
+            .filter(invoice=invoice,
+                    stage=invoice.current_stage,
+                    entered_at=invoice.current_stage_entered_at,
+                    hold_type=StageEvent.HoldType.FULL)
+            .order_by('created_at')
+            .first())
+
+
 def is_full_hold(invoice):
     """True if the invoice's CURRENT stage visit carries a FULL hold note.
 
     A full hold keeps the invoice in place (partial holds advance it), so the
     presence of a FULL hold event on this visit means it's parked on purpose."""
-    return StageEvent.objects.filter(
-        invoice=invoice,
-        stage=invoice.current_stage,
-        entered_at=invoice.current_stage_entered_at,
-        hold_type=StageEvent.HoldType.FULL,
-    ).exists()
+    return _full_hold_note(invoice) is not None
+
+
+def full_hold_invoice_ids(invoice_ids):
+    """Of `invoice_ids`, those whose CURRENT visit carries a FULL hold.
+
+    The set form exists because the queue and the alert sweep both need to
+    exclude held invoices from a LIST — calling `is_full_hold` per row is one
+    query per invoice, which is the N+1 this avoids. Matching on
+    (invoice, stage, entered_at) against the invoice's own current pointers is
+    what scopes it to the CURRENT visit rather than any past hold.
+    """
+    if not invoice_ids:
+        return set()
+    rows = (StageEvent.objects
+            .filter(invoice_id__in=invoice_ids,
+                    hold_type=StageEvent.HoldType.FULL)
+            .values_list('invoice_id', 'stage_id', 'entered_at'))
+    if not rows:
+        return set()
+    current = dict(
+        Invoice.objects.filter(id__in=[r[0] for r in rows])
+        .values_list('id', 'current_stage_id'))
+    entered = dict(
+        Invoice.objects.filter(id__in=[r[0] for r in rows])
+        .values_list('id', 'current_stage_entered_at'))
+    return {
+        inv_id for inv_id, stage_id, ent in rows
+        if current.get(inv_id) == stage_id and entered.get(inv_id) == ent
+    }
 
 
 def stuck_visits(now=None, stage_ids=None):
@@ -152,7 +199,13 @@ def _days_between(start, end):
 
 
 def days_at_stage(invoice, now=None):
-    """Live dwell time (in days) at the invoice's current stage."""
+    """Live dwell time (in days) at the invoice's current stage.
+
+    A FULL hold does NOT pause this — the clock keeps running while an invoice
+    is parked, so the true age of anything sitting on a desk stays visible. Full
+    holds are instead kept out of the stuck-alert EMAILS and out of the queue's
+    Current tab; the ageing itself is deliberately unadjusted.
+    """
     now = now or timezone.now()
     return _days_between(invoice.current_stage_entered_at, now)
 
@@ -240,6 +293,92 @@ def _route_neighbour(invoice, step):
         return None
     nxt = idx + step
     return route[nxt] if 0 <= nxt < len(route) else None
+
+
+FAST_TRACK_FROM_CODE = 'entry'
+FAST_TRACK_TO_CODE = 'sap_approval'
+
+
+@transaction.atomic
+def fast_track(invoice, user, remarks):
+    """Send an invoice straight from Invoice Entry to SAP Approval.
+
+    The desks in between — Bilty/GRPO, Pre-Audit, Data Entry — are recorded as
+    SKIPPED rather than omitted. Each gets a closed visit stamped
+    `entered_at == exited_at` and `days_spent = 0`, carrying the same remarks and
+    the user who fast-tracked it.
+
+    Writing the skipped rows is not bookkeeping pedantry. Every duration and
+    bottleneck figure in `reports.py` is derived from `StageEvent` visits, and
+    `stage_route` is what the flow display walks. An invoice that simply
+    teleported would leave those desks with fewer visits than invoices passed
+    through them, so their averages would silently describe a different
+    population than their counts — and nobody reading the report would know a
+    desk had been bypassed at all. A zero-day visit says "this desk was skipped,
+    here is who did it and why", which is the auditable version of the same fact.
+
+    `remarks` are MANDATORY: this bypasses Pre-Audit, and Pre-Audit is where
+    holds and debits are captured. Skipping it silently would lose the only
+    record of why an invoice avoided the money checks.
+    """
+    if invoice.current_stage.code != FAST_TRACK_FROM_CODE:
+        raise ValidationError(
+            'Only an invoice at Invoice Entry can be sent straight to SAP Approval.')
+    if not (remarks or '').strip():
+        raise ValidationError(
+            'A reason is mandatory when skipping Pre-Audit and Data Entry.')
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice.')
+
+    route = stage_route(invoice)
+    codes = [s.code for s in route]
+    if FAST_TRACK_TO_CODE not in codes:
+        raise ValidationError('SAP Approval is not on this invoice\'s route.')
+    start = codes.index(invoice.current_stage.code)
+    end = codes.index(FAST_TRACK_TO_CODE)
+    if end <= start:
+        raise ValidationError('SAP Approval is not ahead of this invoice.')
+
+    now = timezone.now()
+    target = route[end]
+    skipped = route[start + 1:end]
+
+    # Close the Entry visit as a normal ADVANCE so its dwell time is real.
+    visit = _open_event(invoice)
+    if visit:
+        visit.event_type = StageEvent.EventType.ADVANCE
+        visit.remarks = remarks
+        visit.acted_by = user
+        visit.exited_at = now
+        visit.days_spent = _days_between(visit.entered_at, now)
+        visit.save()
+
+    # Zero-length visits for the desks that were bypassed.
+    for stage in skipped:
+        StageEvent.objects.create(
+            invoice=invoice, stage=stage,
+            event_type=StageEvent.EventType.ADVANCE,
+            stage_status=SKIPPED_STATUS,
+            remarks=remarks, acted_by=user,
+            entered_at=now, exited_at=now, days_spent=Decimal('0.00'),
+        )
+
+    invoice.current_stage = target
+    invoice.current_stage_entered_at = now
+    invoice.rejection_pending = False
+    invoice.is_locked = True            # it has left entry; entry can no longer edit
+    invoice.save()
+
+    StageEvent.objects.create(
+        invoice=invoice, stage=target,
+        event_type=StageEvent.EventType.RECEIVE,
+        receiving_note=(
+            StageEvent.ReceivingNote.LATE if _is_late(now)
+            else StageEvent.ReceivingNote.ON_TIME
+        ),
+        acted_by=user, entered_at=now,
+    )
+    return invoice
 
 
 def _open_event(invoice):
