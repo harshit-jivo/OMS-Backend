@@ -306,9 +306,23 @@ finders return a **list**; the resolvers pick the newest live document.
 
 `resolve_sap_document()` searches the invoice's own company first, then the
 other two, because the unit/branch on the tracker row is not always where the
-document was booked. `resolve_draft_document()` **deliberately does not** — the
+document was booked. `resolve_draft_documents()` **deliberately does not** — the
 draft DocEntry is fed to JSAP, whose DocEntry values collide across companies,
 so a cross-company guess would attach the wrong approval (§6).
+
+### A failed lookup is not an empty result
+
+`find_*` swallow HANA errors and return `[]`, which is right for best-effort
+callers and wrong for anyone who can say something useful about the difference.
+Pass `strict=True` and they raise `sap.SapUnavailable` instead.
+
+This mattered: while HANA was down, the JSAP refresh button reported
+*"N still awaiting a JSAP decision"*. Those invoices were not awaiting anything
+— the draft lookup had failed and said nothing about it. Same shape as the
+Stuck Alerts page reporting all-clear because its sweep had never run: a
+failure that renders as good news. `jsap.status_for_invoice` now returns reason
+`sap_unreachable`, `sync_jsap_all` counts those apart from `waiting`, and the
+button says *"Could not reach SAP"*.
 
 ---
 
@@ -316,6 +330,16 @@ so a cross-company guess would attach the wrong approval (§6).
 
 `tracker/jsap.py`. Read-only against SQL Server `jsaplive3`. **JSAP owns the
 decision; the tracker only mirrors it.** Nothing is ever written back.
+
+### Every draft is tried, not just the newest
+
+A draft can be deleted and re-created: same invoice number and vendor, new
+DocEntry. JSAP's approval stays attached to whichever draft was current when it
+was granted, so taking only the newest made the desk wait for a decision that
+had already been made. `resolve_draft_documents()` returns every match, live
+ones first and newest first within that, and `status_for_invoice` probes each
+until JSAP recognises one. Measured against production: it cost 1 invoice of
+172.
 
 ### The chain
 

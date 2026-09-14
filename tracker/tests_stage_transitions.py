@@ -1144,3 +1144,125 @@ class SapSavedSyncEndpointTests(TrackerFlowTestCase):
         self.assertEqual(row['sap_docnum'], 900)
         invoice.refresh_from_db()
         self.assertEqual(invoice.current_stage.code, 'payment')
+
+
+class SapUnavailableTests(TrackerFlowTestCase):
+    """A failed SAP lookup must not read as "nothing found".
+
+    This is the bug that made the JSAP refresh button report
+    "N still awaiting a JSAP decision" through a HANA outage: the invoices were
+    not awaiting anything, the lookup had failed and said nothing about it.
+    """
+
+    def setUp(self):
+        self.invoice = self.move_to(self.make_invoice(number='U-1'), 'jsap_approval')
+        Invoice.objects.filter(pk=self.invoice.pk).update(party_code='VENDA000001')
+        self.invoice.refresh_from_db()
+
+    @staticmethod
+    def _hana_down():
+        from unittest.mock import patch
+        return patch('tracker.sap.HANAConnection',
+                     side_effect=OSError('connection refused'))
+
+    def test_a_lenient_lookup_still_swallows_the_failure(self):
+        """Most callers want best-effort, and that behaviour is unchanged."""
+        from tracker import sap
+        with self._hana_down():
+            self.assertEqual(sap.find_draft_documents('X', 'VENDA000001', 'S'), [])
+
+    def test_a_strict_lookup_raises_instead(self):
+        from tracker import sap
+        with self._hana_down():
+            with self.assertRaises(sap.SapUnavailable):
+                sap.find_draft_documents('X', 'VENDA000001', 'S', strict=True)
+
+    def test_the_jsap_status_says_unreachable_not_no_draft(self):
+        from tracker import jsap
+        with self._hana_down():
+            status = jsap.status_for_invoice(self.invoice)
+        self.assertFalse(status['available'])
+        self.assertEqual(status['reason'], 'sap_unreachable')
+
+    def test_the_sweep_counts_it_apart_from_waiting(self):
+        """`waiting` means pending; an unreachable SAP is not pending."""
+        from tracker import services
+        with self._hana_down():
+            result = services.sync_jsap_all()
+        self.assertIn(self.invoice.pk, result['unreachable'])
+        self.assertNotIn(self.invoice.pk, result['waiting'])
+        self.assertEqual(result['advanced'], [])
+
+    def test_the_invoice_is_not_moved_when_sap_cannot_be_reached(self):
+        from tracker import services
+        with self._hana_down():
+            services.sync_jsap_all()
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.current_stage.code, 'jsap_approval')
+
+
+class DraftReCreationTests(TrackerFlowTestCase):
+    """JSAP's approval stays on whichever draft was current when it was granted.
+
+    A draft deleted and re-made keeps the same number and vendor but gets a new
+    DocEntry, so taking only the newest made the desk wait for a decision that
+    had already been made. Measured against production: 1 of 172.
+    """
+
+    OLD = {'docentry': 100, 'docnum': 1, 'canceled': 'N', 'schema': 'S',
+           'table': 'ODRF', 'object_type': 18, 'num_at_card': 'D-1',
+           'card_code': 'VENDA000001', 'card_name': 'V', 'doc_date': None,
+           'doc_total': 0}
+    NEW = {**OLD, 'docentry': 200}
+
+    def setUp(self):
+        self.invoice = self.move_to(self.make_invoice(number='D-1'), 'jsap_approval')
+        Invoice.objects.filter(pk=self.invoice.pk).update(party_code='VENDA000001')
+        self.invoice.refresh_from_db()
+
+    def _drafts(self, hits):
+        from unittest.mock import patch
+        return patch('tracker.sap.find_draft_documents', return_value=list(hits))
+
+    def test_every_draft_is_returned_newest_first(self):
+        from tracker import sap
+        with self._drafts([self.OLD, self.NEW]):
+            got = sap.resolve_draft_documents(self.invoice)
+        self.assertEqual([d['docentry'] for d in got], [200, 100])
+
+    def test_a_cancelled_draft_sorts_last(self):
+        from tracker import sap
+        cancelled = {**self.NEW, 'canceled': 'Y'}
+        with self._drafts([cancelled, self.OLD]):
+            got = sap.resolve_draft_documents(self.invoice)
+        self.assertEqual([d['docentry'] for d in got], [100, 200])
+
+    def test_the_approval_on_an_older_draft_is_still_found(self):
+        """The whole point: JSAP knows 100, not the re-made 200."""
+        from unittest.mock import patch
+        from tracker import jsap
+
+        def only_the_old_one(docentry, branch=None):
+            if docentry != 100:
+                return None
+            return {'status': 'A', 'label': 'Approved', 'doc_id': 1,
+                    'doc_entry': 100, 'branch': branch, 'updated_on': None,
+                    'created_on': None, 'description': 'ok', 'decided_on': None,
+                    'decided_by': None}
+
+        with self._drafts([self.OLD, self.NEW]), \
+                patch.object(jsap, 'status_for_draft', only_the_old_one):
+            status = jsap.status_for_invoice(self.invoice)
+
+        self.assertTrue(status['available'])
+        self.assertEqual(status['status'], 'A')
+        self.assertEqual(status['draft']['docentry'], 100)
+
+    def test_no_draft_known_to_jsap_still_reports_not_submitted(self):
+        from unittest.mock import patch
+        from tracker import jsap
+        with self._drafts([self.OLD, self.NEW]), \
+                patch.object(jsap, 'status_for_draft', lambda *a, **k: None):
+            status = jsap.status_for_invoice(self.invoice)
+        self.assertFalse(status['available'])
+        self.assertEqual(status['reason'], 'not_submitted')
