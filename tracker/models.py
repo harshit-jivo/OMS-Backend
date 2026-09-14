@@ -553,6 +553,60 @@ class AlertNotification(models.Model):
         return f'{self.user_id} mailed re {self.invoice_id} @ {self.stage_id}'
 
 
+class AlertMute(models.Model):
+    """A desk user's "stop emailing me about this one" flag, with the reason.
+
+    Scoped to a single stage VISIT, not to the invoice. The key is
+    `(invoice, stage, stage_entered_at)` — the same key `StuckAlert` uses — so
+    the mute dies the moment the invoice moves: the next desk's arrival stamp is
+    a different `stage_entered_at`, no row matches, and the alert emails resume
+    without anyone having to remember to clear it. That is deliberate. A mute
+    that outlived the desk that set it would be a way to make an invoice
+    disappear from every reminder for the rest of its life.
+
+    It suppresses the EMAIL only. The invoice keeps ageing, keeps its overdue
+    badge, still sits in the queue, and still shows on the Alerts page — marked
+    as muted, with the reason and who set it — because the point is to stop the
+    nagging, not to hide the work.
+
+    Rows are kept and flipped inactive rather than deleted, so "who silenced
+    this, when, and why" survives an un-tick.
+    """
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.CASCADE, related_name='alert_mutes',
+    )
+    stage = models.ForeignKey(
+        Stage, on_delete=models.CASCADE, related_name='alert_mutes',
+    )
+    # The visit this mute belongs to: a copy of the invoice's
+    # `current_stage_entered_at` at the time it was set.
+    stage_entered_at = models.DateTimeField()
+    reason = models.TextField()
+
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='tracker_alert_mutes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    cleared_at = models.DateTimeField(null=True, blank=True)
+    cleared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='tracker_alert_mutes_cleared',
+    )
+
+    class Meta:
+        db_table = 'tracker_alert_mute'
+        unique_together = ['invoice', 'stage', 'stage_entered_at']
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['is_active', 'stage'])]
+
+    def __str__(self):
+        state = 'muted' if self.is_active else 'unmuted'
+        return f'{state}: {self.invoice_id} @ {self.stage_id}'
+
+
 class CashVoucher(models.Model):
     class Status(models.TextChoices):
         OPEN = 'OPEN', 'Open'

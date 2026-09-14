@@ -8,16 +8,27 @@ closed when the handler dispositions it (ADVANCE / RETURN), stamping
 visit, so an invoice that bounces has multiple visits to the same stage — and
 each visit's dwell time is captured independently for reporting.
 """
+from datetime import datetime, time as clock_time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Invoice, PaymentDetail, Stage, StageEvent, UserStageAccess
+from .models import (AlertMute, Invoice, PaymentDetail, Stage, StageEvent,
+                     UserStageAccess)
 
 # Cut-off after which an arriving invoice is flagged "late received".
 LATE_HOUR = 18  # 6 PM
+
+# Weekdays the office is closed, as Python's `date.weekday()` numbers them
+# (Mon=0 ... Sun=6). Sunday is the standing off day, so the dwell clock must
+# not run across it: an invoice that lands on Saturday evening is not two days
+# late on Monday morning, nobody was at the desk in between. Overridable via
+# settings so a second off day (or none, e.g. in a test) needs no code change.
+DEFAULT_OFF_WEEKDAYS = (6,)  # Sunday
 
 # Stage statuses that force the invoice back a step.
 RETURN_STATUSES = {'RETURN', 'REJECTED'}
@@ -158,6 +169,87 @@ def full_hold_invoice_ids(invoice_ids):
     }
 
 
+# ---------------------------------------------------------------------------
+# Alert mutes — "stop emailing me about this one", scoped to the stage visit
+# ---------------------------------------------------------------------------
+def alert_mute_map(invoice_ids):
+    """{invoice_id: AlertMute} for those whose CURRENT visit is muted.
+
+    Same shape and the same reason as `full_hold_invoice_ids`: the queue, the
+    Alerts page and the email sweep all need this for a LIST, and a per-row
+    lookup would be one query each. A mute row is only honoured while the
+    invoice is still on the visit it was set for, so the match is against the
+    invoice's own current pointers — a stale row from an earlier visit to the
+    same desk is simply not found.
+    """
+    if not invoice_ids:
+        return {}
+    rows = list(AlertMute.objects
+                .filter(invoice_id__in=invoice_ids, is_active=True)
+                .select_related('created_by'))
+    if not rows:
+        return {}
+    pointers = dict(
+        (i, (st, ent)) for i, st, ent in
+        Invoice.objects.filter(id__in=[r.invoice_id for r in rows])
+        .values_list('id', 'current_stage_id', 'current_stage_entered_at'))
+    return {
+        r.invoice_id: r for r in rows
+        if pointers.get(r.invoice_id) == (r.stage_id, r.stage_entered_at)
+    }
+
+
+def is_alert_muted(invoice):
+    """True if the invoice's CURRENT visit is muted for alert emails."""
+    return bool(alert_mute_map([invoice.id]))
+
+
+def set_alert_mute(invoice, user, reason):
+    """Mute alert emails for the invoice's current stage visit.
+
+    A written reason is mandatory — the whole point of the flag is that the
+    next person to look at a silent overdue invoice can see why it is silent.
+
+    The row is keyed to the visit, so re-muting after the invoice has moved
+    creates a new row rather than reviving the old one; `update_or_create` only
+    ever revives a mute for the very same visit, which is the case where the
+    user un-ticked and ticked again.
+    """
+    reason = (reason or '').strip()
+    if not reason:
+        raise ValidationError('A reason is required to stop the alert emails.')
+    if invoice.status != Invoice.Status.IN_PROGRESS:
+        raise ValidationError('Only an in-progress invoice can be muted.')
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice at this stage.')
+    mute, _created = AlertMute.objects.update_or_create(
+        invoice=invoice,
+        stage=invoice.current_stage,
+        stage_entered_at=invoice.current_stage_entered_at,
+        defaults={'reason': reason, 'is_active': True,
+                  'created_by': user, 'cleared_at': None, 'cleared_by': None},
+    )
+    return mute
+
+
+def clear_alert_mute(invoice, user):
+    """Un-mute the invoice's current visit. No-op if it was not muted.
+
+    Kept as a flip rather than a delete so the audit trail of who silenced it,
+    and who turned it back on, survives.
+    """
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice at this stage.')
+    updated = (AlertMute.objects
+               .filter(invoice=invoice,
+                       stage=invoice.current_stage,
+                       stage_entered_at=invoice.current_stage_entered_at,
+                       is_active=True)
+               .update(is_active=False, cleared_at=timezone.now(),
+                       cleared_by=user))
+    return bool(updated)
+
+
 def stuck_visits(now=None, stage_ids=None):
     """Every in-progress invoice sitting at its stage beyond that stage's
     threshold. Returns a list of (invoice, stage, days_stuck).
@@ -193,13 +285,78 @@ def _is_late(dt):
     return timezone.localtime(dt).hour >= LATE_HOUR
 
 
+def _off_weekdays():
+    """The closed weekdays, read per call so `override_settings` works in tests."""
+    return frozenset(getattr(settings, 'TRACKER_OFF_WEEKDAYS', DEFAULT_OFF_WEEKDAYS))
+
+
+def _business_tz():
+    """The timezone whose calendar decides when a day starts and ends.
+
+    Django's TIME_ZONE is 'UTC' project-wide, and a UTC Sunday is not the same
+    24 hours as the office's Sunday — in IST it runs from Sunday 05:30 to
+    Monday 05:30, so five and a half hours of Monday morning would be written
+    off and five and a half hours of Sunday would still be charged. The office
+    calendar therefore needs its own zone, independent of how the rest of the
+    project stores and renders time.
+    """
+    name = getattr(settings, 'TRACKER_BUSINESS_TIMEZONE', '') or ''
+    return ZoneInfo(name) if name else timezone.get_current_timezone()
+
+
+def _off_day_seconds(start, end):
+    """How many seconds of the span [start, end) fall on a closed day.
+
+    Walks one weekday at a time in 7-day strides rather than day by day: an
+    invoice parked for a year is 52 iterations, not 365, and the stuck sweep
+    runs this for every open invoice.
+    """
+    off = _off_weekdays()
+    if not off or end <= start:
+        return 0.0
+    tz = _business_tz()
+    local_start, local_end = start.astimezone(tz), end.astimezone(tz)
+    total = 0.0
+    for weekday in off:
+        # Step back to the most recent such weekday at or before the start,
+        # since the span may begin part-way through one.
+        day = local_start.date()
+        day -= timedelta(days=(day.weekday() - weekday) % 7)
+        while day <= local_end.date():
+            day_start = datetime.combine(day, clock_time.min, tzinfo=tz)
+            lo = max(local_start, day_start)
+            hi = min(local_end, day_start + timedelta(days=1))
+            if hi > lo:
+                total += (hi - lo).total_seconds()
+            day += timedelta(days=7)
+    return total
+
+
 def _days_between(start, end):
-    seconds = (end - start).total_seconds()
-    return Decimal(seconds / 86400).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    """Elapsed days between two instants, NOT COUNTING CLOSED DAYS (Sunday).
+
+    This is the one definition of the tracker's clock: it feeds the live "days
+    at this stage" figure, the stuck-beyond-threshold test, and the `days_spent`
+    stamped on a visit when it closes. Sunday is skipped because the number is a
+    service-level measure — how long a desk has held an invoice — and a desk
+    nobody is sitting at cannot be holding anything up. Left in, a Saturday
+    arrival read as overdue against a one-day threshold first thing Monday, and
+    every stage average carried a weekend the handler could not have used.
+
+    Note that `days_spent` values written BEFORE this change still include
+    Sundays; only visits closed from now on are weekend-free. The historical
+    rows are left as they are rather than back-computed, so no past figure
+    silently changes under a report someone has already read.
+    """
+    seconds = (end - start).total_seconds() - _off_day_seconds(start, end)
+    return Decimal(max(seconds, 0.0) / 86400).quantize(
+        Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
 def days_at_stage(invoice, now=None):
     """Live dwell time (in days) at the invoice's current stage.
+
+    Sundays are not counted — see `_days_between`.
 
     A FULL hold does NOT pause this — the clock keeps running while an invoice
     is parked, so the true age of anything sitting on a desk stays visible. Full

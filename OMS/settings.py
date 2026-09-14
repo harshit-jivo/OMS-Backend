@@ -660,6 +660,21 @@ DEFAULT_FROM_EMAIL = config(
 TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
     'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)
 
+# The office calendar the tracker's dwell clock runs on.
+#
+# TIME_ZONE above is 'UTC' for the whole project and is deliberately left that
+# way; this is only about which 24 hours count as "Sunday" when tracker decides
+# how long an invoice has sat on a desk. A UTC Sunday starts at 05:30 IST, which
+# would write off half of Monday morning and still charge half of Sunday.
+TRACKER_BUSINESS_TIMEZONE = config('TRACKER_BUSINESS_TIMEZONE',
+                                   default='Asia/Kolkata')
+# Weekdays the office is closed, as Python numbers them (Mon=0 ... Sun=6).
+# Dwell time does not accrue on these days. Comma-separated; empty means the
+# clock runs every day, as it did before.
+TRACKER_OFF_WEEKDAYS = tuple(
+    int(d) for d in config('TRACKER_OFF_WEEKDAYS', default='6').split(',') if d.strip()
+)
+
 
 # CORS_ALLOW_ALL_ORIGINS wildcards the ORIGIN only — it does NOT allow arbitrary
 # request HEADERS. The web client attaches device/version metadata headers to

@@ -49,6 +49,44 @@ Invoice --current_stage--> Stage
 creation. That is the core design commitment — it is what makes "days at this
 stage", ageing, bottleneck reports and the stuck alert all trustworthy.
 
+### The clock does not run on Sunday
+
+`services._days_between` is the single definition of tracker time, and it
+subtracts every second that falls on a closed day. It feeds the live "days at
+this stage" figure, the `days_spent` stamped on a visit when it closes, and the
+stuck-beyond-threshold test — so the rule reaches the screen, the reports and
+the alert email together, rather than being applied in one of them.
+
+The reason is that the number is a service-level measure: how long a desk has
+held an invoice. A desk nobody is sitting at cannot be holding anything up. With
+Sundays counted, an invoice that arrived Saturday evening read as overdue
+against a one-day threshold first thing Monday, and every stage average carried
+a weekend the handler could not have used.
+
+Two settings control it:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `TRACKER_OFF_WEEKDAYS` | `6` (Sunday) | Closed weekdays, as Python numbers them (Mon=0 … Sun=6). Comma-separated in `.env`. Empty restores plain elapsed time. |
+| `TRACKER_BUSINESS_TIMEZONE` | `Asia/Kolkata` | Whose calendar decides where a day starts. |
+
+The timezone is not redundant. Django's project-wide `TIME_ZONE` is `UTC`, and a
+UTC Sunday is not the office's Sunday — in IST it runs from Sunday 05:30 to
+Monday 05:30, so five and a half hours of Monday morning would be written off
+and the same amount of Sunday still charged. `TIME_ZONE` is deliberately left
+alone; this is a tracker-local calendar, not a change to how the project stores
+or renders time.
+
+**`days_spent` values written before this change still include Sundays.** They
+are left as they are rather than back-computed, so no figure silently changes
+under a report someone has already read. Only visits closed from now on are
+weekend-free.
+
+One related thing this does *not* fix: `services._is_late` (the "received after
+6 PM" flag) still reads `LATE_HOUR` against the UTC calendar, so it fires at
+23:30 IST rather than 18:00. Same class of bug, separate behaviour change —
+flagged here rather than altered in passing.
+
 ### Invoice (`tracker_invoice`)
 
 | Group | Fields |
@@ -85,7 +123,7 @@ Admin-editable, so the flow can be reordered or retuned without a code change.
 |---|---|
 | `code` | Stable key (`entry`, `pre_audit`, …). **Code is what logic keys on — never the name.** |
 | `order` | Position in the flow. **Unique** — see the reordering trap in §14. |
-| `threshold_days` | Dwell time after which the stuck alert fires |
+| `threshold_days` | Dwell time after which the stuck alert fires (Sundays are not counted — see below) |
 | `status_choices` | Stage-specific dispositions, e.g. `['OK','HOLD','DEBIT','RETURN']` |
 | `requires_status` | Whether a disposition is mandatory here |
 | `can_return` | May this desk bounce an invoice back? |
@@ -443,9 +481,38 @@ later raises a *fresh* alert rather than reusing the stale one.
 **Pre-Audit FULL holds are skipped**: a full hold parks the invoice on purpose,
 so it must not generate a "stuck" email.
 
+**Muted invoices are skipped** — see "Muting the alert email" below.
+
 A re-notify cooldown (`TRACKER_ALERT_EMAIL_COOLDOWN_HOURS`, default 24) stops
 the sweep from mailing the same invoice every run. `AlertNotification` is the
 ledger of who was actually mailed.
+
+### Muting the alert email
+
+A desk user can tick **No email** on a row in their queue and give a reason.
+That writes an `AlertMute` and `email_stuck_alerts` then skips the invoice,
+reporting the count in its summary line.
+
+Three properties matter, and all three are deliberate:
+
+* **It silences the mail, nothing else.** The invoice keeps ageing, keeps its
+  overdue badge, stays in the queue, and still appears on the Stuck Alerts
+  screen — marked *Muted*, with the reason and who set it. Hiding the work was
+  never the point; stopping the nagging was.
+* **A reason is mandatory.** The server rejects a blank one. Whoever next looks
+  at a silent overdue invoice has to be able to find out why it is silent.
+* **It is keyed to the stage VISIT, not the invoice** — same
+  `(invoice, stage, stage_entered_at)` key as `StuckAlert`. The mute therefore
+  expires by itself the moment the invoice reaches the next desk: the arrival
+  stamp changes, no row matches, and the emails resume with nobody having to
+  remember to clear it. A mute that outlived the desk that set it would be a way
+  to make an invoice invisible to every reminder for the rest of its life.
+
+Rows are flipped inactive rather than deleted on un-tick, so "who silenced this,
+when, and why" survives.
+
+`POST alerts/mute/` with `ids` + `reason` mutes; `DELETE alerts/mute/` with
+`ids` un-mutes (no reason needed to turn reminders back on).
 
 ### The screen does NOT read the alert table
 
