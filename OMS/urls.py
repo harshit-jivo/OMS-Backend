@@ -77,6 +77,9 @@ api_urlpatterns = [
     path('notifications/', include('notifications.urls')),
     # HAIS — hardware asset register (own `hais` Postgres schema).
     path('hais/', include('HAIS.urls')),
+    # Generic workflow engine (own `workflow` Postgres schema). Separate from
+    # approvals/, which continues to serve PAYMENT and DEPOSIT.
+    path('workflow/', include('workflow.urls')),
 ]
 
 urlpatterns = [
