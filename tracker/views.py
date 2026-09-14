@@ -613,7 +613,9 @@ class MyQueueView(APIView):
             invoice_id__in=inv_ids, exited_at__isnull=False
         ).select_related('stage', 'acted_by').order_by('invoice_id', 'exited_at'):
             latest_closed[ev.invoice_id] = ev  # last wins == latest exit
+        mutes = services.alert_mute_map(inv_ids)
         for r in rows:
+            r.update(_mute_fields(mutes.get(r['id'])))
             ev = latest_closed.get(r['id'])
             if ev and ev.event_type == StageEvent.EventType.RETURN:
                 r['arrived_via_return'] = True
@@ -937,6 +939,55 @@ class FastTrackView(APIView):
         }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
 
 
+
+class AlertMuteView(APIView):
+    """Stop (or resume) the stuck-alert emails for invoices at this desk.
+
+    POST with `ids` and a `reason` mutes; DELETE with `ids` un-mutes. A reason is
+    mandatory on the way in and not asked for on the way out — turning the
+    reminders back on needs no justification.
+
+    The mute suppresses the EMAIL only, and only for the stage visit the invoice
+    is on right now (see `tracker.models.AlertMute`). Nothing here changes the
+    invoice's ageing, its overdue flag, or whether it appears in the queue.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def post(self, request):
+        return self._apply(request, mute=True)
+
+    def delete(self, request):
+        return self._apply(request, mute=False)
+
+    def _apply(self, request, mute):
+        ids = request.data.get('ids') or []
+        reason = request.data.get('reason', '')
+        if not ids:
+            return Response({'detail': 'No invoices selected.'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        if mute and not str(reason).strip():
+            return Response(
+                {'detail': 'A reason is required to stop the alert emails.'},
+                status=http.HTTP_400_BAD_REQUEST)
+
+        processed, errors = [], []
+        for invoice in _scoped_queryset(request.user).filter(pk__in=ids):
+            try:
+                if mute:
+                    services.set_alert_mute(invoice, request.user, reason)
+                else:
+                    services.clear_alert_mute(invoice, request.user)
+                processed.append(invoice.id)
+            except (ValidationError, PermissionDenied) as exc:
+                errors.append({'id': invoice.id,
+                               'detail': str(getattr(exc, 'message', exc))})
+        return Response({
+            'processed': processed,
+            'errors': errors,
+            'processed_count': len(processed),
+        }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
+
+
 class AdminInvoicesView(APIView):
     """Master list of EVERY invoice for the tracker admin, with filters.
 
@@ -997,7 +1048,22 @@ class ReportsView(APIView):
         return Response(build_report(request.query_params))
 
 
-def _stuck_alert_payload(invoice, stage, days, alert):
+def _mute_fields(mute):
+    """The mute half of a row's payload — always present, null when not muted.
+
+    Kept as explicit nulls rather than omitted keys so the client never has to
+    distinguish "not muted" from "this endpoint doesn't report mutes".
+    """
+    return {
+        'email_muted': bool(mute),
+        'email_mute_reason': mute.reason if mute else '',
+        'email_muted_by': (getattr(mute.created_by, 'username', None)
+                           if mute and mute.created_by_id else None),
+        'email_muted_at': mute.created_at if mute else None,
+    }
+
+
+def _stuck_alert_payload(invoice, stage, days, alert, mute=None):
     """One live stuck row, in the exact shape `StuckAlertSerializer` emits.
 
     `alert` is the matching `StuckAlert` ledger row or None. The ledger-only
@@ -1024,6 +1090,7 @@ def _stuck_alert_payload(invoice, stage, days, alert):
         'notified': notified_users(alert),
         'created_at': alert.created_at if alert else None,
         'updated_at': alert.updated_at if alert else None,
+        **_mute_fields(mute),
     }
 
 
@@ -1062,10 +1129,16 @@ class AlertsView(APIView):
             for row in rows:
                 ledger[(row.invoice_id, row.stage_id, row.stage_entered_at)] = row
 
+        # Muted visits are still listed here — the mute only silences the
+        # email. They carry the flag and the reason so the desk can see at a
+        # glance which overdue rows are deliberately not being chased.
+        mutes = services.alert_mute_map([inv.id for inv, _s, _d in visits])
+
         data = [
             _stuck_alert_payload(
                 inv, stage, days,
-                ledger.get((inv.id, stage.id, inv.current_stage_entered_at)))
+                ledger.get((inv.id, stage.id, inv.current_stage_entered_at)),
+                mutes.get(inv.id))
             for inv, stage, days in visits
         ]
         # Worst offenders first — the point of the screen is triage.

@@ -7,6 +7,9 @@ digest listing the invoice number and vendor (party) name.
 Rules:
   * Pre-audit FULL holds are skipped — a full hold parks the invoice on
     purpose, so it should not raise a "stuck" email.
+  * Invoices a desk user has MUTED (tracker.models.AlertMute) are skipped, with
+    the reason they gave. The mute is tied to the stage visit, so it lapses on
+    its own the moment the invoice moves to the next desk.
   * A re-notify cooldown (settings.TRACKER_ALERT_EMAIL_COOLDOWN_HOURS, default
     24h) stops the periodic sweep from emailing the same stuck invoice every run.
 
@@ -50,10 +53,17 @@ class Command(BaseCommand):
 
         # 1. Collect stuck visits due for notification.
         due = []           # dicts: alert, invoice, stage, days
-        skipped_hold = 0
-        for inv, stage, days in services.stuck_visits(now):
+        skipped_hold = skipped_muted = 0
+        stuck = services.stuck_visits(now)
+        # Resolved in one query for the whole sweep rather than per invoice.
+        muted = services.alert_mute_map([inv.id for inv, _s, _d in stuck])
+        for inv, stage, days in stuck:
             if stage.code == PRE_AUDIT and services.is_full_hold(inv):
                 skipped_hold += 1
+                continue
+            if inv.id in muted:
+                # Still stuck, still alerted on-screen — just not chased by mail.
+                skipped_muted += 1
                 continue
 
             alert, _created = StuckAlert.objects.get_or_create(
@@ -80,7 +90,8 @@ class Command(BaseCommand):
         if not due:
             self.stdout.write(self.style.SUCCESS(
                 f"No stuck invoices due for notification "
-                f"(skipped {skipped_hold} pre-audit full-hold)."))
+                f"(skipped {skipped_hold} pre-audit full-hold, "
+                f"{skipped_muted} muted)."))
             return
 
         # 2. Group by stage, then fan out to that stage's users.
@@ -131,8 +142,9 @@ class Command(BaseCommand):
             StuckAlert.objects.filter(id__in=notified_alert_ids).update(
                 last_notified_at=now)
 
-        msg = (f"Stuck-alert email: {sent} sent, "
-               f"{len(due)} due visit(s), {skipped_hold} pre-audit full-hold skipped.")
+        msg = (f"Stuck-alert email: {sent} sent, {len(due)} due visit(s), "
+               f"{skipped_hold} pre-audit full-hold skipped, "
+               f"{skipped_muted} muted skipped.")
         if no_recipient_stages:
             msg += (f" No stage users mapped for: "
                     f"{', '.join(sorted(set(no_recipient_stages)))}.")
