@@ -15,6 +15,7 @@ behind — the closure came back empty in both directions.
 from urllib import request
 import re
 from drf_spectacular.utils import (
+    OpenApiParameter,
     OpenApiResponse,
     extend_schema,
     extend_schema_serializer,
@@ -625,31 +626,65 @@ class ProductListView(APIView):
 
 
 @extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='category',
+            description="Business line to list branches for — OIL, BEVERAGES "
+                        "or MART, matching the party's own category. Omitted "
+                        "or blank returns every active branch across all "
+                        "three, in which case `bpl_id` REPEATS (it is unique "
+                        "only within a category) and a client must key on "
+                        "(category, bpl_id).",
+            required=False,
+            type=str,
+        ),
+    ],
     responses={200: _OrdersBranchSchema(many=True)},
-    description='Factory dispatch locations for the "dispatch from" selector. '
-                'A bare array. Note `bpl_id` is a STRING here even though the '
-                'column is an integer — see `orders.serializers.'
-                'BranchSerializer` for why that is deliberate.',
+    description='Dispatch locations for the "dispatch from" selector, for one '
+                'business line. A bare array. Note `bpl_id` is a STRING here '
+                'even though the column is an integer — see `orders.'
+                'serializers.BranchSerializer` for why that is deliberate.',
 )
 class BranchView(APIView):
-    """Factory dispatch locations, for the "dispatch from" selector.
+    """Dispatch locations, for the "dispatch from" selector.
 
     Reads `sap_sync.Branch` — the model the SAP sync writes and the one that
     matches the table. It used to read `orders.Branches`, a second unmanaged
     model on the same table that declared every column wrongly.
 
-    `distinct('bpl_name')` is deliberate and Postgres-specific (DISTINCT ON):
-    the table is unique on (bpl_id, category), so one physical factory appears
-    once per company DB it exists in, and the selector wants it once.
+    Narrowed by `?category=`, which is the same OIL/BEVERAGES/MART value the
+    party carries, so the selector offers the branches belonging to the
+    order's business line.
+
+    This used to filter `bpl_name__icontains='FACTORY'` and then collapse the
+    result with `.distinct('bpl_name')`, on the assumption that a "dispatch
+    location" is a factory and that one physical factory merely repeats across
+    the three company databases. Neither holds:
+
+    * Only OIL and BEVERAGES have a branch named FACTORY. MART has none, so a
+      Mart order was offered nothing at all.
+    * Those two rows are both named exactly 'FACTORY', so DISTINCT ON
+      (bpl_name) treated them as one place and dropped the second. They are
+      not one place — they are two business lines' branches that happen to
+      share a name.
+
+    Together those two lines turned 22 rows into 1. Branches are already
+    distinct within a category, so there is nothing to de-duplicate once the
+    category is known; the filter does the narrowing the DISTINCT was
+    reaching for.
     """
 
     def get(self, request):
-        branches = (Branch.objects
-                    .filter(bpl_name__icontains='FACTORY')
-                    .order_by("bpl_name")
-                    .distinct('bpl_name'))
-        serializer = BranchSerializer(branches, many=True)
+        branches = Branch.objects.filter(is_active=True)
+
+        category = str(request.query_params.get('category') or '').strip().upper()
+        if category:
+            branches = branches.filter(category=category)
+
+        serializer = BranchSerializer(branches.order_by('category', 'bpl_id'),
+                                      many=True)
         return Response(serializer.data)
+
 
 class StaffProductsAPIView(APIView):
     """The staff product catalogue, and the rates attached to it.
