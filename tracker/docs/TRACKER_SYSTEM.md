@@ -511,6 +511,35 @@ A re-notify cooldown (`TRACKER_ALERT_EMAIL_COOLDOWN_HOURS`, default 24) stops
 the sweep from mailing the same invoice every run. `AlertNotification` is the
 ledger of who was actually mailed.
 
+### Annotations left open at a desk the invoice has left
+
+Holds and pending rejections were once written as `RECEIVE` rows with
+`exited_at` NULL and `entered_at` copied from the visit they annotate.
+`EventType.NOTE` exists so they stop being mistaken for an occupancy, and the
+code has written them that way since — but **83 rows predate that change** and
+are still open at desks their invoice left weeks ago.
+
+They are invisible until the invoice comes back. Then
+`tracker_stage_event_one_open_visit_per_stage` — UNIQUE on `(invoice, stage)`
+WHERE `exited_at IS NULL AND event_type <> 'NOTE'` — rejects the new RECEIVE,
+and the desk is told only that the server refused the request. Four invoices
+(ANAND AND ANAND, `NCR2627TM4654055/127/364/983`) sat at Invoice Entry for a
+fortnight that way before anyone traced it.
+
+`services._release_stranded_note()` runs before every visit-opening RECEIVE:
+
+* A row with a **sibling at the same stage and the same `entered_at`** is
+  provably one of those annotations — a real visit is opened once, so it has no
+  twin. It is reclassified to `NOTE` and the advance proceeds. The hold, its
+  reason and its author are untouched; only the classification changes.
+* Anything else is a genuinely unfinished visit. That raises, naming the event
+  id and the date, rather than being papered over — an invoice somebody is
+  still holding is a different problem and should be said out loud.
+
+`StrandedVisitTests` pins both halves, and pins that a HOLD is written as a
+`NOTE`: if a refactor ever writes a RECEIVE there again, the whole defect
+returns.
+
 ### Automatic progression — when SAP already has the invoice
 
 A document can be saved in SAP without anyone advancing the tracker row behind

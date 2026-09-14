@@ -36,8 +36,8 @@ from .models import (
 from .services import (
     SKIPPED_STATUS, _days_between, _open_event, alert_mute_map, apply_action,
     auto_advance_to_payment, clear_alert_mute, create_invoice, days_at_stage,
-    fast_track, full_hold_invoice_ids, sap_saved_remarks, set_alert_mute,
-    stage_route, sync_sap_saved,
+    fast_track, full_hold_invoice_ids, next_stage, sap_saved_remarks,
+    set_alert_mute, stage_route, sync_sap_saved,
 )
 
 
@@ -1266,3 +1266,124 @@ class DraftReCreationTests(TrackerFlowTestCase):
             status = jsap.status_for_invoice(self.invoice)
         self.assertFalse(status['available'])
         self.assertEqual(status['reason'], 'not_submitted')
+
+
+class StrandedVisitTests(TrackerFlowTestCase):
+    """Legacy annotations left open at a desk the invoice has left.
+
+    Holds and pending rejections were once written as RECEIVE rows with
+    `exited_at` NULL. They are invisible until the invoice comes back, at which
+    point the one-open-visit-per-stage index rejects the new RECEIVE and the
+    desk is told only that the server refused the request. Four production
+    invoices sat at Invoice Entry for a fortnight that way.
+    """
+
+    def _legacy_note(self, invoice, stage, *, twin=True):
+        """Re-create the old shape: an annotation written as an open RECEIVE,
+        with `entered_at` copied from the visit it annotates."""
+        anchor = timezone.now() - timedelta(days=5)
+        if twin:
+            StageEvent.objects.create(
+                invoice=invoice, stage=stage,
+                event_type=StageEvent.EventType.RETURN,
+                stage_status='RETURN', remarks='sent back',
+                entered_at=anchor, exited_at=anchor, days_spent=Decimal('0.00'))
+        return StageEvent.objects.create(
+            invoice=invoice, stage=stage,
+            event_type=StageEvent.EventType.RECEIVE,
+            stage_status='HOLD', hold_type=StageEvent.HoldType.FULL,
+            remarks='need approval', entered_at=anchor)
+
+    def test_a_hold_is_written_as_a_NOTE_not_a_visit(self):
+        """The fix that stopped this happening. If a refactor ever writes a
+        RECEIVE here again, the whole defect comes back."""
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        apply_action(invoice=invoice, user=self.clerk, stage_status='HOLD',
+                     hold_type='FULL', remarks='waiting on vendor')
+        note = StageEvent.objects.get(invoice=invoice, stage__code='pre_audit',
+                                      stage_status='HOLD')
+        self.assertEqual(note.event_type, StageEvent.EventType.NOTE)
+
+    def test_a_legacy_note_no_longer_blocks_the_invoice_coming_back(self):
+        invoice = self.move_to(self.make_invoice(number='ST-1'), 'entry')
+        pre_audit = self.stages['pre_audit']
+        stranded = self._legacy_note(invoice, pre_audit)
+
+        invoice = apply_action(invoice=invoice, user=self.clerk, remarks='go')
+
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+        stranded.refresh_from_db()
+        self.assertEqual(stranded.event_type, StageEvent.EventType.NOTE)
+
+    def test_the_hold_itself_survives_the_repair(self):
+        """Only the row's classification changes — the reason, the amount and
+        the author are the record of what happened and must not be touched."""
+        invoice = self.move_to(self.make_invoice(number='ST-2'), 'entry')
+        stranded = self._legacy_note(invoice, self.stages['pre_audit'])
+        apply_action(invoice=invoice, user=self.clerk, remarks='go')
+        stranded.refresh_from_db()
+        self.assertEqual(stranded.stage_status, 'HOLD')
+        self.assertEqual(stranded.hold_type, StageEvent.HoldType.FULL)
+        self.assertEqual(stranded.remarks, 'need approval')
+
+    def test_a_genuinely_unfinished_visit_is_reported_not_papered_over(self):
+        """No twin means it was opened as a real visit and never closed. That is
+        a different problem and must not be silently reclassified."""
+        invoice = self.move_to(self.make_invoice(number='ST-3'), 'entry')
+        self._legacy_note(invoice, self.stages['pre_audit'], twin=False)
+        with self.assertRaises(ValidationError) as caught:
+            apply_action(invoice=invoice, user=self.clerk, remarks='go')
+        message = str(caught.exception)
+        self.assertIn('Pre-Audit', message)
+        self.assertIn('unfinished visit', message)
+
+    def test_the_invoice_does_not_move_when_it_is_reported(self):
+        invoice = self.move_to(self.make_invoice(number='ST-4'), 'entry')
+        self._legacy_note(invoice, self.stages['pre_audit'], twin=False)
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk, remarks='go')
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.current_stage.code, 'entry')
+
+    def test_an_ordinary_advance_is_unaffected(self):
+        invoice = self.move_to(self.make_invoice(number='ST-5'), 'entry')
+        invoice = apply_action(invoice=invoice, user=self.clerk, remarks='go')
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+
+
+class NextStageTests(TrackerFlowTestCase):
+    """Where an invoice is DUE next — what the timeline draws ahead of it."""
+
+    def test_a_non_transport_invoice_goes_from_entry_to_pre_audit(self):
+        """Bilty/GRPO is a Transport-only desk and must not be offered."""
+        invoice = self.make_invoice(self.oil, number='NX-1')
+        self.assertEqual(next_stage(invoice).code, 'pre_audit')
+
+    def test_a_transport_invoice_goes_from_entry_to_bilty(self):
+        invoice = self.make_invoice(self.transport, number='NX-2')
+        self.assertEqual(next_stage(invoice).code, 'bilty_grpo')
+
+    def test_the_terminal_desk_has_nowhere_to_go(self):
+        invoice = self.move_to(self.make_invoice(number='NX-3'), 'payment')
+        self.assertIsNone(next_stage(invoice))
+
+    def test_a_completed_invoice_has_no_next_stage(self):
+        invoice = self.move_to(self.make_invoice(number='NX-4'), 'payment')
+        Invoice.objects.filter(pk=invoice.pk).update(
+            status=Invoice.Status.COMPLETED)
+        invoice.refresh_from_db()
+        self.assertIsNone(next_stage(invoice))
+
+    def test_a_detour_desk_has_no_fixed_next_stage(self):
+        """Transport Approval is not on the route — where it goes is decided on
+        the way out, so promising a next desk would be a guess."""
+        invoice = self.move_to(self.make_invoice(self.transport, number='NX-5'),
+                               'pre_audit')
+        invoice = apply_action(invoice=invoice, user=self.clerk,
+                               stage_status='OK', remarks='detour')
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+        self.assertIsNone(next_stage(invoice))
+
+    def test_it_tracks_the_invoice_as_it_moves(self):
+        invoice = self.move_to(self.make_invoice(number='NX-6'), 'pre_audit')
+        self.assertEqual(next_stage(invoice).code, 'data_entry')

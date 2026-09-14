@@ -384,6 +384,26 @@ def _is_transport(invoice):
     return _category_name(invoice) == 'transport'
 
 
+def next_stage(invoice):
+    """The desk this invoice is due at next, or None if there is nowhere to go.
+
+    Derived from `stage_route`, so it honours the same rules the flow engine
+    does: a non-Transport invoice never sees Bilty/GRPO, and detour desks are
+    not steps along the line. None at the terminal desk, and None for an invoice
+    that is finished or sitting somewhere off the route (a detour), where
+    "next" is decided on the way out rather than being a fixed step.
+    """
+    if invoice.status != Invoice.Status.IN_PROGRESS:
+        return None
+    route = stage_route(invoice)
+    codes = [s.code for s in route]
+    try:
+        position = codes.index(invoice.current_stage.code)
+    except ValueError:
+        return None                     # on a detour: the target is computed later
+    return route[position + 1] if position + 1 < len(route) else None
+
+
 def stage_route(invoice):
     """The ordered stages this invoice actually travels through, IN LINE.
 
@@ -531,6 +551,7 @@ def fast_track(invoice, user, remarks):
     invoice.is_locked = True            # it has left entry; entry can no longer edit
     invoice.save()
 
+    _release_stranded_note(invoice, target)
     StageEvent.objects.create(
         invoice=invoice, stage=target,
         event_type=StageEvent.EventType.RECEIVE,
@@ -618,6 +639,7 @@ def auto_advance_to_payment(invoice, user, remarks, *, now=None):
         invoice.is_locked = True
         invoice.save()
 
+        _release_stranded_note(invoice, target)
         StageEvent.objects.create(
             invoice=invoice, stage=target,
             event_type=StageEvent.EventType.RECEIVE,
@@ -700,6 +722,49 @@ def sync_sap_saved(invoice_ids=None, user=None, *, dry_run=False, limit=None):
         'errors': errors,
         'cross_company': sap.cross_company_documents_for(unmatched),
     }
+
+
+def _release_stranded_note(invoice, stage):
+    """Clear the way for a new visit to `stage`, or say plainly why it is blocked.
+
+    Holds and pending rejections used to be written as RECEIVE rows with
+    `exited_at` NULL and `entered_at` copied from the visit they annotated. They
+    are annotations, not occupancies, and `StageEvent.EventType.NOTE` exists so
+    they stop being mistaken for one — but rows written before that change are
+    still out there, sitting open at desks their invoice left weeks ago.
+
+    They are invisible until the invoice comes back. Then
+    `tracker_stage_event_one_open_visit_per_stage` (UNIQUE on (invoice, stage)
+    WHERE exited_at IS NULL AND event_type <> 'NOTE') rejects the new RECEIVE,
+    and the desk sees "the server refused the request" with nothing to act on.
+    Four invoices sat at Invoice Entry for a fortnight that way.
+
+    A row is provably one of those annotations when a SIBLING row exists at the
+    same stage with the same `entered_at`: a real visit is opened once, so it has
+    no twin. Those are reclassified to NOTE — the same repair by hand, and the
+    shape the code writes today — and the advance proceeds.
+
+    Anything else is a genuinely unfinished visit, which this must NOT paper
+    over: it raises, naming the event and the date, so whoever is holding the
+    invoice can be asked what happened to it.
+    """
+    stranded = list(StageEvent.objects
+                    .filter(invoice=invoice, stage=stage, exited_at__isnull=True)
+                    .exclude(event_type=StageEvent.EventType.NOTE))
+    for row in stranded:
+        twin = (StageEvent.objects
+                .filter(invoice=invoice, stage=stage, entered_at=row.entered_at)
+                .exclude(pk=row.pk)
+                .exists())
+        if not twin:
+            raise ValidationError(
+                f'An unfinished visit to "{stage.name}" is still open for this '
+                f'invoice (event {row.pk}, opened '
+                f'{timezone.localtime(row.entered_at):%d-%m-%Y}). It has to be '
+                f'closed before the invoice can return to that desk.')
+        row.event_type = StageEvent.EventType.NOTE
+        row.save(update_fields=['event_type'])
+    return len(stranded)
 
 
 def _open_event(invoice):
@@ -939,6 +1004,7 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         PaymentDetail.objects.get_or_create(invoice=invoice)
     invoice.save()
 
+    _release_stranded_note(invoice, target)
     StageEvent.objects.create(
         invoice=invoice, stage=target,
         event_type=StageEvent.EventType.RECEIVE,

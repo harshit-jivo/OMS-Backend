@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from . import services
@@ -337,6 +338,29 @@ class StuckAlertSerializer(serializers.ModelSerializer):
 class InvoiceDetailSerializer(InvoiceListSerializer):
     events = StageEventSerializer(many=True, read_only=True)
     payment = PaymentDetailSerializer(read_only=True)
+    # Where it is due next, so the timeline can show the step ahead as well as
+    # the ones behind. Deliberately NOT on the list serializer: `stage_route`
+    # queries the stage table per invoice, which is one extra query here and an
+    # N+1 on a queue of 400.
+    next_stage_code = serializers.SerializerMethodField()
+    next_stage_name = serializers.SerializerMethodField()
 
     class Meta(InvoiceListSerializer.Meta):
-        fields = InvoiceListSerializer.Meta.fields + ['events', 'payment']
+        fields = InvoiceListSerializer.Meta.fields + [
+            'events', 'payment', 'next_stage_code', 'next_stage_name',
+        ]
+
+    def _next(self, obj):
+        if not hasattr(obj, '_next_stage'):
+            obj._next_stage = services.next_stage(obj)
+        return obj._next_stage
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_next_stage_code(self, obj):
+        stage = self._next(obj)
+        return stage.code if stage else None
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_next_stage_name(self, obj):
+        stage = self._next(obj)
+        return stage.name if stage else None
