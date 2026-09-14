@@ -1,7 +1,8 @@
 from django.contrib import admin
 
 from .models import (
-    AlertNotification, Branch, CashVoucher, Category, GstRate, GstType, Invoice,
+    AlertMute, AlertNotification, Branch, CashVoucher, Category, GstRate,
+    GstType, Invoice,
     InvoiceMode, PaymentDetail, Stage, StageEvent, StuckAlert, TransporterPayment,
     Unit, UserStageAccess,
 )
@@ -85,6 +86,15 @@ class StuckAlertAdmin(admin.ModelAdmin):
                     'is_active', 'created_at', 'resolved_at')
     list_filter = ('is_active', 'stage')
     search_fields = ('invoice__invoice_number', 'invoice__party_name')
+
+
+@admin.register(AlertMute)
+class AlertMuteAdmin(admin.ModelAdmin):
+    """Who silenced the alert emails for an invoice, and why."""
+    list_display = ('invoice', 'stage', 'is_active', 'created_by', 'created_at',
+                    'cleared_by', 'cleared_at')
+    list_filter = ('is_active', 'stage')
+    search_fields = ('invoice__invoice_number', 'invoice__party_name', 'reason')
 
 
 @admin.register(AlertNotification)

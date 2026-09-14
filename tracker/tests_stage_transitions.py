@@ -18,24 +18,25 @@ Run with::
 
     python manage.py test tracker --settings=OMS.test_settings
 """
-from datetime import date
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from users.models import User
 
 from .management.commands.seed_tracker import STAGES
 from .models import (
-    Branch, Category, GstRate, GstType, Invoice, InvoiceMode, PaymentDetail,
-    Stage, StageEvent, Unit, UserStageAccess,
+    AlertMute, Branch, Category, GstRate, GstType, Invoice, InvoiceMode,
+    PaymentDetail, Stage, StageEvent, Unit, UserStageAccess,
 )
 from .services import (
-    SKIPPED_STATUS, _open_event, apply_action, create_invoice, fast_track,
-    full_hold_invoice_ids, stage_route,
+    SKIPPED_STATUS, _days_between, _open_event, alert_mute_map, apply_action,
+    clear_alert_mute, create_invoice, days_at_stage, fast_track,
+    full_hold_invoice_ids, set_alert_mute, stage_route,
 )
 
 
@@ -686,3 +687,213 @@ class FullHoldQueueTests(TrackerFlowTestCase):
     def test_empty_input_costs_no_query(self):
         with self.assertNumQueries(0):
             self.assertEqual(full_hold_invoice_ids([]), set())
+
+
+# IST is UTC+5:30 and has no DST, so a fixed offset is exact here and keeps the
+# fixtures readable: the numbers below are wall-clock times in the office.
+IST = dt_timezone(timedelta(hours=5, minutes=30))
+
+
+def ist(year, month, day, hour=0, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=IST)
+
+
+@override_settings(TRACKER_BUSINESS_TIMEZONE='Asia/Kolkata',
+                   TRACKER_OFF_WEEKDAYS=(6,))
+class SundayIsNotCountedTests(TestCase):
+    """The dwell clock stops on Sunday, because the office does.
+
+    2026-09-13 is a Sunday; 09-12 is the Saturday before it and 09-14 the
+    Monday after. Every fixture below is anchored to that weekend.
+    """
+
+    def test_a_weekend_costs_one_day_not_two(self):
+        self.assertEqual(_days_between(ist(2026, 9, 12, 10), ist(2026, 9, 14, 10)),
+                         Decimal('1.00'))
+
+    def test_a_span_wholly_inside_sunday_is_zero(self):
+        self.assertEqual(_days_between(ist(2026, 9, 13, 2), ist(2026, 9, 13, 23)),
+                         Decimal('0.00'))
+
+    def test_only_the_sunday_part_is_dropped(self):
+        """Saturday 18:00 to Monday 06:00 is 36 hours, 24 of them Sunday."""
+        self.assertEqual(_days_between(ist(2026, 9, 12, 18), ist(2026, 9, 14, 6)),
+                         Decimal('0.50'))
+
+    def test_three_weeks_lose_three_sundays(self):
+        self.assertEqual(
+            _days_between(ist(2026, 9, 12, 10), ist(2026, 10, 3, 10)),
+            Decimal('18.00'))
+
+    def test_an_ordinary_weekday_span_is_unchanged(self):
+        self.assertEqual(_days_between(ist(2026, 9, 14, 9), ist(2026, 9, 16, 9)),
+                         Decimal('2.00'))
+
+    def test_the_sunday_boundary_is_the_office_day_not_the_utc_one(self):
+        """Sunday 00:30 IST is still SATURDAY in UTC (19:00 the day before).
+
+        This is the whole reason for TRACKER_BUSINESS_TIMEZONE: on the
+        project's UTC calendar this hour would have been charged as working
+        time, and the equivalent hour of Monday morning written off instead.
+        """
+        self.assertEqual(_days_between(ist(2026, 9, 13, 0), ist(2026, 9, 13, 1)),
+                         Decimal('0.00'))
+
+    @override_settings(TRACKER_OFF_WEEKDAYS=())
+    def test_no_off_days_configured_restores_plain_elapsed_time(self):
+        self.assertEqual(_days_between(ist(2026, 9, 12, 10), ist(2026, 9, 14, 10)),
+                         Decimal('2.00'))
+
+    def test_a_backwards_span_does_not_go_negative(self):
+        self.assertEqual(_days_between(ist(2026, 9, 14, 10), ist(2026, 9, 12, 10)),
+                         Decimal('0.00'))
+
+
+@override_settings(TRACKER_BUSINESS_TIMEZONE='Asia/Kolkata',
+                   TRACKER_OFF_WEEKDAYS=(6,))
+class SundayAndStuckDetectionTests(TrackerFlowTestCase):
+    """The same rule reaches the ageing of a real invoice, not just the helper."""
+
+    def test_an_invoice_parked_over_the_weekend_ages_by_one_day(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        Invoice.objects.filter(pk=invoice.pk).update(
+            current_stage_entered_at=ist(2026, 9, 12, 10))
+        invoice.refresh_from_db()
+        self.assertEqual(days_at_stage(invoice, now=ist(2026, 9, 14, 10)),
+                         Decimal('1.00'))
+
+
+class AlertMuteTests(TrackerFlowTestCase):
+    """"Stop emailing me about this one" — scoped to the stage VISIT."""
+
+    def _at_pre_audit(self):
+        return self.move_to(self.make_invoice(), 'pre_audit')
+
+    def test_muting_records_the_reason_and_the_user(self):
+        invoice = self._at_pre_audit()
+        mute = set_alert_mute(invoice, self.clerk, 'vendor is sending a credit note')
+        self.assertTrue(mute.is_active)
+        self.assertEqual(mute.reason, 'vendor is sending a credit note')
+        self.assertEqual(mute.created_by, self.clerk)
+        self.assertEqual(mute.stage, invoice.current_stage)
+        self.assertEqual(mute.stage_entered_at, invoice.current_stage_entered_at)
+
+    def test_a_reason_is_mandatory(self):
+        invoice = self._at_pre_audit()
+        with self.assertRaises(ValidationError):
+            set_alert_mute(invoice, self.clerk, '   ')
+        self.assertEqual(AlertMute.objects.count(), 0)
+
+    def test_a_user_without_the_stage_cannot_mute(self):
+        invoice = self._at_pre_audit()
+        with self.assertRaises(PermissionDenied):
+            set_alert_mute(invoice, self.other, 'not my desk')
+
+    def test_the_map_finds_a_muted_invoice(self):
+        invoice = self._at_pre_audit()
+        set_alert_mute(invoice, self.clerk, 'awaiting paperwork')
+        self.assertEqual(set(alert_mute_map([invoice.id])), {invoice.id})
+
+    def test_the_mute_lapses_when_the_invoice_moves_on(self):
+        """The point of keying on the visit: the next desk is not silenced by a
+        decision the previous desk made."""
+        invoice = self._at_pre_audit()
+        set_alert_mute(invoice, self.clerk, 'awaiting paperwork')
+        invoice = apply_action(invoice=invoice, user=self.clerk,
+                               stage_status='OK', remarks='done')
+        self.assertEqual(alert_mute_map([invoice.id]), {})
+
+    def test_re_muting_the_same_visit_updates_rather_than_duplicates(self):
+        invoice = self._at_pre_audit()
+        set_alert_mute(invoice, self.clerk, 'first reason')
+        clear_alert_mute(invoice, self.clerk)
+        set_alert_mute(invoice, self.clerk, 'second reason')
+        self.assertEqual(AlertMute.objects.count(), 1)
+        mute = AlertMute.objects.get()
+        self.assertTrue(mute.is_active)
+        self.assertEqual(mute.reason, 'second reason')
+        self.assertIsNone(mute.cleared_at)
+
+    def test_clearing_keeps_the_row_as_an_audit_trail(self):
+        invoice = self._at_pre_audit()
+        set_alert_mute(invoice, self.clerk, 'awaiting paperwork')
+        self.assertTrue(clear_alert_mute(invoice, self.clerk))
+        mute = AlertMute.objects.get()
+        self.assertFalse(mute.is_active)
+        self.assertEqual(mute.cleared_by, self.clerk)
+        self.assertIsNotNone(mute.cleared_at)
+        self.assertEqual(mute.reason, 'awaiting paperwork')
+        self.assertEqual(alert_mute_map([invoice.id]), {})
+
+    def test_clearing_an_unmuted_invoice_is_a_no_op(self):
+        invoice = self._at_pre_audit()
+        self.assertFalse(clear_alert_mute(invoice, self.clerk))
+
+    def test_empty_input_costs_no_query(self):
+        with self.assertNumQueries(0):
+            self.assertEqual(alert_mute_map([]), {})
+
+
+class AlertMuteEndpointTests(TrackerFlowTestCase):
+    """The HTTP round trip, because the wiring is where this can break quietly.
+
+    Three things are only testable here and not in the service tests above: the
+    route exists, `_scoped_queryset` lets the caller reach their own invoice,
+    and the un-mute arrives as a DELETE carrying a JSON body (the client sends
+    it as `api.delete(url, { data })`, which is easy to get wrong on either
+    side). The mute RULES are covered by `AlertMuteTests`.
+    """
+
+    def setUp(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from users.models import UserRole
+        from .views import AlertMuteView
+        # The flow fixture's users have no role; the API layer needs one,
+        # because `IsTrackerUser` gates on the tracker sub-roles.
+        role, _ = UserRole.objects.get_or_create(
+            name='tracker_user', defaults={'display_name': 'Tracker User'})
+        self.clerk.role = role
+        self.clerk.save(update_fields=['role'])
+        self.factory = APIRequestFactory()
+        self.force_authenticate = force_authenticate
+        self.view = AlertMuteView.as_view()
+        self.invoice = self.move_to(self.make_invoice(), 'pre_audit')
+
+    def _call(self, method, payload):
+        request = getattr(self.factory, method)(
+            '/api/tracker/alerts/mute/', payload, format='json')
+        self.force_authenticate(request, user=self.clerk)
+        return self.view(request)
+
+    def test_post_mutes_and_delete_un_mutes(self):
+        response = self._call('post', {'ids': [self.invoice.id],
+                                       'reason': 'awaiting credit note'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['processed'], [self.invoice.id])
+        self.assertEqual(set(alert_mute_map([self.invoice.id])), {self.invoice.id})
+
+        response = self._call('delete', {'ids': [self.invoice.id]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(alert_mute_map([self.invoice.id]), {})
+
+    def test_a_blank_reason_is_refused_before_anything_is_written(self):
+        response = self._call('post', {'ids': [self.invoice.id], 'reason': '  '})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AlertMute.objects.count(), 0)
+
+    def test_no_ids_is_refused(self):
+        response = self._call('post', {'ids': [], 'reason': 'anything'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_the_queue_reports_the_flag_and_the_reason(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from .views import MyQueueView
+        set_alert_mute(self.invoice, self.clerk, 'awaiting credit note')
+        request = APIRequestFactory().get('/api/tracker/my-queue/')
+        force_authenticate(request, user=self.clerk)
+        response = MyQueueView.as_view()(request)
+        self.assertEqual(response.status_code, 200)
+        row = next(r for r in response.data['invoices'] if r['id'] == self.invoice.id)
+        self.assertTrue(row['email_muted'])
+        self.assertEqual(row['email_mute_reason'], 'awaiting credit note')
+        self.assertEqual(row['email_muted_by'], self.clerk.username)
