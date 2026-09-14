@@ -47,6 +47,7 @@ from django.db import DatabaseError, connections, transaction
 from django.utils import timezone
 
 from workflow.exceptions import ConditionExecutionError
+from workflow.models import DEFAULT_KEY_COLUMN
 from workflow.validators import allowed_relations_for, validate_query_text
 
 logger = logging.getLogger(__name__)
@@ -110,10 +111,20 @@ def _run(sql, params, *, alias):
         raise ConditionExecutionError() from exc
 
 
-def matches(query, document_key):
+def matches(query, document_key, *, key_column=None):
     """Is the document with `document_key` inside this query's set?
 
     The single call selection uses (plan §6). Returns a bool.
+
+    `key_column` is RUNTIME CONTEXT, supplied by the business module through
+    `engine.start()` — not read from the query row. The module owns its own
+    table and therefore knows which column identifies one of its documents;
+    asking an administrator to restate that in the query configuration made
+    the engine hold a second copy of a fact it could not verify. Defaults to
+    `id`, which is what every table in this codebase actually uses.
+
+    It is quoted as an IDENTIFIER and never interpolated as data; the document
+    key itself is always a bound parameter.
 
     Raises `ConditionExecutionError` if the query errors or times out — the
     caller must fail the start rather than treat the error as "no match",
@@ -127,10 +138,10 @@ def matches(query, document_key):
             f'evaluated.'
         )
 
-    key_column = _quote_ident(query.effective_key_column)
+    quoted = _quote_ident(key_column or DEFAULT_KEY_COLUMN)
     sql = (
         f'SELECT 1 FROM ({query.query_text}) AS wf_q '
-        f'WHERE wf_q.{key_column} = %s LIMIT 1'
+        f'WHERE wf_q.{quoted} = %s LIMIT 1'
     )
     rows = _run(sql, [document_key], alias=_alias())
     return bool(rows)
@@ -177,7 +188,7 @@ def explain(query_text, *, key_column=None):
     return []
 
 
-def check_query(workflow, query_text, key_column='', *, extra_relations=(),
+def check_query(workflow, query_text, *, extra_relations=(),
                 run_explain=True):
     """Validate query text WITHOUT saving anything. Returns problems.
 
@@ -188,12 +199,20 @@ def check_query(workflow, query_text, key_column='', *, extra_relations=(),
 
     Deliberately the SAME code path `validate_and_stamp` uses — there is one
     validator, and this must not become a second one.
+
+    `workflow` is still taken so the signature reads as "validate this query
+    for this workflow" and so callers need no change, but nothing about the
+    module or the query row is consulted.
     """
-    module = workflow.module
-    effective_key = key_column or module.business_key_column
+    # Configuration-time validation cannot know the runtime key column — the
+    # module supplies that when it submits a document, which has not happened
+    # yet. It checks against the default, `id`, which is what the wrapper will
+    # bind unless a caller overrides it. A query that projects something else
+    # satisfies this with `SELECT *`, exactly as before.
+    effective_key = DEFAULT_KEY_COLUMN
     problems = validate_query_text(
         query_text,
-        allowed_relations=allowed_relations_for(module, extra_relations),
+        allowed_relations=allowed_relations_for(extra_relations),
         key_column=effective_key,
     )
     if not problems and run_explain:
@@ -212,7 +231,7 @@ def validate_and_stamp(query, *, extra_relations=(), run_explain=True):
     Returns the list of problems (empty means the query is now usable).
     """
     problems = check_query(
-        query.workflow, query.query_text, query.key_column,
+        query.workflow, query.query_text,
         extra_relations=extra_relations, run_explain=run_explain,
     )
 

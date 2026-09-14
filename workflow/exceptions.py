@@ -43,22 +43,11 @@ class AmbiguousWorkflowSelection(WorkflowError):
     )
 
 
-class WorkflowAlreadyRunning(WorkflowError):
-    """A workflow execution is already in progress for this document."""
-
-    default_message = 'A workflow is already running for this document.'
-
-
-class InvalidWorkflowAction(WorkflowError):
-    """The requested action is not valid for the current state."""
-
-    default_message = 'That action is not valid for this workflow right now.'
-
-
-class UnauthorizedWorkflowAction(WorkflowError):
-    """The caller is not the effective actor for this task."""
-
-    default_message = 'This task is not assigned to you.'
+# `WorkflowAlreadyRunning`, `InvalidWorkflowAction` and
+# `UnauthorizedWorkflowAction` used to live here. They described RUNTIME the
+# engine no longer owns — "a flow is already open", "you may not act on this
+# task" — and a module raises its own equivalents over its own task model.
+# Keeping them would advertise an engine capability that does not exist.
 
 
 class InvalidWorkflowConfiguration(WorkflowError):
@@ -67,18 +56,9 @@ class InvalidWorkflowConfiguration(WorkflowError):
     default_message = 'The workflow configuration is invalid.'
 
 
-class StageUserUnavailable(InvalidWorkflowConfiguration):
-    """The stage's effective user cannot act (inactive account).
-
-    Surfaced at the moment the stage would open, rather than letting the
-    document deadlock there days later — the same choice
-    `approvals.services` already makes for an unstaffed rung.
-    """
-
-    default_message = (
-        'The user configured for this stage is not active, and no '
-        'replacement covers today.'
-    )
+# `StageUserUnavailable` is gone with them: whether a stage's user can act is
+# decided when the MODULE opens that stage, against the module's own rules.
+# The engine reports the configured and effective user and stops there.
 
 
 class ConditionExecutionError(WorkflowError):

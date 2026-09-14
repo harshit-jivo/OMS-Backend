@@ -1,11 +1,13 @@
-"""Workflow engine API.
+"""Workflow engine API — CONFIGURATION ONLY.
 
 Authentication is the project default (JWT via `DEFAULT_AUTHENTICATION_CLASSES`);
 nothing here defines its own. Authorisation uses `core.permissions.HasKey` with
-keys registered in `core.permission_registry` — configuration endpoints require
-`workflow.config.manage`, runtime endpoints require `workflow.task.act`, and
-acting on a task additionally requires being that task's EFFECTIVE actor, which
-the engine enforces (`UnauthorizedWorkflowAction`).
+keys registered in `core.permission_registry`: every endpoint in this module
+requires `workflow.config.manage`.
+
+There are no runtime endpoints. Approval tasks, actions and flow state belong
+to the business module, which publishes its own API for them; this one manages
+the configuration those modules are driven by. See `workflow/urls.py`.
 
 Responses use the `core.responses` envelope ({success, message, data}), the
 convention the newer apps standardise on.
@@ -13,56 +15,42 @@ convention the newer apps standardise on.
 import logging
 
 from django.db import IntegrityError
+from django.db.models import Count, Q
 from rest_framework import status as http_status
 from rest_framework.generics import (
     ListCreateAPIView,
-    RetrieveUpdateDestroyAPIView,
+    RetrieveUpdateAPIView,
 )
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
 from core.permissions import HasKey
-from core.responses import created, fail, ok
+from core.responses import fail, ok
 from workflow import exceptions as wf_exc
 from workflow.models import (
-    TestDocument,
-    TestDocumentLog,
-    TestFlow,
+    COMPANY_ALL,
     Workflow,
     WorkflowModule,
     WorkflowQuery,
     WorkflowStage,
-    WorkflowTask,
     WorkflowUserReplacement,
 )
 from workflow.serializers import (
-    TestDocumentSerializer,
-    TestFlowSerializer,
-    WorkflowActionSerializer,
     WorkflowModuleSerializer,
     WorkflowQuerySerializer,
     WorkflowSerializer,
     WorkflowStageSerializer,
-    WorkflowTaskSerializer,
     WorkflowUserReplacementSerializer,
 )
-from workflow.services import conditions, engine
+from workflow.services import assignments, conditions, replacements
 
 logger = logging.getLogger(__name__)
 
 CONFIG_KEY = 'workflow.config.manage'
-ACT_KEY = 'workflow.task.act'
-VIEW_KEY = 'workflow.state.view'
 
 #: Engine error -> HTTP status. Each error is explicit rather than collapsing
 #: into a generic 400, so a client can branch on it.
 ERROR_STATUS = {
-    wf_exc.WorkflowNotConfigured: http_status.HTTP_409_CONFLICT,
-    wf_exc.AmbiguousWorkflowSelection: http_status.HTTP_409_CONFLICT,
-    wf_exc.WorkflowAlreadyRunning: http_status.HTTP_409_CONFLICT,
-    wf_exc.InvalidWorkflowAction: http_status.HTTP_400_BAD_REQUEST,
-    wf_exc.UnauthorizedWorkflowAction: http_status.HTTP_403_FORBIDDEN,
-    wf_exc.StageUserUnavailable: http_status.HTTP_409_CONFLICT,
     wf_exc.InvalidWorkflowConfiguration: http_status.HTTP_409_CONFLICT,
     wf_exc.ConditionExecutionError: http_status.HTTP_400_BAD_REQUEST,
     wf_exc.QueryValidationError: http_status.HTTP_400_BAD_REQUEST,
@@ -103,6 +91,19 @@ def _request_ctx(request):
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+def _active_only(request, qs):
+    """Hide deactivated rows unless `?include_inactive=1`.
+
+    Without the escape hatch a deactivated row could never be found again, so
+    deactivation would be a one-way door rather than the reversible
+    alternative to deleting that it is meant to be.
+    """
+    flag = (request.query_params.get('include_inactive') or '').lower()
+    if flag not in {'1', 'true', 'yes'}:
+        qs = qs.filter(is_active=True)
+    return qs
+
 
 class EnvelopeMixin:
     """Put generic-view responses into the project's `{success, message, data}`.
@@ -150,16 +151,47 @@ class EnvelopeMixin:
 
 
 class _ConfigView(EnvelopeMixin):
+    """Shared permission gate for the five configuration resources.
+
+    NOTHING HERE IS DELETABLE. The detail views are Retrieve+Update only, so
+    every one of them answers DELETE with 405. That is deliberate and it is
+    enforced at the API, not left to the UI: every configuration row is
+    referenced by flows, tasks and the append-only action history, and those
+    foreign keys are ON DELETE RESTRICT. A delete therefore either fails with a
+    ProtectedError or, where nothing references the row YET, quietly removes
+    configuration someone is about to point a module at.
+
+    `is_active` is the supported alternative: a deactivated row stops taking
+    part in selection and disappears from the default listing, while every
+    reference to it survives and it can be brought back. See `_active_only`.
+    """
+
     def get_permissions(self):
         return [IsAuthenticated(), HasKey(CONFIG_KEY)]
 
 
 class ModuleListCreateView(_ConfigView, ListCreateAPIView):
-    queryset = WorkflowModule.objects.all()
+    """The registry: which modules exist, and how much is configured on each.
+
+    Every registered module is listed, always. There is no `is_active` on a
+    module and so no `?include_inactive=1` here — the registry is a statement
+    of what exists, and routing is stopped by deactivating a module's
+    WORKFLOWS, which the Workflows tab does.
+
+    Modules normally register THEMSELVES at deploy time (see
+    `WorkflowConfig.ready`), so this is primarily a read endpoint; POST
+    remains for the administrative case and takes `code` + `name` only.
+    """
+
     serializer_class = WorkflowModuleSerializer
 
+    def get_queryset(self):
+        # Annotated so the list does not issue one COUNT per module.
+        return WorkflowModule.objects.annotate(
+            workflow_count=Count('workflows', distinct=True))
 
-class ModuleDetailView(_ConfigView, RetrieveUpdateDestroyAPIView):
+
+class ModuleDetailView(_ConfigView, RetrieveUpdateAPIView):
     queryset = WorkflowModule.objects.all()
     serializer_class = WorkflowModuleSerializer
 
@@ -174,10 +206,16 @@ class WorkflowListCreateView(_ConfigView, ListCreateAPIView):
         module = self.request.query_params.get('module')
         if module:
             qs = qs.filter(module__code=module.upper())
-        return qs
+        company = (self.request.query_params.get('company') or '').upper()
+        if company:
+            # Filter for the UI's company selector. `ALL` workflows always
+            # apply, so they are included for every specific company — the
+            # same applicability rule selection uses, not a preference.
+            qs = qs.filter(Q(company=COMPANY_ALL) | Q(company=company))
+        return _active_only(self.request, qs)
 
 
-class WorkflowDetailView(_ConfigView, RetrieveUpdateDestroyAPIView):
+class WorkflowDetailView(_ConfigView, RetrieveUpdateAPIView):
     serializer_class = WorkflowSerializer
     queryset = (Workflow.objects
                 .select_related('module')
@@ -193,10 +231,10 @@ class QueryListCreateView(_ConfigView, ListCreateAPIView):
         workflow = self.request.query_params.get('workflow')
         if workflow:
             qs = qs.filter(workflow_id=workflow)
-        return qs
+        return _active_only(self.request, qs)
 
 
-class QueryDetailView(_ConfigView, RetrieveUpdateDestroyAPIView):
+class QueryDetailView(_ConfigView, RetrieveUpdateAPIView):
     serializer_class = WorkflowQuerySerializer
     queryset = WorkflowQuery.objects.select_related('workflow',
                                                     'workflow__module')
@@ -233,25 +271,72 @@ class QueryRevalidateView(APIView):
 
 
 class StageListCreateView(_ConfigView, ListCreateAPIView):
+    """Stages, by workflow or by user.
+
+    `?workflow=<id>` is the Stages tab's By Workflow view — the stages of one
+    workflow, in sequence.
+
+    `?user=<id>` is its By User view: every stage this person is the CONFIGURED
+    actor for, across every module. That is a join over the three configuration
+    tables and nothing more — no business module's documents or tasks are
+    touched, because an administrator looking at assignments must not make
+    every module load its runtime.
+    """
+
     serializer_class = WorkflowStageSerializer
 
     def get_queryset(self):
-        qs = WorkflowStage.objects.select_related('workflow', 'user')
+        qs = (WorkflowStage.objects
+              .select_related('user', 'workflow', 'workflow__module'))
         workflow = self.request.query_params.get('workflow')
         if workflow:
             qs = qs.filter(workflow_id=workflow)
-        return qs
+        user = self.request.query_params.get('user')
+        if user:
+            qs = qs.filter(user_id=user).order_by(
+                'workflow__module__code', 'workflow__code', 'sequence')
+        return _active_only(self.request, qs)
+
+    def get_serializer_context(self):
+        """Resolve every row's effective user in ONE replacement query.
+
+        Done here rather than per row: the serializer would otherwise issue a
+        replacement lookup for each stage, which is the N+1 this view exists to
+        avoid.
+        """
+        context = super().get_serializer_context()
+        if self.request.method == 'GET':
+            stages = list(self.get_queryset())
+            context['effective_map'] = assignments._effective_map(
+                stages, replacements.today())
+        return context
 
 
-class StageDetailView(_ConfigView, RetrieveUpdateDestroyAPIView):
+class StageDetailView(_ConfigView, RetrieveUpdateAPIView):
     serializer_class = WorkflowStageSerializer
     queryset = WorkflowStage.objects.select_related('workflow', 'user')
 
 
+# There is deliberately NO bulk "replace all assignments" endpoint.
+#
+# One existed briefly. It is gone because a single request that rewrites every
+# stage a person owns, across every module, is an organisation-wide change with
+# no natural review step — the blast radius is invisible at the moment of
+# clicking, and there is no undo. Moving somebody's work is done one stage at a
+# time through `PATCH /stages/<id>/`, where what changes is exactly what you
+# were looking at.
+#
+# For a holiday, use `/replacements/` instead: dated, reversible, and it leaves
+# the configuration alone.
+
+
 class ReplacementListCreateView(_ConfigView, ListCreateAPIView):
     serializer_class = WorkflowUserReplacementSerializer
-    queryset = WorkflowUserReplacement.objects.select_related('old_user',
-                                                              'new_user')
+
+    def get_queryset(self):
+        return _active_only(
+            self.request,
+            WorkflowUserReplacement.objects.select_related('old_user', 'new_user'))
 
     def create(self, request, *args, **kwargs):
         # The overlap bar is a database exclusion constraint, so the readable
@@ -270,7 +355,7 @@ class ReplacementListCreateView(_ConfigView, ListCreateAPIView):
             raise
 
 
-class ReplacementDetailView(_ConfigView, RetrieveUpdateDestroyAPIView):
+class ReplacementDetailView(_ConfigView, RetrieveUpdateAPIView):
     serializer_class = WorkflowUserReplacementSerializer
     queryset = WorkflowUserReplacement.objects.select_related('old_user',
                                                               'new_user')
@@ -280,244 +365,17 @@ class ReplacementDetailView(_ConfigView, RetrieveUpdateDestroyAPIView):
 # Runtime
 # ---------------------------------------------------------------------------
 
-class InboxView(APIView):
-    """Pending tasks the caller owns, including any they stand in for."""
-
-    def get_permissions(self):
-        return [IsAuthenticated()]
-
-    def get(self, request):
-        tasks = engine.inbox_for(request.user)
-        return ok(WorkflowTaskSerializer(tasks, many=True).data)
-
-
-class TaskDetailView(APIView):
-    def get_permissions(self):
-        return [IsAuthenticated()]
-
-    def get(self, request, pk):
-        try:
-            task = WorkflowTask.objects.select_related(
-                'module', 'stage', 'stage__workflow', 'stage_user').get(pk=pk)
-        except WorkflowTask.DoesNotExist:
-            return fail('Task not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-        return ok(WorkflowTaskSerializer(task).data)
-
-
-class TaskApproveView(APIView):
-    """POST — approve the task. One approve completes the stage."""
-
-    def get_permissions(self):
-        return [IsAuthenticated(), HasKey(ACT_KEY)]
-
-    def post(self, request, pk):
-        if not WorkflowTask.objects.filter(pk=pk).exists():
-            return fail('Task not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-        try:
-            flow, next_task = engine.approve(
-                task_id=pk,
-                user=request.user,
-                remarks=request.data.get('remarks', ''),
-                ctx=_request_ctx(request),
-            )
-        except wf_exc.WorkflowError as exc:
-            return _engine_error(exc)
-        return ok({
-            'flow_id': flow.pk,
-            'flow_status': flow.status,
-            'current_sequence': flow.current_sequence,
-            'next_task': (WorkflowTaskSerializer(next_task).data
-                          if next_task else None),
-        }, message='Approved.')
-
-
-class TaskRejectView(APIView):
-    """POST — reject the task. One reject ends the workflow execution."""
-
-    def get_permissions(self):
-        return [IsAuthenticated(), HasKey(ACT_KEY)]
-
-    def post(self, request, pk):
-        if not WorkflowTask.objects.filter(pk=pk).exists():
-            return fail('Task not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-        try:
-            flow, _ = engine.reject(
-                task_id=pk,
-                user=request.user,
-                remarks=request.data.get('remarks', ''),
-                ctx=_request_ctx(request),
-            )
-        except wf_exc.WorkflowError as exc:
-            return _engine_error(exc)
-        return ok({'flow_id': flow.pk, 'flow_status': flow.status},
-                  message='Rejected.')
-
-
-class FlowStateView(APIView):
-    """Current engine state plus append-only history for one flow."""
-
-    def get_permissions(self):
-        return [IsAuthenticated(), HasKey(VIEW_KEY)]
-
-    def get(self, request, module_code, flow_id):
-        try:
-            module = WorkflowModule.objects.get(code=module_code.upper())
-        except WorkflowModule.DoesNotExist:
-            return fail('Module not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-        try:
-            model = engine.flow_model_for(module)
-        except wf_exc.WorkflowError as exc:
-            return _engine_error(exc)
-
-        flow = (model.objects
-                .select_related('workflow', 'matched_query', 'current_stage')
-                .filter(pk=flow_id).first())
-        if flow is None:
-            return fail('Flow not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-
-        tasks = (WorkflowTask.objects
-                 .filter(module=module, flow_id=flow_id)
-                 .select_related('module', 'stage', 'stage__workflow',
-                                 'stage_user')
-                 .order_by('sequence', 'id'))
-        history = engine.history_for(module, flow_id)
-        return ok({
-            'flow': TestFlowSerializer(flow).data
-                    if isinstance(flow, TestFlow) else {
-                        'id': flow.pk, 'status': flow.status,
-                        'current_sequence': flow.current_sequence,
-                    },
-            'tasks': WorkflowTaskSerializer(tasks, many=True).data,
-            'history': WorkflowActionSerializer(history, many=True).data,
-        })
-
-
 # ---------------------------------------------------------------------------
-# TestFlow harness — the first integration target
+# There is deliberately no runtime API here
 # ---------------------------------------------------------------------------
-
-def _log_module_event(document, event, *, user=None, remarks=''):
-    """Append to the MODULE's own history.
-
-    This is the `flow_logs` role from the plan. RESUBMITTED lives here and
-    never in `workflow_action` — resubmission is a module event.
-    """
-    from django.db.models import Max
-    top = (TestDocumentLog.objects.filter(document=document)
-           .aggregate(t=Max('sequence'))['t'] or 0)
-    return TestDocumentLog.objects.create(
-        document=document, sequence=top + 1, event=event,
-        remarks=remarks, created_by=user if user and user.is_authenticated else None,
-    )
-
-
-class TestDocumentListCreateView(EnvelopeMixin, ListCreateAPIView):
-    """Create a test document WITHOUT starting a workflow.
-
-    Kept separate from submit so the harness can exercise "document exists,
-    no execution yet".
-    """
-
-    serializer_class = TestDocumentSerializer
-    queryset = TestDocument.objects.prefetch_related('logs', 'flows')
-
-    def get_permissions(self):
-        return [IsAuthenticated(), HasKey(CONFIG_KEY)]
-
-
-class TestDocumentDetailView(APIView):
-    def get_permissions(self):
-        return [IsAuthenticated()]
-
-    def get(self, request, pk):
-        doc = (TestDocument.objects
-               .prefetch_related('logs', 'flows')
-               .filter(pk=pk).first())
-        if doc is None:
-            return fail('Document not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-        return ok(TestDocumentSerializer(doc).data)
-
-
-class TestDocumentSubmitView(APIView):
-    """POST — the module-side submit: business row + engine start, one txn.
-
-    This is the reference example of the responsibility boundary. The MODULE:
-      * owns the document and its `flow_logs` history;
-      * creates OR REUSES its single flow row;
-      * decides whether a resubmission is allowed;
-      * then invokes the engine.
-
-    The engine performs ordinary selection and stage opening and has no idea
-    whether this was a first submission or a resubmission.
-    """
-
-    def get_permissions(self):
-        return [IsAuthenticated(), HasKey(ACT_KEY)]
-
-    def post(self, request, pk):
-        from django.db import transaction
-
-        doc = TestDocument.objects.filter(pk=pk).first()
-        if doc is None:
-            return fail('Document not found.',
-                        status=http_status.HTTP_404_NOT_FOUND)
-
-        module = WorkflowModule.objects.filter(code='TESTFLOW').first()
-        if module is None:
-            return fail(
-                'The TESTFLOW module is not configured.',
-                errors={'code': 'InvalidWorkflowConfiguration'},
-                status=http_status.HTTP_409_CONFLICT,
-            )
-
-        try:
-            with transaction.atomic():
-                # Reuse the document's single flow row; create it only if the
-                # document has never had one. A resubmission therefore runs on
-                # the SAME row — the engine never makes a second.
-                flow, fresh = TestFlow.objects.get_or_create(
-                    document=doc, defaults={'company': doc.company},
-                )
-                resubmission = not fresh
-
-                # MODULE policy lives here, not in the engine. This harness
-                # allows resubmission only from a rejected execution.
-                if resubmission and flow.status not in ('REJECTED', 'CANCELLED'):
-                    raise wf_exc.WorkflowAlreadyRunning(
-                        context={'flow_id': flow.pk, 'status': flow.status})
-
-                _log_module_event(
-                    doc,
-                    TestDocumentLog.Event.RESUBMITTED if resubmission
-                    else TestDocumentLog.Event.SUBMITTED,
-                    user=request.user,
-                    remarks=request.data.get('remarks', ''),
-                )
-
-                flow, task = engine.start(
-                    module=module,
-                    flow=flow,
-                    document_key=doc.pk,
-                    company=doc.company,
-                    user=request.user,
-                    context={'branch': doc.branch, 'department': doc.department,
-                             'amount': str(doc.amount)},
-                    ctx=_request_ctx(request),
-                )
-                doc.status = 'IN_APPROVAL'
-                doc.save(update_fields=['status', 'updated_at'])
-        except wf_exc.WorkflowError as exc:
-            return _engine_error(exc)
-
-        return created({
-            'document_id': doc.pk,
-            'resubmission': resubmission,
-            'flow': TestFlowSerializer(flow).data,
-            'task': WorkflowTaskSerializer(task).data,
-        }, message='Workflow started.')
+#
+# `/inbox/`, `/tasks/<pk>/`, `/tasks/<pk>/approve/`, `/tasks/<pk>/reject/`,
+# `/flows/<module>/<id>/state/` and the whole `/testflow/` harness used to
+# live below this line. They are gone because tasks, actions, flows and
+# approval are owned by the BUSINESS MODULE, not by this engine.
+#
+# A module asks `workflow.services.selection.select_for_module()` which
+# workflow applies and what its stages are, then exposes its own
+# approve/reject endpoints over its own task model. Re-adding a generic
+# `/tasks/<id>/approve/` here would put every module's runtime back into one
+# shape, which is exactly what this refactor removed.

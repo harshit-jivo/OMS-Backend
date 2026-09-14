@@ -2,17 +2,22 @@
 
     python manage.py register_workflow_module \
         --code BUDGET \
-        --name "Budget Approval" \
-        --business-table budget.budget_request \
-        --business-key-column id \
-        --flow-table budget.budget_flow \
-        --flow-model budget.BudgetFlow
+        --name "Budget Approval"
+
+`code` and `name` are the whole registration. There are deliberately no
+options for the module's tables or flow model: `workflow_modules` holds
+identity only, and the module's own models are the source of truth for the
+rest (see `workflow/registry.py`).
 
 Re-running with the same `--code` updates the existing row rather than
-creating a second one, so it is safe in a deploy script.
+creating a second one, so it is safe in a deploy script:
 
-`--list` prints the current registry, which is the quickest way to check a
-module actually landed.
+    first  -> Registered module BUDGET (id=20)
+    second -> Updated module BUDGET (id=20)      # still one row
+
+Normally a module registers itself at deploy time from its own AppConfig, and
+this command is the manual escape hatch. `--list` prints the current registry,
+which is the quickest way to check a module actually landed.
 """
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
@@ -27,10 +32,6 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--code')
         parser.add_argument('--name')
-        parser.add_argument('--business-table')
-        parser.add_argument('--business-key-column', default='id')
-        parser.add_argument('--flow-table')
-        parser.add_argument('--flow-model')
         parser.add_argument('--list', action='store_true',
                             help='Print the registry and exit.')
 
@@ -42,24 +43,17 @@ class Command(BaseCommand):
                 return
             for m in rows:
                 self.stdout.write(
-                    f'{m.pk:>4}  {m.code:<14} {m.name}\n'
-                    f'      business: {m.business_table} (key={m.business_key_column})\n'
-                    f'      flow    : {m.flow_table} -> {m.flow_model}')
+                    f'{m.pk:>4}  {m.code:<14} {m.name}'
+                    f'   workflows={m.workflows.count()}')
             return
 
-        required = ['code', 'name', 'business_table', 'flow_table', 'flow_model']
-        missing = [f'--{r.replace("_", "-")}' for r in required if not opts.get(r)]
+        missing = [f'--{r}' for r in ('code', 'name') if not opts.get(r)]
         if missing:
             raise CommandError(f'missing required options: {", ".join(missing)}')
 
         try:
             module, created = register_module(
-                code=opts['code'],
-                name=opts['name'],
-                business_table=opts['business_table'],
-                business_key_column=opts['business_key_column'],
-                flow_table=opts['flow_table'],
-                flow_model=opts['flow_model'],
+                code=opts['code'], name=opts['name'],
             )
         except ValidationError as exc:
             raise CommandError('; '.join(exc.messages))
@@ -67,8 +61,5 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'{"Registered" if created else "Updated"} module '
             f'{module.code} (id={module.pk})'))
-        self.stdout.write(
-            f'  business_table      : {module.business_table}\n'
-            f'  business_key_column : {module.business_key_column}\n'
-            f'  flow_table          : {module.flow_table}\n'
-            f'  flow_model          : {module.flow_model}')
+        self.stdout.write(f'  code : {module.code}\n'
+                          f'  name : {module.name}')
