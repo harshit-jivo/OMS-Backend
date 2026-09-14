@@ -30,6 +30,21 @@ VENDOR_CACHE_TTL = 600  # seconds (10 min)
 AP_TABLES = (('OPCH', 18, 'AP_INVOICE'), ('ORPC', 19, 'AP_CREDIT_MEMO'))
 
 
+class SapUnavailable(Exception):
+    """HANA could not be reached or the query failed.
+
+    Exists because the alternative — returning an empty list — makes "SAP has
+    no such document" and "we never managed to ask SAP" the same answer to
+    every caller. That is how the JSAP refresh button came to report
+    "N still awaiting a JSAP decision" during a HANA outage: the invoices were
+    not awaiting anything, the lookup had failed and said nothing about it.
+
+    The lookups still swallow by default, because most callers genuinely want
+    best-effort. Pass `strict=True` when the caller can say something useful
+    about the difference.
+    """
+
+
 def _vendor_query():
     schema = settings.DATABASES['hana']['OIL_SCHEMA']
     return f'''
@@ -149,7 +164,8 @@ def find_sap_documents(invoice_number, party_code='', schema=None, *, require_pa
     return rows
 
 
-def find_draft_documents(invoice_number, party_code='', schema=None):
+def find_draft_documents(invoice_number, party_code='', schema=None, *,
+                         strict=False):
     """Candidate SAP *draft* documents (ODRF) for a vendor invoice number.
 
     Drafts matter because JSAP's budget approval happens on the draft, before
@@ -178,7 +194,9 @@ def find_draft_documents(invoice_number, party_code='', schema=None):
     try:
         with HANAConnection() as conn:
             rows = conn.execute(sql)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise SapUnavailable(str(exc)) from exc
         return []
     return [{
         'schema': schema,
@@ -339,17 +357,33 @@ def _rows_for_schema(conn, schema, keys):
     return out
 
 
-def resolve_draft_document(invoice):
-    """The SAP draft (ODRF) row for a tracker invoice, or None.
+def resolve_draft_documents(invoice, *, strict=False):
+    """EVERY SAP draft (ODRF) for a tracker invoice, newest DocEntry first.
+
+    Plural on purpose. A draft can be deleted and re-created — the number and
+    vendor stay the same, the DocEntry does not — and JSAP's approval stays
+    attached to whichever draft was current when it was granted. Returning only
+    the newest meant an invoice whose draft had been re-made looked to JSAP like
+    a document it had never seen, and the desk waited for a decision that had
+    already been made. Measured against production: it cost 1 of 172.
+
+    Live (non-cancelled) drafts come first, so a caller taking the first hit
+    still gets the best one.
 
     Only the invoice's own company is searched — the draft DocEntry is fed to
     JSAP, whose docEntry values collide across companies, so a cross-company
     guess here would attach the wrong approval status.
     """
     hits = find_draft_documents(invoice.invoice_number, invoice.party_code,
-                                schema_for_invoice(invoice))
-    live = [h for h in hits if h['canceled'] != 'Y']
-    return (live or hits or [None])[0]
+                                schema_for_invoice(invoice), strict=strict)
+    hits.sort(key=lambda h: (h['canceled'] == 'Y', -(h['docentry'] or 0)))
+    return hits
+
+
+def resolve_draft_document(invoice, *, strict=False):
+    """The best single SAP draft for a tracker invoice, or None."""
+    hits = resolve_draft_documents(invoice, strict=strict)
+    return hits[0] if hits else None
 
 
 def resolve_sap_document(invoice):
