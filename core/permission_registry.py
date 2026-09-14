@@ -157,6 +157,23 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Ap_Invoice_Entry':         'AP Invoice Entry (vendor invoices)',
     },
 
+    # --- Generic workflow engine (new-style keys) --------------------------
+    # Three keys, split by blast radius rather than by endpoint. Authoring a
+    # condition query is effectively authoring code, so it sits behind the
+    # same admin key as the rest of the configuration and NOT behind the
+    # runtime key an approver holds.
+    #
+    # Note that `workflow.task.act` is necessary but NOT sufficient to act on
+    # a task: the engine additionally requires the caller to be that task's
+    # effective actor (the stage's configured user, or their dated
+    # replacement), so holding this key never lets one approver act on
+    # another's task.
+    'workflow': {
+        'workflow.config.manage': 'Configure workflows, queries, stages and replacements',
+        'workflow.task.act':      'Approve/reject workflow tasks assigned to you',
+        'workflow.state.view':    'View workflow state and history for a document',
+    },
+
     # HANA has no module here, deliberately: `hana/` endpoints are read-only
     # data feeds behind pages that already carry keys — Product_Stock and
     # Reports gate every screen they serve. A `hana.*` key would gate nothing
