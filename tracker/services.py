@@ -1079,6 +1079,10 @@ def sync_jsap(invoice, *, user=None):
 
     Returns {'changed': bool, 'action': ADVANCE|RETURN|None, 'status': {...}}.
     Safe to call on any invoice: one not at the JSAP desk is a no-op.
+
+    A `status` carrying reason 'sap_unreachable' means the lookup FAILED, not
+    that the invoice is pending. `sync_jsap_all` counts those separately so the
+    caller can say so instead of reporting a quiet, false all-clear.
     """
     from . import jsap
 
@@ -1137,7 +1141,7 @@ def sync_jsap_all(*, user=None, limit=None):
     if limit:
         qs = qs[:limit]
 
-    advanced, returned, waiting, errors = [], [], [], []
+    advanced, returned, waiting, errors, unreachable = [], [], [], [], []
     for inv in qs:
         try:
             res = sync_jsap(inv, user=user)
@@ -1148,10 +1152,13 @@ def sync_jsap_all(*, user=None, limit=None):
             advanced.append(inv.pk)
         elif res['action'] == 'RETURN':
             returned.append(inv.pk)
+        elif (res.get('status') or {}).get('reason') == 'sap_unreachable':
+            # Kept out of `waiting`: these are unknown, not pending.
+            unreachable.append(inv.pk)
         else:
             waiting.append(inv.pk)
-    return {'advanced': advanced, 'returned': returned,
-            'waiting': waiting, 'errors': errors}
+    return {'advanced': advanced, 'returned': returned, 'waiting': waiting,
+            'unreachable': unreachable, 'errors': errors}
 
 
 def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',

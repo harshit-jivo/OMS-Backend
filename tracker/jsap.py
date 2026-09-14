@@ -176,13 +176,25 @@ def status_for_invoice(invoice):
         return {'available': False, 'reason': 'no_party_code',
                 'detail': 'Pick the SAP vendor on this invoice to link it to SAP.'}
 
-    draft = sap.resolve_draft_document(invoice)
-    if not draft:
+    try:
+        drafts = sap.resolve_draft_documents(invoice, strict=True)
+    except sap.SapUnavailable as exc:
+        # NOT 'no_draft'. The desk is told we could not ask, so it stops
+        # reading a failed lookup as "still pending".
+        return {'available': False, 'reason': 'sap_unreachable',
+                'detail': f'Could not reach SAP: {exc}'}
+
+    if not drafts:
         return {'available': False, 'reason': 'no_draft',
                 'detail': 'No matching SAP draft for this invoice number and vendor.'}
 
-    status = status_for_draft(draft['docentry'], branch)
-    if not status:
-        return {'available': False, 'reason': 'not_submitted', 'draft': draft,
-                'detail': 'The SAP draft exists but has not reached JSAP.'}
-    return {'available': True, 'draft': draft, **status}
+    # Try every draft, not just the newest: a re-created draft leaves JSAP's
+    # approval attached to the earlier one. Newest-first, so the common case
+    # still answers on the first probe.
+    for draft in drafts:
+        status = status_for_draft(draft['docentry'], branch)
+        if status:
+            return {'available': True, 'draft': draft, **status}
+
+    return {'available': False, 'reason': 'not_submitted', 'draft': drafts[0],
+            'detail': 'The SAP draft exists but has not reached JSAP.'}
