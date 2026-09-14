@@ -93,19 +93,36 @@ def _normalise_relation(raw):
     return '.'.join(cleaned)
 
 
-def allowed_relations_for(module, extra=()):
-    """Relations a query configured for `module` may read.
+def allowed_relations_for(extra=()):
+    """Normalise a caller-supplied relation allow-list.
 
-    The module's own business table, plus anything explicitly allow-listed by
-    the caller. Everything else is refused — which is what stops a condition
-    query from reading `users_user` or another module's tables.
+    ONLY the caller's list. The module registry used to contribute
+    `business_table` here, but `workflow_modules` is identity now — the engine
+    is generic and has no way to know which tables a module owns unless the
+    module says so at the call site.
+
+    An EMPTY allow-list means relations are not restricted, and that is the
+    default for a query configured through the API. Read that plainly: the
+    per-module relation boundary is gone, and a condition query may name any
+    relation the database user can read. What still applies to every query, and
+    is not weakened:
+
+    * SELECT/WITH only, single statement, no DML or DDL keyword anywhere —
+      enforced lexically here AND by the `workflow_query_select_only` CHECK;
+    * the `FORBIDDEN_SCHEMAS` deny-list (pg_catalog, information_schema, ...);
+    * the function deny-list;
+    * execution on a read-only path (`conditions.isolation_mode`).
+
+    So a query cannot WRITE. It can read more widely than before, which is why
+    `workflow.config.manage` is an administrator permission. A caller that
+    wants the old narrow boundary passes `extra` explicitly.
     """
     allowed = set()
-    for raw in (module.business_table, *extra):
+    for raw in extra:
         if not raw:
             continue
-        # Stored as `workflow"."workflow_test_document` (the Django
-        # schema-qualifying form); compare on `schema.table`.
+        # A caller may pass Django's `schema"."table` quoting form; compare
+        # on the raw-SQL `schema.table` either way.
         allowed.add(_normalise_relation(raw.replace('"."', '.')))
     # A bare table name is accepted for the same relation, since a query may
     # legitimately rely on search_path.
