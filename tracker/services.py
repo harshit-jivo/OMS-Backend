@@ -42,6 +42,11 @@ REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
 
 PRE_AUDIT_STAGE_CODE = 'pre_audit'
+# Terminal desk. `auto_advance_to_payment` walks an invoice here once the
+# document turns up posted in SAP, whatever desk it was sitting at.
+PAYMENT_STAGE_CODE = 'payment'
+# The desk that owns the SAP-saved sweep, and so the button that runs it.
+SAVE_IN_SAP_STAGE_CODE = 'save_in_sap'
 TRANSPORT_APPROVAL_STAGE_CODE = 'transport_approval'
 # Stages reached by a DETOUR, never as the next step along the line. They are
 # excluded from `stage_route` on purpose: Pre-Audit's linear neighbour must stay
@@ -536,6 +541,165 @@ def fast_track(invoice, user, remarks):
         acted_by=user, entered_at=now,
     )
     return invoice
+
+
+def auto_advance_to_payment(invoice, user, remarks, *, now=None):
+    """Walk an invoice to the Payment desk because SAP already has it posted.
+
+    The trigger is factual rather than procedural: if an A/P invoice for this
+    vendor and number exists in OPCH/ORPC, the work the middle desks exist to
+    do has demonstrably been done — the document was checked, approved and
+    saved. Leaving the tracker row parked at Pre-Audit after that does not
+    protect anything, it just makes the queue and every ageing figure describe
+    a state of the world that ended some time ago.
+
+    The desks in between are recorded as SKIPPED zero-length visits, exactly as
+    `fast_track` does and for the same reason: a bypassed desk that leaves no
+    row would quietly drop out of the visit counts that every duration and
+    bottleneck figure in `reports.py` is built from, and nobody reading the
+    report would know the invoice had been through. `remarks` are written onto
+    every one of those rows, so the passage explains itself wherever it is read
+    — the queue, the timeline, the decision log, the export.
+
+    Position is compared on `Stage.order`, not on the route's list index,
+    because an invoice can be sitting at a DETOUR desk (Transport Approval)
+    which `stage_route` deliberately leaves out. An index lookup would raise for
+    exactly the invoices most likely to be stranded.
+
+    `user=None` means the system acted (the nightly sweep), matching how the
+    JSAP sync records a decision made outside the tracker.
+    """
+    if invoice.status != Invoice.Status.IN_PROGRESS:
+        raise ValidationError('Only an in-progress invoice can be advanced.')
+    if not (remarks or '').strip():
+        raise ValidationError('A reason is mandatory for automatic progression.')
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice.')
+
+    target = Stage.objects.filter(code=PAYMENT_STAGE_CODE, is_active=True).first()
+    if target is None:
+        raise ValidationError('The Payment stage is not configured.')
+    if invoice.current_stage_id == target.id:
+        raise ValidationError('This invoice is already at Payment.')
+    if invoice.current_stage.order > target.order:
+        raise ValidationError('This invoice is already past Payment.')
+
+    now = now or timezone.now()
+    # Its OWN route, so a non-Transport invoice is not credited with a
+    # Bilty/GRPO visit it was never supposed to make.
+    skipped = [s for s in stage_route(invoice)
+               if s.order > invoice.current_stage.order and s.id != target.id]
+
+    with transaction.atomic():
+        # The desk it was actually sitting at closes with its real dwell time;
+        # only the untouched desks ahead of it are zero-length.
+        visit = _open_event(invoice)
+        if visit:
+            visit.event_type = StageEvent.EventType.ADVANCE
+            visit.stage_status = SKIPPED_STATUS
+            visit.remarks = remarks
+            visit.acted_by = user
+            visit.exited_at = now
+            visit.days_spent = _days_between(visit.entered_at, now)
+            visit.save()
+
+        for stage in skipped:
+            StageEvent.objects.create(
+                invoice=invoice, stage=stage,
+                event_type=StageEvent.EventType.ADVANCE,
+                stage_status=SKIPPED_STATUS,
+                remarks=remarks, acted_by=user,
+                entered_at=now, exited_at=now, days_spent=Decimal('0.00'),
+            )
+
+        invoice.current_stage = target
+        invoice.current_stage_entered_at = now
+        invoice.rejection_pending = False
+        invoice.is_locked = True
+        invoice.save()
+
+        StageEvent.objects.create(
+            invoice=invoice, stage=target,
+            event_type=StageEvent.EventType.RECEIVE,
+            receiving_note=(
+                StageEvent.ReceivingNote.LATE if _is_late(now)
+                else StageEvent.ReceivingNote.ON_TIME
+            ),
+            remarks=remarks, acted_by=user, entered_at=now,
+        )
+    return invoice
+
+
+def sap_saved_remarks(document):
+    """The sentence written onto every visit the automatic progression closes.
+
+    Carries the SAP document it was matched to, so a reader who doubts the jump
+    can go and look at the document rather than take the sweep's word for it.
+    There is no column for this — it lives in the remarks, which is what every
+    screen already shows.
+    """
+    doc_type = (document.get('doc_type') or 'AP_INVOICE').replace('_', ' ').title()
+    date = document.get('doc_date')
+    dated = f" dated {date:%d-%m-%Y}" if hasattr(date, 'strftime') else ''
+    return (f"Automatic progression — already saved in SAP as {doc_type} "
+            f"{document.get('docnum')}{dated} "
+            f"({document.get('table')} DocEntry {document.get('docentry')} in "
+            f"{document.get('schema')}). Intervening stages marked skipped.")
+
+
+def sync_sap_saved(invoice_ids=None, user=None, *, dry_run=False, limit=None):
+    """Find in-progress invoices SAP has already posted and walk them to Payment.
+
+    Returns a summary dict: `advanced` (list of {invoice, document, from_stage}),
+    `errors`, `checked`, and `cross_company` — invoices whose document exists but
+    in a different company database, which are REPORTED and never advanced (see
+    `sap.posted_documents_for`).
+
+    Idempotent: an invoice already at Payment is not a candidate, so a second
+    run over the same data changes nothing.
+    """
+    from . import sap
+
+    qs = (Invoice.objects
+          .filter(status=Invoice.Status.IN_PROGRESS)
+          .exclude(current_stage__code=PAYMENT_STAGE_CODE)
+          .exclude(party_code='')
+          .select_related('current_stage', 'branch', 'unit', 'category'))
+    if invoice_ids is not None:
+        qs = qs.filter(id__in=list(invoice_ids))
+    qs = qs.order_by('id')
+    if limit:
+        qs = qs[:limit]
+
+    candidates = list(qs)
+    posted = sap.posted_documents_for(candidates)
+
+    advanced, errors = [], []
+    for invoice in candidates:
+        document = posted.get(invoice.id)
+        if not document:
+            continue
+        from_stage = invoice.current_stage.name
+        remarks = sap_saved_remarks(document)
+        if dry_run:
+            advanced.append({'invoice': invoice, 'document': document,
+                             'from_stage': from_stage})
+            continue
+        try:
+            auto_advance_to_payment(invoice, user, remarks)
+            advanced.append({'invoice': invoice, 'document': document,
+                             'from_stage': from_stage})
+        except (ValidationError, PermissionDenied) as exc:
+            errors.append({'invoice': invoice,
+                           'detail': str(getattr(exc, 'message', exc))})
+
+    unmatched = [i for i in candidates if i.id not in posted]
+    return {
+        'checked': len(candidates),
+        'advanced': advanced,
+        'errors': errors,
+        'cross_company': sap.cross_company_documents_for(unmatched),
+    }
 
 
 def _open_event(invoice):

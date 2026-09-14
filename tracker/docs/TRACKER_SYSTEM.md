@@ -487,6 +487,73 @@ A re-notify cooldown (`TRACKER_ALERT_EMAIL_COOLDOWN_HOURS`, default 24) stops
 the sweep from mailing the same invoice every run. `AlertNotification` is the
 ledger of who was actually mailed.
 
+### Automatic progression — when SAP already has the invoice
+
+A document can be saved in SAP without anyone advancing the tracker row behind
+it: the desk posts it and moves on. The row then sits where it was, ageing,
+appearing in the queue and in the stuck-alert mail, describing a state of the
+world that ended when the document was saved.
+
+`services.sync_sap_saved()` closes that gap. For every in-progress invoice it
+asks SAP whether a **posted, non-cancelled** A/P invoice or credit memo exists
+for that vendor and number; if one does, `auto_advance_to_payment` walks the
+invoice to the Payment desk.
+
+**Only posted documents count.** A draft (ODRF) is pending, not saved. Marching
+an invoice to Payment on the strength of a document nobody has committed would
+be exactly the failure this is meant to prevent, in the other direction.
+
+**Every bypassed desk gets a row.** The stages between where the invoice was and
+Payment are written as zero-length `ADVANCE` visits with `stage_status =
+SKIPPED`, the same shape `fast_track` uses and for the same reason: every
+duration and bottleneck figure in `reports.py` is derived from `StageEvent`
+visits, so a desk that was bypassed without leaving a row would silently drop
+out of the population its own averages describe. The desk the invoice was
+actually sitting at closes with its **real** dwell time — only the untouched
+desks ahead of it are zero-length.
+
+**The reason explains itself wherever it is read.** Each of those visits carries
+a remark naming the document that justified the jump, e.g.
+
+> Automatic progression — already saved in SAP as Ap Invoice 12345 dated
+> 12-09-2026 (OPCH DocEntry 678 in JIVO_OIL_HANADB). Intervening stages marked
+> skipped.
+
+so a reader who doubts the move can go and look at the document rather than
+take the sweep's word for it. There is no column for this; it lives in the
+remarks, which every screen already shows.
+
+**Position is compared on `Stage.order`, not on the route's list index**, because
+an invoice can be sitting at a DETOUR desk (Transport Approval) that
+`stage_route` deliberately leaves out. An index lookup would raise for exactly
+the invoices most likely to be stranded.
+
+**Documents in the wrong company are reported, never acted on.** Each invoice is
+searched only in the schema its branch/unit selects. If the document turns up in
+a different company database, the tracker row or the posting is wrong — which is
+a thing for a person to decide, not for a sweep to resolve by advancing it. The
+count appears in the command output and in the button's toast.
+
+**Idempotent.** An invoice already at Payment is never a candidate, so a repeat
+run changes nothing. `posted_documents_for` is batched — one statement per
+(schema, table) rather than the two-per-invoice `find_sap_documents` does, which
+at queue size would be ~1,600 round trips.
+
+Two ways to run it:
+
+| | |
+|---|---|
+| Nightly | `sync_sap_saved`, via `run_sap_saved_sync.bat`, Task Scheduler daily at **00:00** |
+| On demand | **Check SAP** button on the Save in SAP desk (`POST actions/sync-sap-saved/`). With rows selected it checks only those; with none selected it sweeps the whole queue. |
+
+The button and the job call the same service, so they cannot drift apart. The
+endpoint is restricted to people mapped to the Save in SAP stage, plus tracker
+admins and superusers — it is not destructive, but it moves other desks'
+invoices.
+
+If HANA is unreachable the lookup returns nothing and the sweep advances
+nothing, rather than raising; a scheduled run degrades to a no-op.
+
 ### Muting the alert email
 
 A desk user can tick **No email** on a row in their queue and give a reason.
@@ -539,6 +606,7 @@ screen (you want to see it) but does not generate mail.
 
 | Command | Does | Batch file |
 |---|---|---|
+| `sync_sap_saved` | Advance invoices SAP has already posted to Payment (`--dry-run`, `--limit`, `--ids`, `--verbose`) | `run_sap_saved_sync.bat` |
 | `scan_stuck_alerts` | Raise / resolve stuck alerts | `run_stuck_alerts.bat` |
 | `email_stuck_alerts` | Email each stage's users (`--dry-run`, `--force`, `--cooldown-hours`) | `run_email_stuck_alerts.bat` |
 | `sync_jsap` | Mirror JSAP decisions (`--dry-run`, `--limit`) | `run_jsap_sync.bat` |
@@ -547,6 +615,7 @@ All three are **idempotent** — safe to run on a schedule. Register via Task
 Scheduler:
 
 ```
+schtasks /create /tn "Tracker SAP Saved Sync" /tr "...\run_sap_saved_sync.bat" /sc daily /st 00:00
 schtasks /create /tn "Tracker Stuck Alerts" /tr "...\run_stuck_alerts.bat"  /sc minute /mo 30
 schtasks /create /tn "Tracker JSAP Sync"    /tr "...\run_jsap_sync.bat"     /sc minute /mo 10
 ```

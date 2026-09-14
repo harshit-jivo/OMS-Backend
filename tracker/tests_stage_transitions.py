@@ -35,8 +35,9 @@ from .models import (
 )
 from .services import (
     SKIPPED_STATUS, _days_between, _open_event, alert_mute_map, apply_action,
-    clear_alert_mute, create_invoice, days_at_stage, fast_track,
-    full_hold_invoice_ids, set_alert_mute, stage_route,
+    auto_advance_to_payment, clear_alert_mute, create_invoice, days_at_stage,
+    fast_track, full_hold_invoice_ids, sap_saved_remarks, set_alert_mute,
+    stage_route, sync_sap_saved,
 )
 
 
@@ -897,3 +898,249 @@ class AlertMuteEndpointTests(TrackerFlowTestCase):
         self.assertTrue(row['email_muted'])
         self.assertEqual(row['email_mute_reason'], 'awaiting credit note')
         self.assertEqual(row['email_muted_by'], self.clerk.username)
+
+
+class AutoAdvanceToPaymentTests(TrackerFlowTestCase):
+    """SAP already has the document, so the tracker row stops pretending it is
+    still mid-flow."""
+
+    REASON = 'Automatic progression - already saved in SAP as AP Invoice 900.'
+
+    def test_it_lands_at_payment_from_wherever_it_was(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        invoice = auto_advance_to_payment(invoice, self.clerk, self.REASON)
+        self.assertEqual(invoice.current_stage.code, 'payment')
+
+    def test_every_bypassed_desk_on_its_route_gets_a_skipped_visit(self):
+        """The desks have to appear, or `reports.py` counts a population that
+        silently excludes fast-forwarded invoices."""
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        route = [s.code for s in stage_route(invoice)]
+        expected = [c for c in route
+                    if route.index(c) > route.index('pre_audit') and c != 'payment']
+
+        auto_advance_to_payment(invoice, self.clerk, self.REASON)
+
+        skipped = set(StageEvent.objects
+                      .filter(invoice=invoice, stage_status=SKIPPED_STATUS)
+                      .exclude(stage__code='pre_audit')
+                      .values_list('stage__code', flat=True))
+        self.assertEqual(skipped, set(expected))
+
+    def test_the_skipped_visits_are_zero_length_and_carry_the_reason(self):
+        invoice = self.move_to(self.make_invoice(), 'data_entry')
+        auto_advance_to_payment(invoice, self.clerk, self.REASON)
+        # Excluding the desk it was sitting at: that one closes with its real
+        # dwell time, which is also 0.00 when the test runs inside a minute.
+        bypassed = (StageEvent.objects
+                    .filter(invoice=invoice, stage_status=SKIPPED_STATUS)
+                    .exclude(stage__code='data_entry'))
+        self.assertTrue(bypassed.exists())
+        for ev in bypassed:
+            self.assertEqual(ev.entered_at, ev.exited_at)
+            self.assertEqual(ev.remarks, self.REASON)
+
+    def test_the_desk_it_was_actually_sitting_at_keeps_its_real_dwell_time(self):
+        """Only the untouched desks ahead of it are zero-length; the one that
+        held the invoice must not have its ageing erased."""
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        StageEvent.objects.filter(invoice=invoice, stage__code='pre_audit',
+                                  exited_at__isnull=True).update(
+            entered_at=timezone.now() - timedelta(days=3))
+
+        auto_advance_to_payment(invoice, self.clerk, self.REASON)
+
+        closed = StageEvent.objects.get(invoice=invoice, stage__code='pre_audit',
+                                        exited_at__isnull=False)
+        self.assertGreater(closed.days_spent, Decimal('0.00'))
+
+    def test_it_opens_a_receive_at_payment(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        invoice = auto_advance_to_payment(invoice, self.clerk, self.REASON)
+        visit = _open_event(invoice)
+        self.assertIsNotNone(visit)
+        self.assertEqual(visit.stage.code, 'payment')
+        self.assertEqual(visit.event_type, StageEvent.EventType.RECEIVE)
+
+    def test_it_works_from_a_detour_desk(self):
+        """Transport Approval is deliberately NOT on `stage_route`, so a
+        list-index lookup would raise for exactly these invoices."""
+        invoice = self.move_to(self.make_invoice(self.transport), 'pre_audit')
+        invoice = apply_action(invoice=invoice, user=self.clerk,
+                               stage_status='OK', remarks='detour')
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+        self.grant(self.clerk, 'transport_approval')
+        invoice = auto_advance_to_payment(invoice, self.clerk, self.REASON)
+        self.assertEqual(invoice.current_stage.code, 'payment')
+
+    def test_a_reason_is_mandatory(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        with self.assertRaises(ValidationError):
+            auto_advance_to_payment(invoice, self.clerk, '   ')
+
+    def test_an_invoice_already_at_payment_is_refused(self):
+        invoice = self.move_to(self.make_invoice(), 'payment')
+        with self.assertRaises(ValidationError):
+            auto_advance_to_payment(invoice, self.clerk, self.REASON)
+
+    def test_a_pending_rejection_is_cleared_on_the_way(self):
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        Invoice.objects.filter(pk=invoice.pk).update(rejection_pending=True)
+        invoice.refresh_from_db()
+        invoice = auto_advance_to_payment(invoice, self.clerk, self.REASON)
+        self.assertFalse(invoice.rejection_pending)
+
+    def test_the_system_may_act_without_a_user(self):
+        """The nightly sweep has no person to attribute the move to."""
+        invoice = self.move_to(self.make_invoice(), 'pre_audit')
+        invoice = auto_advance_to_payment(invoice, None, self.REASON)
+        self.assertEqual(invoice.current_stage.code, 'payment')
+        self.assertIsNone(
+            StageEvent.objects.filter(invoice=invoice, stage__code='payment')
+            .first().acted_by)
+
+
+class SapSavedRemarksTests(TestCase):
+    """The sentence has to name the document, or the jump is unverifiable."""
+
+    def test_it_names_the_document_it_matched(self):
+        text = sap_saved_remarks({
+            'doc_type': 'AP_INVOICE', 'docnum': 12345, 'docentry': 678,
+            'table': 'OPCH', 'schema': 'JIVO_OIL_HANADB',
+            'doc_date': date(2026, 9, 12),
+        })
+        for fragment in ('Automatic progression', 'Ap Invoice', '12345',
+                         'OPCH', '678', 'JIVO_OIL_HANADB', '12-09-2026'):
+            self.assertIn(fragment, text)
+
+    def test_a_missing_date_does_not_break_it(self):
+        text = sap_saved_remarks({'doc_type': 'AP_CREDIT_MEMO', 'docnum': 1,
+                                  'docentry': 2, 'table': 'ORPC',
+                                  'schema': 'X', 'doc_date': None})
+        self.assertIn('Automatic progression', text)
+        self.assertNotIn('dated', text)
+
+
+class SyncSapSavedTests(TrackerFlowTestCase):
+    """The sweep itself, with SAP stubbed — the HANA query is not what is
+    under test here, the selection and the idempotence are."""
+
+    def _vendor_invoice(self, number, stage):
+        """A tracker invoice with an SAP vendor code — without one it is
+        correctly never a candidate, since the match key needs it."""
+        invoice = self.move_to(self.make_invoice(number=number), stage)
+        Invoice.objects.filter(pk=invoice.pk).update(party_code='VENDA000001')
+        invoice.refresh_from_db()
+        return invoice
+
+    def _stub(self, mapping):
+        """Patch the batched lookup to return `mapping` (invoice id -> doc)."""
+        from unittest.mock import patch
+        doc = {'table': 'OPCH', 'docnum': 900, 'docentry': 11,
+               'doc_type': 'AP_INVOICE', 'schema': 'S', 'doc_date': None}
+        return patch.multiple(
+            'tracker.sap',
+            posted_documents_for=lambda invoices: {
+                i.id: doc for i in invoices if i.id in mapping},
+            cross_company_documents_for=lambda invoices: {},
+        )
+
+    def test_only_invoices_sap_has_are_moved(self):
+        moved = self._vendor_invoice('S-1', 'pre_audit')
+        left = self._vendor_invoice('S-2', 'pre_audit')
+        with self._stub({moved.id}):
+            result = sync_sap_saved()
+        self.assertEqual([r['invoice'].id for r in result['advanced']], [moved.id])
+        moved.refresh_from_db()
+        left.refresh_from_db()
+        self.assertEqual(moved.current_stage.code, 'payment')
+        self.assertEqual(left.current_stage.code, 'pre_audit')
+
+    def test_the_from_stage_is_captured_before_the_move(self):
+        invoice = self._vendor_invoice('S-3', 'data_entry')
+        with self._stub({invoice.id}):
+            result = sync_sap_saved()
+        self.assertEqual(result['advanced'][0]['from_stage'], 'Data Entry')
+
+    def test_dry_run_changes_nothing(self):
+        invoice = self._vendor_invoice('S-4', 'pre_audit')
+        with self._stub({invoice.id}):
+            result = sync_sap_saved(dry_run=True)
+        self.assertEqual(len(result['advanced']), 1)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+
+    def test_running_it_twice_is_a_no_op_the_second_time(self):
+        invoice = self._vendor_invoice('S-5', 'pre_audit')
+        with self._stub({invoice.id}):
+            sync_sap_saved()
+            again = sync_sap_saved()
+        self.assertEqual(again['advanced'], [])
+
+    def test_an_invoice_without_a_vendor_code_is_never_a_candidate(self):
+        """The match key is NumAtCard + CardCode; without the code a match
+        would be a guess across every vendor that reused the number."""
+        invoice = self._vendor_invoice('S-6', 'pre_audit')
+        Invoice.objects.filter(pk=invoice.pk).update(party_code='')
+        with self._stub({invoice.id}):
+            result = sync_sap_saved()
+        self.assertEqual(result['checked'], 0)
+
+
+class SapSavedSyncEndpointTests(TrackerFlowTestCase):
+    """The button's endpoint: who may press it, and that it calls the same
+    service the nightly job does."""
+
+    def setUp(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from users.models import UserRole
+        from .views import SapSavedSyncView
+        role, _ = UserRole.objects.get_or_create(
+            name='tracker_user', defaults={'display_name': 'Tracker User'})
+        for user in (self.clerk, self.other):
+            user.role = role
+            user.save(update_fields=['role'])
+        self.factory = APIRequestFactory()
+        self.force_authenticate = force_authenticate
+        self.view = SapSavedSyncView.as_view()
+
+    def _post(self, user, payload=None):
+        request = self.factory.post('/api/tracker/actions/sync-sap-saved/',
+                                    payload or {}, format='json')
+        self.force_authenticate(request, user=user)
+        return self.view(request)
+
+    def test_a_user_without_the_save_in_sap_desk_is_refused(self):
+        """It moves other desks' invoices to Payment, so it is not open to
+        every tracker user."""
+        self.grant(self.other, 'pre_audit')
+        self.assertEqual(self._post(self.other).status_code, 403)
+
+    def test_the_save_in_sap_desk_may_run_it(self):
+        self.grant(self.clerk, 'save_in_sap')
+        response = self._post(self.clerk)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('advanced_count', response.data)
+
+    def test_it_advances_what_sap_has_and_reports_the_document(self):
+        from unittest.mock import patch
+        self.grant(self.clerk, 'save_in_sap')
+        invoice = self.move_to(self.make_invoice(number='EP-1'), 'pre_audit')
+        Invoice.objects.filter(pk=invoice.pk).update(party_code='VENDA000001')
+        doc = {'table': 'OPCH', 'docnum': 900, 'docentry': 11,
+               'doc_type': 'AP_INVOICE', 'schema': 'S', 'doc_date': None}
+        with patch.multiple(
+            'tracker.sap',
+            posted_documents_for=lambda invoices: {i.id: doc for i in invoices},
+            cross_company_documents_for=lambda invoices: {},
+        ):
+            response = self._post(self.clerk)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['advanced_count'], 1)
+        row = response.data['advanced'][0]
+        self.assertEqual(row['invoice_number'], 'EP-1')
+        self.assertEqual(row['from_stage'], 'Pre-Audit')
+        self.assertEqual(row['sap_docnum'], 900)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.current_stage.code, 'payment')

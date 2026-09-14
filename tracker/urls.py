@@ -9,8 +9,8 @@ from .views import (
     AdminInvoicesExportView, AdminInvoicesView, AlertMuteView, AlertsView,
     BulkActionView, FastTrackView, InvoiceDetailView, InvoiceListCreateView,
     JsapStatusView, JsapSyncView, LookupsView, MyQueueView, PaymentDetailView,
-    ReportsView, StageAdvancedView, StageDecisionsView, StageExportView,
-    VendorsView,
+    ReportsView, SapSavedSyncView, StageAdvancedView, StageDecisionsView,
+    StageExportView, VendorsView,
 )
 
 urlpatterns = [
@@ -27,6 +27,8 @@ urlpatterns = [
     path('stage-export/', StageExportView.as_view(), name='tracker-stage-export'),
     path('actions/bulk/', BulkActionView.as_view(), name='tracker-bulk-action'),
     path('actions/fast-track/', FastTrackView.as_view(), name='tracker-fast-track'),
+    path('actions/sync-sap-saved/', SapSavedSyncView.as_view(),
+         name='tracker-sync-sap-saved'),
     path('reports/', ReportsView.as_view(), name='tracker-reports'),
     path('alerts/', AlertsView.as_view(), name='tracker-alerts'),
     path('alerts/mute/', AlertMuteView.as_view(), name='tracker-alert-mute'),

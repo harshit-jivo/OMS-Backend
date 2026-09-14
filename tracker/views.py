@@ -940,6 +940,60 @@ class FastTrackView(APIView):
 
 
 
+
+class SapSavedSyncView(APIView):
+    """Run the SAP-saved sweep on demand — the Save in SAP desk's button.
+
+    Same service the nightly `sync_sap_saved` command calls, so the button and
+    the job cannot drift apart. Pass `ids` to check only those invoices (the
+    selected rows); omit it to sweep every in-progress invoice.
+
+    Restricted to people who work the Save in SAP desk, plus tracker admins and
+    superusers. It is not a destructive action, but it moves other desks'
+    invoices to Payment, so it should not be reachable by every tracker user.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def post(self, request):
+        if not self._may_sweep(request.user):
+            return Response(
+                {'detail': 'Only the Save in SAP desk can run this sweep.'},
+                status=http.HTTP_403_FORBIDDEN)
+
+        ids = request.data.get('ids') or None
+        dry_run = _flag_true(request.data.get('dry_run'))
+        result = services.sync_sap_saved(
+            invoice_ids=ids, user=request.user, dry_run=dry_run)
+
+        return Response({
+            'checked': result['checked'],
+            'dry_run': dry_run,
+            'advanced_count': len(result['advanced']),
+            'advanced': [{
+                'id': row['invoice'].id,
+                'invoice_number': row['invoice'].invoice_number,
+                'party_name': row['invoice'].party_name,
+                'from_stage': row['from_stage'],
+                'sap_table': row['document']['table'],
+                'sap_docnum': row['document']['docnum'],
+                'sap_docentry': row['document']['docentry'],
+            } for row in result['advanced']],
+            'errors': [{'id': e['invoice'].id,
+                        'invoice_number': e['invoice'].invoice_number,
+                        'detail': e['detail']} for e in result['errors']],
+            # Reported, never advanced — see services.sync_sap_saved.
+            'cross_company_count': len(result['cross_company']),
+        }, status=http.HTTP_200_OK)
+
+    @staticmethod
+    def _may_sweep(user):
+        if user.is_superuser or _is_tracker_admin(user):
+            return True
+        stage = Stage.objects.filter(
+            code=services.SAVE_IN_SAP_STAGE_CODE).values_list('id', flat=True).first()
+        return bool(stage) and stage in services.accessible_stage_ids(user)
+
+
 class AlertMuteView(APIView):
     """Stop (or resume) the stuck-alert emails for invoices at this desk.
 
