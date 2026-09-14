@@ -6,12 +6,8 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from core.companies import OIL
-from workflow.exceptions import UnauthorizedWorkflowAction
-from workflow.models import (
-    TestFlow,
-    WorkflowUserReplacement,
-)
-from workflow.services import engine, replacements
+from workflow.models import WorkflowUserReplacement
+from workflow.services import replacements, selection
 from workflow.tests.factories import (
     make_document,
     make_module,
@@ -142,8 +138,15 @@ class OverlapConstraintTests(TestCase):
                 self._make(D(2026, 9, 22), D(2026, 9, 15))
 
 
-class ReplacementAuthorisationTests(TestCase):
-    """A stand-in may act during the window; the original may not."""
+class ReplacementInSelectionTests(TestCase):
+    """What a replacement means now the engine owns no runtime.
+
+    It used to be tested through `engine.approve` — who may act on an engine
+    task. There is no engine task any more, so the promise is narrower and
+    sharper: `select_for_module` hands the module BOTH users for every stage,
+    and the module routes work with `effective_user_id` while still being able
+    to show, and hold accountable, the configured one.
+    """
 
     @classmethod
     def setUpTestData(cls):
@@ -155,57 +158,28 @@ class ReplacementAuthorisationTests(TestCase):
         make_stage(wf, 1, cls.u5)
         cls.workflow = wf
 
-    def _open_task(self):
-        doc = make_document(company=OIL)
-        flow = TestFlow.objects.create(document=doc, company=OIL)
-        _flow, task = engine.start(module=self.module, flow=flow,
-                                   document_key=doc.pk, company=OIL,
-                                   user=self.u5)
-        return task
+    def _select(self, on_date=None):
+        doc = make_document()
+        return selection.select_for_module(
+            module_code=self.module.code, document_id=doc.pk, company=OIL,
+            on_date=on_date)
 
-    def test_task_records_the_configured_user_not_the_effective_one(self):
+    def test_stage_carries_configured_and_effective_user(self):
         WorkflowUserReplacement.objects.create(
             old_user=self.u5, new_user=self.u8,
             start_date=replacements.today(), end_date=replacements.today(),
         )
-        task = self._open_task()
-        # Configured user is stored; the stand-in is resolved dynamically.
-        self.assertEqual(task.stage_user_id, self.u5.pk)
+        stage = self._select().stages[0]
+        # Both, deliberately: the module shows one and routes to the other.
+        self.assertEqual(stage.user_id, self.u5.pk)
+        self.assertEqual(stage.effective_user_id, self.u8.pk)
 
-    def test_standin_can_act_and_original_cannot_during_the_window(self):
-        today = replacements.today()
-        WorkflowUserReplacement.objects.create(
-            old_user=self.u5, new_user=self.u8,
-            start_date=today, end_date=today,
-        )
-        task = self._open_task()
+    def test_without_a_replacement_both_are_the_configured_user(self):
+        stage = self._select().stages[0]
+        self.assertEqual(stage.user_id, self.u5.pk)
+        self.assertEqual(stage.effective_user_id, self.u5.pk)
 
-        with self.assertRaises(UnauthorizedWorkflowAction):
-            engine.approve(task_id=task.pk, user=self.u5)
-
-        flow, _ = engine.approve(task_id=task.pk, user=self.u8)
-        self.assertEqual(flow.status, 'APPROVED')
-
-    def test_action_history_records_who_acted_for_whom(self):
-        today = replacements.today()
-        WorkflowUserReplacement.objects.create(
-            old_user=self.u5, new_user=self.u8,
-            start_date=today, end_date=today,
-        )
-        task = self._open_task()
-        engine.approve(task_id=task.pk, user=self.u8)
-
-        action = (engine.history_for(self.module, task.flow_id)
-                  .filter(action='APPROVE').first())
-        self.assertEqual(action.acted_by_id, self.u8.pk)
-        self.assertEqual(action.on_behalf_of_id, self.u5.pk)
-
-    def test_original_resumes_on_an_already_open_task(self):
-        """The window closes and the ALREADY OPEN task returns to user 5.
-
-        This is why the configured user is stored rather than the effective
-        one — nothing about the task row changes.
-        """
+    def test_outside_the_window_the_original_user_is_effective(self):
         today = replacements.today()
         yesterday = today - datetime.timedelta(days=1)
         WorkflowUserReplacement.objects.create(
@@ -213,17 +187,35 @@ class ReplacementAuthorisationTests(TestCase):
             start_date=yesterday - datetime.timedelta(days=1),
             end_date=yesterday,
         )
-        task = self._open_task()
-        # The window ended yesterday, so today the original user acts.
-        flow, _ = engine.approve(task_id=task.pk, user=self.u5)
-        self.assertEqual(flow.status, 'APPROVED')
+        stage = self._select().stages[0]
+        self.assertEqual(stage.effective_user_id, self.u5.pk)
 
-    def test_inbox_follows_the_replacement(self):
+    def test_resolution_is_as_at_a_date_the_caller_chooses(self):
+        """A module reconstructing a past decision needs that date.
+
+        Resolution is a pure function of (user, date), so asking as at the
+        date the work actually opened gives the answer that was true then.
+        """
         today = replacements.today()
+        yesterday = today - datetime.timedelta(days=1)
         WorkflowUserReplacement.objects.create(
             old_user=self.u5, new_user=self.u8,
-            start_date=today, end_date=today,
+            start_date=yesterday, end_date=yesterday,
         )
-        self._open_task()
-        self.assertEqual(engine.inbox_for(self.u8).count(), 1)
-        self.assertEqual(engine.inbox_for(self.u5).count(), 0)
+        self.assertEqual(self._select().stages[0].effective_user_id,
+                         self.u5.pk)
+        self.assertEqual(self._select(on_date=yesterday).stages[0]
+                         .effective_user_id, self.u8.pk)
+
+    def test_selection_writes_nothing_while_resolving(self):
+        WorkflowUserReplacement.objects.create(
+            old_user=self.u5, new_user=self.u8,
+            start_date=replacements.today(), end_date=replacements.today(),
+        )
+        before = WorkflowUserReplacement.objects.count()
+        self._select()
+        self.assertEqual(WorkflowUserReplacement.objects.count(), before)
+        # And the configured stage row is untouched — a replacement never
+        # rewrites configuration.
+        self.assertEqual(self.workflow.stages.get(sequence=1).user_id,
+                         self.u5.pk)

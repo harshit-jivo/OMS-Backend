@@ -1,9 +1,24 @@
-"""Shared fixtures for the workflow tests."""
+"""Shared fixtures for the workflow tests.
+
+THERE IS NO TEST MODULE TABLE, DELIBERATELY
+-------------------------------------------
+These tests used to run against a `TestDocument` / `TestFlow` harness that
+lived as real tables inside the `workflow` schema. That harness is gone: it
+made the engine ship a permanent fake business module, and its flow table
+encoded the runtime shape the engine no longer owns.
+
+A condition query is just SQL over whatever relation the business module
+names, so the fixtures here stand a REAL, already-present table in for a
+module's document table — `users_user`, which every deployment has and whose
+rows these tests create anyway for stage users. A "document" is therefore a
+`User` row, and `DOCUMENT_TABLE` is what a query selects from. That exercises
+the identical code path (validate → bind `id` → execute) with nothing added to
+the schema.
+"""
 from django.contrib.auth import get_user_model
 
 from workflow.models import (
-    CompanyScope,
-    TestDocument,
+    COMPANY_ALL,
     Workflow,
     WorkflowModule,
     WorkflowQuery,
@@ -13,15 +28,10 @@ from workflow.services import conditions
 
 User = get_user_model()
 
-#: The harness module's own relation, as written in a configured query.
-#:
-#: NOTE the form. Django's `db_table = 'workflow"."workflow_test_document'` is
-#: a quoting trick — Django wraps it, emitting `"workflow"."workflow_test_document"`.
-#: A configured query is RAW SQL, so it must use the ordinary dotted form;
-#: `workflow"."x` in raw SQL parses as the identifier `workflow` followed by a
-#: quoted `.`, which is not a table reference at all.
-TESTDOC_TABLE = 'workflow.workflow_test_document'
-TESTFLOW_TABLE = 'workflow.workflow_test_flow'
+#: The relation a fixture query selects from, written as it must appear in RAW
+#: SQL. A module would name its own document table here; these tests borrow a
+#: table that already exists rather than creating one under `workflow`.
+DOCUMENT_TABLE = User._meta.db_table
 
 
 def make_user(username, **kwargs):
@@ -32,43 +42,33 @@ def make_user(username, **kwargs):
     )
 
 
-def make_module(code='TESTFLOW'):
-    return WorkflowModule.objects.create(
-        code=code,
-        name='Workflow Test Harness',
-        business_table=TESTDOC_TABLE,
-        business_key_column='id',
-        flow_table=TESTFLOW_TABLE,
-        flow_model='workflow.TestFlow',
-    )
+def make_module(code='BUDGET', name='Budget Approval'):
+    """A registry row. Identity only — the registry holds nothing else."""
+    return WorkflowModule.objects.create(code=code, name=name)
 
 
 def make_workflow(module, code='WF_STD', name='Standard', company=None):
-    """A workflow. `company=None` means scope ALL; a code means SPECIFIC."""
+    """A workflow. `company=None` is shorthand for `ALL` in these fixtures."""
     return Workflow.objects.create(
         module=module, code=code, name=name,
-        company_scope=CompanyScope.ALL if company is None
-        else CompanyScope.SPECIFIC,
-        company=company,
+        company=company or COMPANY_ALL,
     )
 
 
 def make_query(workflow, name='all', where='', company=None, validate=True):
     """A configured set-selector query, validated by default.
 
-    Mirrors the JSAP shape: the query selects a SET of documents and carries
-    no document parameter of its own. The engine adds the bound predicate.
+    The query selects a SET of documents and carries no document parameter of
+    its own; the engine adds the bound predicate at evaluation time.
 
-    `company=None` means scope ALL; a code means SPECIFIC.
+    `company=None` is shorthand for `ALL` in these fixtures.
     """
-    sql = f'SELECT * FROM {TESTDOC_TABLE}'
+    sql = f'SELECT * FROM {DOCUMENT_TABLE}'
     if where:
         sql += f' WHERE {where}'
     query = WorkflowQuery.objects.create(
         workflow=workflow, name=name, query_text=sql,
-        company_scope=CompanyScope.ALL if company is None
-        else CompanyScope.SPECIFIC,
-        company=company,
+        company=company or COMPANY_ALL,
     )
     if validate:
         problems = conditions.validate_and_stamp(query)
@@ -86,6 +86,11 @@ def make_stage(workflow, sequence, user, name=None):
     )
 
 
-def make_document(company='OIL', amount=1000, **kwargs):
-    return TestDocument.objects.create(
-        company=company, amount=amount, **kwargs)
+def make_document(username=None, **kwargs):
+    """A stand-in business document.
+
+    Returns a `User`, because that is the table the fixture queries read. What
+    matters to the engine is only that it has an `id` to bind.
+    """
+    import uuid
+    return make_user(username or f'doc-{uuid.uuid4().hex[:10]}', **kwargs)

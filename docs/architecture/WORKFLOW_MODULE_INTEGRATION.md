@@ -5,114 +5,181 @@
 `WORKFLOW_ENGINE_IMPLEMENTATION_PLAN.md` for why each rule exists.
 
 > **When Claude Code creates a new Workflow-enabled OMS module,
-> it must register exactly one row in `workflow.workflow_modules`
-> using the module's actual database/model definitions.**
+> that module must register exactly one row in `workflow.workflow_modules`
+> containing its `code` and `name` — and nothing else.**
 
 Not a suggestion, and not a step to leave for a developer to remember: a module
-with no registry row cannot start a workflow at all.
+with no registry row cannot start a workflow at all. The module registers
+*itself*, from its own `AppConfig`, so nobody has to remember.
 
 ---
 
 ## 1. Why every Workflow-enabled module needs a registry row
 
-The engine is generic. It never imports a business module, so at runtime it
-knows nothing about your tables until the registry tells it:
+`workflow.workflow_modules` stores only module identity: **`code` + `name`**.
 
-| The engine needs to know | Registry field | What breaks without it |
-|---|---|---|
-| Which relation a configured query may read | `business_table` | every query fails the allow-list |
-| Which column identifies one document | `business_key_column` | the `%s` bind in the condition wrapper has no target |
-| Which concrete flow model holds runtime state | `flow_model` | `flow_model_for()` raises; approve/reject cannot resolve the flow |
-| Where those flow rows live | `flow_table` | operators cannot trace runtime state |
+The business module remains the source of truth for its own document table,
+flow table, model, lifecycle, **approval runtime** and history.
 
-This is what keeps the engine generic: the module supplies facts about itself
-once, and the engine works against any module without a line of module-specific
-code.
+The Workflow Engine is a CONFIGURATION AND SELECTION engine. It owns five
+tables — `workflow_modules`, `workflows`, `workflow_queries`,
+`workflow_stages`, `workflow_user_replacements` — and nothing else. It has no
+`workflow_task` and no `workflow_action`: one universal task shape cannot fit
+every module's runtime, and a module's approval history is part of its own
+audit story, not the engine's.
+
+The registry row answers exactly one question — *does this module exist, and
+may workflows be configured against it?* It is the bridge between the two
+ownership domains, and it is deliberately the narrowest possible bridge:
+
+| Owned by the **business module** | Owned by the **Workflow Engine** |
+|---|---|
+| Document model and table | Module registration (`code` + `name`) |
+| Flow model and table | Workflow definitions |
+| Business lifecycle | Workflow selection |
+| Submission / resubmission rules | Condition queries |
+| Business history / log | Workflow stages |
+| Business-specific rules | Assigned approver, user replacement |
+| | Task, approve, reject, workflow state |
+| | Action audit |
+
+### What the registry used to hold, and where those answers live now
+
+Earlier revisions stored `business_table`, `business_key_column`, `flow_table`
+and `flow_model` on the registry row. That was a second, hand-maintained copy
+of facts the module's own migrations already stated, and the copy could drift
+from them with nothing to detect it — renaming `BudgetFlow` left the registry
+pointing at a class that no longer existed until an approval failed on a real
+document.
+
+| Old registry column | Where the answer comes from now |
+|---|---|
+| `business_table` | the module's own models; the engine does not need it |
+| `business_key_column` | RUNTIME context the module passes — `select_for_module(..., key_column=...)`, defaulting to `id` |
+| `flow_table` | the flow model's own `Meta.db_table` |
+| `flow_model` | the flow class's own `workflow_module_code` — see §2.1 |
+| `is_active` | removed; stop routing by deactivating the module's **workflows** |
+
+None of it needs to be typed anywhere, so none of it can be typed wrongly.
 
 ## 2. The exact `workflow.workflow_modules` fields
 
 | Column | Type | Required | Notes |
 |---|---|---|---|
+| `id` | `bigint` | auto | |
+| `created_at` | `timestamptz` | auto | |
+| `updated_at` | `timestamptz` | auto | |
 | `code` | `varchar(30)` | yes | **UNIQUE**, UPPERCASE (DB CHECK `workflow_module_code_upper`) |
 | `name` | `varchar(100)` | yes | human label |
-| `business_table` | `varchar(120)` | yes | schema-qualified, **raw-SQL form** — see the warning below |
-| `business_key_column` | `varchar(60)` | yes | usually `id` |
-| `flow_table` | `varchar(120)` | yes | where the module's flow rows live |
-| `flow_model` | `varchar(120)` | yes | `app_label.ModelName`, must subclass `WorkflowFlowBase` |
 
-> ⚠️ **Write table names as raw SQL, not as Django's `db_table`.**
-> Django writes `db_table = 'budget"."budget_request'` so it can quote it,
-> emitting `"budget"."budget_request"`. A configured query is **raw SQL**, where
-> `budget"."budget_request` parses as the identifier `budget` followed by a
-> quoted `.` — not a table reference. Register
-> **`budget.budget_request`**. `register_module()` rejects the quoting form,
-> because this bug reads as a broken query rather than a bad registration.
+There is nothing else, and new technical module metadata must not be added
+here. If the engine appears to need a fact about a module's implementation,
+that is a sign the fact belongs at the call site or on the module's own model.
 
-## 3. How Claude Code registers a new module
+### 2.1 What the engine does NOT hold
 
-Read the real definitions first — never assume names.
+No `workflow_task`, no `workflow_action`, no `WorkflowFlowBase`. Your module
+defines its own:
 
 ```
-Create the module
-      ↓
-Inspect its ACTUAL models/tables
-      ↓
-Identify the business document table      (models.py -> Meta.db_table)
-      ↓
-Identify the business key column          (usually the pk, 'id')
-      ↓
-Identify the flow model + table           (the WorkflowFlowBase subclass)
-      ↓
-Register in workflow.workflow_modules     (register_module / management command)
-      ↓
-Verify: exactly ONE row
-      ↓
-Create the workflow configuration         (workflow -> queries -> stages)
-      ↓
-Run the module → workflow integration test
+budget/models.py
+├── BudgetRequest         the business document
+├── BudgetFlow            its workflow execution state
+├── BudgetApprovalTask    who currently has to act
+└── BudgetApprovalAction  what was approved/rejected, by whom, when
 ```
 
-Two supported ways, both idempotent:
+Another module may shape these entirely differently, and that is the point.
+The engine never sees them.
+
+## 3. How a new module registers itself
+
+```
+Create Business Module
+        ↓
+Business Module registers:  code + name
+        ↓
+workflow.workflow_modules
+        ↓
+Admin opens Workflows page
+        ↓
+Creates workflow for that module
+        ↓
+Defines SQL conditions
+        ↓
+Defines approval stages
+```
+
+Nothing in that path requires anyone to look up a table name.
+
+### 3.1 The supported pattern — the module registers itself
+
+Put this in the module's own app, so deploying the module registers it:
 
 ```python
-# Data migration, AppConfig.ready(), or bootstrap script
-from workflow.registry import register_module
+# budget/apps.py
+from django.apps import AppConfig
+from django.db.models.signals import post_migrate
 
-register_module(
-    code='BUDGET',
-    name='Budget Approval',
-    business_table='budget.budget_request',
-    business_key_column='id',
-    flow_table='budget.budget_flow',
-    flow_model='budget.BudgetFlow',
-)
+
+def register_own_modules(sender, **kwargs):
+    from workflow.registry import register_module
+    register_module(code='BUDGET', name='Budget Approval')
+
+
+class BudgetConfig(AppConfig):
+    name = 'budget'
+
+    def ready(self):
+        post_migrate.connect(register_own_modules, sender=self)
 ```
+
+`post_migrate`, not `ready()` directly: `ready()` runs before the table
+necessarily exists (during the first `migrate`, or `collectstatic` on an
+un-migrated database), so registering there either crashes or has to swallow
+errors that would hide real ones.
+
+`workflow/apps.py` documents exactly this pattern — copy it. The engine app
+registers no modules of its own.
+
+### 3.2 The manual escape hatch
 
 ```bash
-python manage.py register_workflow_module \
-    --code BUDGET --name "Budget Approval" \
-    --business-table budget.budget_request --business-key-column id \
-    --flow-table budget.budget_flow --flow-model budget.BudgetFlow
-
-python manage.py register_workflow_module --list   # verify
+python manage.py register_workflow_module --code BUDGET --name "Budget Approval"
+python manage.py register_workflow_module --list          # verify
 ```
 
-`register_module()` validates before writing: `flow_model` must resolve through
-the app registry and subclass `WorkflowFlowBase`, and both table names are
-rejected if they use the quoting form.
+There are deliberately no `--business-table`, `--business-key-column`,
+`--flow-table` or `--flow-model` options. Passing the equivalent keyword to
+`register_module()` raises `TypeError` rather than being ignored, so a stale
+deploy script breaks loudly instead of leaving its author believing the engine
+still holds a value it no longer has.
 
 ## 4. Idempotent registration
 
 `register_module()` uses `update_or_create(code=...)`. `code` is UNIQUE in the
 database, so a second registration **updates** the existing row — it never
 creates a duplicate. Safe to call from a migration that reruns, from
-`AppConfig.ready()` on every boot, or from a deploy script.
+`post_migrate` on every deploy, or from a deploy script.
+
+```
+first  →  Registered module BUDGET (id=20)
+second →  Updated module BUDGET (id=20)
+count  →  1
+```
+
+Verify the exact schema, not just the rows — `SELECT *` would not show that a
+column was left behind:
 
 ```sql
-SELECT id, code, name, business_table, business_key_column, flow_table, flow_model
-FROM workflow.workflow_modules ORDER BY id;
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'workflow' AND table_name = 'workflow_modules'
+ORDER BY ordinal_position;
+-- expect exactly: id, created_at, updated_at, code, name
 
-SELECT * FROM workflow.workflow_modules WHERE code = 'BUDGET';   -- expect exactly 1
+SELECT id, created_at, updated_at, code, name
+FROM workflow.workflow_modules ORDER BY id;
 ```
 
 ## 5. Creating a workflow for the module
@@ -129,8 +196,8 @@ workflow_modules   (the registry row)
 
 ```http
 POST /api/workflow/workflows/   {"module": 1, "code": "WF_STD", "name": "Standard",
-                                 "company_scope": "ALL"}
-POST /api/workflow/queries/     {"workflow": 1, "name": "all", "company_scope": "ALL",
+                                 "company": "ALL"}
+POST /api/workflow/queries/     {"workflow": 1, "name": "all", "company": "ALL",
                                  "query_text": "SELECT * FROM budget.budget_request"}
 POST /api/workflow/stages/      {"workflow": 1, "name": "Manager", "sequence": 1, "user": 42}
 ```
@@ -140,57 +207,103 @@ A workflow with **no stages** is refused at submit with
 
 ## 6. How the module invokes Workflow
 
-**There is no generic `/workflow/start/` endpoint, and there will not be one.**
-The engine does not own business submission. The module calls it from its own
-submit operation, inside the module's transaction:
+**There is no generic `/workflow/start/` endpoint, no `/workflow/tasks/` and no
+`/workflow/tasks/<id>/approve/`, and there will not be.** The engine does not
+own business submission or approval. It answers ONE question, in process:
 
 ```python
 from django.db import transaction
-from workflow.services import engine
-from workflow.models import WorkflowModule
+from workflow.services import selection
 
 with transaction.atomic():
     document = BudgetRequest.objects.create(...)          # business row
-    flow, _ = BudgetFlow.objects.get_or_create(           # module owns this row
-        document=document, defaults={'company': document.company})
-    flow, task = engine.start(
-        module=WorkflowModule.objects.get(code='BUDGET'),
-        flow=flow,
-        document_key=document.pk,
+
+    result = selection.select_for_module(
+        module_code='BUDGET',
+        document_id=document.pk,
         company=document.company,
-        user=request.user,
-        context={'branch': document.branch},              # routing inputs only
-    )
+        # key_column='DocEntry',     # only if your queries key on something
+    )                                # other than `id`
+
+    # The module builds its OWN runtime from the answer.
+    flow = BudgetFlow.objects.create(
+        document=document, workflow_code=result.workflow.code)
+    first = result.stages[0]
+    BudgetApprovalTask.objects.create(
+        flow=flow, sequence=first.sequence, name=first.name,
+        configured_user_id=first.user_id,
+        assigned_to_id=first.effective_user_id)
 ```
 
-The module creates or reuses its flow row and hands it in. **The engine never
-creates a flow row.** `context` is for routing inputs and the selection
-explanation — never a copy of the business document.
+Everything is passed IN as runtime context. The engine looks nothing up about
+your tables — it has no `business_table`, no `business_key_column`, no
+`flow_model`, and no way to discover them.
+
+What comes back (`result.as_dict()`):
+
+```json
+{
+  "workflow":      {"id": 12, "code": "BUDGET_STANDARD",
+                    "name": "Standard Budget Approval",
+                    "company": "ALL", "module_code": "BUDGET"},
+  "matched_query": {"id": 21, "name": "high-value", "company": "ALL"},
+  "stages": [
+    {"id": 5, "sequence": 1, "name": "Manager Approval",
+     "user_id": 100, "effective_user_id": 100},
+    {"id": 6, "sequence": 2, "name": "Finance Approval",
+     "user_id": 101, "effective_user_id": 108}
+  ]
+}
+```
+
+`user_id` is the CONFIGURED user; `effective_user_id` is who may act today
+after replacements. Both are given because they answer different questions —
+route work to the effective one, show and hold accountable the configured one.
+
+`selection.stages_for(workflow)` returns the same stage list when you already
+know the workflow, for a flow that is mid-approval and must NOT be re-selected.
 
 Errors to handle: `WorkflowNotConfigured`, `AmbiguousWorkflowSelection`,
-`WorkflowAlreadyRunning`, `InvalidWorkflowConfiguration`, `StageUserUnavailable`,
-`ConditionExecutionError`. All subclass `workflow.exceptions.WorkflowError`.
+`InvalidWorkflowConfiguration`, `ConditionExecutionError`. All subclass
+`workflow.exceptions.WorkflowError`.
 
-## 7. Company scope rules
+## 7. Company rules
 
-Companies are `OIL`, `BEVERAGES`, `MART` (`core.companies`). Scope lives on
-**both** `workflows` and `workflow_queries`:
+Companies are `OIL`, `BEVERAGES`, `MART` (`core.companies`). Applicability
+lives on **both** `workflows` and `workflow_queries`, in ONE column each:
 
 ```
-company_scope = 'ALL'       -> company IS NULL   (one row serves every company)
-company_scope = 'SPECIFIC'  -> company = 'OIL' | 'BEVERAGES' | 'MART'
+company = 'ALL'         -> one row serves every company
+company = 'OIL'         -> that company only
+company = 'BEVERAGES'
+company = 'MART'
 ```
 
-A row can never mean both — CHECK `*_company_scope_consistent`. **`ALL` is one
-row; never copy a configuration per company.**
+`ALL` is a stored value, not a NULL. There was previously a `company_scope`
+column beside a nullable `company`; it is gone, on both tables. The pair let
+the same fact be written two ways, needed three CHECKs to forbid the
+contradictory combinations, and made every reader join two columns back
+together before it could answer "which company?". One column makes the
+contradictions unrepresentable rather than forbidden, and leaves a single
+CHECK: `*_company_valid`.
 
-**There is no precedence.** A `SPECIFIC` match does not beat an `ALL` match — if
-both apply and both match, that is `AmbiguousWorkflowSelection`. (This
-deliberately differs from `approvals.resolve_workflow`, which prefers the
-specific row. That engine is untouched.)
+**`ALL` is one row; never copy a configuration per company.**
 
-A query may only **narrow** its workflow's scope: under a workflow scoped
-`SPECIFIC(OIL)`, a query must be `ALL` or `SPECIFIC(OIL)`.
+Matching is exactly:
+
+```
+query.company = ALL   + document OIL   -> applies
+query.company = OIL   + document OIL   -> applies
+query.company = OIL   + document MART  -> does not apply
+```
+
+**There is no precedence.** `OIL` does not beat `ALL` — if both apply and both
+match, that is `AmbiguousWorkflowSelection`. (This deliberately differs from
+`approvals.resolve_workflow`, which prefers the specific row. That engine is
+untouched.)
+
+A query may only **narrow** its workflow's applicability: under a workflow set
+to `OIL`, a query must be `ALL` or `OIL`.
 
 ## 8. Stage / user rules
 
@@ -204,20 +317,102 @@ workflow
 `workflow_stages.user_id` is `NOT NULL`. There is **no** approver collection,
 **no** role expansion, **no** quorum, **no** `approval_required` /
 `rejection_required`. `sequence` is execution order only — never selection
-priority. At most one *open* task per stage, enforced by
-`workflow_task_one_open_per_stage_uq`.
+priority. Whether a stage may have more than one open task is a question
+about YOUR task table — enforce it there.
 
-## 9. Approval and rejection
+### 8.1 Managing who works a stage
+
+Three operations, all in the Stages and Replacements tabs of the Workflows
+page. None creates a table, duplicates a workflow, or touches a business
+module's data.
+
+| Operation | What it writes | Where |
+|---|---|---|
+| Change one stage's user | `workflow_stages.user_id` on that ONE row | Stages → Edit (either view) |
+| Temporary replacement | a `workflow_user_replacements` row | Replacements → Add Replacement |
+| View a user's assignments | nothing — it is a read | Stages → By User |
 
 ```
-Stage → assigned (effective) user
-   ├── APPROVE → stage complete → next stage, or flow APPROVED
-   └── REJECT  → flow REJECTED (this execution ends)
+PATCH /api/workflow/stages/<id>/   {"user": 413}
+GET   /api/workflow/stages/?user=88
+POST  /api/workflow/replacements/  {...}
 ```
 
-One approve completes a stage. One reject ends the workflow. Rejection is
-terminal **for that execution**, not for the document — what happens next is the
-module's decision (§11).
+**There is no bulk "replace all assignments", in the UI or the API.** One
+existed briefly and was removed: a single call that rewrote every stage a
+person owns, across every module, is an organisation-wide change with no
+natural review step and no undo. Moving somebody's work is done one stage at a
+time, so the edit is the same size as the row being looked at. Both the By
+Workflow and By User views offer the same single-stage **Edit**.
+
+**Changing a stage's configured user does NOT require reassigning existing
+business entries.**
+
+```
+The stage remains the same.
+Existing entries remain at the stage.
+Current responsibility is resolved from the current/effective stage user.
+```
+
+Why that works, and what your module must do to keep it working:
+
+```
+Stage 2  Mukesh -> Ravi
+
+   same workflow      same stage id      same entries waiting there
+                                         new responsible user
+```
+
+`workflow_stages` is the source of assignment. A module's task row holds
+`stage_id` and asks the engine who is responsible each time it needs to know:
+
+```python
+from workflow.services.assignments import get_stage_assignment
+
+row = get_stage_assignment(task.stage_id)
+row.configured_user_id     # what an administrator set
+row.effective_user_id      # who may act today, after replacements
+row.has_active_replacement # why those two differ
+```
+
+So the module's inbox filters on `stage_id` plus the CURRENT effective user —
+never on a user copied onto the task when it was created. Copying it is what
+makes a "reassign pending entries" migration necessary, and there is no such
+operation in this engine because nothing needs one.
+
+**Permanent versus temporary.** They are different tools and are not
+interchangeable:
+
+* a *reassignment* writes `workflow_stages.user_id` — Mukesh no longer works
+  that stage at all;
+* a *replacement* writes `workflow_user_replacements` — the stage keeps Mukesh,
+  and only the effective actor changes, for a date window, expiring by itself.
+
+**History is never rewritten.** A past approval records who actually approved;
+changing today's configuration cannot alter it. The engine keeps no action
+history at all (§9), so a module's own records are the only history and nothing
+here writes to them.
+
+## 9. Approval and rejection — the MODULE's job
+
+The engine tells you the stages. It does not run them.
+
+```
+Workflow Engine                Business Module
+---------------                ---------------
+stages 1..N, with              creates its own task per stage
+configured + effective   -->   approve / reject / advance / complete
+users                          writes its own action history
+                               sends its own notifications
+```
+
+The conventions the stage configuration assumes: one approve completes a
+stage, one reject ends that execution, and there is exactly ONE user per stage
+— no quorum, no approver list, no `approval_required`/`rejection_required`
+counts. Rejection is terminal **for that execution**, not for the document;
+what happens next is the module's decision (§11).
+
+Implement these in your module's service layer, over your own task model.
 
 ## 10. User replacement
 
@@ -233,8 +428,12 @@ replacement: old=5 new=8, 15–22 Sep
 
 Resolution is one hop (not transitive). Overlapping windows for one user are
 barred by the GiST constraint `workflow_replacement_no_overlap`; adjacent
-windows are fine. **The user's account is never modified.** Audit records
-`acted_by` and `on_behalf_of`.
+windows are fine. **The user's account is never modified.**
+
+`select_for_module()` gives you both `user_id` and `effective_user_id` per
+stage, and takes `on_date=` so a module reconstructing a past decision gets the
+answer that was true then. Recording who acted on whose behalf is the module's
+audit responsibility — the engine keeps no action history.
 
 ## 11. Resubmission ownership
 
@@ -253,33 +452,59 @@ Module invokes the engine again
 Normal workflow selection runs from scratch
 ```
 
-The engine re-resolves selection against the **current** configuration — it
-never reuses the previously selected workflow, so a config that has since become
-ambiguous correctly fails. Earlier `workflow_action` rows are retained and the
-sequence continues; `created_at` on the flow row does not change.
+Calling `select_for_module()` again re-resolves against the **current**
+configuration — it never reuses the previously selected workflow, so a config
+that has since become ambiguous correctly fails.
 
-Your module owns its own history table (the `flow_logs` role). **No such table
-exists in OMS-Backend** — `workflow_test_document_log` is the harness's version.
-Name yours per your module's own architecture. `workflow_action` records engine
-actions only and has no `RESUBMITTED` value.
+Everything else about resubmission is yours: whether it is allowed, how many
+attempts, what the history says, and whether the old tasks are closed or
+superseded. The engine keeps no attempt counter, no round number and no action
+history to reconcile.
 
 ## 12. SQL query rules
 
+### What a Workflow Query stores
+
+```
+company          ALL | OIL | BEVERAGES | MART
+name
+query_text
+workflow association
+validation state   (validated_at, validation_error)
+```
+
+That is the whole configurable surface. It deliberately does NOT store
+`company_scope`, `type` or `key_column`:
+
+- `type` was JSAP parity only and nothing in this engine ever read it.
+- `key_column` asked an administrator which column identifies a document.
+  That is **runtime context owned by the business module**, which passes it as
+  `engine.start(..., key_column=...)`; it defaults to `id`. Putting it in the
+  query configuration made the engine hold a second copy of a fact it could
+  not verify.
+
+### How the condition is evaluated
+
 One workflow may have many queries (OR semantics). A query is a **set
 selector**: it answers "which documents belong in this workflow?" The engine
-adds the bound document predicate:
+adds the bound document predicate, using the RUNTIME key column:
 
 ```sql
-SELECT 1 FROM ( <your query> ) AS wf_q WHERE wf_q."<key>" = %s LIMIT 1
+SELECT 1 FROM ( <your query> ) AS wf_q WHERE wf_q."<runtime key>" = %s LIMIT 1
 ```
+
+The identifier comes from the caller, never from the query row; the document
+key itself is always a bound parameter.
 
 Rules, all enforced:
 
 - **SELECT / WITH only.** DB CHECK `workflow_query_select_only`
   (`^\s*(select|with)\y` — note `\y`: in PostgreSQL `\b` is *backspace*).
-- INSERT/UPDATE/DELETE/DROP/ALTER, multi-statement, `pg_sleep` and friends, and
-  relations outside the module's allow-list are **rejected with HTTP 400** and
-  no row is stored.
+- INSERT/UPDATE/DELETE/DROP/ALTER, multi-statement, `pg_sleep` and friends,
+  and forbidden schemas (`pg_catalog`, `information_schema`) are **rejected
+  with HTTP 400** and no row is stored.
+- An unknown `company` is **rejected with HTTP 400** before the SQL is even
+  planned, and no row is stored.
 - The document key is always a **bound parameter**, never interpolated.
 - Execution is isolated with a statement timeout; a broken query fails the
   start rather than counting as "no match".
@@ -290,9 +515,10 @@ Rules, all enforced:
 ## 13. Integration testing checklist
 
 - [ ] module registered — **exactly one** row for its `code`
+- [ ] the registry row holds `code` + `name` only
 - [ ] re-running registration does not duplicate the row
-- [ ] `flow_model` resolves and subclasses `WorkflowFlowBase`
-- [ ] `business_table` in raw-SQL form (no `"."`)
+- [ ] the flow model subclasses `WorkflowFlowBase` and sets `workflow_module_code`
+- [ ] `workflow.flows.flow_model_for(module)` returns that class
 - [ ] workflow + query + stage created through the normal APIs
 - [ ] query validated (`validated_at` is set)
 - [ ] submitting a document selects the workflow and creates **one** task
@@ -307,40 +533,46 @@ Rules, all enforced:
 
 ## 14. Example registration
 
-For a module that really creates `budget.budget_request`, `budget.budget_flow`
-and `budget.BudgetFlow`:
+The whole registration, for a module that really creates
+`budget.budget_request`, `budget.budget_flow` and `budget.BudgetFlow`:
 
 ```json
 {
   "code": "BUDGET",
-  "name": "Budget Approval",
-  "business_table": "budget.budget_request",
-  "business_key_column": "id",
-  "flow_table": "budget.budget_flow",
-  "flow_model": "budget.BudgetFlow"
+  "name": "Budget Approval"
 }
 ```
 
-**This is an example, not a template to paste.** Use the names your module
-actually defines.
+The three names above appear **nowhere** in it. They are declared by the Budget
+module: the tables by its own `Meta.db_table`, and the link to this
+registration by `BudgetFlow.workflow_module_code = 'BUDGET'`.
+
+**This is an example, not a template to paste.** Use the code your module
+actually registers.
 
 ## 15. Example SQL verification
 
 ```sql
--- the registry
-SELECT id, code, name, business_table, business_key_column, flow_table, flow_model
+-- the registry: identity only
+SELECT id, created_at, updated_at, code, name
 FROM workflow.workflow_modules ORDER BY id;
+
+-- and the exact schema, which SELECT * would not reveal
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'workflow' AND table_name = 'workflow_modules'
+ORDER BY ordinal_position;
 
 -- exactly one row for a module
 SELECT count(*) FROM workflow.workflow_modules WHERE code = 'BUDGET';   -- 1
 
 -- its configuration
-SELECT w.id, w.code, w.company_scope, w.company
+SELECT w.id, w.code, w.company
 FROM workflow.workflows w
 JOIN workflow.workflow_modules m ON m.id = w.module_id
 WHERE m.code = 'BUDGET';
 
-SELECT q.id, q.name, q.company_scope, q.company,
+SELECT q.id, q.name, q.company,
        q.validated_at IS NOT NULL AS usable, q.validation_error
 FROM workflow.workflow_queries q
 JOIN workflow.workflows w ON w.id = q.workflow_id
@@ -353,24 +585,14 @@ JOIN workflow.workflows w ON w.id = s.workflow_id
 JOIN workflow.workflow_modules m ON m.id = w.module_id
 WHERE m.code = 'BUDGET' ORDER BY s.sequence;
 
--- runtime for one module
-SELECT t.id, t.flow_id, t.stage_id, t.stage_user_id, t.status
-FROM workflow.workflow_task t
-JOIN workflow.workflow_modules m ON m.id = t.module_id
-WHERE m.code = 'BUDGET' ORDER BY t.created_at DESC;
-
-SELECT a.flow_id, a.sequence, a.action, a.stage_name,
-       a.acted_by_username, a.on_behalf_of_id, a.acted_at
-FROM workflow.workflow_action a
-JOIN workflow.workflow_modules m ON m.id = a.module_id
-WHERE m.code = 'BUDGET' ORDER BY a.flow_id, a.sequence;
+-- runtime lives in the MODULE's own tables; query those, not `workflow.*`
 
 -- latent ambiguity: workflows in one module that could both apply
-SELECT a.code AS wf_a, a.company_scope, a.company,
-       b.code AS wf_b, b.company_scope, b.company
+SELECT a.code AS wf_a, a.company,
+       b.code AS wf_b, b.company
 FROM workflow.workflows a
 JOIN workflow.workflows b ON a.module_id = b.module_id AND a.id < b.id
- AND (a.company_scope='ALL' OR b.company_scope='ALL' OR a.company = b.company);
+ AND (a.company='ALL' OR b.company='ALL' OR a.company = b.company);
 ```
 
 ## 16. What the module must NOT create
@@ -379,10 +601,12 @@ The generic engine already owns these — a module that duplicates any of them
 has forked the engine:
 
 ```
-workflow.workflow_modules      workflow.workflow_stages     workflow.workflow_task
-workflow.workflows             workflow.workflow_queries    workflow.workflow_action
+workflow.workflow_modules      workflow.workflow_stages
+workflow.workflows             workflow.workflow_queries
 workflow.workflow_user_replacements
 ```
+
+Those five are the whole engine.
 
 So **do not create** `budget_workflow`, `budget_workflow_stage`,
 `budget_workflow_query`, `budget_approver`, or any module-specific approver,

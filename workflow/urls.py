@@ -1,30 +1,36 @@
 """Workflow engine routes. Mounted at ``api/workflow/`` (and ``api/v1/workflow/``).
 
-Configuration (requires `workflow.config.manage`):
-  GET  POST         /api/workflow/modules/
-  GET  PATCH DELETE /api/workflow/modules/<pk>/
-  GET  POST         /api/workflow/workflows/            ?module=TESTFLOW
-  GET  PATCH DELETE /api/workflow/workflows/<pk>/
-  GET  POST         /api/workflow/queries/              ?workflow=<id>
-  GET  PATCH DELETE /api/workflow/queries/<pk>/
-  POST              /api/workflow/queries/<pk>/revalidate/
-  GET  POST         /api/workflow/stages/               ?workflow=<id>
-  GET  PATCH DELETE /api/workflow/stages/<pk>/
-  GET  POST         /api/workflow/replacements/
-  GET  PATCH DELETE /api/workflow/replacements/<pk>/
+CONFIGURATION ONLY. Every route requires `workflow.config.manage`.
 
-Runtime:
-  GET               /api/workflow/inbox/                     (authenticated)
-  GET               /api/workflow/tasks/<pk>/                (authenticated)
-  POST              /api/workflow/tasks/<pk>/approve/        (workflow.task.act)
-  POST              /api/workflow/tasks/<pk>/reject/         (workflow.task.act)
-  GET               /api/workflow/flows/<module_code>/<flow_id>/state/
-                                                             (workflow.state.view)
+  GET  POST        /api/workflow/modules/
+  GET  PATCH PUT   /api/workflow/modules/<pk>/
+  GET  POST        /api/workflow/workflows/            ?module=CODE&company=OIL
+  GET  PATCH PUT   /api/workflow/workflows/<pk>/
+  GET  POST        /api/workflow/queries/              ?workflow=<id>
+  GET  PATCH PUT   /api/workflow/queries/<pk>/
+  POST             /api/workflow/queries/<pk>/revalidate/
+  GET  POST        /api/workflow/stages/               ?workflow=<id>
+                                                      ?user=<id>
+  GET  PATCH PUT   /api/workflow/stages/<pk>/
+  GET  POST        /api/workflow/replacements/
+  GET  PATCH PUT   /api/workflow/replacements/<pk>/
 
-TestFlow harness — the first integration target:
-  GET  POST         /api/workflow/testflow/documents/
-  GET               /api/workflow/testflow/documents/<pk>/
-  POST              /api/workflow/testflow/documents/<pk>/submit/
+There is no DELETE on any of them — every row is referenced by a module's
+runtime or its history, so retiring one is `is_active = false`.
+
+WHAT IS NOT HERE, AND WHY
+-------------------------
+No `/inbox/`, `/tasks/`, `/tasks/<id>/approve/`, `/tasks/<id>/reject/`,
+`/flows/.../state/` and no `/testflow/`. Approval runtime belongs to the
+business module: it owns its task, its action history and its lifecycle, and
+publishes its own endpoints for them. This engine answers one question, in
+process rather than over HTTP:
+
+    workflow.services.selection.select_for_module(
+        module_code='BUDGET', document_id=123, company='OIL')
+
+which returns the workflow, the query that matched, and the ordered stages
+with their configured and effective users.
 """
 from django.urls import path
 
@@ -58,23 +64,4 @@ urlpatterns = [
          name='workflow-replacement-list'),
     path('replacements/<int:pk>/', views.ReplacementDetailView.as_view(),
          name='workflow-replacement-detail'),
-
-    # --- runtime ---------------------------------------------------------
-    path('inbox/', views.InboxView.as_view(), name='workflow-inbox'),
-    path('tasks/<int:pk>/', views.TaskDetailView.as_view(),
-         name='workflow-task-detail'),
-    path('tasks/<int:pk>/approve/', views.TaskApproveView.as_view(),
-         name='workflow-task-approve'),
-    path('tasks/<int:pk>/reject/', views.TaskRejectView.as_view(),
-         name='workflow-task-reject'),
-    path('flows/<str:module_code>/<int:flow_id>/state/',
-         views.FlowStateView.as_view(), name='workflow-flow-state'),
-
-    # --- TestFlow harness ------------------------------------------------
-    path('testflow/documents/', views.TestDocumentListCreateView.as_view(),
-         name='workflow-testdoc-list'),
-    path('testflow/documents/<int:pk>/',
-         views.TestDocumentDetailView.as_view(), name='workflow-testdoc-detail'),
-    path('testflow/documents/<int:pk>/submit/',
-         views.TestDocumentSubmitView.as_view(), name='workflow-testdoc-submit'),
 ]

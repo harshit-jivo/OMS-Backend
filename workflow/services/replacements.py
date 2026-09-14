@@ -11,12 +11,12 @@ Two properties worth stating, because both are load-bearing:
   `.first()` here is deterministic rather than order-dependent. Without that
   constraint this function would silently depend on row order.
 
-* **Resolution is dynamic, not baked in.** `WorkflowTask.stage_user` holds the
-  stage's CONFIGURED user; the effective actor is computed on every read and
-  every action. That is what makes "after `end_date` the original user
-  automatically resumes" true for a task that was ALREADY OPEN when the window
-  closed — writing the effective user into the task row would instead require
-  rewriting live rows whenever a window opened or closed.
+* **Resolution is dynamic, not baked in.** `WorkflowStage.user` holds the
+  CONFIGURED user; the effective actor is computed on every read. That is what
+  makes "after `end_date` the original user automatically resumes" true for
+  work that was ALREADY OPEN when the window closed. A module that copies the
+  effective user onto its own task row at creation time is choosing the other
+  behaviour — it should re-resolve through here when it wants the dynamic one.
 """
 from django.utils import timezone
 
@@ -38,6 +38,7 @@ def replacement_for(user_id, on_date=None):
     return (
         WorkflowUserReplacement.objects
         .filter(old_user_id=user_id,
+                is_active=True,
                 start_date__lte=on_date,
                 end_date__gte=on_date)
         .first()
@@ -69,6 +70,7 @@ def effective_user_ids(user_ids, on_date=None):
     rows = (
         WorkflowUserReplacement.objects
         .filter(old_user_id__in=user_ids,
+                is_active=True,
                 start_date__lte=on_date,
                 end_date__gte=on_date)
         .values_list('old_user_id', 'new_user_id')
@@ -89,6 +91,7 @@ def configured_users_acting_for(user_id, on_date=None):
     acting_for = set(
         WorkflowUserReplacement.objects
         .filter(new_user_id=user_id,
+                is_active=True,
                 start_date__lte=on_date,
                 end_date__gte=on_date)
         .values_list('old_user_id', flat=True)

@@ -1,9 +1,14 @@
-"""Company scope: ALL vs SPECIFIC, and the absence of precedence.
+"""Company applicability: `ALL` vs one company, and the absence of precedence.
 
 Covers T1-T6 from the approved plan §18. The load-bearing assertion is T4:
-a SPECIFIC match and an ALL match are TWO matches, so the engine fails loud
-rather than preferring the specific one. `approvals.resolve_workflow` does
-prefer the specific one; that engine is deliberately untouched.
+a company-specific match and an `ALL` match are TWO matches, so the engine
+fails loud rather than preferring the specific one. `approvals.resolve_workflow`
+does prefer the specific one; that engine is deliberately untouched.
+
+`company` is ONE column holding `ALL`, `OIL`, `BEVERAGES` or `MART`. The old
+`company_scope` + nullable `company` pair is gone, so the contradictory states
+these tests used to assert against are now unrepresentable rather than merely
+forbidden — which is why the constraint class below is much shorter.
 """
 from django.db import IntegrityError, transaction
 from django.test import TestCase
@@ -13,7 +18,7 @@ from workflow.exceptions import (
     AmbiguousWorkflowSelection,
     WorkflowNotConfigured,
 )
-from workflow.models import CompanyScope, Workflow, WorkflowQuery
+from workflow.models import COMPANY_ALL, Workflow, WorkflowQuery
 from workflow.services import selection
 from workflow.tests.factories import (
     make_document,
@@ -25,14 +30,14 @@ from workflow.tests.factories import (
 )
 
 
-class CompanyScopeSelectionTests(TestCase):
+class CompanyApplicabilitySelectionTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.module = make_module()
         cls.user = make_user('scope-approver')
 
     def _select(self, company):
-        doc = make_document(company=company)
+        doc = make_document()
         return selection.select_workflow(self.module, doc.pk, company)
 
     # --- T1 ---------------------------------------------------------------
@@ -52,8 +57,7 @@ class CompanyScopeSelectionTests(TestCase):
 
         workflow, _query = self._select(OIL)
         self.assertEqual(workflow.pk, wf.pk)
-        self.assertEqual(wf.company_scope, CompanyScope.ALL)
-        self.assertIsNone(wf.company)
+        self.assertEqual(wf.company, COMPANY_ALL)
 
     # --- T3 ---------------------------------------------------------------
     def test_one_all_configuration_serves_every_company(self):
@@ -126,7 +130,7 @@ class CompanyScopeSelectionTests(TestCase):
 
         for company in (OIL, BEVERAGES, MART):
             selection.select_workflow(
-                self.module, make_document(company=company).pk, company)
+                self.module, make_document().pk, company)
 
         self.assertEqual(Workflow.objects.count(), 1)
         self.assertEqual(WorkflowQuery.objects.count(), 1)
@@ -160,54 +164,90 @@ class CompanyScopeSelectionTests(TestCase):
             self._select('')
 
 
-class CompanyScopeConstraintTests(TestCase):
-    """The database must refuse every ambiguous representation."""
+class CompanyConstraintTests(TestCase):
+    """The database must refuse anything that is not a company or `ALL`.
+
+    There is exactly ONE rule left. The three old CHECKs existed to bar the
+    contradictory `(scope, company)` pairs; with one column those states
+    cannot be written down, so there is nothing to forbid.
+    """
 
     @classmethod
     def setUpTestData(cls):
         cls.module = make_module()
 
-    def test_all_scope_with_a_company_is_rejected(self):
+    def test_unknown_company_is_rejected_on_a_workflow(self):
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 Workflow.objects.create(
                     module=self.module, code='BAD1', name='bad',
-                    company_scope=CompanyScope.ALL, company=OIL,
+                    company='ATLANTIS',
                 )
 
-    def test_specific_scope_without_a_company_is_rejected(self):
+    def test_empty_company_is_rejected(self):
+        """`''` is the sentinel this design deliberately does not use."""
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 Workflow.objects.create(
-                    module=self.module, code='BAD2', name='bad',
-                    company_scope=CompanyScope.SPECIFIC, company=None,
+                    module=self.module, code='BAD2', name='bad', company='',
                 )
 
-    def test_unknown_company_code_is_rejected(self):
-        with self.assertRaises(IntegrityError):
-            with transaction.atomic():
-                Workflow.objects.create(
-                    module=self.module, code='BAD3', name='bad',
-                    company_scope=CompanyScope.SPECIFIC, company='ATLANTIS',
+    def test_every_valid_company_is_accepted(self):
+        for i, company in enumerate([COMPANY_ALL, OIL, BEVERAGES, MART]):
+            with self.subTest(company=company):
+                wf = Workflow.objects.create(
+                    module=self.module, code=f'OK{i}', name='ok',
+                    company=company,
                 )
+                self.assertEqual(wf.company, company)
 
-    def test_unknown_scope_value_is_rejected(self):
-        with self.assertRaises(IntegrityError):
-            with transaction.atomic():
-                Workflow.objects.create(
-                    module=self.module, code='BAD4', name='bad',
-                    company_scope='SOMETIMES', company=None,
-                )
-
-    def test_query_level_constraints_apply_too(self):
+    def test_query_level_constraint_applies_too(self):
         wf = make_workflow(self.module, code='WF', company=None)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 WorkflowQuery.objects.create(
                     workflow=wf, name='bad',
-                    query_text='SELECT 1 AS id',
-                    company_scope=CompanyScope.ALL, company=OIL,
+                    query_text='SELECT 1 AS id', company='PUNJAB',
                 )
+
+
+class CompanyMatchingTests(TestCase):
+    """`applies_to_company` — the pure-Python mirror of the selection filter.
+
+    Spelled out per pair rather than derived, because the whole point is that
+    `ALL` matches everything and a specific company matches only itself. A
+    loop computing the expectation from the same rule would pass even if the
+    rule were wrong.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.module = make_module()
+
+    def test_all_matches_every_company(self):
+        wf = make_workflow(self.module, code='A', company=None)
+        for company in (OIL, BEVERAGES, MART):
+            with self.subTest(document=company):
+                self.assertTrue(wf.applies_to_company(company))
+
+    def test_specific_matches_only_itself(self):
+        cases = [
+            (OIL, OIL, True), (OIL, BEVERAGES, False), (OIL, MART, False),
+            (BEVERAGES, BEVERAGES, True), (BEVERAGES, OIL, False),
+            (BEVERAGES, MART, False),
+            (MART, MART, True), (MART, OIL, False), (MART, BEVERAGES, False),
+        ]
+        for i, (configured, document, expected) in enumerate(cases):
+            with self.subTest(configured=configured, document=document):
+                wf = make_workflow(self.module, code=f'S{i}',
+                                   company=configured)
+                self.assertIs(wf.applies_to_company(document), expected)
+
+    def test_a_document_with_no_company_matches_only_all(self):
+        allc = make_workflow(self.module, code='N1', company=None)
+        oil = make_workflow(self.module, code='N2', company=OIL)
+        self.assertTrue(allc.applies_to_company(''))
+        self.assertFalse(oil.applies_to_company(''))
 
 
 class QueryScopeNarrowingTests(TestCase):

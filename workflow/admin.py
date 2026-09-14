@@ -1,21 +1,17 @@
 """Django Admin for workflow configuration.
 
-Configuration is registered; runtime tables (`WorkflowTask`,
-`WorkflowAction`) are registered read-only — `WorkflowAction` is append-only
+Only the five configuration models are registered. There is no runtime
+here: tasks, actions and flow state belong to the business module, which
+registers its own. `WorkflowQuery.validated_at` stays read-only
 history and must never be edited or deleted through the admin.
 """
 from django.contrib import admin
 
 from workflow.models import (
-    TestDocument,
-    TestDocumentLog,
-    TestFlow,
     Workflow,
-    WorkflowAction,
     WorkflowModule,
     WorkflowQuery,
     WorkflowStage,
-    WorkflowTask,
     WorkflowUserReplacement,
 )
 from workflow.services import conditions
@@ -31,17 +27,16 @@ class WorkflowStageInline(admin.TabularInline):
 class WorkflowQueryInline(admin.TabularInline):
     model = WorkflowQuery
     extra = 1
-    fields = ('name', 'company_scope', 'company', 'type', 'key_column',
+    fields = ('name', 'company',
               'query_text', 'validated_at', 'validation_error')
     readonly_fields = ('validated_at', 'validation_error')
 
 
 @admin.register(WorkflowModule)
 class WorkflowModuleAdmin(admin.ModelAdmin):
-    list_display = ('code', 'name', 'business_table', 'business_key_column',
-                    'flow_table', 'created_at')
+    list_display = ('id', 'code', 'name', 'created_at', 'updated_at')
     search_fields = ('code', 'name')
-    ordering = ('code',)
+    ordering = ('id',)
 
 
 @admin.register(Workflow)
@@ -50,13 +45,13 @@ class WorkflowAdmin(admin.ModelAdmin):
     # thing an operator needs when diagnosing an ambiguous selection.
     list_display = ('code', 'name', 'module', 'applies_to', 'stage_count',
                     'query_count')
-    list_filter = ('module', 'company_scope', 'company')
+    list_filter = ('module', 'company')
     search_fields = ('code', 'name')
     inlines = [WorkflowStageInline, WorkflowQueryInline]
 
     @admin.display(description='Applies to')
     def applies_to(self, obj):
-        return 'ALL companies' if obj.company_scope == 'ALL' else obj.company
+        return 'ALL companies' if obj.company == 'ALL' else obj.company
 
     def get_queryset(self, request):
         return (super().get_queryset(request)
@@ -74,9 +69,9 @@ class WorkflowAdmin(admin.ModelAdmin):
 
 @admin.register(WorkflowQuery)
 class WorkflowQueryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'workflow', 'company_scope', 'company', 'type',
+    list_display = ('name', 'workflow', 'company',
                     'is_validated', 'scope_ok')
-    list_filter = ('company_scope', 'company', 'workflow__module')
+    list_filter = ('company', 'workflow__module')
     search_fields = ('name', 'query_text')
     readonly_fields = ('validated_at', 'validation_error')
     actions = ['revalidate']
@@ -140,79 +135,5 @@ class WorkflowUserReplacementAdmin(admin.ModelAdmin):
                 .select_related('old_user', 'new_user'))
 
 
-@admin.register(WorkflowTask)
-class WorkflowTaskAdmin(admin.ModelAdmin):
-    """Read-only. Task state is the engine's; editing it here would bypass
-    the transaction and history that every transition goes through."""
-
-    list_display = ('id', 'module', 'flow_id', 'stage', 'sequence',
-                    'stage_user', 'status', 'created_at')
-    list_filter = ('status', 'module')
-    readonly_fields = tuple(
-        f.name for f in WorkflowTask._meta.fields
-    )
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
-
-    def get_queryset(self, request):
-        return (super().get_queryset(request)
-                .select_related('module', 'stage', 'stage_user'))
-
-
-@admin.register(WorkflowAction)
-class WorkflowActionAdmin(admin.ModelAdmin):
-    """Append-only history — no add, no change, no delete."""
-
-    list_display = ('module', 'flow_id', 'sequence', 'action', 'stage_name',
-                    'acted_by_username', 'on_behalf_of', 'acted_at')
-    list_filter = ('action', 'module')
-    search_fields = ('acted_by_username', 'remarks')
-    readonly_fields = tuple(f.name for f in WorkflowAction._meta.fields)
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
-
-    def get_queryset(self, request):
-        return (super().get_queryset(request)
-                .select_related('module', 'stage', 'acted_by', 'on_behalf_of'))
-
-
-# --- TestFlow harness ------------------------------------------------------
-
-class TestDocumentLogInline(admin.TabularInline):
-    model = TestDocumentLog
-    extra = 0
-    readonly_fields = ('sequence', 'event', 'remarks', 'created_by',
-                       'created_at')
-    can_delete = False
-
-
-@admin.register(TestDocument)
-class TestDocumentAdmin(admin.ModelAdmin):
-    list_display = ('id', 'document_number', 'company', 'branch',
-                    'department', 'amount', 'status')
-    list_filter = ('company', 'status')
-    inlines = [TestDocumentLogInline]
-
-
-@admin.register(TestFlow)
-class TestFlowAdmin(admin.ModelAdmin):
-    list_display = ('id', 'document', 'workflow', 'status', 'current_stage',
-                    'current_sequence', 'integration_status')
-    list_filter = ('status',)
-    readonly_fields = ('lock_version',)
-
-    def get_queryset(self, request):
-        return (super().get_queryset(request)
-                .select_related('document', 'workflow', 'current_stage',
-                                'matched_query'))
+# No admin for tasks, actions or a TestFlow harness: those models are gone.
+# A module registers its own approval runtime in its own admin.
