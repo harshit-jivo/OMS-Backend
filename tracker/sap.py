@@ -195,6 +195,150 @@ def find_draft_documents(invoice_number, party_code='', schema=None):
     } for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# Batched "is it already posted in SAP?" lookup
+# ---------------------------------------------------------------------------
+# `find_sap_documents` opens its own HANA connection per call, which is right
+# for the one-invoice question the detail screen asks and unusable for the
+# whole-queue question the SAP-saved sweep asks: 800 invoices would be 1,600
+# round trips. This groups the work by company schema and issues one statement
+# per (schema, table) instead — five or six in total.
+POSTED_BATCH_SIZE = 400
+
+
+def _chunks(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _quoted(values):
+    return ', '.join("'" + v.replace("'", "''") + "'" for v in sorted(set(values)))
+
+
+def posted_documents_for(invoices):
+    """{invoice.id: document dict} for invoices already POSTED in SAP.
+
+    "Posted" deliberately means OPCH / ORPC only — a draft (ODRF) is not saved,
+    it is pending, and treating one as saved would march an invoice to Payment
+    on the strength of a document nobody has committed yet. Cancelled documents
+    are ignored for the same reason: a cancelled A/P invoice is not a saved one.
+
+    Matching is case-insensitive on the invoice number. That is not a
+    loosening — `Invoice`'s own uniqueness constraint is `Lower(...)`, so the
+    tracker already considers 'ats:394' and 'ATS:394' the same number, and a
+    case-sensitive probe here would disagree with the application's own idea of
+    identity. The vendor code is still part of the key: `NumAtCard` alone is
+    not unique across vendors.
+
+    Each invoice is searched ONLY in the company schema its branch/unit selects
+    (`schema_for_invoice`). Documents posted in a different company are
+    reported by `cross_company_documents_for` rather than acted on, because a
+    mismatch there means the tracker row or the posting is wrong — which is a
+    thing for a person to look at, not for a sweep to resolve by advancing it.
+
+    Best-effort: a HANA failure yields {} so a scheduled sweep degrades to
+    doing nothing rather than raising.
+    """
+    return _posted_lookup(invoices, cross_company=False)
+
+
+def cross_company_documents_for(invoices):
+    """{invoice.id: document dict} for invoices posted in the WRONG company.
+
+    Diagnostic only — never used to advance an invoice. See
+    `posted_documents_for` for why.
+    """
+    return _posted_lookup(invoices, cross_company=True)
+
+
+def _all_schemas():
+    names = [settings.HANA_OIL_COMPANY_DB,
+             settings.HANA_BEVERAGE_COMPANY_DB,
+             getattr(settings, 'HANA_MART_COMPANY_DB', '')]
+    return [n for n in names if n]
+
+
+def _posted_lookup(invoices, cross_company):
+    invoices = [i for i in invoices if (i.party_code or '').strip()
+                and (i.invoice_number or '').strip()]
+    if not invoices:
+        return {}
+
+    wanted = {}                       # schema -> {(NUMBER, CODE): [invoice, ...]}
+    for inv in invoices:
+        schema = schema_for_invoice(inv)
+        if not schema:
+            continue
+        key = (inv.invoice_number.strip().upper(), inv.party_code.strip().upper())
+        wanted.setdefault(schema, {}).setdefault(key, []).append(inv)
+
+    if not wanted:
+        return {}
+
+    search_in = {}                    # schema -> {keys to look for there}
+    if cross_company:
+        every = _all_schemas()
+        for own, keys in wanted.items():
+            for other in every:
+                if other == own:
+                    continue
+                bucket = search_in.setdefault(other, {})
+                for key, invs in keys.items():
+                    # extend, never overwrite: two companies can legitimately
+                    # contribute the same (number, vendor) key, and assigning
+                    # would drop one company's invoices from the search.
+                    bucket.setdefault(key, []).extend(invs)
+    else:
+        search_in = wanted
+
+    found = {}
+    try:
+        with HANAConnection() as conn:
+            for schema, keys in search_in.items():
+                for row in _rows_for_schema(conn, schema, list(keys)):
+                    key = (row['num_at_card'].upper(), row['card_code'].upper())
+                    for inv in keys.get(key, ()):
+                        # Newest document wins if a vendor reused the number.
+                        current = found.get(inv.id)
+                        if current is None or (row['docentry'] or 0) > (current['docentry'] or 0):
+                            found[inv.id] = row
+    except Exception:  # noqa: BLE001
+        return {}
+    return found
+
+
+def _rows_for_schema(conn, schema, keys):
+    """Posted, non-cancelled A/P documents in `schema` matching any of `keys`."""
+    out = []
+    for batch in _chunks(keys, POSTED_BATCH_SIZE):
+        numbers = _quoted(n for n, _c in batch)
+        codes = _quoted(c for _n, c in batch)
+        for table, object_type, doc_type in AP_TABLES:
+            sql = (
+                f'SELECT "DocEntry", "DocNum", TRIM("NumAtCard") AS "NumAtCard",'
+                f'       "CardCode", "CardName", "DocDate", "DocTotal", "DocStatus"'
+                f' FROM "{schema}"."{table}"'
+                f' WHERE UPPER(TRIM("NumAtCard")) IN ({numbers})'
+                f'   AND UPPER("CardCode") IN ({codes})'
+                f"   AND IFNULL(\"CANCELED\", 'N') = 'N'"
+            )
+            for r in conn.execute(sql):
+                out.append({
+                    'schema': schema,
+                    'table': table,
+                    'object_type': object_type,
+                    'doc_type': doc_type,
+                    'docentry': r.get('DocEntry'),
+                    'docnum': r.get('DocNum'),
+                    'num_at_card': (r.get('NumAtCard') or '').strip(),
+                    'card_code': (r.get('CardCode') or '').strip(),
+                    'card_name': (r.get('CardName') or '').strip(),
+                    'doc_date': r.get('DocDate'),
+                    'doc_total': r.get('DocTotal'),
+                })
+    return out
+
+
 def resolve_draft_document(invoice):
     """The SAP draft (ODRF) row for a tracker invoice, or None.
 
