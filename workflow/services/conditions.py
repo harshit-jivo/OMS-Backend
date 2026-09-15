@@ -70,6 +70,26 @@ def _alias():
     return RO_ALIAS if RO_ALIAS in settings.DATABASES else 'default'
 
 
+def _escape_percent(query_text):
+    """`%` in CONFIGURED sql, made safe for psycopg2's parameter binding.
+
+    The wrapper below is executed with a bound parameter, and psycopg2 then
+    reads the WHOLE statement looking for `%s` placeholders — including the
+    administrator's own text. So a perfectly ordinary condition:
+
+        ... WHERE company LIKE '%,OIL,%'
+
+    made it raise `IndexError: list index out of range`, because `%,` looked
+    like a malformed placeholder. Doubling the percent signs is how psycopg2 is
+    told they are literals.
+
+    Only the configured text is escaped; the engine's own `%s` is added
+    afterwards and must stay a placeholder. Nothing about the query's MEANING
+    changes — `%%` is `%` to psycopg2 and never reaches PostgreSQL doubled.
+    """
+    return (query_text or '').replace('%', '%%')
+
+
 def _quote_ident(name):
     """Quote an identifier for safe interpolation.
 
@@ -140,7 +160,7 @@ def matches(query, document_key, *, key_column=None):
 
     quoted = _quote_ident(key_column or DEFAULT_KEY_COLUMN)
     sql = (
-        f'SELECT 1 FROM ({query.query_text}) AS wf_q '
+        f'SELECT 1 FROM ({_escape_percent(query.query_text)}) AS wf_q '
         f'WHERE wf_q.{quoted} = %s LIMIT 1'
     )
     rows = _run(sql, [document_key], alias=_alias())
@@ -157,7 +177,8 @@ def execute(query, params=None, *, limit=1000):
     if query.validated_at is None:
         raise ConditionExecutionError(
             f'Query "{query.name}" has not passed validation.')
-    sql = f'SELECT * FROM ({query.query_text}) AS wf_q LIMIT {int(limit)}'
+    sql = (f'SELECT * FROM ({_escape_percent(query.query_text)}) AS wf_q '
+           f'LIMIT {int(limit)}')
     return _run(sql, list(params or []), alias=_alias())
 
 
@@ -171,7 +192,10 @@ def explain(query_text, *, key_column=None):
     Returns a list of problems (empty means it planned cleanly), so it
     composes with `validators.validate_query_text`.
     """
-    wrapped = f'SELECT 1 FROM ({query_text}) AS wf_q'
+    # Escaped for the same reason as in `matches` — and it matters MORE here,
+    # because this is the path the admin UI validates through. Without it a
+    # condition containing `LIKE '%...%'` could not even be SAVED.
+    wrapped = f'SELECT 1 FROM ({_escape_percent(query_text)}) AS wf_q'
     if key_column:
         wrapped += f' WHERE wf_q.{_quote_ident(key_column)} = %s LIMIT 1'
         params = [None]

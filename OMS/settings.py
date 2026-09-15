@@ -163,6 +163,7 @@ INSTALLED_APPS = [
     # payments and HAIS. Independent of `approvals`, which keeps serving
     # PAYMENT and DEPOSIT untouched.
     'workflow',
+    'backdate',
 ]
 
 MIDDLEWARE = [
