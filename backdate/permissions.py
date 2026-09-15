@@ -53,6 +53,26 @@ def CanOpenApprovalDesk():
     return HasKey(APPROVAL_KEY)
 
 
+class CanReadRequests(BasePermission):
+    """May the caller READ a BackDate request at all — either key will do.
+
+    Reading and deciding are different questions. An approver holds
+    `BackDate_Approval` and often NOT `BackDate`, because they never raise a
+    request of their own; requiring the requester key to open a detail or a
+    history would leave them approving documents they are not allowed to look
+    at. WHICH requests they may read is then decided per object in the view:
+    your own, or anything if you run the approval desk.
+    """
+
+    message = 'You do not have permission to view BackDate requests.'
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated
+                    and (has_request_access(user)
+                         or has_approval_access(user)))
+
+
 class IsBackDateApprover(BasePermission):
     """Holds `BackDate_Approval`. The stage check is per-flow, not per-view.
 
@@ -64,6 +84,61 @@ class IsBackDateApprover(BasePermission):
 
     def has_permission(self, request, view):
         return has_approval_access(request.user)
+
+
+#: Why an edit was refused. Two different answers are needed — "this is not
+#: yours" and "it is too late" — so the caller is told which, in its own words
+#: rather than in an HTTP number this layer has no business knowing.
+NOT_YOURS, TOO_LATE = 'NOT_YOURS', 'TOO_LATE'
+
+
+def may_edit(user, backdate):
+    """May this user edit this request RIGHT NOW? `(allowed, reason, why)`.
+
+    The rule lives here, not in the view, because the UI has to ask the same
+    question: an Edit control offered to somebody the server will refuse is
+    worse than no control at all.
+
+    Normally the requester, and only while nothing has been decided — an
+    approver agreed to the request as it read in front of them.
+
+    The exception is a SAP refusal. Nothing is approved in that state (the
+    final approval calls SAP first and is only written if SAP accepted), the
+    request is stuck at its last stage, and the person LOOKING at the database's
+    error is the approver holding it. They may correct it and try again rather
+    than relay it back through the requester.
+    """
+    from backdate.models import FlowStatus, HanaStatus, LogAction
+
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False, 'Authentication required.', NOT_YOURS
+
+    flow = getattr(backdate, 'flow', None)
+    sap_refused = flow is not None and flow.hana_status == HanaStatus.FAILED
+
+    if backdate.created_by_id != user.pk:
+        if not sap_refused:
+            return False, 'Only the requester can edit this request.', NOT_YOURS
+        allowed, _reason = may_act_on(user, flow)
+        if not allowed:
+            return False, ('Only the requester or the approver holding this '
+                           'request can edit it.'), NOT_YOURS
+
+    if flow is not None and flow.status != FlowStatus.PENDING:
+        return False, (f'This request is already '
+                       f'{flow.get_status_display().lower()} and can no '
+                       f'longer be edited.'), TOO_LATE
+
+    # An approval already given was given to the request AS IT READ THEN. A SAP
+    # refusal is the exception: nothing is approved in that state — the WRITE is
+    # what failed — so correcting it is not rewriting history.
+    if (flow is not None and not sap_refused
+            and backdate.action_logs.filter(
+                action=LogAction.APPROVE).exists()):
+        return False, ('This request has already been approved at one of its '
+                       'stages and can no longer be edited.'), TOO_LATE
+
+    return True, '', ''
 
 
 def may_act_on(user, flow):

@@ -51,9 +51,12 @@ WHAT WAS WRONG IN JSAP AND IS FIXED HERE
 import json
 import logging
 
+from django.utils import timezone
+
 from hana.services.connection import HANAConnection, HanaSchemaError, Queries
 
-from backdate.models import HanaStatus
+from backdate.models import BackDateFlow, HanaStatus
+from backdate.services import sap_masters
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +73,17 @@ PARAMETER_NAMES = [
 
 
 class HanaWriteError(Exception):
-    """The SAP write failed. The message is safe to show an operator."""
+    """The SAP write failed. The message is safe to show an operator.
+
+    It also CARRIES THE EVIDENCE — what was sent, and what SAP said back — so
+    the handler that catches it can store that once its own transaction has
+    ended. See `record_failure` for why it cannot be stored any earlier.
+    """
+
+    def __init__(self, message, *, payload=None, status_text=''):
+        super().__init__(message)
+        self.payload = payload
+        self.status_text = status_text
 
 
 def _rights_for(action):  # noqa: ARG001 — see the docstring
@@ -105,6 +118,16 @@ def build_payload(backdate, company=None):
 
     `company` names which of the request's companies this call is for; it
     defaults to the only one when a request names a single company.
+
+    `TRANSTYPE` IS RESOLVED HERE, NOT STORED. The request holds the SAP object
+    NAME; `OPEN_BKDT` needs the number. The mapping is one-to-one (75 objects,
+    75 distinct non-blank names, identical in all three company schemas,
+    verified against live HANA), so the lookup is exact — and doing it at call
+    time means the number sent is the one SAP has NOW, never a stale copy.
+
+    A name SAP does not know raises rather than guessing. Granting rights over
+    the wrong object because a name nearly matched would be far worse than a
+    refused approval the approver can see and correct.
     """
     companies = backdate.companies
     if company is None:
@@ -131,10 +154,18 @@ def build_payload(backdate, company=None):
             'This request has no expiry, and SAP ignores rights that never '
             'lapse. It cannot be applied.')
 
+    object_type = sap_masters.object_type_for(
+        company, backdate.document_type_name)
+    if object_type is None:
+        raise HanaWriteError(
+            f'SAP does not have a document type called '
+            f'"{backdate.document_type_name}" in {company}, so these rights '
+            f'cannot be applied. Correct the document type and try again.')
+
     return [
         branch,                              # 1  BRANCH    NVARCHAR(50)
         (backdate.sap_username or '')[:20],  # 2  USERID    NVARCHAR(20)
-        int(backdate.document_type),         # 3  TRANSTYPE INTEGER
+        object_type,                         # 3  TRANSTYPE INTEGER
         backdate.from_date,                  # 4  FROMDATE  DATE
         backdate.to_date,                    # 5  TODATE    DATE
         backdate.time_limit,                 # 6  TIMELIMIT TIMESTAMP
@@ -228,22 +259,69 @@ def apply_grant(flow):
         results.append({
             'branch': branch, 'status': 'SUCCESS',
             'response': (f'OPEN_BKDT accepted: {backdate.sap_username}, '
-                         f'object type {backdate.document_type}, '
+                         f'{backdate.document_type_name}, '
                          f'{backdate.from_date} to {backdate.to_date}, '
                          f'expires {backdate.time_limit.isoformat()}.'),
         })
 
     status_text = json.dumps({'results': results}, indent=2, sort_keys=False)
-    flow.sap_payload = {'calls': calls}
-    flow.hana_status = HanaStatus.FAILED if failures else HanaStatus.SUCCESS
+    payload = {'calls': calls}
+
+    if failures:
+        # NOTHING IS WRITTEN HERE, deliberately. The final approval calls this
+        # from inside the transaction holding `backdate_flow` FOR UPDATE, and
+        # that transaction is about to be rolled back to keep the request
+        # un-approved. Writing the failure now would either be lost in that
+        # rollback, or — as an earlier version tried — be written from a second
+        # connection, which then waits on the row lock its OWN caller is still
+        # holding and never returns. That is a hang, not a slow write.
+        #
+        # So the evidence travels on the exception and is stored by the handler
+        # after the rollback. See `record_failure`.
+        raise HanaWriteError(
+            'SAP refused the rights for ' + ', '.join(failures)
+            + '. The request has NOT been approved — correct it and try '
+              'again. The exact SAP response is recorded against it.',
+            payload=payload, status_text=status_text)
+
+    # A success belongs to the approval it was part of, so it is written on the
+    # caller's own connection: the two commit together or neither does.
+    flow.sap_payload = payload
+    flow.hana_status = HanaStatus.SUCCESS
     flow.hana_status_text = status_text
     flow.save(update_fields=['sap_payload', 'hana_status', 'hana_status_text',
                              'updated_at'])
-
-    if failures:
-        raise HanaWriteError(
-            'SAP did not accept the rights for '
-            + ', '.join(failures)
-            + '. The approval stands; an administrator can retry the SAP '
-              'write. The exact SAP response is recorded against the request.')
     return status_text
+
+
+def record_failure(flow, error):
+    """Store a refused SAP call against the flow, AFTER the rollback.
+
+    Call this from the handler that caught `HanaWriteError`, once the
+    approval's transaction has ended. By then the row lock is gone, so this is
+    an ordinary write on the ordinary connection with nothing to wait on — and
+    it survives, which is the entire point: the approver is told SAP refused,
+    and must be able to open the request and read exactly why.
+
+    A `.update()` rather than a `.save()`: the request stays exactly as the
+    requester left it, and only the SAP columns move.
+
+    Recording must never mask the SAP error the caller is already reporting, so
+    a failure here is logged and swallowed.
+    """
+    payload = getattr(error, 'payload', None)
+    status_text = getattr(error, 'status_text', '') or str(error)
+
+    try:
+        BackDateFlow.objects.filter(pk=flow.pk).update(
+            sap_payload=payload, hana_status=HanaStatus.FAILED,
+            hana_status_text=status_text, updated_at=timezone.now())
+    except Exception:  # noqa: BLE001 — recording must not mask the SAP error
+        logger.warning('BKDT could not record the SAP failure for flow=%s',
+                       flow.pk, exc_info=True)
+
+    # Keep the in-memory flow in step, so a caller that renders it straight
+    # back does not show the state from before the attempt.
+    flow.sap_payload = payload
+    flow.hana_status = HanaStatus.FAILED
+    flow.hana_status_text = status_text

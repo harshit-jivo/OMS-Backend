@@ -15,11 +15,12 @@ from .models import BackDate, BackDateActionLog, BackDateFlow
 
 @admin.register(BackDate)
 class BackDateAdmin(admin.ModelAdmin):
-    list_display = ('id', 'company', 'sap_username', 'document_type',
+    list_display = ('id', 'company', 'sap_username', 'document_type_name',
                     'from_date', 'to_date', 'time_limit', 'action',
                     'created_by', 'created_at')
     list_filter = ('company', 'action', 'created_at')
-    search_fields = ('sap_username', 'remarks', 'created_by__username')
+    search_fields = ('sap_username', 'document_type_name',
+                     'created_by__username')
     date_hierarchy = 'created_at'
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('created_by',)

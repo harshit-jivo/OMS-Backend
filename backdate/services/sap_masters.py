@@ -12,9 +12,10 @@ connection, per request. `HANAConnection` has no pooling (a known gap in
 `docs/CODEBASE_AND_REFACTOR_PLAN.md`), so that is one connect/disconnect per
 page view for data that changes very rarely.
 
-The label is also never stored on a request here: `document_type` holds the
-numeric `ObjType` SAP actually needs, and the label is resolved for display.
-Storing it would let it drift from SAP the moment somebody renames an object.
+A request stores the object NAME, and `object_type_for` turns that back into
+the number `OPEN_BKDT` needs at the moment of the call. The mapping is
+one-to-one — 75 objects, 75 distinct non-blank names, identical in all three
+company schemas, verified against live HANA — so the round trip is exact.
 """
 import logging
 
@@ -103,6 +104,32 @@ def sap_users(company):
 
 def document_types(company):
     return _fetch(company, 'GETMOBJDETAILS', _object_row, 'mobj')
+
+
+def object_type_for(company, name):
+    """The numeric `ObjType` for an object NAME, or None.
+
+    The reverse of `document_type_labels`, and the reason a request can store
+    only the name: `OPEN_BKDT`'s `TRANSTYPE` is an INTEGER, so the number is
+    needed at the moment of the call and nowhere else.
+
+    Matched case-insensitively on the trimmed name, because the name travelled
+    through a form and back. Returns None when SAP does not have it — the
+    caller decides how loudly to say so, and for the SAP write that is loudly:
+    guessing a number would grant rights over the wrong object.
+    """
+    wanted = (name or '').strip().casefold()
+    if not wanted:
+        return None
+    for row in document_types(company):
+        if row['name'].strip().casefold() == wanted:
+            return row['object_type']
+    return None
+
+
+def document_type_names(company):
+    """The object names a request may name, for validating a submission."""
+    return [row['name'] for row in document_types(company) if row['name']]
 
 
 def document_type_labels(company):

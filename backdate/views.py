@@ -68,14 +68,25 @@ def _company_filter(request, field='company'):
     if raw not in COMPANY_CODES:
         return None, ('`company` must be one of '
                       + ', '.join(COMPANY_CODES) + '.')
-    # A request's `company` is a SET now — `'OIL,BEVERAGES'` — so the filter
-    # asks whether the named company is IN it rather than whether it IS it.
-    # Spelt out as four exact positions rather than one bare `contains`, which
-    # would let a company match another whose name merely contained it.
-    return (Q(**{field: raw})
-            | Q(**{f'{field}__startswith': f'{raw},'})
-            | Q(**{f'{field}__endswith': f',{raw}'})
-            | Q(**{f'{field}__contains': f',{raw},'})), None
+    return Q(**{field: raw}), None
+
+
+def _search_filter(request):
+    """`Q` for an optional `?search=` — a BackDate id, or a SAP user.
+
+    Two fields because those are the two ways a person refers to one of these:
+    by the number on the screen, or by whose SAP login the rights are for. A
+    term that is entirely digits matches the id EXACTLY as well as appearing in
+    a SAP username, so searching "82" finds request 82 and does not bury it
+    under every id containing 82.
+    """
+    term = (request.query_params.get('search') or '').strip()
+    if not term:
+        return Q()
+    matches = Q(sap_username__icontains=term)
+    if term.isdigit():
+        matches |= Q(pk=int(term))
+    return matches
 
 
 def _queryset():
@@ -90,6 +101,13 @@ def _queryset():
         .select_related('created_by', 'flow', 'flow__workflow',
                         'flow__current_stage', 'flow__current_user')
     )
+
+
+def _ctx(request):
+    """Serializer context. The read serializer needs the CALLER to answer
+    `can_edit` — who may edit depends on who is asking, so a serializer with no
+    request in it reports False rather than guessing."""
+    return {'request': request}
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +160,14 @@ class RequestListCreateView(APIView):
         company, error = _company_filter(request)
         if error:
             return fail(error)
-        qs = qs.filter(company)
+        qs = qs.filter(company).filter(_search_filter(request))
 
-        status_filter = (request.query_params.get('status') or '').upper()
-        if status_filter in FlowStatus.values:
-            qs = qs.filter(flow__status=status_filter)
+        # `COMPLETED` is handled here too — see `flow_service.status_q`. One
+        # definition, so the list and the card above it agree on the word.
+        condition = flow_service.status_q(
+            request.query_params.get('status'), prefix='flow__')
+        if condition is not None:
+            qs = qs.filter(condition)
 
         month = (request.query_params.get('month') or '').strip()
         if month:
@@ -156,7 +177,7 @@ class RequestListCreateView(APIView):
             year, mon = parsed
             qs = qs.filter(created_at__year=year, created_at__month=mon)
 
-        return ok(BackDateSerializer(qs, many=True).data)
+        return ok(BackDateSerializer(qs, many=True, context=_ctx(request)).data)
 
     def post(self, request):
         serializer = BackDateCreateSerializer(data=request.data)
@@ -171,19 +192,28 @@ class RequestListCreateView(APIView):
             with transaction.atomic():
                 # `created_by` from the session, never the payload.
                 backdate = serializer.save(created_by=request.user)
-                flow_service.submit(backdate, user=request.user)
+                # The reason travels to the CREATE log, not to a column.
+                flow_service.submit(
+                    backdate, user=request.user,
+                    remarks=serializer.validated_data.get('remarks', ''))
         except flow_service.BackDateError as exc:
             return fail(str(exc), status=http_status.HTTP_409_CONFLICT)
 
-        payload = BackDateSerializer(_queryset().get(pk=backdate.pk)).data
+        payload = BackDateSerializer(_queryset().get(pk=backdate.pk),
+                                    context=_ctx(request)).data
         return created(payload, message='BackDate request submitted.')
 
 
 class RequestDetailView(APIView):
-    """Read one request, or edit it while it is still pending."""
+    """Read one request, or edit it while it is still pending.
+
+    READING takes either key — an approver has to be able to open what they
+    are deciding, and they usually do not hold `BackDate`. EDITING is still
+    the requester's alone, checked in `patch`.
+    """
 
     def get_permissions(self):
-        return [IsAuthenticated(), bkdt_perms.CanRaiseRequests()]
+        return [IsAuthenticated(), bkdt_perms.CanReadRequests()]
 
     def _load(self, request, pk):
         obj = _queryset().filter(pk=pk).first()
@@ -202,37 +232,27 @@ class RequestDetailView(APIView):
         obj, error = self._load(request, pk)
         if error:
             return error
-        return ok(BackDateSerializer(obj).data)
+        return ok(BackDateSerializer(obj, context=_ctx(request)).data)
 
     def patch(self, request, pk):
         """Edit a pending request, recording exactly what changed.
 
-        Only the REQUESTER may edit, and only while nothing has been decided —
-        an approver agreed to the request in front of them, and letting the
-        dates move underneath an approval already given would make the record
-        untrue. An approver who wants different terms rejects; the requester
-        raises a new one.
+        Who may edit, and when, is `permissions.may_edit` — one rule, shared
+        with the serializer so the UI never offers an Edit control the server
+        is going to refuse.
         """
         obj, error = self._load(request, pk)
         if error:
             return error
 
-        if obj.created_by_id != request.user.pk:
-            return fail('Only the requester can edit this request.',
-                        status=http_status.HTTP_403_FORBIDDEN)
-
-        flow = getattr(obj, 'flow', None)
-        if flow is not None and flow.status != FlowStatus.PENDING:
-            return fail(
-                f'This request is already {flow.get_status_display().lower()} '
-                f'and can no longer be edited.',
-                status=http_status.HTTP_409_CONFLICT)
-        if flow is not None and BackDateActionLog.objects.filter(
-                backdate=obj, action=LogAction.APPROVE).exists():
-            return fail(
-                'This request has already been approved at one of its stages '
-                'and can no longer be edited.',
-                status=http_status.HTTP_409_CONFLICT)
+        allowed, reason, why = bkdt_perms.may_edit(request.user, obj)
+        if not allowed:
+            # "not yours" and "too late" are different answers and get
+            # different statuses, so a client can tell them apart without
+            # reading the prose.
+            return fail(reason, status=(
+                http_status.HTTP_409_CONFLICT if why == bkdt_perms.TOO_LATE
+                else http_status.HTTP_403_FORBIDDEN))
 
         serializer = BackDateUpdateSerializer(obj, data=request.data,
                                               partial=True)
@@ -248,23 +268,30 @@ class RequestDetailView(APIView):
             backdate = serializer.save()
             after = snapshot(backdate)
             changes = diff(before, after)
-            if changes:
+            remarks = serializer.validated_data.get('remarks', '')
+            # An UPDATE row is written when anything changed OR when the user
+            # gave a reason. Those are two different edits: correcting a date,
+            # and explaining a request without altering it (the usual answer to
+            # a SAP refusal an approver is puzzling over). Writing nothing for
+            # the second would lose the only thing the user actually said.
+            if changes or remarks.strip():
                 flow_service.log(
                     backdate, action=LogAction.UPDATE, user=request.user,
-                    remarks=(request.data.get('log_remarks') or '')[:2000],
-                    action_data=changes)
+                    remarks=remarks, action_data=changes)
 
-        payload = BackDateSerializer(_queryset().get(pk=backdate.pk)).data
+        payload = BackDateSerializer(_queryset().get(pk=backdate.pk),
+                                    context=_ctx(request)).data
         return ok(payload,
                   message=('Request updated.' if changes
+                           else 'Remark added.' if remarks.strip()
                            else 'Nothing changed.'))
 
 
 class RequestHistoryView(APIView):
-    """The append-only history for one request."""
+    """The append-only history for one request, plus its stage progress."""
 
     def get_permissions(self):
-        return [IsAuthenticated(), bkdt_perms.CanRaiseRequests()]
+        return [IsAuthenticated(), bkdt_perms.CanReadRequests()]
 
     def get(self, request, pk):
         obj = BackDate.objects.filter(pk=pk).first()
@@ -286,7 +313,66 @@ class RequestHistoryView(APIView):
         return ok({
             'actions': BackDateActionLogSerializer(
                 logs, many=True, context=context).data,
+            'stages': _progress(obj, logs),
         })
+
+
+def _progress(backdate, logs):
+    """Every stage of this request's workflow, decided or not yet reached.
+
+    The action log alone cannot answer "where is this?", because it only
+    records what has HAPPENED — a request waiting at stage 1 of 3 has one row
+    and says nothing about the two stages ahead. The stages come from the
+    engine, the decisions from the log, and they are joined here.
+
+    Users are the CURRENT effective ones, resolved per stage: a reviewer who
+    has not acted yet is whoever would act today, not whoever was configured
+    when the request was raised.
+    """
+    flow = getattr(backdate, 'flow', None)
+    if flow is None:
+        return []
+
+    decided = {}
+    for entry in logs:
+        if entry.action in (LogAction.APPROVE, LogAction.REJECT) and entry.stage_id:
+            decided[entry.stage_id] = entry
+
+    from workflow.services.assignments import get_stage_assignment
+
+    rows = []
+    for stage in flow_service.stages_for(flow):
+        entry = decided.get(stage.id)
+        assignment = get_stage_assignment(stage.id)
+        if entry is not None:
+            status = ('APPROVED' if entry.action == LogAction.APPROVE
+                      else 'REJECTED')
+        elif flow.current_stage_id == stage.id:
+            status = 'AWAITING'
+        elif flow.status == FlowStatus.PENDING:
+            status = 'UPCOMING'
+        else:
+            # The flow ended before this stage had its turn — a rejection
+            # upstream. "Upcoming" would imply it is still going to happen.
+            status = 'SKIPPED'
+
+        rows.append({
+            'stage_id': stage.id,
+            'sequence': stage.sequence,
+            'stage_name': stage.name,
+            'status': status,
+            'reviewer': (assignment.effective_username if assignment
+                         else ''),
+            'configured_reviewer': (assignment.configured_username
+                                    if assignment else ''),
+            'has_active_replacement': bool(
+                assignment and assignment.has_active_replacement),
+            'acted_by': entry.acted_by.username if entry and entry.acted_by
+                        else '',
+            'acted_at': entry.acted_at if entry else None,
+            'remarks': entry.remarks if entry else '',
+        })
+    return rows
 
 
 class InsightsView(APIView):
@@ -303,7 +389,7 @@ class InsightsView(APIView):
         company, error = _company_filter(request)
         if error:
             return fail(error)
-        qs = qs.filter(company)
+        qs = qs.filter(company).filter(_search_filter(request))
 
         month = (request.query_params.get('month') or '').strip()
         if month:
@@ -313,15 +399,25 @@ class InsightsView(APIView):
             year, mon = parsed
             qs = qs.filter(created_at__year=year, created_at__month=mon)
 
-        counts = {'pending': 0, 'approved': 0, 'rejected': 0}
-        for value in qs.values_list('flow__status', flat=True):
-            if value == FlowStatus.PENDING:
+        counts = {'pending': 0, 'approved': 0, 'rejected': 0, 'completed': 0}
+        for status, hana in qs.values_list('flow__status', 'flow__hana_status'):
+            if status == FlowStatus.PENDING:
                 counts['pending'] += 1
-            elif value == FlowStatus.APPROVED:
+            elif status == FlowStatus.APPROVED:
                 counts['approved'] += 1
-            elif value == FlowStatus.REJECTED:
+                # A SUBSET of approved, deliberately not a fourth bucket: the
+                # two cards answer different questions ("who said yes" and
+                # "does the user actually have the rights"), and since SAP
+                # became the gate they differ only for requests approved under
+                # the old order. Those are the ones worth finding.
+                if hana == HanaStatus.SUCCESS:
+                    counts['completed'] += 1
+            elif status == FlowStatus.REJECTED:
                 counts['rejected'] += 1
-        counts['total'] = sum(counts.values())
+        # `completed` is NOT added in: it is already counted in `approved`, and
+        # a total that double-counted it would not match the list below.
+        counts['total'] = (counts['pending'] + counts['approved']
+                           + counts['rejected'])
         return ok(counts)
 
 
@@ -344,8 +440,9 @@ class ApprovalQueueView(APIView):
         company, error = _company_filter(request)
         if error:
             return fail(error)
-        qs = _queryset().filter(company, pk__in=_pending_ids(request.user))
-        return ok(BackDateSerializer(qs, many=True).data)
+        qs = _queryset().filter(company, _search_filter(request),
+                                pk__in=_pending_ids(request.user))
+        return ok(BackDateSerializer(qs, many=True, context=_ctx(request)).data)
 
 
 class ApprovalHistoryView(APIView):
@@ -358,12 +455,11 @@ class ApprovalHistoryView(APIView):
         company, error = _company_filter(request)
         if error:
             return fail(error)
-        status_filter = (request.query_params.get('status') or '').upper()
         ids = flow_service.decided_backdate_ids(
-            request.user,
-            status_filter if status_filter in FlowStatus.values else None)
-        qs = _queryset().filter(company, pk__in=ids)
-        return ok(BackDateSerializer(qs, many=True).data)
+            request.user, request.query_params.get('status'))
+        qs = _queryset().filter(company, _search_filter(request),
+                                pk__in=ids)
+        return ok(BackDateSerializer(qs, many=True, context=_ctx(request)).data)
 
 
 def _pending_ids(user):
@@ -376,9 +472,12 @@ class ApprovalInsightsView(APIView):
     """Counts for the approval desk — the KPI cards above its list.
 
     `pending` is what is waiting on this user RIGHT NOW (the queue), while
-    `approved` and `rejected` are what they have already decided. The three are
-    disjoint, so `total` is their sum: a request cannot be both awaiting this
-    user's decision and already carrying it.
+    `approved` and `rejected` are what they have already decided. Those three
+    are disjoint, so `total` is their sum: a request cannot be both awaiting
+    this user's decision and already carrying it.
+
+    `completed` is NOT in that sum. It counts the approved ones whose rights
+    actually reached SAP — a subset of `approved`, not a fourth state.
     """
 
     def get_permissions(self):
@@ -392,7 +491,8 @@ class ApprovalInsightsView(APIView):
         def count(ids):
             if not ids:
                 return 0
-            return BackDate.objects.filter(company, pk__in=ids).count()
+            return BackDate.objects.filter(
+                company, _search_filter(request), pk__in=ids).count()
 
         counts = {
             'pending': count(_pending_ids(request.user)),
@@ -400,8 +500,13 @@ class ApprovalInsightsView(APIView):
                 request.user, FlowStatus.APPROVED)),
             'rejected': count(flow_service.decided_backdate_ids(
                 request.user, FlowStatus.REJECTED)),
+            # Approved AND the grant is in SAP — a subset of `approved`.
+            'completed': count(flow_service.decided_backdate_ids(
+                request.user, flow_service.COMPLETED)),
         }
-        counts['total'] = sum(counts.values())
+        # The three disjoint states only; `completed` is inside `approved`.
+        counts['total'] = (counts['pending'] + counts['approved']
+                           + counts['rejected'])
         return ok(counts)
 
 
@@ -438,21 +543,22 @@ class RequestApproveView(_DecisionView):
             flow = flow_service.approve(
                 flow, user=request.user,
                 remarks=payload.validated_data.get('remarks', ''))
+        except hana_service.HanaWriteError as exc:
+            # The last stage calls SAP BEFORE approving, so a refusal means
+            # nothing was approved. The request is still sitting at this
+            # stage; the recorded SAP response says why.
+            #
+            # Recorded HERE, not inside the service: the approval transaction
+            # has rolled back by the time this line runs, which is exactly what
+            # makes this write survive — and what lets it take the row lock
+            # that transaction was holding.
+            hana_service.record_failure(flow, exc)
+            flow.refresh_from_db()
+            return fail(str(exc),
+                        errors={'sap': _sap_detail(flow)},
+                        status=http_status.HTTP_502_BAD_GATEWAY)
         except flow_service.BackDateError as exc:
             return fail(str(exc), status=http_status.HTTP_409_CONFLICT)
-
-        hana_text = ''
-        hana_ok = None
-        if flow.status == FlowStatus.APPROVED:
-            # Final approval is what grants the rights in SAP. The approval
-            # itself is already committed, so a HANA failure does NOT undo it —
-            # it is reported, recorded, and retryable.
-            hana_ok = True
-            try:
-                hana_text = hana_service.apply_grant(flow)
-            except hana_service.HanaWriteError as exc:
-                hana_ok = False
-                hana_text = str(exc)
 
         flow.refresh_from_db()
         return ok({
@@ -461,19 +567,25 @@ class RequestApproveView(_DecisionView):
             'current_stage': flow.current_stage_id,
             'current_user': flow.current_user_id,
             'hana_status': flow.hana_status,
-            'hana_status_text': hana_text or flow.hana_status_text,
-            'hana_applied': hana_ok,
-        }, message=_approve_message(flow, hana_ok))
+            'hana_status_text': flow.hana_status_text,
+            'hana_applied': flow.status == FlowStatus.APPROVED or None,
+        }, message=_approve_message(flow))
 
 
-def _approve_message(flow, hana_ok):
+def _sap_detail(flow):
+    """What the client needs to show the operator the SAP refusal."""
+    return {
+        'hana_status': flow.hana_status,
+        'hana_status_text': flow.hana_status_text,
+        'sap_payload': flow.sap_payload,
+    }
+
+
+def _approve_message(flow):
     if flow.status == FlowStatus.PENDING:
         return 'Approved. The request has moved to the next stage.'
-    if hana_ok is False:
-        # Deliberately not "success". JSAP reported 200/Success=true here even
-        # when the SAP write never happened.
-        return ('Approved, but the rights could not be applied in SAP. '
-                'An administrator can retry the SAP write.')
+    # "Approved" now means the grant is in SAP: the write happened first and
+    # the status was only set because it succeeded.
     return 'Approved. The back-posting rights have been applied in SAP.'
 
 
@@ -528,9 +640,15 @@ class RetryHanaView(APIView):
             return fail('Request not found.',
                         status=http_status.HTTP_404_NOT_FOUND)
 
+        # An approved flow whose write failed is impossible now — SAP is the
+        # gate on the final approval — but a retry still exists for a flow that
+        # was approved under the OLD order, and for an operator re-running a
+        # write after fixing something in SAP itself.
         if flow.status != FlowStatus.APPROVED:
             return fail(
-                'Only a fully approved request can be written to SAP.',
+                'Only a fully approved request can be written to SAP. A '
+                'request refused by SAP is still awaiting its last approval — '
+                'correct it and approve again.',
                 status=http_status.HTTP_409_CONFLICT)
         if flow.hana_status == HanaStatus.SUCCESS:
             return fail('These rights have already been applied in SAP.',
@@ -539,6 +657,7 @@ class RetryHanaView(APIView):
         try:
             text = hana_service.apply_grant(flow)
         except hana_service.HanaWriteError as exc:
+            hana_service.record_failure(flow, exc)
             return fail(str(exc), status=http_status.HTTP_502_BAD_GATEWAY)
 
         return ok({'flow_id': flow.pk, 'hana_status': flow.hana_status,

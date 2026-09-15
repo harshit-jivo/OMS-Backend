@@ -1,17 +1,17 @@
 """BackDate (BKDT) routes. Mounted at ``api/backdate/`` and ``api/v1/backdate/``.
 
 Requester (`BackDate`):
-  GET  POST  /api/backdate/requests/            ?status=&company=&month=MM-YYYY
+  GET  POST  /api/backdate/requests/            ?status=&company=&search=&month=MM-YYYY
   GET PATCH  /api/backdate/requests/<pk>/       PATCH edits a pending request
-  GET        /api/backdate/requests/<pk>/history/
+  GET        /api/backdate/requests/<pk>/history/  actions + stage progress
   GET        /api/backdate/insights/            ?company=&month=MM-YYYY
   GET        /api/backdate/sap-users/           ?company=OIL
   GET        /api/backdate/document-types/      ?company=OIL
 
 Approver (`BackDate_Approval` AND the effective stage user):
-  GET        /api/backdate/approvals/queue/     ?company=
-  GET        /api/backdate/approvals/history/   ?status=&company=
-  GET        /api/backdate/approvals/insights/  ?company=
+  GET        /api/backdate/approvals/queue/     ?company=&search=
+  GET        /api/backdate/approvals/history/   ?status=&company=&search=
+  GET        /api/backdate/approvals/insights/  ?company=&search=
   POST       /api/backdate/requests/<pk>/approve/
   POST       /api/backdate/requests/<pk>/reject/
   POST       /api/backdate/requests/<pk>/retry-hana/
