@@ -92,6 +92,16 @@ REGISTRY: dict[str, dict[str, str]] = {
         # routes. Gates every legal/ endpoint via HasKeyOrRole, with the
         # `legal` role as the transitional fallback (see legal/views.py).
         'Legal':                    'Legal (Labels & Nutrition)',
+        # BackDate (BKDT) — temporary back-posting rights in SAP. TWO keys,
+        # because raising a request and deciding one are different authorities
+        # and the second is the one worth withholding.
+        #
+        # `BackDate_Approval` is necessary but NOT sufficient to approve: the
+        # backend also requires the caller to be the current effective user of
+        # that workflow stage (backdate/permissions.py). Holding the key alone
+        # opens the page and shows nothing actionable.
+        'BackDate':                 'BackDate — raise requests',
+        'BackDate_Approval':        'BackDate — approve/reject',
     },
 
     # --- Payments actions (legacy keys, verbatim from

@@ -62,12 +62,48 @@ def company_q(company, *, prefix=''):
 
     A document with no company matches only `ALL` rows: a company-specific row
     cannot be said to apply to an unknown company.
+
+    `company` MAY be several companies — a list, or the comma-separated string
+    a module stores for a document that covers more than one. BackDate is the
+    first: one request can ask for rights in OIL and BEVERAGES together, and it
+    is still one document with one approval chain. A company-scoped row then
+    applies if it covers ANY of them, which is the same rule as the single
+    case and not a new one.
+
+    Note what this does NOT do: it does not pick a winner. A two-company
+    document that matches one OIL workflow and one BEVERAGES workflow is
+    ambiguous, loudly, because which chain approves it is a business decision
+    the engine cannot invent. Configuring an `ALL`-scoped workflow is how an
+    administrator answers that.
     """
     field = f'{prefix}company'
     applies_to_all = Q(**{field: COMPANY_ALL})
-    if not company:
+    codes = company_codes(company)
+    if not codes:
         return applies_to_all
-    return applies_to_all | Q(**{field: company})
+    return applies_to_all | Q(**{f'{field}__in': codes})
+
+
+def company_codes(company):
+    """`company` as a list of codes, however the caller expressed it.
+
+    Accepts `''`, `'OIL'`, `'OIL,BEVERAGES'`, or any iterable of codes, so a
+    module storing one company and a module storing several both call the same
+    engine function with the value they actually hold.
+    """
+    if not company:
+        return []
+    if isinstance(company, str):
+        parts = company.split(',')
+    else:
+        parts = list(company)
+    seen, codes = set(), []
+    for part in parts:
+        code = str(part).strip().upper()
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
 
 
 def candidate_queries(module, company=''):
