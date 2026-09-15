@@ -16,7 +16,7 @@ from backdate.models import (
     BackDateActionLog,
     BackDateFlow,
     normalise_action,
-    normalise_companies,
+    normalise_company,
 )
 
 
@@ -124,20 +124,36 @@ class BackDateSerializer(serializers.ModelSerializer):
     #: See `BackDate`.
     action_label = serializers.CharField(read_only=True)
     company_label = serializers.CharField(read_only=True)
-    #: The selection as a list, so a client renders it without splitting a
-    #: string and guessing the separator.
+    #: The company as a one-element list, so a client that renders badges does
+    #: not need a second code path.
     companies = serializers.ListField(
         child=serializers.CharField(), read_only=True)
     flow = BackDateFlowSerializer(read_only=True)
+    #: Whether THIS caller may edit THIS request right now — the same rule the
+    #: PATCH endpoint enforces, so the page can offer an Edit control only when
+    #: it will actually work. Without a request in context (a serializer used
+    #: outside a view) it is False: not offering an action is the safe default.
+    can_edit = serializers.SerializerMethodField()
+
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        if request is None or not getattr(request, 'user', None):
+            return False
+        from backdate import permissions as bkdt_perms
+        allowed, _reason, _why = bkdt_perms.may_edit(request.user, obj)
+        return allowed
 
     class Meta:
         model = BackDate
+        # No `remarks`: a request has no single remark. Each one belongs to
+        # the event that produced it and is read from the history endpoint.
+        # No `document_type`: the name IS the document identity now.
         fields = ['id', 'company', 'company_label', 'companies',
-                  'sap_username',
-                  'document_type', 'from_date', 'to_date', 'time_limit',
-                  'action', 'action_label', 'remarks',
+                  'sap_username', 'document_type_name',
+                  'from_date', 'to_date', 'time_limit',
+                  'action', 'action_label',
                   'created_by', 'created_by_username', 'created_at',
-                  'updated_at', 'flow']
+                  'updated_at', 'flow', 'can_edit']
         read_only_fields = fields
 
 
@@ -155,26 +171,83 @@ class _BackDateWriteSerializer(serializers.ModelSerializer):
     #: a form naturally sends the ticked boxes as a list.
     company = serializers.JSONField()
 
+    #: WRITE-ONLY, and not a model field: there is no remarks column. What the
+    #: user types here becomes the `remarks` of the action-log row this
+    #: submission writes — CREATE on a new request, UPDATE on an edit — so the
+    #: reason is attached to the event it explains and to the person who gave
+    #: it, rather than to a column that only ever holds the last one.
+    remarks = serializers.CharField(
+        required=False, allow_blank=True, max_length=2000,
+        default='', write_only=True)
+
     class Meta:
         model = BackDate
-        fields = ['company', 'sap_username', 'document_type', 'from_date',
-                  'to_date', 'time_limit', 'action', 'remarks']
+        fields = ['company', 'sap_username', 'document_type_name',
+                  'from_date', 'to_date', 'time_limit', 'action', 'remarks']
+
+    def create(self, validated_data):
+        # `remarks` is not a column. The view takes it from
+        # `validated_data` before saving; dropping it here as well keeps a
+        # direct `.save()` from raising on an unexpected kwarg.
+        validated_data.pop('remarks', None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('remarks', None)
+        return super().update(instance, validated_data)
+
+    def validate_document_type_name(self, value):
+        """A SAP object NAME, checked against what SAP actually has.
+
+        Checked HERE and not only at the SAP call because the number
+        `OPEN_BKDT` needs is resolved from this name at approval time: a name
+        SAP does not know would sail through every stage and fail at the very
+        last one. Refusing it at submission costs one cached lookup.
+
+        When SAP is unreachable the name is accepted as typed — a master-data
+        outage must not stop somebody raising a request, and the SAP call
+        remains the authority either way.
+        """
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('The document type is required.')
+
+        from backdate.services import sap_masters
+
+        company = self.initial_data.get('company')
+        if isinstance(company, list):
+            company = company[0] if len(company) == 1 else None
+        if not company and self.instance is not None:
+            company = self.instance.company
+        if not company:
+            return value
+
+        try:
+            known = sap_masters.document_type_names(company)
+        except sap_masters.MasterDataError:
+            return value
+        if not known:
+            return value
+
+        matched = [name for name in known
+                   if name.strip().casefold() == value.casefold()]
+        if not matched:
+            raise serializers.ValidationError(
+                f'SAP has no document type called "{value}" in {company}.')
+        # Store SAP's own spelling, not the caller's.
+        return matched[0]
 
     def validate_company(self, value):
-        """One or more companies, stored together on ONE request.
+        """Exactly ONE company. A list is accepted, with one entry in it.
 
-        Accepts a list or a comma-separated string, and returns the canonical
-        spelling — so `["BEVERAGES","OIL"]` and `"OIL,BEVERAGES"` are the same
-        request rather than two that look different in every report.
+        Refusing a two-entry list here rather than quietly taking the first is
+        deliberate: a form that sent two and got one request back would grant
+        rights in one company and silently drop the other.
         """
-        canonical, unknown = normalise_companies(value)
-        if unknown:
-            raise serializers.ValidationError(
-                f'{", ".join(unknown)} is not a company. Use one or more of: '
-                f'{", ".join(COMPANY_CODES)}.')
-        if not canonical:
-            raise serializers.ValidationError('At least one company is required.')
-        return canonical
+        code, error = normalise_company(value)
+        if error:
+            raise serializers.ValidationError(error)
+        return code
 
     def validate_sap_username(self, value):
         value = (value or '').strip()
@@ -259,22 +332,25 @@ class BackDateUpdateSerializer(_BackDateWriteSerializer):
     company = None
 
     class Meta(_BackDateWriteSerializer.Meta):
-        fields = ['sap_username', 'document_type', 'from_date', 'to_date',
-                  'time_limit', 'action', 'remarks']
+        fields = ['sap_username', 'document_type_name', 'from_date',
+                  'to_date', 'time_limit', 'action', 'remarks']
 
 
 #: The fields an edit may change, and therefore the only ones an UPDATE log
 #: row can describe. Deliberately absent: `company` (see above), `created_by`
-#: and the timestamps (not edits).
-TRACKED_FIELDS = ['company', 'sap_username', 'document_type', 'from_date',
-                  'to_date', 'time_limit', 'action', 'remarks']
+#: and the timestamps (not edits) — and `remarks`, which is not a field of the
+#: request at all. An edit's reason is the log row's OWN `remarks`, so listing
+#: it as a changed value would record the same sentence twice and invite the
+#: two copies to differ.
+TRACKED_FIELDS = ['company', 'sap_username', 'document_type_name',
+                  'from_date', 'to_date', 'time_limit', 'action']
 
 
 def snapshot(backdate):
     """The tracked fields, JSON-safe, for the change log.
 
     Every value is JSON-native: dates and timestamps as ISO strings, the
-    document type as a real number. `payments.PaymentStatusHistory` keeps the
+    document type as its SAP name. `payments.PaymentStatusHistory` keeps the
     same rule, and for the same reason — this column is read by a person, so
     the shape has to be stable.
     """
@@ -284,12 +360,11 @@ def snapshot(backdate):
     return {
         'company': backdate.company,
         'sap_username': backdate.sap_username,
-        'document_type': backdate.document_type,
+        'document_type_name': backdate.document_type_name or '',
         'from_date': iso(backdate.from_date),
         'to_date': iso(backdate.to_date),
         'time_limit': iso(backdate.time_limit),
         'action': backdate.action,
-        'remarks': backdate.remarks or '',
     }
 
 

@@ -77,13 +77,12 @@ def make_request(creator, *, company=OIL, to_date=datetime.date(2026, 5, 20),
     return BackDate.objects.create(
         company=company,
         sap_username='USER12',
-        document_type=13,
+        document_type_name='A/R Invoice',
         from_date=datetime.date(2026, 5, 1),
         to_date=to_date,
         time_limit=time_limit,
         action=RequestAction.ADD,
         created_by=creator,
-        remarks='month-end close',
     )
 
 
@@ -156,6 +155,21 @@ class DataModelTests(_Base):
         for banned in ('backdate_approval_task', 'backdate_task',
                        'approval_task', 'workflow_task'):
             self.assertNotIn(banned, tables)
+
+    def test_the_request_holds_one_document_identity_and_no_remarks(self):
+        columns = self._columns('backdate')
+        self.assertEqual(
+            columns,
+            {'id', 'company', 'sap_username', 'document_type_name',
+             'from_date', 'to_date', 'time_limit', 'action',
+             'created_by_id', 'created_at', 'updated_at'})
+        # `document_type` held the same fact as `document_type_name` in a
+        # second spelling; SAP's number is resolved from the name at call
+        # time. `remarks` could only ever hold the LAST of four different
+        # people's statements — each is a row in the action log instead.
+        for banned in ('document_type', 'remarks', 'document_name',
+                       'object_type', 'reason'):
+            self.assertNotIn(banned, columns)
 
     def test_the_flow_holds_no_duplicated_stage_state(self):
         columns = self._columns('backdate_flow')
@@ -240,7 +254,7 @@ class SubmissionTests(_Base):
             reverse('backdate-request-list'), {
                 # No workflow is configured for BEVERAGES.
                 'company': BEVERAGES, 'sap_username': 'USER12',
-                'document_type': 13, 'from_date': '2026-05-01',
+                'document_type_name': 'A/R Invoice', 'from_date': '2026-05-01',
                 'to_date': '2026-05-20', 'action': 'A',
                 'time_limit': '2026-12-31T18:30:00Z',
             }, format='json')
@@ -250,7 +264,7 @@ class SubmissionTests(_Base):
     def test_created_by_comes_from_the_session_not_the_payload(self):
         response = self.client_for(self.requester).post(
             reverse('backdate-request-list'), {
-                'company': OIL, 'sap_username': 'USER12', 'document_type': 13,
+                'company': OIL, 'sap_username': 'USER12', 'document_type_name': 'A/R Invoice',
                 'from_date': '2026-05-01', 'to_date': '2026-05-20',
                 'action': 'A', 'time_limit': '2026-12-31T18:30:00Z',
                 'created_by': self.outsider.pk,
@@ -290,16 +304,20 @@ class UpdateTests(_Base):
     def test_several_changed_fields_are_all_described(self):
         self.client_for(self.requester).patch(
             self.url,
-            {'sap_username': 'USER99', 'document_type': 15,
+            {'sap_username': 'USER99', 'document_type_name': 'Delivery',
              'remarks': 'corrected'},
             format='json')
-        data = self.req.action_logs.get(action=LogAction.UPDATE).action_data
-        self.assertEqual(set(data), {'sap_username', 'document_type',
-                                     'remarks'})
-        self.assertEqual(data['sap_username'],
+        log = self.req.action_logs.get(action=LogAction.UPDATE)
+        # `remarks` is NOT one of them: it is the log row's own reason, not a
+        # field of the request, so recording it as a changed value would state
+        # the same sentence twice.
+        self.assertEqual(set(log.action_data),
+                         {'sap_username', 'document_type_name'})
+        self.assertEqual(log.action_data['sap_username'],
                          {'old': 'USER12', 'new': 'USER99'})
-        # Numbers stay numbers; only dates become strings.
-        self.assertEqual(data['document_type'], {'old': 13, 'new': 15})
+        self.assertEqual(log.action_data['document_type_name'],
+                         {'old': 'A/R Invoice', 'new': 'Delivery'})
+        self.assertEqual(log.remarks, 'corrected')
 
     def test_dates_and_timestamps_are_iso_strings(self):
         self.client_for(self.requester).patch(
@@ -328,9 +346,92 @@ class UpdateTests(_Base):
         # underneath them.
         self.assertEqual(response.status_code, 409, response.data)
 
+    def test_can_edit_says_what_the_endpoint_will_do(self):
+        """The UI offers Edit off this flag, so it must not disagree."""
+        response = self.client_for(self.requester).get(self.url)
+        self.assertTrue(response.data['data']['can_edit'])
+
+        self.client_for(self.approver1).post(
+            self.approve_url(self.req), {}, format='json')
+        response = self.client_for(self.requester).get(self.url)
+        self.assertFalse(response.data['data']['can_edit'])
+        # And the endpoint agrees — one rule, asked twice.
+        self.assertEqual(
+            self.client_for(self.requester).patch(
+                self.url, {'remarks': 'too late'}, format='json').status_code,
+            409)
+
+    def test_can_edit_is_false_for_somebody_else(self):
+        response = self.client_for(self.approver1).get(self.url)
+        # An approver may READ what they are deciding, and may not edit it.
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['data']['can_edit'])
+
+
+class SapRefusedEditTests(_Base):
+    """SAP refuses on the last stage: nothing is approved, and it is fixable.
+
+    That is the point of calling SAP first. The error is almost always a value
+    SAP would not take, and the person reading it is the approver holding the
+    request — so they may correct it and approve again rather than relay it.
+    """
+
+    def setUp(self):
+        self.req = make_request(self.requester)
+        self.flow = flow_service.submit(self.req, user=self.requester)
+        self.url = reverse('backdate-request-detail', args=[self.req.pk])
+        # Walk to the last stage, then have SAP refuse it.
+        self.client_for(self.approver1).post(
+            reverse('backdate-request-approve', args=[self.req.pk]),
+            {}, format='json')
+        from backdate.services.hana import HanaWriteError
+        with mock.patch('backdate.services.hana.apply_grant',
+                        side_effect=HanaWriteError(
+                            'SAP refused the rights.',
+                            payload={'calls': []},
+                            status_text='{"results": []}')):
+            self.response = self.client_for(self.approver2).post(
+                reverse('backdate-request-approve', args=[self.req.pk]),
+                {}, format='json')
+
+    def test_nothing_was_approved(self):
+        self.assertEqual(self.response.status_code, 502)
+        self.flow.refresh_from_db()
+        self.assertEqual(self.flow.status, FlowStatus.PENDING)
+        self.assertEqual(self.flow.hana_status, HanaStatus.FAILED)
+
+    def test_the_holding_approver_may_now_edit(self):
+        response = self.client_for(self.approver2).patch(
+            self.url, {'sap_username': 'FIXED'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.sap_username, 'FIXED')
+
+    def test_the_fix_is_logged_as_an_update(self):
+        self.client_for(self.approver2).patch(
+            self.url, {'sap_username': 'FIXED'}, format='json')
+        log = self.req.action_logs.filter(action=LogAction.UPDATE).last()
+        self.assertIsNotNone(log)
+        self.assertEqual(log.acted_by_id, self.approver2.pk)
+        self.assertEqual(log.action_data['sap_username']['new'], 'FIXED')
+
+    def test_an_approver_who_is_NOT_holding_it_still_cannot_edit(self):
+        response = self.client_for(self.approver1).patch(
+            self.url, {'sap_username': 'NOPE'}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+    def test_can_edit_is_true_for_the_holder_and_false_for_the_rest(self):
+        self.assertTrue(
+            self.client_for(self.approver2).get(self.url)
+            .data['data']['can_edit'])
+        self.assertFalse(
+            self.client_for(self.approver1).get(self.url)
+            .data['data']['can_edit'])
+
     def test_history_is_append_only_across_create_update_approve(self):
         self.client_for(self.requester).patch(
-            self.url, {'remarks': 'revised'}, format='json')
+            self.url, {'sap_username': 'USER99', 'remarks': 'revised'},
+            format='json')
         self.client_for(self.approver1).post(
             self.approve_url(self.req), {}, format='json')
 
@@ -342,8 +443,9 @@ class UpdateTests(_Base):
         self.assertIsNone(logs[0].action_data)
         self.assertIsNone(logs[0].stage_id)
         self.assertEqual(logs[1].action_data,
-                         {'remarks': {'old': 'month-end close',
-                                      'new': 'revised'}})
+                         {'sap_username': {'old': 'USER12',
+                                           'new': 'USER99'}})
+        self.assertEqual(logs[1].remarks, 'revised')
         self.assertEqual(logs[2].stage_id, self.stage1.pk)
 
 
@@ -602,17 +704,38 @@ class HanaTests(_Base):
         self.assertFalse(apply_grant.called)
 
     @mock.patch('backdate.services.hana.apply_grant')
-    def test_a_failed_sap_write_is_not_reported_as_success(self, apply_grant):
-        """JSAP returned 200/Success=true here even with no SAP write."""
+    def test_a_refused_sap_write_approves_nothing(self, apply_grant):
+        """JSAP returned 200/Success=true here even with no SAP write.
+
+        SAP is the gate on the last stage now, so a refusal is a refusal: the
+        request stays exactly where it was, and the approver is told so.
+        """
         from backdate.services.hana import HanaWriteError
-        apply_grant.side_effect = HanaWriteError('SAP refused the rights.')
+        apply_grant.side_effect = HanaWriteError(
+            'SAP refused the rights.',
+            payload={'calls': []}, status_text='{"results": []}')
 
         req, response = self._approve_to_final()
-        self.assertIs(response.data['data']['hana_applied'], False)
-        self.assertIn('could not be applied', response.data['message'])
-        # The approval itself stands — it was committed before SAP was called.
-        self.assertEqual(BackDateFlow.objects.get(backdate=req).status,
-                         FlowStatus.APPROVED)
+        self.assertEqual(response.status_code, 502)
+        flow = BackDateFlow.objects.get(backdate=req)
+        self.assertEqual(flow.status, FlowStatus.PENDING)
+        self.assertIsNotNone(flow.current_stage_id)
+
+    @mock.patch('backdate.services.hana.apply_grant')
+    def test_a_refused_sap_write_is_still_recorded(self, apply_grant):
+        """The approver is told to correct it, so they must be able to see WHY."""
+        from backdate.services.hana import HanaWriteError
+        apply_grant.side_effect = HanaWriteError(
+            'SAP refused the rights.',
+            payload={'calls': [{'branch': OIL}]},
+            status_text='{"results": [{"response": "invalid userid"}]}')
+
+        req, _ = self._approve_to_final()
+        flow = BackDateFlow.objects.get(backdate=req)
+        # Written AFTER the approval transaction rolled back, so it survives.
+        self.assertEqual(flow.hana_status, HanaStatus.FAILED)
+        self.assertIn('invalid userid', flow.hana_status_text)
+        self.assertEqual(flow.sap_payload, {'calls': [{'branch': OIL}]})
 
     def test_a_successful_write_records_success(self):
         req = make_request(self.requester)
@@ -631,11 +754,32 @@ class HanaTests(_Base):
         from backdate.services import hana
         with mock.patch.object(hana, 'HANAConnection',
                                side_effect=RuntimeError('down')):
-            with self.assertRaises(hana.HanaWriteError):
+            with self.assertRaises(hana.HanaWriteError) as caught:
                 hana.apply_grant(flow)
+        # `apply_grant` raises WITHOUT writing: it runs inside the approval's
+        # own transaction, which is about to be rolled back. The handler stores
+        # the evidence once that transaction is gone.
+        hana.record_failure(flow, caught.exception)
         flow.refresh_from_db()
         self.assertEqual(flow.hana_status, HanaStatus.FAILED)
         self.assertTrue(flow.hana_status_text)
+
+    def test_a_refusal_carries_what_was_sent_and_what_sap_said(self):
+        """The evidence rides on the exception, not on a rolled-back row."""
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        from backdate.services import hana
+        with mock.patch.object(hana, 'HANAConnection',
+                               side_effect=RuntimeError('down')):
+            with self.assertRaises(hana.HanaWriteError) as caught:
+                hana.apply_grant(flow)
+
+        error = caught.exception
+        self.assertEqual([c['branch'] for c in error.payload['calls']], [OIL])
+        self.assertIn('down', error.status_text)
+        # And nothing was written behind the caller's back.
+        flow.refresh_from_db()
+        self.assertNotEqual(flow.hana_status, HanaStatus.FAILED)
 
     def test_the_sap_outcome_is_not_duplicated_into_the_log(self):
         """Two copies of one fact is how the two come to disagree."""
@@ -644,8 +788,9 @@ class HanaTests(_Base):
         from backdate.services import hana
         with mock.patch.object(hana, 'HANAConnection',
                                side_effect=RuntimeError('down')):
-            with self.assertRaises(hana.HanaWriteError):
+            with self.assertRaises(hana.HanaWriteError) as caught:
                 hana.apply_grant(flow)
+        hana.record_failure(flow, caught.exception)
         self.assertEqual(
             set(req.action_logs.values_list('action', flat=True)),
             {LogAction.CREATE})
@@ -741,7 +886,7 @@ class TimeLimitTests(_Base):
 
     def _body(self, **overrides):
         body = {
-            'company': OIL, 'sap_username': 'USER12', 'document_type': 13,
+            'company': OIL, 'sap_username': 'USER12', 'document_type_name': 'A/R Invoice',
             'from_date': '2026-05-01', 'to_date': '2026-05-20',
             'time_limit': '2026-12-31T18:30:00Z', 'action': 'A',
         }
@@ -783,76 +928,49 @@ class TimeLimitTests(_Base):
         self.assertEqual(response.status_code, 400, response.data)
 
 
-class OneRequestTests(_Base):
-    """Several companies is ONE request, and N SAP calls.
+class OneCompanyTests(_Base):
+    """One company per request. Both actions still ride on one.
 
-    The business object is the decision, not the company: asking for the same
-    rights in OIL and BEVERAGES is one thing to approve. JSAP stored it that
-    way too (`branch = '1,2'`). The fan-out belongs to SAP, where `OPEN_BKDT`
-    takes one branch per call — and `action` never fans out at all, because the
-    procedure has no action parameter.
+    JSAP accepted a comma-separated branch list and looped the SAP writes with
+    no transaction, so a mid-loop failure granted rights in one company and not
+    another. One company per request is what makes that impossible.
+
+    `action` is the exception and stays combined: `OPEN_BKDT` has no action
+    parameter, so splitting `A,U` would write SAP rows identical in every
+    column SAP reads.
     """
 
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        # An ALL-scoped workflow, because a request naming several companies is
-        # not any one company's business. Its condition matches anything this
-        # module stores, so multi-company requests route without ambiguity.
-        cls.any_workflow = Workflow.objects.create(
-            module=cls.module, code='BKDT_ANY', name='Any', company='ALL')
-        query = WorkflowQuery.objects.create(
-            workflow=cls.any_workflow, name='multi', company='ALL',
-            query_text=(f"SELECT * FROM {DOC_TABLE} "
-                        f"WHERE company LIKE '%,%'"))
-        conditions.validate_and_stamp(query)
-        WorkflowStage.objects.create(
-            workflow=cls.any_workflow, name='Manager', sequence=1,
-            user=cls.approver1)
+    def test_a_second_company_is_refused_not_silently_dropped(self):
+        response = self.client_for(self.requester).post(
+            reverse('backdate-request-list'), {
+                'company': [OIL, BEVERAGES], 'sap_username': 'USER12',
+                'document_type_name': 'A/R Invoice', 'from_date': '2026-05-01',
+                'to_date': '2026-05-20', 'action': 'A',
+                'time_limit': '2026-12-31T18:30:00Z',
+            }, format='json')
+        # Taking the first would grant OIL and silently drop BEVERAGES.
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('ONE company', str(response.data))
 
-    def _submit(self, company, action='A'):
-        req = make_request(self.requester, company=company)
-        req.action = action
-        req.save(update_fields=['action'])
-        flow_service.submit(req, user=self.requester)
-        return req
+    def test_a_one_element_list_is_accepted(self):
+        """The form sends its ticked boxes; one ticked box is one request."""
+        response = self.client_for(self.requester).post(
+            reverse('backdate-request-list'), {
+                'company': [OIL], 'sap_username': 'USER12',
+                'document_type_name': 'A/R Invoice', 'from_date': '2026-05-01',
+                'to_date': '2026-05-20', 'action': 'U,A',
+                'time_limit': '2026-12-31T18:30:00Z',
+            }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        obj = BackDate.objects.get(pk=response.data['data']['id'])
+        self.assertEqual(obj.company, OIL)
+        # Both actions on the ONE request, normalised.
+        self.assertEqual(obj.action, 'A,U')
 
-    def _approve_fully(self, req):
-        with mock.patch('backdate.services.hana.HANAConnection') as conn, \
-                mock.patch('backdate.services.hana.Queries') as queries:
-            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
-            for _ in range(5):
-                flow = BackDateFlow.objects.get(backdate=req)
-                if flow.status != FlowStatus.PENDING:
-                    break
-                approver = User.objects.get(
-                    pk=flow_service.effective_user_id(flow.current_stage_id))
-                self.client_for(approver).post(
-                    self.approve_url(req), {}, format='json')
-            # One `execute` per company: that is the SAP fan-out.
-            return conn.return_value.__enter__.return_value.execute.call_count
-
-    def test_one_company_is_one_request_one_flow_one_call(self):
-        req = self._submit(OIL)
-        self.assertEqual(BackDate.objects.filter(pk=req.pk).count(), 1)
-        self.assertEqual(BackDateFlow.objects.filter(backdate=req).count(), 1)
-        self.assertEqual(self._approve_fully(req), 1)
-
-    def test_two_companies_are_one_request_one_flow_two_calls(self):
-        req = self._submit(f'{OIL},{BEVERAGES}', action='A,U')
-        self.assertEqual(req.companies, [OIL, BEVERAGES])
-        self.assertEqual(BackDateFlow.objects.filter(backdate=req).count(), 1)
-        self.assertEqual(self._approve_fully(req), 2)
-
-    def test_three_companies_are_one_request_one_flow_three_calls(self):
-        req = self._submit(f'{OIL},{BEVERAGES},{MART}', action='A,U')
-        self.assertEqual(BackDateFlow.objects.filter(backdate=req).count(), 1)
-        self.assertEqual(self._approve_fully(req), 3)
-
-    def test_both_actions_do_not_multiply_the_calls(self):
-        """`A,U` across two companies is 2 calls, not 4."""
-        both = self._submit(f'{OIL},{BEVERAGES}', action='A,U')
-        self.assertEqual(self._approve_fully(both), 2)
+    def test_the_company_column_holds_no_commas(self):
+        req = make_request(self.requester)
+        self.assertNotIn(',', req.company)
+        self.assertEqual(req.companies, [OIL])
 
     def test_the_action_never_reaches_the_sap_payload(self):
         """`OPEN_BKDT` has no action parameter; neither may the payload."""
@@ -860,69 +978,37 @@ class OneRequestTests(_Base):
 
         add = make_request(self.requester)
         upd = make_request(self.requester)
-        upd.action = RequestAction.UPDATE
+        upd.action = 'A,U'
         upd.save(update_fields=['action'])
 
         self.assertEqual(build_payload(add), build_payload(upd))
 
-    def test_the_api_accepts_a_list_of_companies(self):
-        response = self.client_for(self.requester).post(
-            reverse('backdate-request-list'), {
-                'company': [BEVERAGES, OIL], 'sap_username': 'USER12',
-                'document_type': 13, 'from_date': '2026-05-01',
-                'to_date': '2026-05-20', 'action': 'U,A',
-                'time_limit': '2026-12-31T18:30:00Z',
-            }, format='json')
-        self.assertEqual(response.status_code, 201, response.data)
-        obj = BackDate.objects.get(pk=response.data['data']['id'])
-        # Canonical order, so one selection has one spelling.
-        self.assertEqual(obj.company, f'{OIL},{BEVERAGES}')
-        self.assertEqual(obj.action, 'A,U')
-        self.assertEqual(BackDate.objects.filter(
-            sap_username='USER12', created_at=obj.created_at).count(), 1)
+    def test_one_request_makes_exactly_one_sap_call(self):
+        from backdate.services import hana
 
-    def test_an_unknown_company_is_refused(self):
-        response = self.client_for(self.requester).post(
-            reverse('backdate-request-list'), {
-                'company': [OIL, 'ATLANTIS'], 'sap_username': 'USER12',
-                'document_type': 13, 'from_date': '2026-05-01',
-                'to_date': '2026-05-20', 'action': 'A',
-                'time_limit': '2026-12-31T18:30:00Z',
-            }, format='json')
-        self.assertEqual(response.status_code, 400, response.data)
+        req = make_request(self.requester)
+        req.action = 'A,U'
+        req.save(update_fields=['action'])
+        flow = flow_service.submit(req, user=self.requester)
 
-    def test_the_company_filter_matches_membership(self):
-        both = self._submit(f'{OIL},{BEVERAGES}')
-        response = self.client_for(self.requester).get(
-            reverse('backdate-request-list'), {'company': BEVERAGES})
-        self.assertIn(both.pk, [row['id'] for row in response.data['data']])
+        with mock.patch.object(hana, 'HANAConnection') as conn,                 mock.patch.object(hana, 'Queries') as queries:
+            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
+            hana.apply_grant(flow)
+            calls = conn.return_value.__enter__.return_value.execute.call_count
+        self.assertEqual(calls, 1)
 
 
 class SapPayloadTests(_Base):
     """What was sent and what SAP said, kept per company."""
 
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        cls.any_workflow = Workflow.objects.create(
-            module=cls.module, code='BKDT_ANY', name='Any', company='ALL')
-        query = WorkflowQuery.objects.create(
-            workflow=cls.any_workflow, name='multi', company='ALL',
-            query_text=(f"SELECT * FROM {DOC_TABLE} "
-                        f"WHERE company LIKE '%,%'"))
-        conditions.validate_and_stamp(query)
-        WorkflowStage.objects.create(
-            workflow=cls.any_workflow, name='Manager', sequence=1,
-            user=cls.approver1)
-
-    def _flow(self, company):
+    def _flow(self, company=OIL):
         req = make_request(self.requester, company=company)
         return flow_service.submit(req, user=self.requester)
 
-    def test_the_payload_records_one_call_per_company(self):
+    def test_the_payload_records_the_one_call_that_was_made(self):
         from backdate.services import hana
 
-        flow = self._flow(f'{OIL},{BEVERAGES}')
+        flow = self._flow(BEVERAGES)
         with mock.patch.object(hana, 'HANAConnection'), \
                 mock.patch.object(hana, 'Queries') as queries:
             queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
@@ -930,7 +1016,8 @@ class SapPayloadTests(_Base):
 
         flow.refresh_from_db()
         calls = flow.sap_payload['calls']
-        self.assertEqual([c['branch'] for c in calls], [OIL, BEVERAGES])
+        # One company per request, so one call — never a branch loop.
+        self.assertEqual([c['branch'] for c in calls], [BEVERAGES])
 
     def test_the_payload_holds_the_actual_parameters(self):
         from backdate.services import hana
@@ -981,8 +1068,9 @@ class SapPayloadTests(_Base):
                 side_effect=RuntimeError('(259, "invalid table name: BKDT")')):
             with mock.patch.object(hana, 'Queries') as queries:
                 queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
-                with self.assertRaises(hana.HanaWriteError):
+                with self.assertRaises(hana.HanaWriteError) as caught:
                     hana.apply_grant(flow)
+        hana.record_failure(flow, caught.exception)
 
         flow.refresh_from_db()
         self.assertEqual(flow.hana_status, HanaStatus.FAILED)
@@ -991,40 +1079,10 @@ class SapPayloadTests(_Base):
         self.assertIn('invalid table name: BKDT', results[0]['response'])
         self.assertIn('RuntimeError', results[0]['response'])
 
-    def test_a_partial_failure_says_which_company_failed(self):
-        """OIL lands, BEVERAGES does not — and the record says so."""
+    def test_success_records_success(self):
         from backdate.services import hana
 
-        flow = self._flow(f'{OIL},{BEVERAGES}')
-        calls = {'n': 0}
-
-        def flaky():
-            calls['n'] += 1
-            if calls['n'] == 2:
-                raise RuntimeError('SAP says no')
-            return mock.MagicMock()
-
-        with mock.patch.object(hana, 'HANAConnection', side_effect=flaky), \
-                mock.patch.object(hana, 'Queries') as queries:
-            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
-            with self.assertRaises(hana.HanaWriteError):
-                hana.apply_grant(flow)
-
-        flow.refresh_from_db()
-        # One failure makes the REQUEST failed: the user does not have what
-        # they asked for. There is no PARTIAL status.
-        self.assertEqual(flow.hana_status, HanaStatus.FAILED)
-        results = json.loads(flow.hana_status_text)['results']
-        self.assertEqual([(r['branch'], r['status']) for r in results],
-                         [(OIL, 'SUCCESS'), (BEVERAGES, 'FAILED')])
-        self.assertIn('SAP says no', results[1]['response'])
-        # Both payloads are kept, so the successful one can be identified.
-        self.assertEqual(len(flow.sap_payload['calls']), 2)
-
-    def test_success_records_success_for_every_company(self):
-        from backdate.services import hana
-
-        flow = self._flow(f'{OIL},{BEVERAGES}')
+        flow = self._flow()
         with mock.patch.object(hana, 'HANAConnection'), \
                 mock.patch.object(hana, 'Queries') as queries:
             queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
@@ -1081,6 +1139,164 @@ class HistoryReadTests(_Base):
         self.assertEqual(data['flow']['total_stage'], 2)
         self.assertEqual(data['flow']['current_user_username'],
                          self.approver1.username)
+
+
+class ApproverReadAccessTests(_Base):
+    """An approver can open what they are deciding.
+
+    They hold `BackDate_Approval` and usually NOT `BackDate`, because they
+    never raise a request of their own. Gating the detail and the history on
+    the requester key left them approving documents they could not look at —
+    the dialog showed "You do not have permission for this action" where the
+    approval history should have been.
+    """
+
+    def setUp(self):
+        self.req = make_request(self.requester)
+        flow_service.submit(self.req, user=self.requester)
+        self.approver_only = make_user('bk-approver-only', 'BackDate_Approval')
+
+    def test_an_approver_without_the_requester_key_can_read_the_detail(self):
+        response = self.client_for(self.approver_only).get(
+            reverse('backdate-request-detail', args=[self.req.pk]))
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_an_approver_without_the_requester_key_can_read_the_history(self):
+        response = self.client_for(self.approver_only).get(
+            reverse('backdate-request-history', args=[self.req.pk]))
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_reading_is_still_refused_without_either_key(self):
+        nobody = make_user('bk-reads-nothing')
+        for name in ('backdate-request-detail', 'backdate-request-history'):
+            response = self.client_for(nobody).get(
+                reverse(name, args=[self.req.pk]))
+            self.assertEqual(response.status_code, 403, name)
+
+    def test_a_requester_still_cannot_read_somebody_elses(self):
+        other = make_user('bk-other-requester', 'BackDate')
+        response = self.client_for(other).get(
+            reverse('backdate-request-detail', args=[self.req.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_an_approver_still_cannot_edit(self):
+        response = self.client_for(self.approver_only).patch(
+            reverse('backdate-request-detail', args=[self.req.pk]),
+            {'remarks': 'not mine to change'}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+
+class ProgressTests(_Base):
+    """The history endpoint also answers "how far has this got?".
+
+    The action log alone cannot: it records what HAPPENED, so a request
+    waiting at stage 1 of 2 has one row and says nothing about the stage
+    ahead. The stages come from the engine and are joined to the log.
+    """
+
+    def setUp(self):
+        self.req = make_request(self.requester)
+        flow_service.submit(self.req, user=self.requester)
+
+    def _stages(self, user=None):
+        response = self.client_for(user or self.requester).get(
+            reverse('backdate-request-history', args=[self.req.pk]))
+        return response.data['data']['stages']
+
+    def test_every_stage_is_listed_including_the_ones_ahead(self):
+        stages = self._stages()
+        self.assertEqual([s['sequence'] for s in stages], [1, 2])
+        self.assertEqual([s['status'] for s in stages],
+                         ['AWAITING', 'UPCOMING'])
+
+    def test_a_decided_stage_reports_who_acted_and_when(self):
+        self.client_for(self.approver1).post(
+            self.approve_url(self.req), {'remarks': 'looks right'},
+            format='json')
+        stages = self._stages()
+        self.assertEqual(stages[0]['status'], 'APPROVED')
+        self.assertEqual(stages[0]['acted_by'], self.approver1.username)
+        self.assertEqual(stages[0]['remarks'], 'looks right')
+        self.assertIsNotNone(stages[0]['acted_at'])
+        # The next stage is now the one waiting.
+        self.assertEqual(stages[1]['status'], 'AWAITING')
+
+    def test_a_stage_that_never_got_its_turn_is_not_called_upcoming(self):
+        self.client_for(self.approver1).post(
+            self.reject_url(self.req), {'remarks': 'too far back'},
+            format='json')
+        stages = self._stages()
+        self.assertEqual(stages[0]['status'], 'REJECTED')
+        # "Upcoming" would imply it is still going to happen.
+        self.assertEqual(stages[1]['status'], 'SKIPPED')
+
+    def test_the_reviewer_is_resolved_not_stored(self):
+        """A stage reassigned today changes who the progress names."""
+        successor = make_user('bk-progress-successor', 'BackDate_Approval')
+        WorkflowStage.objects.filter(pk=self.stage2.pk).update(user=successor)
+        stages = self._stages()
+        self.assertEqual(stages[1]['reviewer'], successor.username)
+
+    def test_a_replacement_shows_who_is_covering(self):
+        stand_in = make_user('bk-progress-standin', 'BackDate_Approval')
+        today = datetime.date.today()
+        WorkflowUserReplacement.objects.create(
+            old_user=self.approver1, new_user=stand_in, reason='leave',
+            start_date=today, end_date=today)
+        stages = self._stages()
+        self.assertEqual(stages[0]['reviewer'], stand_in.username)
+        self.assertEqual(stages[0]['configured_reviewer'],
+                         self.approver1.username)
+        self.assertTrue(stages[0]['has_active_replacement'])
+
+
+class SearchTests(_Base):
+    """`?search=` finds one request by its id or its SAP user."""
+
+    def setUp(self):
+        self.one = make_request(self.requester)
+        flow_service.submit(self.one, user=self.requester)
+        self.two = make_request(self.requester)
+        self.two.sap_username = 'FINANCE9'
+        self.two.save(update_fields=['sap_username'])
+        flow_service.submit(self.two, user=self.requester)
+
+    def _ids(self, term, user=None, name='backdate-request-list'):
+        response = self.client_for(user or self.requester).get(
+            reverse(name), {'search': term})
+        return {row['id'] for row in response.data['data']}
+
+    def test_searching_by_sap_user(self):
+        self.assertEqual(self._ids('FINANCE9'), {self.two.pk})
+
+    def test_searching_by_sap_user_is_case_insensitive(self):
+        self.assertEqual(self._ids('finance9'), {self.two.pk})
+
+    def test_searching_by_id_matches_that_id_exactly(self):
+        """Not a substring: searching "12" must not bury request 12."""
+        self.assertIn(self.one.pk, self._ids(str(self.one.pk)))
+        self.assertNotIn(self.two.pk, self._ids(str(self.one.pk)))
+
+    def test_an_empty_search_narrows_nothing(self):
+        self.assertEqual(self._ids(''), {self.one.pk, self.two.pk})
+
+    def test_the_approval_queue_is_searchable(self):
+        self.assertEqual(
+            self._ids('FINANCE9', user=self.approver1,
+                      name='backdate-approval-queue'),
+            {self.two.pk})
+
+    def test_the_counts_follow_the_search(self):
+        """Otherwise the card says 2 over a table showing 1."""
+        response = self.client_for(self.approver1).get(
+            reverse('backdate-approval-insights'), {'search': 'FINANCE9'})
+        self.assertEqual(response.data['data']['total'], 1)
+
+    def test_search_combines_with_the_company_filter(self):
+        response = self.client_for(self.requester).get(
+            reverse('backdate-request-list'),
+            {'search': 'FINANCE9', 'company': BEVERAGES})
+        self.assertEqual(response.data['data'], [])
 
 
 class ScopingTests(_Base):
@@ -1167,6 +1383,60 @@ class CompanyFilterTests(_Base):
         self.assertEqual((counts['pending'], counts['total']), (1, 1))
 
 
+class CompletedFilterTests(_Base):
+    """`COMPLETED` = approved AND the grant actually reached SAP."""
+
+    def setUp(self):
+        self.req = make_request(self.requester)
+        self.flow = flow_service.submit(self.req, user=self.requester)
+        for approver in (self.approver1, self.approver2):
+            self.client_for(approver).post(
+                self.approve_url(self.req), {}, format='json')
+        self.flow.refresh_from_db()
+
+    def _ids(self, status):
+        response = self.client_for(self.requester).get(
+            reverse('backdate-request-list'), {'status': status})
+        return [row['id'] for row in response.data['data']]
+
+    def _counts(self):
+        return self.client_for(self.requester).get(
+            reverse('backdate-insights')).data['data']
+
+    def test_a_grant_in_sap_is_completed(self):
+        self.flow.hana_status = HanaStatus.SUCCESS
+        self.flow.save(update_fields=['hana_status'])
+        self.assertEqual(self._ids('COMPLETED'), [self.req.pk])
+        self.assertEqual(self._counts()['completed'], 1)
+
+    def test_a_grant_sap_refused_is_approved_but_not_completed(self):
+        self.flow.hana_status = HanaStatus.FAILED
+        self.flow.save(update_fields=['hana_status'])
+        # It WAS approved — a person said yes — and the rights do not exist.
+        # Both facts are true, and the two filters say so separately.
+        self.assertEqual(self._ids('APPROVED'), [self.req.pk])
+        self.assertEqual(self._ids('COMPLETED'), [])
+        counts = self._counts()
+        self.assertEqual((counts['approved'], counts['completed']), (1, 0))
+
+    def test_a_grant_never_attempted_is_not_completed(self):
+        self.assertIsNone(self.flow.hana_status)
+        self.assertEqual(self._ids('COMPLETED'), [])
+
+    def test_the_total_never_double_counts_a_completed_request(self):
+        self.flow.hana_status = HanaStatus.SUCCESS
+        self.flow.save(update_fields=['hana_status'])
+        counts = self._counts()
+        self.assertEqual(
+            counts['total'],
+            counts['pending'] + counts['approved'] + counts['rejected'])
+        self.assertEqual(counts['total'], 1)
+
+    def test_an_unknown_status_is_no_filter_rather_than_an_error(self):
+        """A stale bookmark should show everything, not nothing or a 500."""
+        self.assertEqual(self._ids('BANANAS'), [self.req.pk])
+
+
 class ApprovalInsightsTests(_Base):
     """The desk's KPI counts: pending is the queue, the rest is history."""
 
@@ -1178,7 +1448,7 @@ class ApprovalInsightsTests(_Base):
         counts = self.client_for(self.approver1).get(
             reverse('backdate-approval-insights')).data['data']
         self.assertEqual(counts, {'pending': 1, 'approved': 0, 'rejected': 0,
-                                  'total': 1})
+                                  'completed': 0, 'total': 1})
         other = self.client_for(self.approver2).get(
             reverse('backdate-approval-insights')).data['data']
         self.assertEqual(other['total'], 0)
@@ -1191,7 +1461,36 @@ class ApprovalInsightsTests(_Base):
         # Approved at stage 1 of two: the flow is still pending, so it is not
         # yet counted as approved, and it no longer waits on this user.
         self.assertEqual(counts, {'pending': 0, 'approved': 0, 'rejected': 0,
-                                  'total': 0})
+                                  'completed': 0, 'total': 0})
+
+    def test_completed_is_a_subset_of_approved_not_a_fourth_state(self):
+        """An approved request whose SAP write never landed grants nothing."""
+        for approver in (self.approver1, self.approver2):
+            self.client_for(approver).post(
+                self.approve_url(self.req), {}, format='json')
+
+        flow = BackDateFlow.objects.get(backdate=self.req)
+        self.assertEqual(flow.status, FlowStatus.APPROVED)
+
+        # SAP accepted: approved AND completed, the same one request.
+        flow.hana_status = HanaStatus.SUCCESS
+        flow.save(update_fields=['hana_status'])
+        counts = self.client_for(self.approver2).get(
+            reverse('backdate-approval-insights')).data['data']
+        self.assertEqual(counts['approved'], 1)
+        self.assertEqual(counts['completed'], 1)
+        # `completed` is inside `approved`, so the total must not count it
+        # twice — the card and the list below it would stop agreeing.
+        self.assertEqual(counts['total'], 1)
+
+        # SAP refused: still approved by a person, but nothing is in SAP.
+        flow.hana_status = HanaStatus.FAILED
+        flow.save(update_fields=['hana_status'])
+        counts = self.client_for(self.approver2).get(
+            reverse('backdate-approval-insights')).data['data']
+        self.assertEqual(counts['approved'], 1)
+        self.assertEqual(counts['completed'], 0)
+        self.assertEqual(counts['total'], 1)
 
     def test_the_desk_counts_are_refused_without_the_key(self):
         response = self.client_for(self.requester).get(

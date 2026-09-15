@@ -41,7 +41,7 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
-from core.companies import COMPANY_CODES
+from core.companies import COMPANY_CHOICES, COMPANY_CODES
 
 
 def _t(table):
@@ -102,23 +102,29 @@ def normalise_action(value):
     return ','.join(ordered) if ordered else str(value or '').strip().upper()
 
 
-def normalise_companies(value):
-    """The selected companies as one canonical `'OIL,BEVERAGES'` string.
+def normalise_company(value):
+    """One company code, however the caller spelled it.
 
-    Ordered by `COMPANY_CODES` rather than by what the user ticked, so the same
-    selection always reads and stores the same way — `'BEVERAGES,OIL'` and
-    `'OIL,BEVERAGES'` are one request, not two spellings of it. Duplicates are
-    dropped. JSAP had the same problem with `action` and never solved it
-    (`'A,U'` 821 times, `'U,A'` 150).
+    Returns `(code, error)`. A LIST is accepted and must hold exactly one
+    entry: the form sends the ticked boxes, and rejecting a two-element list
+    here is what stops two companies quietly becoming one request again.
     """
-    if isinstance(value, str):
-        parts = value.split(',')
+    if isinstance(value, (list, tuple, set)):
+        picked = [str(v).strip().upper() for v in value if str(v).strip()]
     else:
-        parts = list(value or [])
-    picked = {str(p).strip().upper() for p in parts if str(p).strip()}
-    ordered = [code for code in COMPANY_CODES if code in picked]
-    unknown = sorted(picked - set(COMPANY_CODES))
-    return ','.join(ordered), unknown
+        picked = [str(value or '').strip().upper()] if str(value or '').strip() \
+            else []
+
+    if not picked:
+        return '', 'A company is required.'
+    if len(set(picked)) > 1:
+        return '', ('A BackDate request covers ONE company. Raise one request '
+                    'per company.')
+    code = picked[0]
+    if code not in COMPANY_CODES:
+        return '', (f'"{code}" is not a company. Use one of: '
+                    f'{", ".join(COMPANY_CODES)}.')
+    return code, None
 
 
 class FlowStatus(models.TextChoices):
@@ -154,46 +160,29 @@ class LogAction(models.TextChoices):
     REJECT = 'REJECT', 'Rejected'
 
 
-#: `OIL`, or `OIL,BEVERAGES`, ... — canonical order, no repeats, at least one.
-#: Built from `COMPANY_CODES` so a new company needs no edit here.
-_COMPANY_LIST_REGEX = (
-    r'^(' + '|'.join(COMPANY_CODES) + r')(,(' + '|'.join(COMPANY_CODES) + r'))*$'
-)
-
-
 class BackDate(models.Model):
-    """One request for back-posting rights: one document type, one or more
-    companies.
+    """One request for back-posting rights: one company, one document type.
 
-    ONE REQUEST IS ONE BUSINESS DECISION. Needing the same rights in OIL and
-    BEVERAGES is one thing to ask for and one thing to approve, so it is one
-    row with one flow — the shape JSAP stored (`branch = '1,2'`). Splitting it
-    into a request per company would put the same decision in front of an
-    approver twice and let half of it be rejected.
+    ONE COMPANY PER REQUEST. Each company's grant is approved on its own and
+    written to its own SAP schema, so a refusal or a SAP error in one cannot
+    half-grant another. JSAP accepted a comma-separated branch list and looped
+    the SAP writes with no transaction, which is exactly that failure.
 
-    The fan-out happens at the SAP layer instead: `OPEN_BKDT` takes one branch
-    per call and writes into that company's own schema, so two companies is two
-    calls — each in its own connection, each recorded separately. That is
-    exactly where JSAP's bug was (a loop with no transaction and no per-branch
-    record), and it is why the per-branch payloads and responses are kept on
-    the flow.
+    The ACTION is the exception: `A`, `U`, or both on one request, because
+    `OPEN_BKDT` has no action parameter, so splitting it would write SAP rows
+    identical in every column SAP reads.
     """
 
-    #: The companies whose SAP databases the rights are granted in, as a
-    #: canonical comma-separated list: `'OIL'`, `'OIL,BEVERAGES'`, ...
+    #: ONE company per request. Asking for rights in two companies is two
+    #: requests: each is approved on its own and writes to its own SAP schema,
+    #: so a refusal in one cannot half-grant the other. JSAP's own bug was a
+    #: branch loop inside a single untransacted request.
     #:
-    #: ONE REQUEST, SEVERAL COMPANIES. Asking for the same rights in two
-    #: companies is one business decision, approved once, so it is one document
-    #: with one flow — exactly the shape JSAP stored (`branch = '1,2'`). The
-    #: fan-out happens only at the SAP layer, where `OPEN_BKDT` takes one
-    #: branch per call and therefore gets one call per company.
-    #:
-    #: Not a `choices` field: the combination is not one of the atoms. The
-    #: CHECK constraint below is what keeps the value honest.
+    #: The ACTION is different — see `action`. Both actions live on one request
+    #: because SAP is never told the action at all.
     company = models.CharField(
-        max_length=64, db_index=True,
-        help_text=('Companies the rights are granted in, comma-separated '
-                   '(e.g. "OIL,BEVERAGES").'),
+        max_length=20, choices=COMPANY_CHOICES, db_index=True,
+        help_text='The company whose SAP database the rights are granted in.',
     )
     #: The SAP login (`OUSR.USER_CODE`) the rights are for — NOT the OMS user
     #: raising the request. They are frequently different people.
@@ -201,10 +190,23 @@ class BackDate(models.Model):
         max_length=20,
         help_text='SAP user the rights are granted to (OUSR.USER_CODE).',
     )
-    #: SAP's numeric object type. The display name is resolved from HANA for
-    #: display only and is never stored, so it cannot drift from SAP.
-    document_type = models.IntegerField(
-        help_text='SAP object type (MOBJ.ObjType), e.g. 13 for A/R Invoice.',
+    #: THE document identity — the SAP object NAME, e.g. "G/L Accounts".
+    #:
+    #: The numeric `ObjType` column this replaced is gone. A name is what a
+    #: requester picks, what an approver reads and what the history shows, and
+    #: keeping a second numeric copy of the same fact is how the two come to
+    #: disagree.
+    #:
+    #: SAP still needs the NUMBER — `OPEN_BKDT`'s `TRANSTYPE` is an INTEGER —
+    #: so it is resolved from this name against `MOBJ` at the moment of the
+    #: SAP call (`services.sap_masters.object_type_for`). That is safe because
+    #: the mapping is one-to-one: `MOBJ` holds 75 objects with 75 distinct,
+    #: non-blank names, identical across all three company schemas (verified
+    #: against live HANA). A name SAP no longer knows fails the call loudly and
+    #: recoverably rather than granting the wrong object — see §7.3.
+    document_type_name = models.CharField(
+        max_length=120,
+        help_text='SAP object name (MOBJ.ObjName), e.g. "A/R Invoice".',
     )
     from_date = models.DateField(
         help_text='Start of the back-posting window (inclusive).')
@@ -228,7 +230,13 @@ class BackDate(models.Model):
     action = models.CharField(
         max_length=3, default=RequestAction.ADD,
     )
-    remarks = models.TextField(blank=True, default='')
+
+    # NO `remarks` COLUMN, deliberately. Remarks are EVENT-specific: the reason
+    # for raising, the reason for an edit, an approver's note and a rejection
+    # reason are four different statements by up to four different people. One
+    # column could only hold the last of them, and overwriting a rejection
+    # reason with a later edit's note is how an audit trail becomes untrue.
+    # Every remark is a row in `BackDateActionLog` instead.
 
     #: ALWAYS the authenticated user. JSAP took this from the request body, so
     #: a request could be raised in somebody else's name.
@@ -245,12 +253,8 @@ class BackDate(models.Model):
         verbose_name = 'BackDate'
         verbose_name_plural = 'BackDate requests'
         constraints = [
-            # Every comma-separated token must be a known company, in the
-            # canonical order. A regex rather than an `in` list, because the
-            # value is now a SET of companies and enumerating all seven legal
-            # combinations would be a constraint nobody could read.
             models.CheckConstraint(
-                condition=Q(company__regex=_COMPANY_LIST_REGEX),
+                condition=Q(company__in=list(COMPANY_CODES)),
                 name='backdate_company_valid',
             ),
             # The window must be a window. JSAP enforced this in the stored
@@ -274,12 +278,16 @@ class BackDate(models.Model):
 
     @property
     def companies(self):
-        """The selected companies as a list — one SAP call each."""
-        return [code for code in (self.company or '').split(',') if code]
+        """The request's company as a one-element list.
+
+        Kept so a caller that iterates does not have to care, and so the SAP
+        layer reads the same whether a request ever covers more than one.
+        """
+        return [self.company] if self.company else []
 
     @property
     def company_label(self):
-        return ', '.join(self.companies)
+        return self.get_company_display()
 
     @property
     def action_label(self):

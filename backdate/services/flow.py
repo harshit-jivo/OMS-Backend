@@ -38,6 +38,7 @@ configuration. That is the engine's normal path and needs no special support.
 import logging
 
 from django.db import transaction
+from django.db.models import Q
 
 from workflow.exceptions import WorkflowError
 from workflow.services import selection
@@ -47,6 +48,7 @@ from backdate.models import (
     BackDateActionLog,
     BackDateFlow,
     FlowStatus,
+    HanaStatus,
     LogAction,
 )
 from backdate.services import notify as notify_service
@@ -93,8 +95,12 @@ def _point_at(flow, stage_id):
 
 
 @transaction.atomic
-def submit(backdate, *, user):
+def submit(backdate, *, user, remarks=''):
     """Create the flow: select a workflow and open its first stage.
+
+    `remarks` is the requester's reason. It is PASSED IN rather than read off
+    the request, because the request has no remarks column: it belongs to the
+    CREATE log row this writes, and to nothing else.
 
     Atomic with the caller's request creation, so a selection failure rolls the
     business row back too — a request that could never be routed should not
@@ -137,8 +143,7 @@ def submit(backdate, *, user):
     # two rows would record one instant twice. `stage_id` is NULL because
     # nothing has been decided yet — the stage is where it now waits, which the
     # flow already says.
-    log(backdate, action=LogAction.CREATE, user=user,
-        remarks=backdate.remarks)
+    log(backdate, action=LogAction.CREATE, user=user, remarks=remarks)
     notify_service.stage_awaiting(flow, backdate)
     return flow
 
@@ -169,14 +174,28 @@ def approve(flow, *, user, remarks=''):
     The caller must already have passed `permissions.may_act_on` — this
     function is the business transition, not the gate.
 
-    Returns the flow.
+    SAP IS THE GATE ON THE FINAL STAGE
+    ----------------------------------
+    The last approval calls `OPEN_BKDT` BEFORE it writes APPROVED, and writes
+    it only if SAP accepted. If SAP refuses, the whole transaction rolls back:
+    the request stays PENDING at this stage, the approver sees the database's
+    own error, and they can correct the request and try again.
+
+    That is the opposite of the earlier order — approve, then call SAP — which
+    left a request reading APPROVED while the rights it promised did not
+    exist. "Approved" now means the grant is in SAP.
+
+    The trade-off, stated rather than hidden: a network call runs inside the
+    transaction, holding it open for the length of the call (bounded by the
+    driver's timeout). The alternative — commit first, call SAP after — is
+    what produced the lie this replaces.
+
+    Returns the flow. Raises `HanaWriteError` when SAP refused the grant.
     """
     flow = _locked(flow)
     _guard(flow)
 
     decided_stage_id = flow.current_stage_id
-    log(flow.backdate, action=LogAction.APPROVE, user=user,
-        stage_id=decided_stage_id, remarks=remarks)
 
     # The NEXT active stage as configured right now. Re-read rather than
     # remembered, so a stage deactivated mid-flight is skipped rather than
@@ -187,16 +206,22 @@ def approve(flow, *, user, remarks=''):
                  if current else [])
 
     if not following:
+        # Last stage: SAP first. A refusal raises, and this transaction —
+        # including the APPROVE log written below — is rolled back with it.
+        from backdate.services import hana as hana_service
+        hana_service.apply_grant(flow)
+
+        log(flow.backdate, action=LogAction.APPROVE, user=user,
+            stage_id=decided_stage_id, remarks=remarks)
         flow.status = FlowStatus.APPROVED
         _point_at(flow, None)
         flow.save(update_fields=['status', 'current_stage', 'current_user',
                                  'updated_at'])
-        # The requester is told the decision here; whether SAP then accepted
-        # the grant is reported separately by the caller, because it is a
-        # different fact and can fail on its own.
         notify_service.decided(flow.backdate, approved=True, actor=user)
         return flow
 
+    log(flow.backdate, action=LogAction.APPROVE, user=user,
+        stage_id=decided_stage_id, remarks=remarks)
     _point_at(flow, following[0].id)
     flow.save(update_fields=['current_stage', 'current_user', 'updated_at'])
     notify_service.stage_awaiting(flow, flow.backdate)
@@ -264,6 +289,36 @@ def pending_for(user, *, on_date=None):
     )
 
 
+#: The status value that is NOT a flow status: "approved AND the grant is
+#: actually in SAP".
+#:
+#: It is a SUBSET of APPROVED, never a fifth state, and that is the whole point
+#: of having it. Since SAP became the gate on the final approval every new
+#: APPROVED request is also COMPLETED — but requests approved under the OLD
+#: order (approve first, call SAP after) can be APPROVED with the rights never
+#: written, and those are exactly the ones an operator needs to find.
+COMPLETED = 'COMPLETED'
+
+
+def status_q(status, prefix=''):
+    """`Q` for a status filter, or None for "no filter".
+
+    Accepts any `FlowStatus` plus `COMPLETED`. One function so the list, the
+    approval queue and both KPI counts cannot drift into three different ideas
+    of what a word means.
+
+    `prefix` is the path to the flow from whatever is being filtered: empty
+    when filtering `BackDateFlow` itself, `'flow__'` when filtering requests.
+    """
+    status = (status or '').upper()
+    if status == COMPLETED:
+        return Q(**{f'{prefix}status': FlowStatus.APPROVED,
+                    f'{prefix}hana_status': HanaStatus.SUCCESS})
+    if status in FlowStatus.values:
+        return Q(**{f'{prefix}status': status})
+    return None
+
+
 def decided_backdate_ids(user, status=None):
     """Requests this user has approved or rejected, optionally by outcome.
 
@@ -276,6 +331,7 @@ def decided_backdate_ids(user, status=None):
                    action__in=[LogAction.APPROVE, LogAction.REJECT])
            .values_list('backdate_id', flat=True))
     qs = BackDateFlow.objects.filter(backdate_id__in=set(ids))
-    if status:
-        qs = qs.filter(status=status)
+    condition = status_q(status)
+    if condition is not None:
+        qs = qs.filter(condition)
     return set(qs.values_list('backdate_id', flat=True))

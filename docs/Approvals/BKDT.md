@@ -1,9 +1,10 @@
 # BKDT — BackDate
 
 **BKDT = the BackDate module.** A user asks for permission to post SAP documents
-of one type, in one or more companies, with a posting date inside a bounded past
+of one type, in one company, with a posting date inside a bounded past
 window. The request is approved through a configured chain, and the final
-approval writes the grant into SAP's HANA database.
+approval writes the grant into SAP's HANA database — SAP first, and the request
+is only marked approved if SAP accepted it.
 
 This document is the technical source of truth for:
 
@@ -30,8 +31,12 @@ JSAP and remain queryable there. The BEHAVIOUR was migrated; the rows were not.
 | **[INFERRED]** | A reasonable reading, not directly observed |
 | **[UNKNOWN]** | Needs business confirmation — do not guess |
 
+**This file, `docs/Approvals/BKDT.md`, is the canonical BKDT document.** Every
+approvals document lives under `docs/Approvals/`; there is no copy under
+`docs/backend/` or `docs/migration/` any more, and none should be made.
+
 Related documents:
-`docs/migration/BKDT_TO_OMS_MIGRATION_PLAN.md` (the migration analysis) and
+`docs/Approvals/BKDT_TO_OMS_MIGRATION_PLAN.md` (the migration analysis) and
 `docs/architecture/WORKFLOW_MODULE_INTEGRATION.md` (how any module plugs into
 the engine).
 
@@ -189,14 +194,13 @@ backdate.backdate_action_logs  what was decided or changed, by whom, when
 | Column | Type | Null | Meaning |
 |---|---|---|---|
 | `id` | bigint | NOT NULL | PK |
-| `company` | varchar(64) | NOT NULL | the companies asked for, comma-separated and canonical: `OIL`, `OIL,BEVERAGES`, … See §9 |
+| `company` | varchar(20) | NOT NULL | the ONE company asked for: `OIL`, `BEVERAGES` or `MART`. A CHECK constraint holds the list. See §9 |
 | `sap_username` | varchar(20) | NOT NULL | the SAP login (`OUSR.USER_CODE`) the rights are granted to — **not** the OMS user asking |
-| `document_type` | integer | NOT NULL | SAP object type (`MOBJ.ObjType`), e.g. 13 = A/R Invoice. The label is resolved from HANA for display and never stored |
+| `document_type_name` | varchar(120) | NOT NULL | **THE document identity** — the SAP object NAME (`MOBJ.ObjName`), e.g. `A/R Invoice`. See below |
 | `from_date` | date | NOT NULL | start of the posting window (inclusive) |
 | `to_date` | date | NOT NULL | end of the posting window (inclusive) |
 | `time_limit` | timestamptz | **NOT NULL** | when the rights lapse in SAP. Required — see §11.3 |
 | `action` | varchar(3) | NOT NULL | `A`, `U`, or `A,U` for both |
-| `remarks` | text | NOT NULL (blank ok) | the requester's reason; approvers see it |
 | `created_by_id` | integer | NOT NULL | FK → `users_user`. **Always** the authenticated user |
 | `created_at` | timestamptz | NOT NULL | |
 | `updated_at` | timestamptz | NOT NULL | |
@@ -228,8 +232,8 @@ request** (UNIQUE `backdate_id`).
 | `backdate_id` | bigint | NOT NULL | FK → `backdate.backdate(id)`, UNIQUE |
 | `status` | varchar(10) | NOT NULL | `PENDING` / `APPROVED` / `REJECTED` |
 | `hana_status` | varchar(10) | NULL | `NULL` (not attempted) / `SUCCESS` / `FAILED` |
-| `sap_payload` | **jsonb** | NULL | the exact parameters sent to `OPEN_BKDT`, one entry per company |
-| `hana_status_text` | text | NOT NULL (blank ok) | the exact SAP response or error, per company, as JSON |
+| `sap_payload` | **jsonb** | NULL | the exact parameters sent to `OPEN_BKDT` |
+| `hana_status_text` | text | NOT NULL (blank ok) | the exact SAP response or error, as JSON |
 | `current_user_id` | integer | NULL | FK → `users_user`. The current responsible user — **denormalised, not the authority** (§8) |
 | `workflow_id` | bigint | NOT NULL | FK → `workflow.workflows`, PROTECT |
 | `current_stage` | bigint | NULL | FK → `workflow.workflow_stages(id)`. NULL once finished |
@@ -240,14 +244,60 @@ request** (UNIQUE `backdate_id`).
 **Indexes:** `bkdt_flow_queue_idx (status, current_user)`,
 `bkdt_flow_stage_idx (current_stage)`, `bkdt_flow_workflow_idx (workflow)`.
 
-`hana_status` has **two** values plus NULL. There is no `PARTIAL`: if any
-required SAP call fails the request is `FAILED`, because the requester does not
-have what they asked for. Which company failed is in `hana_status_text`.
+`hana_status` has **two** values plus NULL. There is no `PARTIAL`: one request
+is one company and one call, so the call either landed or it did not.
+
+**`COMPLETED` is a filter, not a status.** `status = APPROVED` **and**
+`hana_status = SUCCESS` — "a person said yes AND the rights are actually in
+SAP". It is a **subset of APPROVED**, never a fifth state, and `status_q()` in
+`services/flow.py` is its only definition, shared by the request list, the
+approval queue and both sets of KPI counts.
+
+Since SAP became the gate on the final approval (§7.1) every newly APPROVED
+request is also COMPLETED. The two differ only for requests approved under the
+OLD order — approve first, call SAP after — which could leave a request reading
+APPROVED while the grant it promised was never written. Those are exactly the
+ones this filter exists to find.
+
+Both KPI rows therefore count `completed` **inside** `approved`, and
+`total = pending + approved + rejected` deliberately excludes it: a total that
+double-counted it would not match the list underneath it.
+
+`FAILED` is not a dead end. It is written by `hana.record_failure` **after** the
+refused approval has rolled back (§11.5), so it survives to tell the approver
+what to correct — and it is the flag that lets them correct it (§7.3).
 
 `sap_payload` holds **business parameters only** — no connection string, no
 credentials, no resolved schema name.
 
-**Removed fields — do not reintroduce:** `current_sequence` (the stage's own
+**`document_type` (the numeric `MOBJ.ObjType`) HAS BEEN REMOVED.** It and
+`document_type_name` were the same fact in two spellings, and two copies of one
+fact are how the two come to disagree. The name is what a requester picks, what
+an approver reads and what the history shows, so the name is what is stored.
+
+SAP still needs the NUMBER — `OPEN_BKDT`'s `TRANSTYPE` is an INTEGER — so it is
+resolved from the name against `MOBJ` at the moment of the SAP call
+(`services.sap_masters.object_type_for`). The round trip is exact, not a guess:
+`MOBJ` holds **75 objects with 75 distinct, non-blank names, identical across
+all three company schemas** — verified against live HANA. **[OMS]**
+
+Two consequences, both deliberate:
+
+- A name SAP does not have is refused **at submission** (400), so it cannot sail
+  through every stage and fail at the last one.
+- A name SAP no longer has at approval time — an object renamed in between —
+  fails the SAP call loudly and recoverably (§7.1, §7.3) rather than granting
+  rights over a wrong object that nearly matched.
+
+**`remarks` HAS BEEN REMOVED from the request.** A remark is EVENT-specific: the
+reason for raising, the reason for an edit, an approver's note and a rejection
+reason are four different statements by up to four different people. One column
+can hold only the last of them, and overwriting a rejection reason with a later
+note is how an audit trail stops being true. Every remark is a row in
+`backdate_action_logs` — see §3.3.
+
+**Removed fields — do not reintroduce:** `document_type` and `remarks` (above),
+`current_sequence` (the stage's own
 `sequence` is in `workflow_stages`), `hana_applied_at` (use `updated_at`),
 `matched_query_id` (explained the selection at one instant; nothing read it
 afterwards).
@@ -264,21 +314,31 @@ a row.
 | `action` | varchar(10) | NOT NULL | `CREATE` / `UPDATE` / `APPROVE` / `REJECT` |
 | `acted_by_id` | integer | NULL | FK → `users_user` |
 | `stage_id` | bigint | NULL | FK → `workflow.workflow_stages(id)` |
-| `remarks` | text | NOT NULL (blank ok) | |
+| `remarks` | text | NOT NULL (blank ok) | **the only place a remark is stored.** Whose words these are is `acted_by_id`; what they explain is `action` (and `stage_id`, on a decision) |
 | `action_data` | **jsonb** | NULL | changed fields, UPDATE rows only |
 | `acted_at` | timestamptz | NOT NULL | |
 
 **Index:** `bkdt_log_backdate_idx (backdate, acted_at)`. Order history by
 `acted_at, id` — never by a stored sequence.
 
-What each action records:
+What each action records — **and this table is the whole of the remarks
+model**, because there is nowhere else a remark is kept:
 
-| Action | `stage_id` | `action_data` |
-|---|---|---|
-| `CREATE` | **NULL** — creation happens before any stage runs | NULL |
-| `UPDATE` | NULL — an edit is not a stage decision | the changed fields |
-| `APPROVE` | the stage being approved | NULL |
-| `REJECT` | the stage being rejected | NULL |
+| Action | `acted_by_id` | `stage_id` | `remarks` | `action_data` |
+|---|---|---|---|---|
+| `CREATE` | the requester | **NULL** — creation happens before any stage runs | the reason given when raising it | NULL |
+| `UPDATE` | whoever edited | NULL — an edit is not a stage decision | the reason for THAT edit | the changed fields |
+| `APPROVE` | the approver | the stage being approved | the approver's note, when given | NULL |
+| `REJECT` | the approver | the stage being rejected | the rejection reason (**required**) | NULL |
+
+An `UPDATE` row is written when anything changed **or** when a reason was given
+with no field change — explaining a request without altering it is a real edit
+(it is the usual answer to a SAP refusal an approver is puzzling over), and
+writing nothing would lose the only thing the user actually said.
+
+`remarks` is never one of the `action_data` keys. The row's own `remarks` column
+already holds the reason for that edit; listing it as a changed value would
+state the same sentence twice and invite the two copies to differ.
 
 `action_data` shape — only fields that actually changed:
 
@@ -297,6 +357,25 @@ so a row never claims an edit it cannot describe.
 `stage_id` → `workflow_stages`, so a renamed stage reads correctly in history
 too. Likewise there is no `on_behalf_of`: the actor is `acted_by`, and who was
 *configured* at the time is the replacement table's business.
+
+### 3.3.1 Stage progress is DERIVED, not stored
+
+`GET /requests/<pk>/history/` returns `stages` alongside `actions`. The log
+alone cannot answer "how far has this got?" — it records what HAPPENED, so a
+request waiting at stage 1 of 3 has one row and says nothing about the two
+ahead. The engine supplies the stages, the log supplies the decisions, and the
+view joins them:
+
+| `status` | Means |
+|---|---|
+| `APPROVED` / `REJECTED` | decided — `acted_by`, `acted_at` and `remarks` are populated |
+| `AWAITING` | the stage the flow is sitting at now |
+| `UPCOMING` | ahead of the current stage |
+| `SKIPPED` | the flow ended before this stage had its turn (a rejection upstream) |
+
+`reviewer` is the CURRENT effective user of that stage, not a stored copy, so a
+reassignment or an active replacement reads correctly for stages not yet
+decided. On a decided stage `acted_by` is who actually acted.
 
 ### 3.4 There is no task table
 
@@ -331,9 +410,11 @@ next stage
       ↓
 final approval
       ↓
-HANA OPEN_BKDT
+HANA OPEN_BKDT ────── refused ──→ nothing approved, still PENDING,
+      ↓                            FAILED recorded, 502 to the approver
+   accepted                        (edit it and approve again — §7.3)
       ↓
-SUCCESS / FAILED
+APPROVED + SUCCESS
 ```
 
 Rejection:
@@ -353,8 +434,9 @@ Key properties **[OMS]**:
   no template matched, silently. **[JSAP]**
 - On final approval `current_stage` and `current_user` both become NULL — nothing
   is left claiming to be waiting.
-- A HANA failure does **not** undo the approval: the approval is committed
-  first, then SAP is called, then the outcome is recorded and reported.
+- A HANA failure **prevents** the final approval. SAP is called first and the
+  approval is written only if SAP accepted, so `APPROVED` always means the grant
+  is in SAP (§7.1). Earlier stages never touch SAP and are unaffected.
 - Rejection is terminal for that request. There is no resubmission; the user
   raises a new request, which re-runs selection against the CURRENT
   configuration. JSAP has no rework path either. **[JSAP]**
@@ -369,7 +451,7 @@ One call, from `backdate/services/flow.py`:
 selection.select_for_module(
     module_code='BKDT',
     document_id=backdate.pk,
-    company=backdate.company,     # may be 'OIL' or 'OIL,BEVERAGES'
+    company=backdate.company,     # the request's one company (§9)
 )
 ```
 
@@ -423,12 +505,38 @@ would be missed by a naive `current_user = me` query. **[OMS]**
 
 ### 7.1 Approve
 
-`may_act_on(user, flow)` must pass first (§10). Then, in one transaction: write
-the `APPROVE` log with the stage being decided, re-read the workflow's stages as
-configured **right now**, and move to the next stage by sequence — or finish.
+`may_act_on(user, flow)` must pass first (§10). Then, in one transaction: re-read
+the flow `FOR UPDATE` so two approvers cannot both complete it, write the
+`APPROVE` log with the stage being decided and the approver's remark, re-read
+the workflow's stages as configured **right now**, and move to the next stage by
+sequence — or finish.
 
 Re-reading rather than remembering means a stage deactivated mid-flight is
 skipped instead of deadlocking the request.
+
+**SAP IS THE GATE ON THE LAST STAGE.** The final approval calls `OPEN_BKDT`
+BEFORE it writes `APPROVED`, and writes it only if SAP accepted:
+
+```
+last approval → OPEN_BKDT → accepted → APPROVE log + status APPROVED  (commit)
+                          → refused  → nothing written                (rollback)
+                                       ↓
+                                  502, the exact SAP error, and the request is
+                                  still PENDING at the same stage
+```
+
+The earlier order — approve, then call SAP — could leave a request reading
+`APPROVED` while the rights it promised did not exist. "Approved" now means the
+grant is in SAP.
+
+The trade-off, stated rather than hidden: a network call runs inside the
+transaction, holding it open for the length of the call (bounded by the driver's
+timeout).
+
+A refusal is reported as **502**, not 200-with-a-warning. The API response
+carries the SAP detail so the approver reads the database's own words, and the
+approval desk shows a busy state for the whole call so the button cannot be
+pressed twice.
 
 ### 7.2 Reject
 
@@ -438,13 +546,30 @@ on rejection. **[JSAP]**
 
 ### 7.3 Edit
 
-`PATCH /api/backdate/requests/<pk>/` — the requester only, and only while
-nothing has been decided. Once any stage has approved, the request is frozen:
-letting the dates move underneath an approval already given would make the
-record untrue.
+`PATCH /api/backdate/requests/<pk>/` — the requester, and only while nothing has
+been decided. Once any stage has approved, the request is frozen: letting the
+dates move underneath an approval already given would make the record untrue.
+
+**One exception: a request SAP has refused.** While `flow.hana_status = FAILED`
+and the flow is still `PENDING`, the approver currently holding it may edit it
+too. `permissions.may_edit(user, backdate)` is the whole rule and the only copy
+of it — the PATCH endpoint enforces it, and the read serializer answers it as
+**`can_edit`** so a page can offer an Edit control exactly when it will work.
+Two copies of this rule would drift, and the drift would show as a button that
+403s. That is the whole point of the SAP-first order — the error is almost always
+a value SAP would not take (an unknown `sap_username`, a document type that
+company does not have), and the person reading the error is the one who can fix
+it and approve again. Nothing is approved in the meantime, so nothing untrue is
+recorded.
 
 `company` cannot be edited — it decides which workflow applies, and the request
-has already been routed.
+has already been routed. A different company is a different request.
+
+`remarks` on a PATCH is **not a field of the request**. It is the reason for
+THAT edit and it lands on that edit's own `UPDATE` log row, attributed to
+whoever made it. The form therefore starts it EMPTY rather than seeding it from
+an earlier remark — prefilling would put somebody else's sentence in this
+user's mouth on a brand-new history entry.
 
 The sequence is read → apply → diff → log, in one transaction, so the log can
 never describe an edit that did not commit or miss one that did.
@@ -490,38 +615,43 @@ The single resolution point for all of this is
 
 ---
 
-## 9. Multi-company behaviour
+## 9. One company per request
 
-One BackDate request can cover `OIL`, `BEVERAGES` and `MART`. The selected
-companies are stored **together, in one request**, comma-separated and in
-canonical order (`OIL`, `BEVERAGES`, `MART` — so `BEVERAGES,OIL` and
-`OIL,BEVERAGES` are the same request, not two spellings of it).
+**A BackDate request covers exactly ONE company.** `company` holds one code —
+`OIL`, `BEVERAGES` or `MART` — and a CHECK constraint holds that list.
 
 ```
-ONE OMS request  →  ONE flow  →  ONE workflow selection
-                                      ↓
-                              final approval
-                                      ↓
-                        ┌─────────────┴─────────────┐
-                        ↓                           ↓
-                   OPEN_BKDT                   OPEN_BKDT
-                    (OIL)                     (BEVERAGES)
+ONE OMS request → ONE company → ONE flow → ONE workflow selection
+                                              ↓
+                                       final approval
+                                              ↓
+                                     ONE OPEN_BKDT call
 ```
+
+The API accepts either a bare string or a **one-element list** (the form sends
+its ticked boxes). Two companies is a **400 that says so** — never a silent
+drop of the second:
+
+> A BackDate request covers ONE company. Raise one request per company.
+
+The page ticks companies in one form and raises one request per ticked company,
+reporting how many were raised. Each is approved on its own and written to its
+own SAP schema, so a refusal in one cannot half-grant another.
 
 | Input | Requests | Flows | HANA calls | HANA rows |
 |---|---|---|---|---|
 | `OIL` + `A` | 1 | 1 | 1 | 1 |
-| `OIL,BEVERAGES` + `A,U` | 1 | 1 | **2** | 2 |
-| `OIL,BEVERAGES,MART` + `A,U` | 1 | 1 | **3** | 3 |
+| `OIL` + `A,U` | 1 | 1 | **1** | 1 |
+| `OIL`, `BEVERAGES` ticked + `A,U` | **2** | 2 | 2 | 2 |
 
 **Action never multiplies anything.** `A,U` is one request with a wider recorded
 scope, because `OPEN_BKDT` has no ACTION parameter — so splitting it would write
 SAP rows identical in every column SAP reads. JSAP stored the pair on one row
 for the same reason (`action = 'A,U'`, 821 rows). **[JSAP]**
 
-**Routing consequence.** A per-company workflow condition (`company = 'OIL'`) is
-an EXACT match and will not match `OIL,BEVERAGES`. Multi-company requests need
-their own workflow — see §13.
+**Routing consequence.** `company = 'OIL'` is an exact match and matches every
+OIL request, because no request ever names more than one company. There is no
+multi-company workflow to configure and none should be created.
 
 ---
 
@@ -529,7 +659,8 @@ their own workflow — see §13.
 
 | Capability | Requirement |
 |---|---|
-| Open the BackDate page, create/view own requests | `BackDate` |
+| Open the BackDate page, create/edit own requests | `BackDate` |
+| **Read** one request's detail or history | `BackDate` **OR** `BackDate_Approval` — then scoped per object: your own, or anything if you run the desk |
 | Open the BackDate Approval page | `BackDate_Approval` |
 | **Approve / reject** | `BackDate_Approval` **AND** being the current *effective* stage user |
 | Configure workflows, queries, stages, replacements | `workflow.config.manage` |
@@ -582,9 +713,9 @@ raise"**. That is a property of the procedure, not an omission.
 
 | Parameter | Source | Note |
 |---|---|---|
-| `BRANCH` | the company NAME (`OIL`/`BEVERAGES`/`MART`) | one branch per call |
+| `BRANCH` | the company NAME (`OIL`/`BEVERAGES`/`MART`) | the request's one company |
 | `USERID` | `backdate.sap_username` | truncated to 20 |
-| `TRANSTYPE` | `backdate.document_type` | real int |
+| `TRANSTYPE` | resolved from `document_type_name` via `MOBJ` at call time | real int; never stored |
 | `FROMDATE` / `TODATE` | `from_date` / `to_date` | real `date` objects |
 | `TIMELIMIT` | `time_limit` | **never NULL** |
 | `RIGHTS` | literal `'NO'` | see below |
@@ -649,17 +780,32 @@ points at before testing.**
       "DELETEDBY": null, "DELETEDON": null } } ] }
 ```
 
-`hana_status_text`:
+`hana_status_text` — the DATABASE's own words on a failure, never an application
+summary, because they are the only thing that says WHY a grant did not land:
 
 ```json
 { "results": [
-  { "branch": "OIL",       "status": "SUCCESS", "response": "<exact SAP response>" },
-  { "branch": "BEVERAGES", "status": "FAILED",  "response": "<exact SAP error>" } ] }
+  { "branch": "OIL", "status": "FAILED",
+    "response": "RuntimeError: (259, \"invalid userid USER02\")" } ] }
 ```
 
-Partial failure is recorded, not hidden: the calls are independent (SAP gives no
-cross-schema transaction), so OIL can land while BEVERAGES fails. `hana_status`
-is then `FAILED` for the request as a whole.
+**WHERE THE OUTCOME IS WRITTEN, AND WHY IT DIFFERS BY OUTCOME.**
+
+- A **success** is written by `apply_grant` on the caller's own connection. It
+  belongs to the approval it was part of, so the two commit together or neither
+  does.
+- A **failure** is written by `hana.record_failure`, called by the API handler
+  **after** the approval transaction has rolled back. `apply_grant` writes
+  nothing on failure: it raises a `HanaWriteError` CARRYING the payload and the
+  status text, and the handler stores them once the transaction is gone.
+
+That ordering is load-bearing, not stylistic. The final approval holds
+`backdate_flow` `FOR UPDATE` across the SAP call. An earlier version wrote the
+failure from a SECOND connection so it would outlive the rollback — and that
+second connection simply waited on the row lock its own caller was still
+holding. Postgres saw an ordinary lock wait, not a deadlock cycle, so it never
+timed out: **the approval hung forever**. Recording after the rollback needs no
+second connection and has nothing to wait on.
 
 ### 11.6 Retry
 
@@ -700,7 +846,7 @@ rejected.
 | `fromDate` | `from_date` | |
 | `timeLimit` | `time_limit` | |
 | `username` | `sap_username` | |
-| `documentType` | `document_type` | |
+| `documentType` | `document_type_name` | JSAP stored the number; OMS stores the NAME and resolves the number for SAP |
 | `createdBy` | `created_by_id` | **different id namespace** — a jsUser id is not an OMS user id |
 | `companyId` | *(dropped)* | JSAP tenant id, not the document company |
 | `id` | `id` | but see rule 3 |
@@ -725,26 +871,24 @@ WHERE company = 'OIL'
 
 (the `createdBy != 72` exclusion is dropped — see §14).
 
-### 12.4 Matching a company when a request may name several
+### 12.4 Matching a company
 
-`company = 'OIL'` is an EXACT match and will **not** match `'OIL,BEVERAGES'`.
-That is intended: it keeps single-company workflows meaning "only this company".
-
-To match any request that INCLUDES a company:
+One request names one company (§9), so the match is plain equality:
 
 ```sql
-WHERE ',' || company || ',' LIKE '%,OIL,%'
+WHERE company = 'OIL'
 ```
 
-To match every multi-company request:
+The membership form some older queries use still works and means the same thing
+for a single value, but prefer equality — it says what is true:
 
 ```sql
-WHERE company LIKE '%,%'
+WHERE ',' || company || ',' LIKE '%,OIL,%'   -- equivalent, but indirect
 ```
 
-**Write `%` normally.** The engine escapes literal percent signs for psycopg2
-itself (`conditions._escape_percent`, applied in `matches`, `execute` and
-`explain`). Never write `%%` in stored SQL.
+**Write `%` normally** if you do use `LIKE`. The engine escapes literal percent
+signs for psycopg2 itself (`conditions._escape_percent`, applied in `matches`,
+`execute` and `explain`). Never write `%%` in stored SQL.
 
 ### 12.5 What the validator enforces
 
@@ -769,7 +913,7 @@ an administrator permission.
 2. Change `SELECT 1` to `SELECT id`.
 3. Delete `AND id = @id`.
 4. Map every column and translate branch numbers to company names.
-5. Decide exact vs membership matching (§12.4).
+5. Match the company with `company = '<CODE>'` (§12.4).
 6. Re-check any `createdBy` filter against OMS user ids — **they do not match
    JSAP's**.
 7. Paste into the Workflows page; it validates on save.
@@ -794,15 +938,17 @@ Use `company = ALL` on the workflow and the query when the SQL itself pins the
 company; that keeps the company decision in one place instead of two.
 
 **Conditions must be mutually exclusive.** There is no priority or
-tie-breaking — two matches is an error, by design. A useful shape:
+tie-breaking — two matches is an error, by design. One request names one
+company, so one condition per company never overlaps:
 
 | Workflow | Condition |
 |---|---|
-| per company | `company = 'OIL'` — matches only single-company OIL requests |
-| multi-company | `company LIKE '%,%'` — matches only requests naming several |
+| BKDT_OIL | `company = 'OIL'` |
+| BKDT_BEVERAGES | `company = 'BEVERAGES'` |
+| BKDT_MART | `company = 'MART'` |
 
-Those never overlap, because a comma appears exactly when more than one company
-was chosen.
+Add a further column to the `WHERE` (a date boundary, say) only if you split a
+company across two workflows — and then make the two halves exclusive.
 
 ---
 
@@ -860,23 +1006,27 @@ project `{success, message, data}` envelope. **[OMS]**
 
 | Method | Path | Notes |
 |---|---|---|
-| GET POST | `/requests/` | `?status=&company=&month=MM-YYYY`. GET is scoped to the caller |
-| GET PATCH | `/requests/<pk>/` | PATCH edits a pending request |
-| GET | `/requests/<pk>/history/` | the action log, stage names resolved |
-| GET | `/insights/` | `?company=&month=` counts |
+| GET POST | `/requests/` | `?status=&company=&month=MM-YYYY`. `status` takes `PENDING`/`APPROVED`/`REJECTED` **and `COMPLETED`** (§3.2); anything else is no filter rather than an error, so a stale bookmark shows everything. GET is scoped to the caller |
+| GET PATCH | `/requests/<pk>/` | PATCH edits a pending request — the requester, or the current approver once SAP has refused it (§7.3). **GET takes either key** — an approver must be able to open what they are deciding |
+| GET | `/requests/<pk>/history/` | `actions` (the log) **and `stages`** (the progress). Either key |
+| GET | `/insights/` | `?company=&month=` counts: `pending`, `approved`, `completed`, `rejected`, `total`. `completed` is a subset of `approved` and is **not** in `total` |
 | GET | `/sap-users/` | `?company=OIL`, cached |
 | GET | `/document-types/` | `?company=OIL`, cached |
 
 **Approver — needs `BackDate_Approval` AND the effective stage:**
 
-| Method | Path |
-|---|---|
-| GET | `/approvals/queue/` `?company=` |
-| GET | `/approvals/history/` `?status=&company=` |
-| GET | `/approvals/insights/` `?company=` |
-| POST | `/requests/<pk>/approve/` |
-| POST | `/requests/<pk>/reject/` (reason required) |
-| POST | `/requests/<pk>/retry-hana/` |
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/approvals/queue/` `?company=&search=` | |
+| GET | `/approvals/history/` `?status=&company=&search=` | |
+| GET | `/approvals/insights/` `?company=&search=` | |
+| POST | `/requests/<pk>/approve/` | **502** if SAP refused: nothing was approved, and `errors.sap` carries what SAP said |
+| POST | `/requests/<pk>/reject/` (reason required) | |
+| POST | `/requests/<pk>/retry-hana/` | approved flows only; a SAP-refused request is not approved, so it is approved again instead |
+
+Every read of a request carries **`can_edit`** — whether THIS caller may edit
+THIS request right now (§7.3). It depends on who is asking, so a serializer used
+without a request in its context reports `false`.
 
 **Decisions are addressed by REQUEST, not by task.** There is no task table: a
 request waits at one stage at a time and its flow says which, so the request id
@@ -892,15 +1042,69 @@ is enough. The old `/tasks/<pk>/approve/` pair no longer exists.
 | BackDate Approval | `/BackDate_Approval` | `BackDate_Approval` | approve/reject — only what this user may act on |
 | Workflows | `/Workflows` | `workflow.config.manage` | workflow, query, stage and replacement configuration |
 
-The BackDate page has two tabs (Entries, New Request), clickable KPI cards that
-filter the list, and company + status filters. The approval queue only ever
-contains what the server says this user may act on, so "can I see it" and "can I
-decide it" are the same question — holding the key alone shows an empty queue,
-which is the honest outcome rather than buttons that all 403.
+Both pages share one table — id, company, from/to date, time limit, created by,
+and two buttons: **Details** and **Progress**. The BackDate page adds two tabs
+(Entries, New Request), clickable KPI cards that filter the list, and
+search + company + status filters; the approval page has the same cards and
+filters over its own queue.
 
-The request detail shows the resolved current stage, "stage N of M", the
-effective user (naming the stand-in when one is covering), the history with a
-readable diff for UPDATE rows, and the per-branch SAP payload and response.
+The cards are a `StatRow` — a responsive grid that lays them out **across** the
+page and wraps on narrow screens. They must not be wrapped in a `Card`: that
+stacks them one per line down the page. There are five —
+**Pending · Approved · Completed · Rejected · Total** — and Completed carries
+the hint "rights reached SAP" because it is a subset of Approved and a reader
+comparing the two numbers should not have to guess why they differ. Total
+clears the filter rather than selecting a status.
+
+The approval queue only ever contains what the server says this user may act on,
+so "can I see it" and "can I decide it" are the same question — holding the key
+alone shows an empty queue, which is the honest outcome rather than buttons that
+all 403.
+
+**Details** is WHAT was asked for: the highlighted request id, the company, the
+SAP user, the document type **by name** (`document_type_name` — there is no
+number to fall back to), the window and the action — plus an **SAP response**
+box once SAP has actually been called, and an **edit** control at the top right
+for whoever may currently edit it (§7.3).
+
+Details shows **no remarks**, deliberately. A request has no single reason, so
+there is nothing truthful to put there; a remark shown without its author and
+its date is how a summary starts disagreeing with the history it summarises.
+
+**Progress** is WHERE it has got to. Its timeline ends with a **SAP** node on
+the same rail as the approvals — the SAP write is the last event of an approved
+request, not a footnote under the history of it — carrying the timestamp and
+**SAP's exact response, verbatim**.
+
+That node shows the RESPONSE and nothing else. The parameters that were sent are
+in `sap_payload` for an administrator with database access; the person reading
+this is deciding what to do next, and the only thing that tells them is what SAP
+sent back. A payload dump beside it buried that, so the "show payload" control
+is gone. The Details dialog's **SAP response** box renders the same component,
+so the two can never describe one SAP call differently.
+
+A row whose `hana_status_text` is a plain sentence rather than the JSON shape
+(written by an older version) takes its SUCCESS/FAILED from the flow. Assuming
+FAILED for those printed a red "FAILED" beside a green "rights applied" on
+requests that had in fact succeeded — the record contradicting itself, which is
+the one thing that column exists to prevent.
+
+It is also where **every remark** is read from — the history endpoint's
+`actions`, never the request:
+
+| Remark | Shown on |
+|---|---|
+| given when raising it | the **Created** node, with the creator and the timestamp |
+| given with an edit | that edit's **Updated** node, with who edited and the readable diff beside it |
+| given when approving | that stage's node, with the approver and the stage name |
+| given when rejecting | the rejecting stage's node, with the approver and the reason |
+
+Alongside them: the stage timeline with "stage N of M" and the effective user at
+each stage (naming the stand-in when one is covering).
+
+Approving is a network call to SAP, so the decision dialog shows an explicit
+"Calling SAP…" busy state and disables the button for its whole duration — an
+approver who cannot tell it is running will press it again.
 
 ---
 
@@ -929,8 +1133,8 @@ approval.
 ### 18.1 Everything about one request
 
 ```sql
-SELECT r.id, r.company, r.sap_username, r.document_type, r.action,
-       r.from_date, r.to_date, r.time_limit, r.remarks,
+SELECT r.id, r.company, r.sap_username, r.document_type_name, r.action,
+       r.from_date, r.to_date, r.time_limit,
        u.username AS raised_by, r.created_at,
        f.status, f.hana_status, f.total_stage,
        w.code AS workflow, s.name AS current_stage_name, s.sequence,
@@ -995,11 +1199,13 @@ ORDER BY w.code;
 
 | Symptom | Likely cause |
 |---|---|
-| `WorkflowNotConfigured` | no condition matched — check company spelling, and whether a multi-company request has a workflow (§9, §13) |
+| `WorkflowNotConfigured` | no condition matched — check the company spelling against the request's own `company` (§9, §13) |
 | `AmbiguousWorkflowSelection` | two conditions match — they overlap, or an old workflow was left active |
 | "has not passed validation" | `validated_at` is NULL — re-save the query |
 | "could not be evaluated" | the SQL errored at runtime: usually a renamed table or column |
 | approve returns 403 | either the key is missing or this is not the caller's stage — the message says which |
+| approve returns 502 | SAP refused. Nothing was approved; read `hana_status_text` (§18.3), correct the request and approve again |
+| approve never returns | something is writing to `backdate_flow` on a second connection while the approval holds the row `FOR UPDATE` — see §11.5, and §18.7 to confirm it |
 
 ### 18.6 Is the flow pointing where you expect?
 
@@ -1015,6 +1221,26 @@ If `current_user_id` differs from `s.user_id`, that is **expected** after a
 stage reassignment: the stored value is refreshed when the flow moves, and the
 queue resolves through the engine regardless (§6).
 
+### 18.7 An approval that hangs
+
+A final approval holds `backdate_flow` `FOR UPDATE` for the length of the SAP
+call. If it never returns, look for a second backend waiting on that row rather
+than assuming SAP is slow:
+
+```sql
+SELECT pid, state, wait_event_type, wait_event, left(query, 80)
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+  AND (state = 'idle in transaction' OR wait_event_type = 'Lock')
+ORDER BY query_start;
+```
+
+An `active` row with `wait_event_type = 'Lock'` updating `backdate.backdate_flow`,
+behind an `idle in transaction` row, is the shape of the bug §11.5 describes:
+Postgres sees an ordinary lock wait, not a deadlock cycle, so it waits forever.
+`pg_terminate_backend(pid)` on both clears it; the fix is never to write that row
+from a second connection.
+
 ---
 
 ## 19. Testing notes
@@ -1029,3 +1255,9 @@ transaction.
 When testing the HANA path, **use the `TEST_JIVO_*` schemas** and assert the
 resolved schema starts with `TEST_` before executing anything. Rows written
 there are durable — they are not rolled back with the Postgres transaction.
+
+One trap worth naming, because it cost a session: a test that wraps everything
+in one rolled-back transaction cannot exercise anything written from a second
+connection, and — worse — will BLOCK on a lock the same test is holding. If a
+check is about what survives a rollback, commit the fixture and delete it in a
+`finally`.
