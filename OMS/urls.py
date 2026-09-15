@@ -80,6 +80,9 @@ api_urlpatterns = [
     # Generic workflow engine (own `workflow` Postgres schema). Separate from
     # approvals/, which continues to serve PAYMENT and DEPOSIT.
     path('workflow/', include('workflow.urls')),
+    # BackDate (BKDT) — back-posting rights, own `backdate` Postgres
+    # schema. Drives the generic workflow engine; owns its own runtime.
+    path('backdate/', include('backdate.urls')),
 ]
 
 urlpatterns = [
