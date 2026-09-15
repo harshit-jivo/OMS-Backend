@@ -36,6 +36,19 @@ def resolve_doc_entry(doc_num, branch='OIL'):
     return rows[0]['DocEntry']
 
 
+def resolve_order_doc_entry(doc_num, branch='OIL'):
+    """DocNum -> ORDR."DocEntry" for the given company, or None if not found.
+
+    The sales-order counterpart of `resolve_doc_entry`. The Crystal sales-order
+    layouts are addressed by DocEntry exactly as the bill print is, and the same
+    DocNum exists in every company database — hence the branch here too.
+    """
+    rows = SalesOrderService().get_order_doc_entry(doc_num, branch)
+    if not rows:
+        return None
+    return rows[0]['DocEntry']
+
+
 def _as_float(value, default=0.0):
     try:
         return float(value)

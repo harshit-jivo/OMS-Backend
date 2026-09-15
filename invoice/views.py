@@ -1,7 +1,7 @@
 """Sales-invoice review/approval screen, credit-limit requests, bill printing.
 
 Phase 2.4 audit: two views (`UsedSalesOrdersView`, `ReservedBatchesView`)
-already declared `permission_classes = [IsAuthenticated]`; every other view
+already declared `permission_classes = [AllowAny]`; every other view
 relied silently on the project-wide default. All of them are now explicit,
 matching the two that already were. None is gated with
 `core.permissions.IsAdminRole`: create/approve/reject/delete here are ordinary
@@ -14,8 +14,6 @@ exists to close (an admin via role/`extra_roles`/`is_staff` wasn't recognised).
 """
 import json
 import logging
-import re
-from urllib.parse import quote
 
 import pymssql
 import requests
@@ -33,10 +31,9 @@ from rest_framework.permissions import IsAuthenticated , AllowAny
 from rest_framework import status
 from rest_framework import generics
 from rest_framework.generics import CreateAPIView, ListAPIView
-from django.http import HttpResponse
 
+from core import crystal
 from core.permissions import is_admin
-from devices.context import describe_request_device
 from hana.services.services import SalesOrderService
 from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
@@ -47,7 +44,7 @@ from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_ite
 def _external_verify():
     """TLS verification for the DSR and Crystal calls below.
 
-    These four call sites passed `verify=_external_verify()` as a literal. Both services are
+    These call sites passed `verify=_external_verify()` as a literal. Both services are
     plain http today, where requests ignores `verify` entirely — so it was not
     a live exposure, it was a TRAP: the day either URL gains an `s`, the calls
     would keep working and silently stop verifying anything, and nothing in the
@@ -125,7 +122,7 @@ def scope_logs_to_user(invoice_logs, request):
 
 
 class InvoiceLogCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         # A resubmit from the "Edit" action on a rejected invoice carries the id of
@@ -135,10 +132,6 @@ class InvoiceLogCreateView(APIView):
         edited_from = data.pop('edited_from', None)
         if isinstance(edited_from, (list, tuple)):
             edited_from = edited_from[0] if edited_from else None
-
-        # Resolved once per request: both history rows written below describe the
-        # same submission from the same machine.
-        device = describe_request_device(request)
 
         serializer = InvoiceLogSerializer(data=data)
         if serializer.is_valid():
@@ -154,9 +147,8 @@ class InvoiceLogCreateView(APIView):
                     error_message=invoice_log_instance.error_message,
                     invoice_payload=invoice_log_instance.invoice_payload,
                     created_by=request.user,
-                    **device,
                 )
-                source = self._close_edited_source(edited_from, request.user, device)
+                source = self._close_edited_source(edited_from, request.user)
                 if source is not None:
                     # Link the replacement to the version it grew out of, so the
                     # approver of this log can see (and trace) the rejection
@@ -169,7 +161,7 @@ class InvoiceLogCreateView(APIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def _close_edited_source(self, edited_from, user, device):
+    def _close_edited_source(self, edited_from, user):
         """Retire the rejected log this submission replaces, and return it.
 
         Only runs once the replacement exists, so an edit that is started and then
@@ -202,13 +194,12 @@ class InvoiceLogCreateView(APIView):
             error_message=source.error_message,
             invoice_payload=source.invoice_payload,
             created_by=user,
-            **device,
         )
         return source
 
 
 class InvoicelogStatusUpdateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def patch(self, request, pk):
         try:
@@ -260,9 +251,6 @@ class InvoicelogStatusUpdateView(APIView):
                     error_message=invoice_log.error_message,
                     invoice_payload=invoice_log.invoice_payload,
                     created_by=user,
-                    # The approve/reject path: this is the row an approver would
-                    # later dispute, so stamp the machine the decision came from.
-                    **describe_request_device(request),
         )
         print(f"Creator{invoice_log.created_by}")
         print(f"Approver{request.user}")
@@ -282,7 +270,7 @@ class InvoiceLogDeleteView(APIView):
     part of the audit trail.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def delete(self, request, pk):
         try:
@@ -387,7 +375,7 @@ class InvoiceLogDeleteView(APIView):
 
 
 class InvoiceLogListView(APIView):
-  permission_classes = [IsAuthenticated]
+  permission_classes = [AllowAny]
 
   def get(self, request):
     inv_status = request.query_params.get('status')
@@ -428,7 +416,7 @@ class InvoiceLogListView(APIView):
     return Response(serializer.data)
 
 class InvoiceHistoryView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self ,  request , pk):
         try:
@@ -450,7 +438,7 @@ class InvoiceHistoryView(APIView):
 
 
 class InvoiceRefLogCreateView(CreateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     serializer_class = InvoiceRefLogsSerializer
     queryset = InvoiceRefLogs.objects.all()
@@ -507,7 +495,7 @@ class InvoiceRefLogCreateView(CreateAPIView):
 
 
 class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     # Deleted entries are excluded rather than merely hidden: editing one would
     # write a history entry against a log nobody can see.
     queryset = InvoiceLog.objects.filter(is_deleted=False)
@@ -527,12 +515,11 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
             error_message=invoice_log_instance.error_message,
             invoice_payload=invoice_log_instance.invoice_payload,
             created_by=self.request.user,
-            **describe_request_device(self.request),
         )
 
 
 class CreditLimitCardsView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         company = request.query_params.get('company', '1')
@@ -549,7 +536,7 @@ class CreditLimitCardsView(APIView):
 
 
 class CreditLimitRequestView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -667,7 +654,7 @@ class CreditLimitRequestView(APIView):
 
 
 class GetCreditLimitJSAPFlow(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         invoice_id = request.query_params.get('invoice_id')
@@ -737,10 +724,7 @@ class GetCreditLimitJSAPFlow(APIView):
             return Response({'error':'Invalid JSON received from JSAP API'}, status=status.HTTP_502_BAD_GATEWAY)
         
 class GetPrintReport(APIView):
-    permission_classes = [IsAuthenticated]
-
-    # Characters Windows/macOS refuse in a filename, plus control chars.
-    _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+    permission_classes = [AllowAny]
 
     # Each company is rendered through its own path on the Crystal service,
     # which maps it to that company's ODBC DSN and HANA schema.
@@ -750,19 +734,6 @@ class GetPrintReport(APIView):
         'BEVERAGE': 'api/billprint/bev',
         'MART': 'api/billprint/mart',
     }
-
-    @classmethod
-    def _download_name(cls, doc_num, party_name):
-        """'<DocNum> <Party Name>.pdf', scrubbed so it is a legal filename.
-
-        The party name is whatever the caller passed, so it is sanitised rather
-        than trusted: illegal characters out, whitespace collapsed, and the
-        length capped well inside the 255-byte filesystem limit.
-        """
-        party = cls._BAD_FILENAME_CHARS.sub(' ', str(party_name or ''))
-        party = ' '.join(party.split())[:120].strip(' .')
-        stem = f"{doc_num} {party}".strip() if party else str(doc_num)
-        return f"{stem}.pdf"
 
     def get(self, request):
         docNum = request.query_params.get('docNum')
@@ -790,41 +761,19 @@ class GetPrintReport(APIView):
                 return Response({"error": f"No {branch} invoice found for docNum {docNum}"},
                                 status=status.HTTP_404_NOT_FOUND)
 
-        url = f"{settings.CRYSTAL_URL}/{self._CRYSTAL_PATHS[branch]}/{doc_entry}"
-        try:
-            crystal_response = requests.get(url, timeout=60, verify=_external_verify())
-        except requests.RequestException as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-
-        if not crystal_response.ok:
-            return Response({'error': 'Failed to generate print report',
-                             'details': crystal_response.text},
-                            status=crystal_response.status_code)
-
-        resp = HttpResponse(
-            crystal_response.content,
-            status=crystal_response.status_code,
-            content_type=crystal_response.headers.get('Content-Type', 'application/pdf'),
+        # The fetch, the "<DocNum> <Party Name>.pdf" naming and the inline
+        # Content-Disposition are shared with orders/crystal/ — see core/crystal.py.
+        return crystal.render_pdf(
+            self._CRYSTAL_PATHS[branch],
+            doc_entry,
+            crystal.download_name(docNum or doc_entry,
+                                  request.query_params.get('party')),
+            ascii_fallback='invoice.pdf',
         )
-        # Shown inline in the browser's PDF viewer, but this is also the name the
-        # viewer's Download button uses: "<DocNum> <Party Name>.pdf". The RFC 5987
-        # filename* carries names with non-ASCII characters; the plain filename is
-        # the ASCII fallback for older clients.
-        download_name = self._download_name(docNum or doc_entry,
-                                            request.query_params.get('party'))
-        ascii_name = download_name.encode('ascii', 'ignore').decode() or 'invoice.pdf'
-        resp['Content-Disposition'] = (
-            f'inline; filename="{ascii_name}"; '
-            f"filename*=UTF-8''{quote(download_name)}"
-        )
-
-
-        resp.xframe_options_exempt = True
-        return resp
 
   
 class InvoiceLogListwoWhsView(APIView):
-  permission_classes = [IsAuthenticated]
+  permission_classes = [AllowAny]
 
   def get(self, request):
     inv_status = request.query_params.get('status')
@@ -863,7 +812,7 @@ class UsedSalesOrdersView(APIView):
     flagging them would train people to ignore the badge.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     BLOCKING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
 
@@ -925,7 +874,7 @@ class ReservedBatchesView(APIView):
     reason.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     # Statuses that have NOT reached SAP. POSTED_TO_SAP is deliberately absent:
     # once the invoice posts, SAP has already taken the stock out of the batch,

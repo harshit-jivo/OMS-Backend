@@ -1,0 +1,46 @@
+# The build context is copied to the daemon before anything runs, so keeping
+# this tight is the difference between a 2-second and a 90-second build.
+
+# Virtualenvs — the image builds its own against the container's Python.
+# Copying the host's would ship Linux-host paths and the wrong interpreter.
+.venv/
+venv/
+env/
+ENV/
+
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Secrets NEVER enter the image. `.env` is mounted at run time (compose
+# env_file) and `secrets/` is a bind mount, so both stay on the host and can
+# be rotated without a rebuild.
+.env
+.env.*
+!.env.example
+secrets/
+
+# Build/runtime output that the image regenerates or mounts as a volume.
+staticfiles/
+media/
+logs/
+*.log
+
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+test_results/
+
+# Windows Task Scheduler wrappers. The container runs the management commands
+# directly (see docker-compose.yml), so these would only mislead.
+*.bat
+
+.vscode/
+.idea/
+*.swp

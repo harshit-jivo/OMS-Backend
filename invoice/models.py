@@ -50,11 +50,29 @@ class InvoiceLog(models.Model):
         ('CL_RAISED' , 'CL Raised')
     ]
 
-    # Statuses a reviewer may clear off the review screen. Everything else —
-    # APPROVED and POSTED_TO_SAP — is a decision already acted on downstream (a
-    # real SAP document, in the POSTED_TO_SAP case), so removing it would leave
-    # OMS disagreeing with SAP about what happened.
-    DELETABLE_STATUSES = ('PENDING', 'ERROR', 'REJECTED', 'EDITED', 'CL_RAISED')
+    # Statuses a reviewer may clear off the review screen.
+    #
+    # APPROVED is included, POSTED_TO_SAP is not, and the difference is whether
+    # a real SAP document exists. An approved log is a decision OMS made and
+    # has not yet acted on: measured on live, all 9 APPROVED logs carry no
+    # `sap_doc_num`, while 92 of the 93 POSTED_TO_SAP ones do. Removing an
+    # approved entry hides an OMS decision; removing a posted one would leave
+    # OMS silent about an invoice SAP has actually issued.
+    DELETABLE_STATUSES = ('PENDING', 'ERROR', 'REJECTED', 'EDITED', 'CL_RAISED',
+                          'APPROVED')
+
+    @property
+    def has_sap_document(self):
+        """Whether SAP has issued a document for this log.
+
+        The real invariant behind `DELETABLE_STATUSES`, checked directly rather
+        than inferred from the status. A status list is a proxy: it holds only
+        while every posted log is labelled POSTED_TO_SAP, and a post that
+        stamped the identifiers but failed to save the status would slip
+        through it. This does not.
+        """
+        return bool((self.sap_doc_num or '').strip()
+                    or (self.sap_doc_entry or '').strip())
 
     so_number = models.CharField(max_length=100)
     party_name = models.CharField(max_length=255)

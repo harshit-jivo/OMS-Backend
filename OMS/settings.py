@@ -158,6 +158,12 @@ INSTALLED_APPS = [
     # HAIS — Hardware Asset Identification Software. Owns its own `hais`
     # Postgres schema (created by its initial migration), same as payments.
     'HAIS',
+    # Generic, configuration-driven approval workflow engine. Owns its own
+    # `workflow` Postgres schema (created by its initial migration), same as
+    # payments and HAIS. Independent of `approvals`, which keeps serving
+    # PAYMENT and DEPOSIT untouched.
+    'workflow',
+    'backdate',
 ]
 
 MIDDLEWARE = [

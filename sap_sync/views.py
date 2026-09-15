@@ -25,7 +25,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from core.permissions import IsAdminRole
+from core.permissions import HasKey
 from django.db.models import Q
 from core.pagination import OptInPagination, ordering_from
 from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q  , SalesOrderLog
@@ -37,11 +37,28 @@ from orders.models import Order
 
 logger = logging.getLogger(__name__)
 
+
+def _sap_sync_permissions():
+    """Gate for the SAP Sync screen: the `Sap_Sync` key, not the admin role.
+
+    `Sap_Sync` was already grantable from the Permissions page and from a role's
+    bundle, but it only opened the PAGE — every sync trigger and schedule edit
+    behind it still demanded `IsAdminRole`, so a role granted the page got
+    buttons that returned 403. Granting the key now carries the authority the
+    grant implies.
+
+    These endpoints only ever PULL from SAP into the local mirror; nothing here
+    writes back to SAP. An ungranted user is still refused.
+    """
+    return [IsAuthenticated(), HasKey('Sap_Sync')]
+
+
 # ============ Sync Operations ============
 
 class SyncAllView(APIView):
     """Trigger manual sync of all data (Products, Parties, Addresses)"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def post(self, request):
         try:
@@ -70,7 +87,8 @@ class SyncAllView(APIView):
 
 class SyncProductsView(APIView):
     """Trigger manual sync of products only"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def post(self, request):
         try:
@@ -98,7 +116,8 @@ class SyncProductsView(APIView):
 
 class SyncPartiesView(APIView):
     """Trigger manual sync of parties only"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def post(self, request):
         try:
@@ -126,7 +145,8 @@ class SyncPartiesView(APIView):
 
 class SyncPartyAddressesView(APIView):
     """Trigger manual sync of party addresses only"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def post(self, request):
         try:
@@ -443,7 +463,8 @@ class SyncLogListView(ListAPIView):
 
 class SyncScheduleListView(APIView):
     """List and create sync schedules"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def get(self, request):
         schedules = SyncSchedule.objects.all()
@@ -471,7 +492,8 @@ class SyncScheduleListView(APIView):
 
 class SyncScheduleDetailView(APIView):
     """Get, update, or delete a sync schedule"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def get_object(self, pk):
         try:
@@ -532,7 +554,8 @@ class SyncScheduleDetailView(APIView):
 
 class ToggleScheduleView(APIView):
     """Activate or deactivate a schedule"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def post(self, request, pk):
         try:
@@ -611,7 +634,8 @@ class BranchListView(ListAPIView):
 
 class SyncBranchesView(APIView):
     """Sync branches from SAP"""
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _sap_sync_permissions()
     
     def post(self, request):
         try:

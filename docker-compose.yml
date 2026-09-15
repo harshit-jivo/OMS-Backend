@@ -1,0 +1,162 @@
+# ===========================================================================
+#  OMS — full stack
+#
+#    web        nginx serving the React bundle, proxying /api to the backend
+#    backend    Django under gunicorn
+#    scheduler  the APScheduler worker, in its OWN process
+#
+#  `backend` and `scheduler` run the SAME image with different commands. That
+#  is intentional: they share code and settings, and building twice would let
+#  the two drift apart between deploys.
+#
+#  Quick start
+#    docker compose build
+#    docker compose run --rm backend python manage.py migrate
+#    docker compose up -d
+#
+#  This file lives in the BACKEND repo but builds BOTH images, so it needs
+#  the frontend repo checked out alongside it as ../frontend.
+#
+#  There is no `postgres` service. The database is an existing external
+#  server holding live data (DB_HOST in .env); adding one here would
+#  silently point the app at an empty schema. See DEPLOYMENT.md if you do
+#  want Postgres in the compose stack.
+# ===========================================================================
+
+name: oms
+
+# ---------------------------------------------------------------------------
+# Shared by the two Django services. Anchored rather than repeated so a change
+# to the image or the mounts cannot be applied to one and forgotten on the
+# other — the scheduler writing to a different media directory than the web
+# tier is the sort of bug this prevents.
+# ---------------------------------------------------------------------------
+x-backend-common: &backend-common
+  build:
+    # `.` — this file now lives IN the backend repo, so the backend build
+    # context is the directory around it.
+    context: .
+    dockerfile: Dockerfile
+  image: oms-backend:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  volumes:
+    # User uploads. A named volume, not a bind mount: this is the app's own
+    # state and it must survive `docker compose down` and image rebuilds.
+    - oms-media:/app/media
+    # Logs on the HOST, because the first thing anyone does after an incident
+    # is read them, and that should not require the container to still exist.
+    - ./logs:/app/logs
+    # NIC e-invoice / e-way bill private keys, read-only. Bind-mounted rather
+    # than baked in so a key rotation is a file copy, not a rebuild, and so
+    # the keys never sit in an image layer that could be pushed to a registry.
+    # Create ./backend/secrets/ before `up`, even if empty.
+    - ./secrets:/app/secrets:ro
+  logging:
+    # Uncapped json-file logging is the classic way a long-running host runs
+    # out of disk. Three 10MB files per service is enough to debug a bad
+    # afternoon without ever becoming the outage itself.
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # -------------------------------------------------------------------------
+  # Django API
+  # -------------------------------------------------------------------------
+  backend:
+    <<: *backend-common
+    container_name: oms-backend
+    ports:
+      # Bound to LOOPBACK, not 0.0.0.0. nginx reaches gunicorn over the
+      # compose network and does not need this at all — it is published only
+      # so an operator can curl the API directly while debugging.
+      #
+      # `0.0.0.0:8000` here would expose Django straight to the internet,
+      # bypassing nginx's rate limits, body-size cap and TLS. To reach it
+      # from your laptop, tunnel: ssh -L 8000:127.0.0.1:8000 user@server
+      - "127.0.0.1:8000:8000"
+
+  # -------------------------------------------------------------------------
+  # SAP-sync scheduler
+  #
+  # Separate service because it MUST be a single process. It used to start
+  # from inside Django's app registry, which meant one copy per gunicorn
+  # worker — three schedulers racing each other on the same jobs.
+  #
+  # Starting a second copy is harmless anyway: the command takes a Postgres
+  # advisory lock and the loser exits non-zero. That is what makes
+  # `docker compose up -d` safe to run during a rolling restart.
+  # -------------------------------------------------------------------------
+  scheduler:
+    <<: *backend-common
+    container_name: oms-scheduler
+    command: python manage.py run_scheduler
+    depends_on:
+      backend:
+        # Waits for the HEALTHCHECK, not merely for the container to exist.
+        # The scheduler's first act is a database round trip, so starting it
+        # before the backend proves the DB is reachable just produces a
+        # crash-loop that hides the real error.
+        condition: service_healthy
+    # The image's HEALTHCHECK curls /api/auth/login/, which is meaningless
+    # here — this service runs no web server, so the check fails forever and
+    # compose reports a perfectly healthy scheduler as `unhealthy`. That is
+    # not cosmetic: it is the state an operator or an orchestrator watches,
+    # and a permanently-red service trains people to ignore red.
+    #
+    # A HEALTHCHECK is inherited from the image by every container built from
+    # it, so it has to be switched off explicitly per service rather than
+    # merely left unset.
+    #
+    # Nothing replaces it. What the scheduler can usefully be judged on is
+    # its log line ("SAP sync scheduler running") and its exit code, and
+    # `restart: unless-stopped` already acts on the latter — including the
+    # deliberate non-zero exit when a second copy loses the advisory lock.
+    healthcheck:
+      disable: true
+
+  # -------------------------------------------------------------------------
+  # React SPA + reverse proxy
+  # -------------------------------------------------------------------------
+  web:
+    build:
+      # The frontend is a SEPARATE repository, checked out as a SIBLING of
+      # this one. That is a real requirement of running compose from here:
+      # `docker compose build` fails outright if ../frontend is missing.
+      # See DEPLOYMENT.md §3 for the expected layout.
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        # Relative, so the bundle calls whatever origin served it and nginx
+        # proxies onward. Change this ONLY if the API moves to a different
+        # hostname — and then add that origin to CORS_ALLOWED_ORIGINS in
+        # backend/.env, because it stops being a same-origin call.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+        # Needed only for the HAIS device QR, which is printed onto physical
+        # stickers — a wrong value here outlives the container. Set it to the
+        # public URL of this app in production, e.g. https://oms.jivo.in
+        VITE_PUBLIC_APP_URL: ${VITE_PUBLIC_APP_URL:-}
+        # Leave empty until the backend's /api/v1/ mount is deployed.
+        VITE_API_VERSION: ${VITE_API_VERSION:-}
+    image: oms-web:latest
+    container_name: oms-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      backend:
+        # Only `started`. nginx must come up even when the API is unhealthy —
+        # otherwise a backend problem takes the login page down too and users
+        # get a connection refused instead of an error they can report.
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  oms-media:

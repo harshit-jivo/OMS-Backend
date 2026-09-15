@@ -38,7 +38,7 @@ from .models import (
     UserDevice,
     VersionPolicy,
 )
-from .permissions import IsAdminRole
+from core.permissions import HasKey
 from .serializers import AdminUserDeviceSerializer, VersionPolicySerializer
 from .status import filter_by_status, status_counts, thresholds
 from .version_policy import active_policies, clear_policy_cache
@@ -164,10 +164,35 @@ def _filtered_devices(request):
     return qs.order_by(ordering)
 
 
+def _device_management_permissions():
+    """Gate for the Device Management screen: the key, not the admin role.
+
+    `Device_Management` was already grantable — registered in
+    `core/permission_registry.py`, offered on the Permissions page, and enough
+    to open `/Device_Management` per `routeAccess.ts`. But all four endpoints
+    the page calls demanded `IsAdminRole`, so granting it produced a screen
+    that loaded and then failed EVERY request it made. Nobody had hit it only
+    because nobody outside `admin` had been granted the key yet.
+
+    The note in `devices/permissions.py` still holds and is not weakened here:
+    these tables expose every user's device names, activity and software
+    inventory across the org, so they must never be AllowAny. An administrator
+    still has to grant the key deliberately; this only makes the grant work.
+
+    Covers the version-policy PUT as well as the three reads. That write forces
+    a minimum app version on every client, which is the sharpest thing on this
+    page — but it is also the whole point of the screen, and splitting it onto
+    a second key would recreate the ungrantable-capability problem the registry
+    exists to prevent. One page, one key.
+    """
+    return [IsAuthenticated(), HasKey('Device_Management')]
+
+
 class AdminDeviceListView(APIView):
     """GET /api/admin/devices/ — the searchable device table."""
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _device_management_permissions()
 
     def get(self, request):
         qs = _filtered_devices(request)
@@ -196,7 +221,8 @@ class AdminDeviceDetailView(APIView):
     users), so it is not a safe lookup key on its own.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _device_management_permissions()
 
     def get(self, request, pk):
         device = (
@@ -224,7 +250,8 @@ class AdminDeviceDetailView(APIView):
 class AdminDeviceAnalyticsView(APIView):
     """GET /api/admin/devices/analytics/ — summary cards + chart series."""
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _device_management_permissions()
 
     def get(self, request):
         now = timezone.now()
@@ -386,7 +413,8 @@ class AdminVersionPolicyView(APIView):
     a release log. Editing a platform overwrites its single active row.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _device_management_permissions()
 
     def get(self, request):
         existing = {
