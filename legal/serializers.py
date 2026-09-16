@@ -1,7 +1,7 @@
 import os
 
+from . import previews
 from .models import ComplianceRule , LabelData , LabelItem , NutritionUOM , LabelNutrition
-from .service import IMAGE_SUFFIXES
 from rest_framework import serializers
 
 
@@ -100,39 +100,23 @@ class LabelCheckListSerializer(serializers.ModelSerializer):
     def get_image_url(self, obj):
         """A URL a browser can actually put in an `<img>`, or ''.
 
-        The fallback used to be `label_file.url`, which is a PDF for almost
-        every check — and a PDF in an `<img>` is a broken image, not a
-        fallback. Every row written before `preview_image` existed took that
-        path, so the whole history rendered broken thumbnails.
+        TWO bugs live behind this method, and the second is why it is now one
+        line.
 
-        Three steps, in order of confidence:
+        The first: the fallback used to be `label_file.url`, which is a PDF
+        for almost every check — and a PDF in an `<img>` is a broken image,
+        not a fallback. Every row written before `preview_image` existed took
+        that path, so the whole history rendered broken thumbnails.
 
-        1. the stored preview path;
-        2. the path `service.save_preview` WOULD have written, if that file is
-           still on disk — true for every historic check here, because the
-           previews were always generated, only the path was never recorded;
-        3. the upload itself, but ONLY when it is already an image.
-
-        Otherwise '' — and the client shows its own explanation rather than a
-        broken image icon.
+        The second: what it returned was a MEDIA url, and `OMS/urls.py` serves
+        `MEDIA_URL` only under `DEBUG`. So the fix above worked on a
+        developer's machine and the deployed build showed the broken icon
+        anyway, for a different reason. It now names the authenticated view
+        that streams the bytes; `legal/previews.py` holds the resolution order
+        and the reasoning, and the same module is what that view opens, so the
+        two cannot disagree about whether a preview exists.
         """
-        if obj.preview_image:
-            return obj.preview_image
-
-        name = obj.label_file.name if obj.label_file else ''
-        if not name:
-            return ''
-
-        from django.core.files.storage import default_storage
-
-        stem = os.path.splitext(os.path.basename(name))[0]
-        derived = f'labels/previews/{stem}.png'
-        if default_storage.exists(derived):
-            return default_storage.url(derived)
-
-        if os.path.splitext(name)[1].lower() in IMAGE_SUFFIXES:
-            return obj.label_file.url
-        return ''
+        return previews.image_url(obj)
 
     def get_checked_by_name(self, obj):
         user = obj.checked_by

@@ -29,14 +29,30 @@ from rest_framework.test import APIClient
 
 from users.models import User
 
-from . import service
-from .models import ComplianceRule, LabelData
+from . import ocr, service
+# `LabelItem` was used by the history fixture and never imported, so
+# `LabelCheckHistoryTests` failed in setUpClass and the whole class was
+# skipped — silently, since an errored setUpClass reports as one entry.
+from .models import ComplianceRule, LabelData, LabelItem
 from .ocr import (OcrRead, Word, contains as ocr_contains,
                   fssai_numbers as ocr_fssai_numbers, locate as ocr_locate)
 from .schemas import GeminiLabelReport, GeminiRuleFinding, RuleFinding
 
 UPLOAD_URL = '/api/legal/upload/'
 RULES_URL = '/api/legal/rules/'
+
+
+class _FakePytesseract:
+    """Stands in for the `pytesseract` module.
+
+    `_tesseract()` only ever reads and writes `pytesseract.pytesseract
+    .tesseract_cmd`, and the real package's default for it is the bare name
+    `tesseract` — i.e. "find it on PATH". Starting from that default is what
+    lets a test tell "left alone" apart from "overridden".
+    """
+
+    class pytesseract:  # noqa: N801 — mirrors the real module's shape
+        tesseract_cmd = 'tesseract'
 
 
 def gemini_reply(*findings) -> GeminiLabelReport:
@@ -98,9 +114,15 @@ class CrossReferenceTests(TestCase):
             code=code, name=f'Rule {code}', rule_text='...',
             critical_tokens=tokens or [], is_critical=critical)
 
-    def _finding(self, code='R1', status='PASS', remarks='Found it.'):
+    def _finding(self, code='R1', status='PASS', remarks='Found it.',
+                 evidence_text=''):
+        # `evidence_text` is REQUIRED on the schema — it arrived with
+        # highlighting, and this helper was never updated, so every test in
+        # this class had been dying in pydantic validation before reaching a
+        # single assertion about cross-referencing.
         return GeminiRuleFinding(rule_id=code, rule_name=f'Rule {code}',
-                                 status=status, remarks=remarks)
+                                 status=status, remarks=remarks,
+                                 evidence_text=evidence_text)
 
     def test_a_rule_with_no_tokens_gets_no_opinion(self):
         """Most rules are judgements OCR cannot corroborate. Claiming it did
@@ -176,6 +198,51 @@ class CrossReferenceTests(TestCase):
 
         self.assertEqual(result.status, 'PASS')
         self.assertIsNone(result.ocr_verified)
+
+
+class NativeBinaryPathTests(TestCase):
+    """A stale `TESSERACT_CMD` / `POPPLER_PATH` must not disable the pipeline.
+
+    `.env` is per-host (compose `env_file`), so a deployment file seeded from
+    a developer's is an ordinary thing to happen — and it carries Windows
+    paths. Handed to the Linux host those name nothing, and they OVERRIDE the
+    binaries the image actually apt-installs: OCR goes quiet behind "OCR
+    unavailable, AI review only" and every PDF upload fails, both while
+    tesseract and poppler sit installed and on PATH.
+
+    The failure is silent and it points at the wrong thing — the banner reads
+    as "not installed" — so these pin that a path which is not there is
+    ignored rather than obeyed.
+    """
+
+    @override_settings(TESSERACT_CMD=r'C:\Program Files\Tesseract-OCR	esseract.exe')
+    def test_a_tesseract_path_that_does_not_exist_falls_back_to_path(self):
+        with patch.dict('sys.modules', {'pytesseract': _FakePytesseract()}):
+            module = ocr._tesseract()
+
+        # Left alone, so pytesseract looks the binary up on PATH.
+        self.assertEqual(module.pytesseract.tesseract_cmd, 'tesseract')
+
+    def test_a_tesseract_path_that_exists_is_used(self):
+        """The setting still works — this is a fallback, not a removal."""
+        import sys
+
+        real = sys.executable  # any file that is certainly there
+        with override_settings(TESSERACT_CMD=real),              patch.dict('sys.modules', {'pytesseract': _FakePytesseract()}):
+            module = ocr._tesseract()
+
+        self.assertEqual(module.pytesseract.tesseract_cmd, real)
+
+    @override_settings(POPPLER_PATH=r'C:\poppler-26.02.0\Libraryin')
+    def test_a_poppler_path_that_does_not_exist_falls_back_to_path(self):
+        # `load_image` imports it inside the function, so the patch goes on
+        # the source module rather than on `service`.
+        with patch('pdf2image.convert_from_path',
+                   return_value=['page one']) as convert:
+            page = service.load_image('label.pdf')
+
+        self.assertEqual(page, 'page one')
+        self.assertIsNone(convert.call_args.kwargs['poppler_path'])
 
 
 class TokenMatchingTests(TestCase):
@@ -523,8 +590,21 @@ class LabelCheckViewTests(TestCase):
         self.client.force_authenticate(self.user)
 
     def _post(self, reply, ocr_text='FSSAI 10012345678901  MRP Rs 250'):
+        """POST a label with the model mocked and OCR stubbed.
+
+        THE STUB GOES ON `ocr.read`, WHICH IS WHAT THE PIPELINE CALLS.
+        It used to go on `ocr.extract_text` — the entry point before
+        `read` replaced it — so the patch bound to a function nothing
+        invoked and the real Tesseract ran instead. On a host without the
+        binary that raised, which happens to produce `ocr_available:
+        False`, so the one test asserting a MISSING binary passed for the
+        wrong reason while the three asserting a working one failed.
+        Neither verdict said anything about the code: install Tesseract
+        and all four simply swap over.
+        """
+        read = OcrRead(text=ocr_text, words=(), size=(8, 8))
         with patch.object(service, 'call_gemini', return_value=reply) as call, \
-             patch.object(service.ocr, 'extract_text', return_value=ocr_text):
+             patch.object(service.ocr, 'read', return_value=read):
             response = self.client.post(
                 UPLOAD_URL, {'label_file': png_upload()}, format='multipart')
         return response, call
@@ -546,9 +626,13 @@ class LabelCheckViewTests(TestCase):
         self.assertTrue(body['ocr_available'])
 
         # The rendered preview, not the upload — a PDF in an <img> shows
-        # nothing, and that is the common upload.
-        self.assertIn('previews/', body['image_url'])
-        self.assertTrue(body['image_url'].endswith('.png'))
+        # nothing, and that is the common upload. Named as an ENDPOINT rather
+        # than as `/media/labels/previews/x.png`, because MEDIA_URL is routed
+        # only under DEBUG and that path is a 404 in every deployed build.
+        check = LabelData.objects.latest('id')
+        self.assertEqual(body['image_url'],
+                         f'/api/legal/history/{check.id}/preview/')
+        self.assertTrue(check.preview_image.endswith('.png'))
 
         self.assertEqual(body['summary'],
                          {'total': 2, 'passed': 1, 'failed': 1,
@@ -566,6 +650,30 @@ class LabelCheckViewTests(TestCase):
         first = body['findings'][0]
         self.assertEqual(first['rule_id'], 'FSSAI_LICENCE')
         self.assertTrue(first['ocr_verified'])
+
+    def test_the_upload_names_the_preview_endpoint_not_a_media_path(self):
+        """The regression that made a check look broken once deployed.
+
+        `image_url` used to be `/media/labels/previews/x.png`, and
+        `OMS/urls.py` routes MEDIA_URL only under `DEBUG`. So a check ran
+        fine, stored its report, returned a path — and the page beside the
+        findings showed a broken image icon on the server, where the record is
+        actually read. A fresh check and a reopened one must name the SAME
+        gated endpoint; `legal/previews.py` is the single place that decides.
+
+        Deliberately asserts nothing about OCR, so it still reports on a host
+        with no Tesseract installed.
+        """
+        response, _ = self._post(gemini_reply(
+            ('FSSAI_LICENCE', 'FSSAI logo and licence number', 'PASS', 'Present.'),
+            ('MRP_DECLARATION', 'MRP inclusive of all taxes', 'PASS', 'Present.'),
+        ))
+        check = LabelData.objects.latest('id')
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()['image_url'],
+                         f'/api/legal/history/{check.id}/preview/')
+        self.assertNotIn('/media/', response.json()['image_url'])
 
     def test_the_report_is_stored_with_the_upload(self):
         """A check that cannot be looked at afterwards cannot be defended."""
@@ -614,8 +722,11 @@ class LabelCheckViewTests(TestCase):
             ('MRP_DECLARATION', 'MRP inclusive of all taxes', 'PASS', '.'),
         )
 
+        # On `read`, not `extract_text` — see `_post`. Patched on the
+        # wrong name, this test passed only on a host that HAD no
+        # Tesseract: it was testing the host, not the degradation.
         with patch.object(service, 'call_gemini', return_value=reply), \
-             patch.object(service.ocr, 'extract_text',
+             patch.object(service.ocr, 'read',
                           side_effect=service.ocr.OcrUnavailable('no binary')):
             response = self.client.post(
                 UPLOAD_URL, {'label_file': png_upload()}, format='multipart')
@@ -722,13 +833,26 @@ class LabelCheckHistoryTests(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        from django.core.files.base import ContentFile
+        from django.core.files.storage import default_storage
+
         cls.user = User.objects.create_superuser(
             username='zz-history', password='pw', name='Priya')
         cls.item = LabelItem.objects.create(item_name='Mustard Oil 200ml')
 
+        # A REAL file, not just a recorded path. `previews.resolve` only
+        # advertises artwork it has confirmed it can open — that invariant is
+        # what keeps the serializer and the streaming view from disagreeing —
+        # so a fixture that records a path to nothing would be testing the
+        # predates-previews branch while claiming to test this one.
+        # The saved name is read back rather than assumed: `save` de-duplicates
+        # against whatever an earlier run left in MEDIA_ROOT.
+        cls.preview_name = default_storage.save(
+            'labels/previews/passed.png', ContentFile(png_bytes()))
+
         cls.passed = LabelData.objects.create(
             label_file='labels/passed.pdf',
-            preview_image='/media/labels/previews/passed.png',
+            preview_image=default_storage.url(cls.preview_name),
             checked_by=cls.user, label_item=cls.item,
             ocr_text='FSSAI 10015064000541',
             report_json={
@@ -763,9 +887,40 @@ class LabelCheckHistoryTests(TestCase):
             label_file='labels/legacy.pdf',
             parameter_json={'food_name': {'value': 'Old shape'}})
 
+    @classmethod
+    def tearDownClass(cls):
+        from django.core.files.storage import default_storage
+
+        # Windows will not delete an open file; every test that streams this
+        # one closes its response (see `_preview`).
+        default_storage.delete(cls.preview_name)
+        super().tearDownClass()
+
     def setUp(self):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
+
+    def _preview(self, url):
+        """GET a streamed preview and DRAIN it. Returns `(response, body)`.
+
+        Draining is not just how the bytes are read — it is how the file gets
+        closed, and on Windows an open file cannot be deleted, so a test that
+        leaves one open takes its own cleanup down with it and the traceback
+        names `default_storage.delete` rather than the test that caused it.
+
+        Do NOT also call `response.close()`. Django's test client wraps a
+        streaming response so that exhausting it closes the response with
+        `close_old_connections` temporarily disconnected from
+        `request_finished` — because inside a `TestCase` the connection is
+        mid-transaction with autocommit off, which is exactly the state that
+        makes that receiver drop it. The wrapper reconnects the receiver on
+        its way out, so a second, manual `close()` fires the signal unguarded:
+        the connection goes, and every later test in the class fails with
+        "connection already closed", nowhere near the test that did it.
+        """
+        response = self.client.get(url)
+        body = b''.join(response.streaming_content) if response.streaming else b''
+        return response, body
 
     def test_lists_checks_newest_first(self):
         body = self.client.get(self.HISTORY_URL).json()
@@ -788,7 +943,8 @@ class LabelCheckHistoryTests(TestCase):
         self.assertEqual(row['checked_by_name'], 'Priya')
         self.assertEqual(row['item_name'], 'Mustard Oil 200ml')
         self.assertEqual(row['file_name'], 'passed.pdf')
-        self.assertEqual(row['image_url'], '/media/labels/previews/passed.png')
+        self.assertEqual(row['image_url'],
+                         f'/api/legal/history/{self.passed.id}/preview/')
 
     def test_a_check_with_no_report_is_not_listed(self):
         """The previous pipeline's rows would be a link to a blank page."""
@@ -846,14 +1002,29 @@ class LabelCheckHistoryTests(TestCase):
 
     def test_an_image_upload_is_still_offered_directly(self):
         """A PNG upload needs no preview to be displayable."""
+        from django.core.files.base import ContentFile
+        from django.core.files.storage import default_storage
+
         row = LabelData.objects.create(
             label_file='labels/direct.png',
             report_json={'findings': [], 'summary': {}},
         )
+        saved = default_storage.save('labels/direct.png',
+                                     ContentFile(png_bytes()))
+        try:
+            body = self.client.get(f'{self.HISTORY_URL}{row.id}/').json()
 
-        body = self.client.get(f'{self.HISTORY_URL}{row.id}/').json()
-
-        self.assertTrue(body['image_url'].endswith('direct.png'))
+            self.assertEqual(body['image_url'],
+                             f'/api/legal/history/{row.id}/preview/')
+            # And the endpoint serves the upload itself, not a preview it
+            # never had.
+            served, _ = self._preview(body['image_url'])
+            self.assertEqual(served['Content-Type'], 'image/png')
+        finally:
+            # MEDIA_ROOT is the developer's real media/ directory here, so a
+            # test that leaves its fixture behind changes what the NEXT run
+            # sees — `default_storage.save` de-duplicates around it.
+            default_storage.delete(saved)
 
     def test_an_unrecorded_preview_is_recovered_from_disk(self):
         """The previews were always written; only the path went unrecorded.
@@ -869,9 +1040,60 @@ class LabelCheckHistoryTests(TestCase):
                                      ContentFile(png_bytes()))
         try:
             body = self.client.get(f'{self.HISTORY_URL}{row.id}/').json()
-            self.assertTrue(body['image_url'].endswith('recovered.png'))
+            self.assertEqual(body['image_url'],
+                             f'/api/legal/history/{row.id}/preview/')
+            served, _ = self._preview(body['image_url'])
+            self.assertEqual(served.status_code, 200)
         finally:
             default_storage.delete(saved)
+
+    # ── The preview endpoint ────────────────────────────────────────────
+    #
+    # The artwork used to be a `/media/` URL, and `OMS/urls.py` routes
+    # MEDIA_URL only under DEBUG. So the label rendered on every developer's
+    # machine and was a broken image icon on the deployed server — the one
+    # place the compliance record is actually read. These pin the replacement.
+
+    def test_the_preview_streams_the_stored_artwork(self):
+        response, body = self._preview(
+            f'{self.HISTORY_URL}{self.passed.id}/preview/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'image/png')
+        self.assertEqual(body, png_bytes())
+        # Cached, because a preview is written once under a de-duplicated name
+        # and never rewritten — but PRIVATE, or the gate below is decorative
+        # the moment a shared proxy is in front of this.
+        self.assertIn('private', response['Cache-Control'])
+
+    def test_a_check_with_no_artwork_is_a_404_not_a_500(self):
+        """The predates-previews row: an ordinary state, not a failure."""
+        row = LabelData.objects.create(
+            label_file='labels/no-preview.pdf',
+            report_json={'findings': [], 'summary': {}},
+        )
+
+        self.assertEqual(
+            self.client.get(f'{self.HISTORY_URL}{row.id}/preview/').status_code,
+            404)
+
+    def test_the_preview_is_behind_the_legal_gate(self):
+        """The whole reason this is an endpoint and not a media path.
+
+        Serving MEDIA_ROOT in production would have been the one-line fix and
+        would have put every label PDF and every rendered preview behind a
+        guessable URL with no permission check — for the one module whose
+        every other route is gated. Pre-launch packaging artwork is exactly
+        what that gate is for.
+        """
+        outsider = User.objects.create_user(
+            username='zz-outsider-preview', password='pw', name='Outsider')
+        client = APIClient()
+        client.force_authenticate(outsider)
+
+        self.assertEqual(
+            client.get(f'{self.HISTORY_URL}{self.passed.id}/preview/').status_code,
+            403)
 
     def test_history_is_behind_the_legal_gate(self):
         outsider = User.objects.create_user(
