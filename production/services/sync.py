@@ -6,7 +6,7 @@ JSAP's feed into `PRDO.PlannedProductionOrders` stopped on 13 Aug 2026 and its
 approval job kept logging "The job succeeded" every 60 seconds for 33 days,
 because its intake was `WHERE Status = 'P'` and an empty source is not an
 error. 432 production orders were raised in that window and none entered any
-approval. See `docs/backend/PRODUCTION_ORDER_JSAP_SAP.md` §5.
+approval. See `docs/Approvals/PRODUCTION_ORDER_JSAP_SAP.md` §5.
 
 So the rules here are about being noisy, not about being clever:
 

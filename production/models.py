@@ -21,11 +21,11 @@ this module's business, and lives in the `production` schema:
     ProductionOrderActionLog   what was decided, by whom, when
 
 No task table — see `ProductionOrderFlow`. Same shape as BKDT
-(`docs/backend/BKDT.md` §3), and for the same reasons.
+(`docs/Approvals/BKDT.md` §3), and for the same reasons.
 
 WHAT JSAP GOT WRONG, AND WHERE IT IS FIXED HERE
 ------------------------------------------------
-See `docs/backend/PRODUCTION_ORDER_JSAP_SAP.md` for the evidence.
+See `docs/Approvals/PRODUCTION_ORDER_JSAP_SAP.md` for the evidence.
 
 * `jsDocEntry.docEntry` carried no company, and DocEntry sequences run PER
   COMPANY. 11 OIL orders ended up recorded against Beverages and one has been
@@ -133,7 +133,7 @@ class ProductionOrder(models.Model):
     #: `OITM.U_Sub_Group` and `OITM.Series`. Snapshotted so a workflow
     #: condition can move off the `PM%` item-code prefix — a naming convention
     #: — and onto SAP's own tagging, with no schema change. See
-    #: `docs/backend/PRDO_DESIGN.md` §4.
+    #: `docs/Approvals/PRDO_DESIGN.md` §4.
     item_group = models.CharField(max_length=50, blank=True, default='')
     item_series = models.IntegerField(null=True, blank=True)
 

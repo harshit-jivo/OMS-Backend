@@ -1,7 +1,7 @@
 """PRDO — the rules worth holding down.
 
 Most of these are things the JSAP predecessor got wrong, documented with
-evidence in `docs/backend/PRODUCTION_ORDER_JSAP_SAP.md`:
+evidence in `docs/Approvals/PRODUCTION_ORDER_JSAP_SAP.md`:
 
 * DocEntry is unique only PER COMPANY — JSAP had no company column, so 11 OIL
   orders were recorded against Beverages;
