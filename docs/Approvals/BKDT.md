@@ -37,7 +37,7 @@ approvals document lives under `docs/Approvals/`; there is no copy under
 
 Related documents:
 `docs/Approvals/BKDT_TO_OMS_MIGRATION_PLAN.md` (the migration analysis) and
-`docs/architecture/WORKFLOW_MODULE_INTEGRATION.md` (how any module plugs into
+`docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md` (how any module plugs into
 the engine).
 
 ---

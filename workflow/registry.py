@@ -33,7 +33,7 @@ migration, a `post_migrate` handler, `AppConfig.ready()`, a management command
 or a deploy script, and safe to call repeatedly. Calling it twice updates one
 row; it never creates a second.
 
-See `docs/architecture/WORKFLOW_MODULE_INTEGRATION.md` for the full contract.
+See `docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md` for the full contract.
 """
 import logging
 

@@ -1,4 +1,4 @@
-"""The module-registration contract — `docs/architecture/WORKFLOW_MODULE_INTEGRATION.md`.
+"""The module-registration contract — `docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md`.
 
 Proves that registering a module is enough to configure a workflow and have
 the generic engine SELECT it, with no module-specific engine code. The engine

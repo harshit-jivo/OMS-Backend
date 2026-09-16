@@ -1,6 +1,6 @@
 """Generic workflow engine — configuration, runtime, and the flow base.
 
-Implements `docs/architecture/WORKFLOW_ENGINE_IMPLEMENTATION_PLAN.md`.
+Implements `docs/Approvals/WORKFLOW_ENGINE_IMPLEMENTATION_PLAN.md`.
 
 Three things this module deliberately does NOT contain, each a settled
 decision in the approved plan:
@@ -507,4 +507,4 @@ class WorkflowUserReplacement(_Timestamped):
 # A module asks `workflow.services.selection.select_for_module()` which
 # workflow applies and what its stages are, then builds its OWN task, action,
 # history and lifecycle from that answer. See
-# `docs/architecture/WORKFLOW_MODULE_INTEGRATION.md`.
+# `docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md`.
