@@ -38,9 +38,36 @@ CASE WHEN OCRD."GroupCode" = 145 THEN 'Export Invoice' WHEN TO_VARCHAR(OINV."GST
 
 INITCAP((SELECT "CompnyName" FROM OADM)) CompnyName, OCRY."Name" AS "CONTRYNAM", IFNULL(TO_VARCHAR(OINV."U_Dipatch_Date", 'DD/MM/YYYY'), NULL) AS "DispatchDate", OINV."DocNum", OCRD."CardName",
 
+-- ShipToName: the CONSIGNEE. Gated on OCRD."U_AddressIdPrint"='Y', which is
+-- currently NULL for all 1,186 customers -- so today every bill falls through to
+-- OINV."CardName", the BILL-TO party, and a third-party (bill-to/ship-to)
+-- invoice prints the buyer's name above the consignee's address.
+--
+-- THE GATE MUST STAY. Removing it was tried and rejected on evidence: CRD1
+-- address records here are named as LABELS, not legal names, so printing them
+-- unconditionally changed 3,191 of 3,213 FY invoices, and not for the better --
+--   JIVO MART PVT LTD            -> "JIVO MART PVT LTD SONIPAT BHAKARPUR"
+--   PURE AGROCHEM CORPORATION    -> "PURE AGROCHEM CORPORATION DELIVERY"
+--   RAJESHWAR KISHORE MAHENDERPAL-> "RAJESHWAR KISHORE MAHENDERPAL SHIP TO"
+--   JASMEET SINGH BHAKHARPUR ... -> "HARYANA"          <-- name lost entirely
+-- The last one is the disqualifier: 13 bills would name a state as the
+-- consignee. So the flag is the right mechanism after all -- it is per-customer
+-- opt-in, and it is only safe to tick where that customer's ship-to address
+-- records are named after real consignees.
+--
+-- To fix a customer: set OCRD."U_AddressIdPrint" = 'Y' on that BP (Business
+-- Partner Master Data -> Ctrl+Shift+U -> "Print Address Id"). Verify their
+-- ship-to address NAMES read as party names first.
 Case When "U_AddressIdPrint"='Y' Then (Select A."Address" from CRD1 A Where A."CardCode"=OINV."CardCode" and A."AdresType"='S' and A."Address"=OINV."ShipToCode") Else OINV."CardName" End ShipToName,
 
-Case When "U_AddressIdPrint"='Y' Then (Select A."Address" from CRD1 A Where A."CardCode"=OINV."CardCode" and A."AdresType"='B' and A."Address"=OINV."ShipToCode") Else OINV."CardName" End BillToName,
+-- BillToName: matched on PayToCode. It read OINV."ShipToCode" -- a ship-to
+-- address name, which can never match an AdresType='B' row -- so the subquery
+-- returned NULL whenever it ran. It was harmless only because the
+-- U_AddressIdPrint gate never opened; anyone who ticked that flag would have
+-- fixed the ship-to name and blanked the bill-to name in the same stroke. The
+-- gate is kept here on purpose: bill-to output stays byte-for-byte as it is
+-- today (flag NULL -> CardName), and the latent trap is defused.
+Case When "U_AddressIdPrint"='Y' Then (Select A."Address" from CRD1 A Where A."CardCode"=OINV."CardCode" and A."AdresType"='B' and A."Address"=OINV."PayToCode") Else OINV."CardName" End BillToName,
 
 IFNULL(CRD1."Address2", '') || ' ' || IFNULL(CRD1."Address3", '') || ' ' || IFNULL(CRD1."StreetNo", '') || ' ' || IFNULL(CRD1."Street", '') || '  ' || IFNULL(CRD1."Block", '') || '  ' || IFNULL(CRD1."City", '') || ' - ' || IFNULL((SELECT OCRY."Name" FROM OCRY WHERE OCRY."Code" = CRD1."Country"), '') || '-' || IFNULL(CRD1."ZipCode", '') AS "ADDRESS",
 
@@ -899,7 +926,7 @@ CASE
 
 CASE
 
-WHEN OINV."CardCode" IN ('CUSTA000606','CUSTA000680','CUSTA001061','CUSTA000673','CUSTA000354','CUSTA000844') 
+WHEN OINV."CardCode" IN ('CUSTA000606','CUSTA000680','CUSTA001061','CUSTA000673','CUSTA000354','CUSTA000844','CUSTA000993')
 
          AND (CRD1."Address" LIKE 'BARU SAHIB' 
 
@@ -929,6 +956,7 @@ WHEN OINV."CardCode" IN ('CUSTA000606','CUSTA000680','CUSTA001061','CUSTA000673'
 
               OR CRD1."Address" like 'THE KALGIDHAR SOCIETY%'
 
+              OR CRD1."Address" like 'RISHABGLOBAL INDUSTRIES PRIVATE LIMITED HARYANA%'
               OR CRD1."Address"='CONNEDIT BUSINESS SOLUTIONS PVT. LTD BIHAR')
 
     THEN CRD1."Address"
