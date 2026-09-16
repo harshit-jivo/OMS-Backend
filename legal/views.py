@@ -34,6 +34,7 @@ from django.http import FileResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from rest_framework.views import APIView
 from rest_framework import status
+from .metrology import PackageSpec
 from .service import LabelCheckError, run_label_check
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
@@ -81,7 +82,14 @@ class FeedtoAIView(LegalEndpointGate, APIView):
          "findings": [{"rule_id", "rule_name", "status", "remarks",
                        "ocr_verified"}],
          "summary": {"total", "passed", "failed", "compliant"},
-         "ocr_available": bool, "rule_count": int}
+         "ocr_available": bool, "rule_count": int,
+         "skipped": [{"rule_id", "rule_name", "reason"}],
+         "package_spec": {...} | null}
+
+    `skipped` is the measurement rules that did not apply to this pack — an
+    unfortified product does not fail the fortification rules, it is not asked
+    them. `rule_count` stays the count of ACTIVE rules, so the two together
+    say "21 of 26 checked, and here is why the other five were not".
 
     `ocr_text` is deliberately NOT returned. It is stored (for explaining a
     finding later) but it is a page of OCR noise that no reviewer reads, and
@@ -114,8 +122,17 @@ class FeedtoAIView(LegalEndpointGate, APIView):
         instance = serializer.save()
 
         try:
-            report = run_label_check(instance.label_file.path,
-                                     request.data.get('item_id'))
+            report = run_label_check(
+                instance.label_file.path,
+                request.data.get('item_id'),
+                # The physical facts the artwork cannot supply. Parsed
+                # tolerantly (`PackageSpec.from_request` keeps anything blank
+                # or unparseable as None) rather than validated into a 400:
+                # the dimensional rules are optional, and refusing an upload
+                # over a mistyped circumference would cost the reviewer the
+                # twenty-one checks that do not need it.
+                spec=PackageSpec.from_request(request.data),
+            )
         except LabelCheckError as exc:
             # The upload row stays: a failed check is worth being able to look
             # at afterwards, and the file is already on disk either way.
@@ -133,6 +150,11 @@ class FeedtoAIView(LegalEndpointGate, APIView):
             'summary': report['summary'],
             'ocr_available': report['ocr_available'],
             'rule_count': report['rule_count'],
+            # Stored, not merely returned: a dimensional finding is
+            # unexplainable without the dimensions it was computed from, and
+            # a reopened check that cannot explain itself is not a record.
+            'skipped': report['skipped'],
+            'package_spec': report['package_spec'],
         }
         instance.preview_image = report.get('preview_url') or ''
         instance.checked_by = request.user if request.user.is_authenticated else None
@@ -162,6 +184,8 @@ class FeedtoAIView(LegalEndpointGate, APIView):
             'summary': report['summary'],
             'ocr_available': report['ocr_available'],
             'rule_count': report['rule_count'],
+            'skipped': report['skipped'],
+            'package_spec': report['package_spec'],
         }, status=status.HTTP_201_CREATED)
 
 
