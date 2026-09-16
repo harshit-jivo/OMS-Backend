@@ -99,14 +99,24 @@ def may_edit(user, backdate):
     question: an Edit control offered to somebody the server will refuse is
     worse than no control at all.
 
-    Normally the requester, and only while nothing has been decided — an
-    approver agreed to the request as it read in front of them.
+    TWO PEOPLE MAY EDIT A PENDING REQUEST:
 
-    The exception is a SAP refusal. Nothing is approved in that state (the
-    final approval calls SAP first and is only written if SAP accepted), the
-    request is stuck at its last stage, and the person LOOKING at the database's
-    error is the approver holding it. They may correct it and try again rather
-    than relay it back through the requester.
+    * the REQUESTER, while nothing has been decided; and
+    * the APPROVER CURRENTLY HOLDING IT — the effective user of the stage it is
+      waiting at.
+
+    The approver is included because they are the one who can see what is wrong
+    with it. A document type SAP will not accept, or a window off by a day, was
+    previously a rejection and a re-raise; now it is a correction and an
+    approval. Every change is written to the action log with WHO made it, so
+    the record shows an approver amended the request rather than implying the
+    requester did.
+
+    ONE THING THIS DOES NOT DO: re-open stages that have already approved. An
+    earlier approver agreed to the request as it read in front of them, so
+    editing after that point is refused — except after a SAP refusal, where
+    nothing is approved at all (the final approval calls SAP first and is only
+    written if SAP accepted) and correcting it is not rewriting history.
     """
     from backdate.models import FlowStatus, HanaStatus, LogAction
 
@@ -117,12 +127,14 @@ def may_edit(user, backdate):
     sap_refused = flow is not None and flow.hana_status == HanaStatus.FAILED
 
     if backdate.created_by_id != user.pk:
-        if not sap_refused:
-            return False, 'Only the requester can edit this request.', NOT_YOURS
-        allowed, _reason = may_act_on(user, flow)
+        # The approver holding it may edit it — they are the one who can see
+        # what is wrong. `may_act_on` is the same check that decides whether
+        # they may APPROVE it, so the right to correct and the right to decide
+        # always travel together and cannot drift apart.
+        allowed, _reason = may_act_on(user, flow) if flow else (False, '')
         if not allowed:
-            return False, ('Only the requester or the approver holding this '
-                           'request can edit it.'), NOT_YOURS
+            return False, ('Only the requester or the approver currently '
+                           'reviewing this request can edit it.'), NOT_YOURS
 
     if flow is not None and flow.status != FlowStatus.PENDING:
         return False, (f'This request is already '

@@ -14,6 +14,57 @@ with no registry row cannot start a workflow at all. The module registers
 
 ---
 
+## 0. Start here — the whole integration, in order
+
+Everything below expands on these nine steps. Follow them in order and a new
+module is Workflow-enabled with nothing left to remember. `backdate` (BKDT) is
+the worked reference throughout: when a rule is easier to read as code, open the
+equivalent file in `backdate/` — and `docs/Approvals/BKDT.md` describes that
+module end to end.
+
+| # | Step | Where | Section |
+|---|---|---|---|
+| 1 | Create the Django app and its own PostgreSQL schema | `<module>/models.py`, `0001_initial` | §0.1 |
+| 2 | Create **three** tables of your own: the document, its flow, its action log | `<module>/models.py` | §0.1 |
+| 3 | Register the module — `code` + `name`, nothing else | `<module>/apps.py` | §3 |
+| 4 | Add permission keys and gate every endpoint | `core/permission_registry.py` | §8 |
+| 5 | Call `select_for_module()` when a document is submitted | `<module>/services/flow.py` | §6 |
+| 6 | Own approve / reject: advance the stage, write the log | `<module>/services/flow.py` | §9 |
+| 7 | Resolve the current approver through `get_stage_assignment()` — never store it | `<module>/permissions.py` | §8, §10 |
+| 8 | Configure workflows, queries and stages in the Workflows UI | runtime, not code | §5, §12 |
+| 9 | Work the integration checklist | tests | §13 |
+
+### 0.1 The three tables your module owns
+
+The engine owns configuration. **Your module owns its runtime**, and that is
+always the same three tables. BKDT's are named in brackets.
+
+| Table | Holds | Rows |
+|---|---|---|
+| **the document** (`backdate.backdate`) | what was asked for — the business fields, the company, who raised it | one per request |
+| **the flow** (`backdate.backdate_flow`) | where it is now — status, current stage, which workflow was chosen, any external-system outcome | **exactly one per document** (UNIQUE FK) |
+| **the action log** (`backdate.backdate_action_logs`) | what has happened — CREATE / UPDATE / APPROVE / REJECT, who, when, why, and what changed | many per document, append-only |
+
+Rules that hold for every module:
+
+* The document and its flow **commit together**. A document that cannot be
+  routed must not exist — see §6.
+* The flow stores **`current_stage` as the engine's stage id**, never a copy of
+  the stage's name, sequence or user. That id is the whole integration: an
+  administrator reassigning a stage re-routes every request already waiting
+  there, with nothing in your module updated.
+* The action log is **append-only**. Nothing updates or deletes a row in it.
+* Give your own schema a `db_table = '<schema>"."<table>'` and a
+  `RunSQL('CREATE SCHEMA IF NOT EXISTS <schema>;')` in `0001_initial`, the way
+  `workflow` and `backdate` both do.
+
+### 0.2 What you must NOT build
+
+No task table, no per-module copy of the engine's tables, no stored approver,
+no quorum columns. §16 is the full list and the reasons.
+
+---
+
 ## 1. Why every Workflow-enabled module needs a registry row
 
 `workflow.workflow_modules` stores only module identity: **`code` + `name`**.
@@ -514,22 +565,38 @@ Rules, all enforced:
 
 ## 13. Integration testing checklist
 
+**Registration**
 - [ ] module registered — **exactly one** row for its `code`
 - [ ] the registry row holds `code` + `name` only
 - [ ] re-running registration does not duplicate the row
-- [ ] the flow model subclasses `WorkflowFlowBase` and sets `workflow_module_code`
-- [ ] `workflow.flows.flow_model_for(module)` returns that class
-- [ ] workflow + query + stage created through the normal APIs
+
+**Your own tables (§0.1)**
+- [ ] three tables: the document, its flow, its action log
+- [ ] exactly one flow row per document (UNIQUE FK)
+- [ ] the flow stores the engine's `current_stage` **id** — no copied name,
+      sequence or user
+- [ ] the action log is append-only; nothing updates or deletes a row
+
+**Selection**
+- [ ] workflow + query + stage created through the Workflows UI
 - [ ] query validated (`validated_at` is set)
-- [ ] submitting a document selects the workflow and creates **one** task
-- [ ] the task appears in the right user's inbox and nobody else's
-- [ ] an unauthorised user gets `UnauthorizedWorkflowAction`
-- [ ] approve advances to the next stage; the last approve completes the flow
-- [ ] reject ends the execution and opens no further stage
-- [ ] zero matches → `WorkflowNotConfigured`, nothing created
+- [ ] submitting a document selects exactly one workflow and opens its first
+      stage
+- [ ] zero matches → `WorkflowNotConfigured`, and the DOCUMENT rolls back with
+      it — nothing is left unroutable
 - [ ] two matches → `AmbiguousWorkflowSelection`, full rollback
-- [ ] resubmission reuses the same flow row and keeps history
-- [ ] **no module-specific workflow tables were created** (§8 of the task brief)
+
+**Acting**
+- [ ] the request appears for the stage's effective user and nobody else
+- [ ] approving requires BOTH the permission key AND being that effective user;
+      each alone is refused
+- [ ] approve advances to the next stage; the last approve completes the flow
+- [ ] reject ends the flow and opens no further stage
+- [ ] a replacement's window re-routes the queue with nothing reassigned
+- [ ] changing a stage's user re-routes requests already waiting there
+
+**Nothing extra**
+- [ ] **no module-specific workflow tables were created** (§16)
 
 ## 14. Example registration
 
@@ -613,4 +680,5 @@ So **do not create** `budget_workflow`, `budget_workflow_stage`,
 stage, query or SQL-executor implementation.
 
 A business module owns exactly three things: its **business document**, its
-**flow state** (one `WorkflowFlowBase` subclass), and its **own history/log**.
+**flow state** (one flow row per document, a plain model of its own — see
+§0.1), and its **own history/log**.

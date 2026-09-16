@@ -1079,6 +1079,179 @@ class SapPayloadTests(_Base):
         self.assertIn('invalid table name: BKDT', results[0]['response'])
         self.assertIn('RuntimeError', results[0]['response'])
 
+    def test_the_expiry_is_sent_on_saps_own_clock(self):
+        """SAP compares timeLimit against ITS clock, which runs at UTC+05:30.
+
+        Sending UTC made every grant lapse 5h30m early — an approved request
+        that stops working before the user thinks it has. JSAP has always
+        written local time here; its own record and the HANA row it produced
+        are identical to the second on live rows.
+        """
+        import datetime
+        import zoneinfo
+        from backdate.services.hana import build_payload, to_sap_clock
+
+        ist = zoneinfo.ZoneInfo('Asia/Kolkata')
+        req = make_request(self.requester)
+        # 13:00 UTC is 18:30 in Indian time.
+        req.time_limit = datetime.datetime(
+            2026, 12, 31, 13, 0, tzinfo=datetime.timezone.utc)
+        req.save(update_fields=['time_limit'])
+
+        params = build_payload(req)
+        expiry = params[5]
+        self.assertEqual(
+            expiry,
+            req.time_limit.astimezone(ist).replace(tzinfo=None))
+        self.assertEqual((expiry.hour, expiry.minute), (18, 30))
+        # Naive on the way out: BKDT."timeLimit" carries no zone.
+        self.assertIsNone(expiry.tzinfo)
+
+        # createdOn moves with it, so the two read consistently.
+        self.assertEqual(
+            params[8],
+            req.created_at.astimezone(ist).replace(tzinfo=None))
+
+    def test_a_naive_timestamp_is_left_alone(self):
+        """It is already somebody's local time; guessing whose is worse."""
+        import datetime
+        from backdate.services.hana import to_sap_clock
+
+        naive = datetime.datetime(2026, 12, 31, 18, 30)
+        self.assertEqual(to_sap_clock(naive), naive)
+        self.assertIsNone(to_sap_clock(None))
+
+    def test_the_sap_row_is_tagged_with_the_request_id(self):
+        """`OPEN_BKDT` leaves `id` NULL, so nothing ties a row to a request."""
+        from backdate.services import hana
+        from backdate.services.hana import build_payload
+
+        flow = self._flow(OIL)
+        with mock.patch.object(hana, 'HANAConnection') as conn,                 mock.patch.object(hana, 'Queries') as queries:
+            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
+            hana.apply_grant(flow)
+            calls = conn.return_value.__enter__.return_value.execute.call_args_list
+
+        # Two statements: the grant, then the label.
+        self.assertEqual(len(calls), 2)
+        self.assertIn('OPEN_BKDT', calls[0].args[0])
+        sql, params = calls[1].args[0], calls[1].args[1]
+        self.assertIn('UPDATE', sql)
+        self.assertIn('"id" = ?', sql)
+        # Only ever fills a blank — it cannot overwrite somebody else's value.
+        self.assertIn('"id" IS NULL', sql)
+        self.assertEqual(params[0], flow.backdate_id)
+
+        # IT MUST MATCH THE WHOLE ROW. ("userid", "createdOn") alone is not
+        # unique in BKDT: JSAP truncates createdOn to the whole second and
+        # live OIL already holds 44 duplicated pairs, so a narrower match
+        # could put this request's id on somebody else's row.
+        for column in ('"branch"', '"userid"', '"transtype"', '"fromDate"',
+                       '"toDate"', '"timeLimit"', '"rights"', '"createdBy"',
+                       '"createdOn"'):
+            self.assertIn(f'{column} = ?', sql, column)
+        # Every one of them bound, in the order OPEN_BKDT was given them.
+        self.assertEqual(params[1:], list(build_payload(flow.backdate)[:9]))
+
+    def test_a_tagged_row_reports_its_id_as_a_field(self):
+        """The page shows it as "SAP row id", not buried in a sentence."""
+        from backdate.services import hana
+
+        hana._TAGGING_REFUSED.clear()
+        self.addCleanup(hana._TAGGING_REFUSED.clear)
+
+        flow = self._flow(OIL)
+        with mock.patch.object(hana, 'HANAConnection'),                 mock.patch.object(hana, 'Queries') as queries:
+            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
+            hana.apply_grant(flow)
+
+        flow.refresh_from_db()
+        result = json.loads(flow.hana_status_text)['results'][0]
+        self.assertEqual(result['sap_row_id'], flow.backdate_id)
+        self.assertIn('OPEN_BKDT accepted', result['response'])
+        self.assertNotIn('SELECT', result['response'])
+
+    def test_a_schema_that_refuses_the_tag_is_not_retried(self):
+        """Live BEVERAGES will never carry UPDATE — that grant is refused.
+
+        Without this, every BEVERAGES approval would run a statement that
+        cannot succeed and log a warning about a settled fact.
+        """
+        from backdate.services import hana
+
+        hana._TAGGING_REFUSED.clear()
+        self.addCleanup(hana._TAGGING_REFUSED.clear)
+
+        def denied(sql, params=None):
+            if str(sql).lstrip().upper().startswith('UPDATE'):
+                raise RuntimeError('insufficient privilege')
+            return []
+
+        for attempt in (1, 2):
+            flow = self._flow(BEVERAGES)
+            with mock.patch.object(hana, 'HANAConnection') as conn,                     mock.patch.object(hana, 'Queries') as queries:
+                queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
+                conn.return_value.__enter__.return_value.execute.side_effect =                     denied
+                hana.apply_grant(flow)
+                statements = [
+                    str(c.args[0]) for c in
+                    conn.return_value.__enter__.return_value
+                    .execute.call_args_list]
+
+            if attempt == 1:
+                # Tried once, refused, remembered.
+                self.assertEqual(len(statements), 2)
+                self.assertIn(f'TEST_{BEVERAGES}', hana._TAGGING_REFUSED)
+            else:
+                # Second time it does not even try — only the grant runs.
+                self.assertEqual(len(statements), 1)
+                self.assertIn('OPEN_BKDT', statements[0])
+
+            flow.refresh_from_db()
+            self.assertEqual(flow.hana_status, HanaStatus.SUCCESS)
+
+    def test_an_untagged_row_says_so_in_a_field_not_a_paragraph(self):
+        """A row that could not be tagged still reads as a plain success."""
+        from backdate.services import hana
+
+        hana._TAGGING_REFUSED.clear()
+        self.addCleanup(hana._TAGGING_REFUSED.clear)
+
+        flow = self._flow(OIL)
+        with mock.patch.object(hana, 'HANAConnection'),                 mock.patch.object(hana, 'Queries') as queries,                 mock.patch.object(hana, '_stamp_request_id',
+                                  return_value=False):
+            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
+            hana.apply_grant(flow)
+
+        flow.refresh_from_db()
+        result = json.loads(flow.hana_status_text)['results'][0]
+        # ONE sentence — what SAP accepted. No SQL, no prose about tagging:
+        # a query pasted into the middle of it buried the only thing an
+        # approver is reading for.
+        self.assertIn('OPEN_BKDT accepted', result['response'])
+        self.assertNotIn('SELECT', result['response'])
+        self.assertNotIn('WHERE', result['response'])
+        # Where the row is, is a FIELD. None says "not tagged" without a
+        # paragraph explaining it.
+        self.assertIsNone(result['sap_row_id'])
+
+    def test_a_failure_to_tag_never_unsays_a_real_grant(self):
+        """Past the CALL the rights EXIST. Labelling must not undo that."""
+        from backdate.services import hana
+
+        flow = self._flow(OIL)
+        with mock.patch.object(hana, 'HANAConnection'),                 mock.patch.object(hana, 'Queries') as queries,                 mock.patch.object(hana, '_stamp_request_id',
+                                  side_effect=RuntimeError('no UPDATE right')):
+            queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
+            # No raise: the approval stands.
+            hana.apply_grant(flow)
+
+        flow.refresh_from_db()
+        self.assertEqual(flow.hana_status, HanaStatus.SUCCESS)
+        results = json.loads(flow.hana_status_text)['results']
+        # And it does not claim a tag it does not have.
+        self.assertIsNone(results[0]['sap_row_id'])
+
     def test_success_records_success(self):
         from backdate.services import hana
 
@@ -1179,11 +1352,45 @@ class ApproverReadAccessTests(_Base):
             reverse('backdate-request-detail', args=[self.req.pk]))
         self.assertEqual(response.status_code, 404)
 
-    def test_an_approver_still_cannot_edit(self):
+    def test_an_approver_who_is_not_reviewing_it_cannot_edit(self):
+        """Holding the key is not holding the request."""
         response = self.client_for(self.approver_only).patch(
             reverse('backdate-request-detail', args=[self.req.pk]),
             {'remarks': 'not mine to change'}, format='json')
         self.assertEqual(response.status_code, 403)
+
+    def test_the_approver_reviewing_it_MAY_edit(self):
+        """They are the one who can see what is wrong with it.
+
+        A document type SAP will not take, or a window off by a day, used to
+        mean a rejection and a re-raise. Now it is a correction, recorded
+        against the approver who made it.
+        """
+        url = reverse('backdate-request-detail', args=[self.req.pk])
+        response = self.client_for(self.approver1).patch(
+            url, {'sap_username': 'USER99', 'remarks': 'corrected'},
+            format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.sap_username, 'USER99')
+        log = self.req.action_logs.filter(action=LogAction.UPDATE).last()
+        # Attributed to the APPROVER, never to the requester.
+        self.assertEqual(log.acted_by_id, self.approver1.pk)
+        self.assertEqual(log.remarks, 'corrected')
+
+    def test_a_later_approver_cannot_rewrite_what_an_earlier_one_agreed_to(self):
+        url = reverse('backdate-request-detail', args=[self.req.pk])
+        self.client_for(self.approver1).post(
+            self.approve_url(self.req), {}, format='json')
+
+        # Stage 2 now holds it, but stage 1 has already said yes to the
+        # request AS IT READ THEN.
+        response = self.client_for(self.approver2).patch(
+            url, {'sap_username': 'TOOLATE'}, format='json')
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertFalse(
+            self.client_for(self.approver2).get(url).data['data']['can_edit'])
 
 
 class ProgressTests(_Base):

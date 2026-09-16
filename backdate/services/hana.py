@@ -27,6 +27,32 @@ success message says what was sent rather than quoting a reply SAP never gives.
 There is no ACTION parameter, and none is invented: ADD/UPDATE is recorded on
 the request and never reaches SAP, exactly as in JSAP.
 
+STAMPING THE OMS REQUEST ID ONTO THE SAP ROW
+--------------------------------------------
+`BKDT` has an `id` column that `OPEN_BKDT` never writes, so every row it has
+ever inserted carries `id = NULL` — 1,292 of them across the three live
+schemas, with nothing to tie a SAP row back to the request that asked for it.
+Finding one means matching on `userid` + `createdOn` and hoping.
+
+So after a successful call this module stamps the OMS request id into that
+column with a follow-up `UPDATE`. Verified safe before doing it:
+
+* `id` is a plain nullable INTEGER with no default and no generated value.
+* `BKDT` has NO primary key, NO unique index and NO constraint of any kind,
+  so a value there cannot collide with or violate anything.
+* `SBO_SP_TRANSACTIONNOTIFICATION` — the posting validator that decides whether
+  a back-dated document is allowed — contains 14 BKDT lookups and reads the
+  `id` column in NONE of them. Writing it cannot change what SAP permits.
+* The only 6 non-NULL ids in live data are all the literal `70`, left by some
+  older tool. They are not a scheme to preserve, and the `"id" IS NULL` guard
+  below means they are never touched.
+
+It is a second statement rather than a 12th parameter because `OPEN_BKDT` is
+SHARED WITH JSAP: changing its signature would need a SAP-side release and
+would still leave JSAP writing NULL. And it is BEST EFFORT — the rights are
+already granted by the time it runs, so failing to label a row must never fail
+the grant or unsay a success that really happened.
+
 ONE REQUEST, ONE CALL PER COMPANY
 ---------------------------------
 `OPEN_BKDT` takes ONE branch and writes into that company's own schema, so a
@@ -48,9 +74,12 @@ WHAT WAS WRONG IN JSAP AND IS FIXED HERE
   is kept instead, because it is the only thing that says WHY a grant did not
   land.
 """
+import datetime
 import json
 import logging
+import zoneinfo
 
+from django.conf import settings
 from django.utils import timezone
 
 from hana.services.connection import HANAConnection, HanaSchemaError, Queries
@@ -70,6 +99,63 @@ PARAMETER_NAMES = [
     'BRANCH', 'USERID', 'TRANSTYPE', 'FROMDATE', 'TODATE', 'TIMELIMIT',
     'RIGHTS', 'CREATEDBY', 'CREATEDON', 'DELETEDBY', 'DELETEDON',
 ]
+
+
+#: The wall clock SAP's own `CURRENT_TIMESTAMP` runs on.
+#:
+#: `BKDT."timeLimit"` is a bare TIMESTAMP with no zone, and SAP's posting
+#: validator compares it against `CURRENT_TIMESTAMP` — the SERVER's clock, which
+#: is UTC+05:30. JSAP has always written local time here: its own
+#: `userDocument.timeLimit` and the HANA row it produced are identical to the
+#: second, verified on live rows.
+#:
+#: OMS stores timestamps as UTC, so binding them unconverted made every grant
+#: expire 5 hours 30 minutes EARLY — an approved request that stops working
+#: before the user thinks it has. This is the conversion that fixes it.
+SAP_TIME_ZONE = getattr(settings, 'SAP_TIME_ZONE', 'Asia/Kolkata')
+
+
+def sap_offset():
+    """SAP's offset from UTC, as a `timedelta`."""
+    now = datetime.datetime.now(zoneinfo.ZoneInfo(SAP_TIME_ZONE))
+    return now.utcoffset()
+
+
+def to_sap_clock(value, offset=None):
+    """An aware timestamp as SAP's own wall clock, naive.
+
+    A naive value is passed through untouched — it is already somebody's local
+    time and guessing which would be worse than leaving it.
+    """
+    if value is None or timezone.is_naive(value):
+        return value
+    offset = sap_offset() if offset is None else offset
+    return value.astimezone(datetime.timezone.utc).replace(tzinfo=None) + offset
+
+
+def _check_sap_clock(conn):
+    """Warn if SAP's real clock disagrees with `SAP_TIME_ZONE`.
+
+    The conversion above is driven by configuration so it stays deterministic
+    and testable; this is the check that the configuration is still true. A
+    silent drift here would put every expiry out by hours, so it is worth one
+    cheap query per call to find out loudly.
+    """
+    try:
+        row = conn.execute('SELECT CURRENT_TIMESTAMP AS "L", '
+                           'CURRENT_UTCTIMESTAMP AS "U" FROM DUMMY')[0]
+        actual = row['L'] - row['U']
+    except Exception:  # noqa: BLE001 — never worth failing a grant over
+        return
+    expected = sap_offset()
+    # Half a minute of slack: the two values are read a moment apart.
+    if abs((actual - expected).total_seconds()) > 30:
+        logger.error(
+            'BKDT: SAP_TIME_ZONE is %s (UTC%+.1fh) but the HANA server clock '
+            'is UTC%+.1fh. Every timeLimit written is out by the difference, '
+            'so grants will expire at the wrong time until this is corrected.',
+            SAP_TIME_ZONE, expected.total_seconds() / 3600,
+            actual.total_seconds() / 3600)
 
 
 class HanaWriteError(Exception):
@@ -162,19 +248,103 @@ def build_payload(backdate, company=None):
             f'"{backdate.document_type_name}" in {company}, so these rights '
             f'cannot be applied. Correct the document type and try again.')
 
+    # Both timestamps go in on SAP's WALL CLOCK, not UTC. `timeLimit` is
+    # compared against the server's `CURRENT_TIMESTAMP`, so a UTC value on a
+    # UTC+05:30 server expires five and a half hours early; `createdOn` is
+    # converted with it so the two read consistently and match JSAP's rows.
+    offset = sap_offset()
     return [
         branch,                              # 1  BRANCH    NVARCHAR(50)
         (backdate.sap_username or '')[:20],  # 2  USERID    NVARCHAR(20)
         object_type,                         # 3  TRANSTYPE INTEGER
         backdate.from_date,                  # 4  FROMDATE  DATE
         backdate.to_date,                    # 5  TODATE    DATE
-        backdate.time_limit,                 # 6  TIMELIMIT TIMESTAMP
+        to_sap_clock(backdate.time_limit, offset),   # 6  TIMELIMIT TIMESTAMP
         _rights_for(backdate.action),        # 7  RIGHTS    NVARCHAR(10)
         str(backdate.created_by_id)[:20],    # 8  CREATEDBY NVARCHAR(20)
-        backdate.created_at,                 # 9  CREATEDON TIMESTAMP
+        to_sap_clock(backdate.created_at, offset),   # 9  CREATEDON TIMESTAMP
         None,                                # 10 DELETEDBY NVARCHAR(10)
         None,                                # 11 DELETEDON TIMESTAMP
     ]
+
+
+#: Schemas where tagging has been refused, so it is not tried again.
+#:
+#: The connected HANA user holds UPDATE on five of the six BKDT schemas but NOT
+#: on live `JIVO_BEVERAGES_HANADB`, and that grant is not going to be given.
+#: Without this, every BEVERAGES approval would run a statement that cannot
+#: succeed and log a warning about it — a permanent stream of noise describing
+#: a settled fact.
+#:
+#: Learned rather than configured, because a hard-coded schema list would be
+#: another copy of the deployment's privileges to keep in step. Process-lifetime
+#: only, so a restart re-tries: if the grant is ever given, tagging simply
+#: starts working. Same pattern and same reasoning as `_COLUMN_EXISTS_CACHE` in
+#: `hana.services.connection`.
+_TAGGING_REFUSED = set()
+
+
+def _stamp_request_id(conn, schema, backdate, params):
+    """Write the OMS request id onto the row `OPEN_BKDT` has just inserted.
+
+    Returns True when a row was tagged. NEVER raises: the grant is already in
+    SAP by the time this runs, and a missing label is a smaller problem than an
+    approval reported as failed after the rights were actually given.
+
+    The row is found by EVERY column `OPEN_BKDT` was just given — branch, SAP
+    user, object type, both dates, the expiry, rights, createdBy and createdOn.
+    Matching on fewer would be enough almost always, and "almost" is the
+    problem: see the note in the body.
+
+    `"id" IS NULL` means this only ever fills a blank. It cannot overwrite a
+    value somebody else put there, and if a request somehow wrote two rows
+    (SAP has no unique constraint to prevent it) BOTH get the same id, which
+    is exactly how you would want a duplicate to show up.
+
+    VERIFIED, because it is the property that matters: `HANAConnection.execute`
+    commits a statement that returns no result set, so the `CALL` above has
+    already committed by the time this runs. The rollback that follows a failed
+    UPDATE therefore undoes nothing — a refused tag cannot take the grant with
+    it. Tested against a real failure, not reasoned about.
+    """
+    if schema in _TAGGING_REFUSED:
+        return False
+
+    try:
+        # MATCH THE WHOLE ROW, not a convenient corner of it.
+        #
+        # `("userid", "createdOn")` alone is NOT unique in this table: JSAP
+        # writes `createdOn` truncated to the whole second (536 of 641 live OIL
+        # rows have no sub-second part, some are 00:00:00), and 44 live OIL
+        # pairs are already duplicated. An OMS timestamp landing exactly on a
+        # whole second is improbable, not impossible — and "improbable" is not
+        # a good enough reason to put a stray id on somebody else's row.
+        #
+        # So every column `OPEN_BKDT` was just given is in the WHERE clause. A
+        # false match would have to be identical in all nine, which makes it
+        # indistinguishable from the row we wrote anyway.
+        branch, userid, transtype = params[0], params[1], params[2]
+        from_date, to_date, time_limit = params[3], params[4], params[5]
+        rights, created_by, created_on = params[6], params[7], params[8]
+        conn.execute(
+            f'UPDATE "{schema}"."BKDT" SET "id" = ? '
+            f'WHERE "id" IS NULL '
+            f'  AND "branch" = ? AND "userid" = ? AND "transtype" = ? '
+            f'  AND "fromDate" = ? AND "toDate" = ? AND "timeLimit" = ? '
+            f'  AND "rights" = ? AND "createdBy" = ? AND "createdOn" = ?',
+            [int(backdate.pk), branch, userid, transtype, from_date, to_date,
+             time_limit, rights, created_by, created_on])
+        return True
+    except Exception:  # noqa: BLE001 — a label is never worth a failed grant
+        _TAGGING_REFUSED.add(schema)
+        logger.warning(
+            'BKDT granted the rights for request=%s in %s but could not tag '
+            'the SAP row with its id, and will not try %s again until this '
+            'process restarts. Grants there stay correct; their rows keep '
+            'id=NULL and are found by "userid" + "createdOn". To enable '
+            'tagging, UPDATE on that schema is what is missing.',
+            backdate.pk, schema, schema, exc_info=True)
+        return False
 
 
 def _jsonable(value):
@@ -237,11 +407,27 @@ def apply_grant(flow):
             logger.warning('BKDT schema unresolved for %s: %s', company, exc)
             continue
 
+        stamped = None
         try:
             with HANAConnection() as conn:
+                _check_sap_clock(conn)
                 conn.execute(
                     f'CALL "{schema}"."OPEN_BKDT"(?,?,?,?,?,?,?,?,?,?,?)',
                     params)
+
+                # PAST THIS LINE THE GRANT IS IN SAP. Everything after it is
+                # labelling, and labelling must never be able to turn a real
+                # grant into a reported failure — so it is caught HERE, at the
+                # call site, and not only inside the helper. Belt and braces
+                # on purpose: the failure this guards against is telling an
+                # approver the rights were refused after SAP has given them.
+                try:
+                    stamped = _stamp_request_id(conn, schema, backdate, params)
+                except Exception:  # noqa: BLE001 — see above
+                    logger.warning(
+                        'BKDT tagged nothing for request=%s in %s',
+                        backdate.pk, schema, exc_info=True)
+                    stamped = False
         except Exception as exc:  # noqa: BLE001 — hdbcli raises a broad family
             # The EXACT database message is kept: it is the only thing that
             # says why the grant did not land. It carries the schema and the
@@ -256,12 +442,23 @@ def apply_grant(flow):
 
         # `OPEN_BKDT` returns nothing, so this states what was accepted rather
         # than quoting a reply that does not exist.
+        #
+        # ONE SENTENCE. Where the row can be found is a FIELD (`sap_row_id`),
+        # not prose: an approver reading this wants to know the grant landed,
+        # and a SQL query pasted into the middle of that buried it. The query
+        # belongs in the runbook — §18.4 — where somebody is actually looking
+        # for one.
         results.append({
-            'branch': branch, 'status': 'SUCCESS',
+            'branch': branch,
+            'status': 'SUCCESS',
             'response': (f'OPEN_BKDT accepted: {backdate.sap_username}, '
                          f'{backdate.document_type_name}, '
                          f'{backdate.from_date} to {backdate.to_date}, '
-                         f'expires {backdate.time_limit.isoformat()}.'),
+                         f'expires {backdate.time_limit:%Y-%m-%d %H:%M}.'),
+            # The id on the SAP row, or None where the connection cannot write
+            # that column (live BEVERAGES). None means "find it by SAP user and
+            # createdOn" and the page says so in its own words.
+            'sap_row_id': backdate.pk if stamped else None,
         })
 
     status_text = json.dumps({'results': results}, indent=2, sort_keys=False)
