@@ -164,6 +164,11 @@ INSTALLED_APPS = [
     # PAYMENT and DEPOSIT untouched.
     'workflow',
     'backdate',
+    # PRDO — Production Order approval. Owns its own `production`
+    # Postgres schema; drives the same Workflow Engine as `backdate`.
+    # SAP is the point of origin: orders arrive via
+    # `manage.py sync_production_orders`, never from a user.
+    'production',
 ]
 
 MIDDLEWARE = [
