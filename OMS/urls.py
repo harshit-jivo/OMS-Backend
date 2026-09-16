@@ -83,6 +83,8 @@ api_urlpatterns = [
     # BackDate (BKDT) — back-posting rights, own `backdate` Postgres
     # schema. Drives the generic workflow engine; owns its own runtime.
     path('backdate/', include('backdate.urls')),
+    # PRDO — Production Order approval (own `production` schema).
+    path('production/', include('production.urls')),
 ]
 
 urlpatterns = [
