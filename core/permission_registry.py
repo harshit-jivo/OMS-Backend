@@ -125,6 +125,20 @@ REGISTRY: dict[str, dict[str, str]] = {
         # opens the page and shows nothing actionable.
         'BackDate':                 'BackDate — raise requests',
         'BackDate_Approval':        'BackDate — approve/reject',
+
+        # PRDO (Production Orders) — SAP raises them, OMS approves them.
+        # Two keys for the same reason as BackDate: noticing and
+        # deciding are different authorities.
+        #
+        # `Production_Order_Approval` is necessary but NOT sufficient:
+        # the backend also requires the caller to be the current
+        # effective user of that workflow stage
+        # (production/permissions.py). The stage is also what scopes a
+        # user to a company — OMS has no user->company map that scopes
+        # documents, and a stage belongs to exactly one company's
+        # workflow.
+        'Production_Order':          'Production Order — view requests',
+        'Production_Order_Approval': 'Production Order — approve/reject',
     },
 
     # --- Payments actions (legacy keys, verbatim from
