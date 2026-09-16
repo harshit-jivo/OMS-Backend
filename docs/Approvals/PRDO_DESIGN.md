@@ -1,7 +1,7 @@
 # PRDO — Production Order approval in OMS
 
 Design proposal. Driven by the Workflow Engine, modelled on BKDT
-(`docs/backend/BKDT.md`). Written after reading the live JSAP `PRDO` schema, the
+(`docs/Approvals/BKDT.md`). Written after reading the live JSAP `PRDO` schema, the
 SAP `OWOR` tables and `SBO_SP_TRANSACTIONNOTIFICATION` — that investigation is
 `PRODUCTION_ORDER_JSAP_SAP.md`.
 

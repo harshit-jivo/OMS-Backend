@@ -22,8 +22,8 @@ BKDT calls `OPEN_BKDT` because SAP ships that procedure. There is no SAP
 procedure for "this production order is approved" — JSAP invented a table and
 hand-wrote a lookup into `SBO_SP_TRANSACTIONNOTIFICATION`. OMS does the same
 thing, but into a table it owns, with a real INTEGER DocEntry instead of
-JSAP's NVARCHAR one. See `docs/backend/PRDO_DESIGN.md` §7 and
-`docs/backend/prdo_test_wiring.sql`.
+JSAP's NVARCHAR one. See `docs/Approvals/PRDO_DESIGN.md` §7 and
+`docs/Approvals/prdo_test_wiring.sql`.
 """
 import json
 import logging
@@ -53,7 +53,7 @@ class SapWriteError(Exception):
 
 
 #: The OMS-owned table SAP's release gate reads. Created per company schema;
-#: see `docs/backend/prdo_test_wiring.sql`.
+#: see `docs/Approvals/prdo_test_wiring.sql`.
 APPROVAL_TABLE = 'OMS_PRDO_APPROVAL'
 
 #: Only Standard orders are approved. JSAP never touched Special or
