@@ -22,8 +22,8 @@ class ComplianceRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ComplianceRule
         fields = [
-            'id', 'code', 'name', 'rule_text', 'critical_tokens',
-            'is_critical', 'is_active', 'sort_order',
+            'id', 'code', 'name', 'rule_text', 'check_type', 'params',
+            'critical_tokens', 'is_critical', 'is_active', 'sort_order',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -34,6 +34,21 @@ class ComplianceRuleSerializer(serializers.ModelSerializer):
         # normal case, not an error worth rejecting.
         validated_data.pop('code', None)
         return super().update(instance, validated_data)
+
+    def validate_params(self, value):
+        """A JSON object, or nothing.
+
+        Same reasoning as `validate_critical_tokens`: `JSONField` will store a
+        list or a bare string quite happily, and `dimensions` reads this with
+        `.get()`. A rule whose settings silently do not apply is worse than
+        one that refuses to save.
+        """
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'Expected an object, e.g. {"tolerance_de": 10}.')
+        return value
 
     def validate_critical_tokens(self, value):
         """A list of non-blank strings, or nothing.
@@ -136,10 +151,13 @@ class LabelCheckDetailSerializer(LabelCheckListSerializer):
     findings = serializers.SerializerMethodField()
     ocr_available = serializers.SerializerMethodField()
     rule_count = serializers.SerializerMethodField()
+    skipped = serializers.SerializerMethodField()
+    package_spec = serializers.SerializerMethodField()
 
     class Meta(LabelCheckListSerializer.Meta):
         fields = LabelCheckListSerializer.Meta.fields + [
-            'findings', 'ocr_available', 'rule_count',
+            'findings', 'ocr_available', 'rule_count', 'skipped',
+            'package_spec',
         ]
 
     def get_findings(self, obj):
@@ -156,3 +174,20 @@ class LabelCheckDetailSerializer(LabelCheckListSerializer):
         if 'rule_count' in report:
             return report['rule_count']
         return len(report.get('findings') or [])
+
+    def get_skipped(self, obj):
+        """Rules that did not apply to this pack, with the reason.
+
+        Empty for every check run before the dimensional rules existed, which
+        is the right answer for them: nothing was skipped, because there was
+        nothing skippable.
+        """
+        return (obj.report_json or {}).get('skipped') or []
+
+    def get_package_spec(self, obj):
+        """The dimensions the measurement findings were computed from.
+
+        None when the reviewer left the panel alone — and None for every
+        historic check, where it means the same thing.
+        """
+        return (obj.report_json or {}).get('package_spec')

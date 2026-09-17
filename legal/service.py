@@ -37,7 +37,7 @@ import os
 
 from django.conf import settings
 
-from . import ocr
+from . import dimensions, metrology, ocr
 from .models import ComplianceRule, LabelNutrition
 from .schemas import GeminiLabelReport, Region, RuleFinding
 
@@ -178,6 +178,41 @@ def save_preview(image, source_name: str) -> str:
 def active_rules():
     """Every rule to check, in checklist order."""
     return list(ComplianceRule.objects.filter(is_active=True))
+
+
+def split_rules(rules):
+    """`(ai_rules, measurement_rules)`, each keeping checklist order.
+
+    The split is what keeps millimetres away from the model. A MEASUREMENT
+    rule is never put in the prompt — not as a rule to judge and not as
+    context — because a rule in the prompt is a rule the model will answer,
+    and its answer to "is this mark 4 mm across" would look exactly like its
+    answer to a question it can actually see.
+    """
+    ai, measurement = [], []
+    for rule in rules:
+        if rule.check_type == ComplianceRule.CHECK_MEASUREMENT:
+            measurement.append(rule)
+        else:
+            ai.append(rule)
+    return ai, measurement
+
+
+def in_checklist_order(findings, rules):
+    """`findings` sorted into the order the rules are listed.
+
+    The two halves of the report are produced independently — Gemini answers
+    the AI rules, `dimensions` answers the measurement ones — so concatenating
+    them would put every measurement at the end regardless of where the legal
+    desk put it in the checklist. Sorting by the rule's own position means
+    `sort_order` keeps meaning what it says, whichever half a rule is in.
+
+    Anything whose code is not in `rules` sorts last rather than being
+    dropped: a finding with no home is a bug worth seeing, not one to hide.
+    """
+    position = {rule.code: index for index, rule in enumerate(rules)}
+    return sorted(findings,
+                  key=lambda f: position.get(f.rule_id, len(position)))
 
 
 def nutrition_reference(item_id) -> list[dict]:
@@ -509,13 +544,21 @@ def summarise(findings) -> dict:
     }
 
 
-def run_label_check(file_path: str, item_id=None) -> dict:
+def run_label_check(file_path: str, item_id=None, spec=None) -> dict:
     """Check one uploaded label against every active rule.
+
+    `spec` is the reviewer's `metrology.PackageSpec` — the physical facts that
+    are not on the artwork. None, or one with no shape chosen, means the
+    dimensions panel was left alone: the measurement rules are then SKIPPED
+    with that reason on the report rather than failed. Someone who did not
+    answer a question has not got it wrong, and failing them for it would
+    teach reviewers that failures are noise.
 
     Returns the report dict the API serves:
 
         {"findings": [...], "summary": {...}, "ocr_text": "...",
-         "ocr_available": bool, "rule_count": int, "preview_url": "..."}
+         "ocr_available": bool, "rule_count": int, "preview_url": "...",
+         "skipped": [...], "package_spec": {...}}
 
     Raises `LabelCheckError` for anything the user should be told about.
     """
@@ -525,8 +568,11 @@ def run_label_check(file_path: str, item_id=None) -> dict:
             'No compliance rules are configured yet. Add rules on the '
             'Compliance Rules screen before checking a label.'
         )
+    ai_rules, measurement_rules = split_rules(rules)
 
     image = load_image(file_path)
+
+    spec = spec or metrology.PackageSpec()
 
     # Best-effort: a preview that could not be written is a page without a
     # picture, which is a worse report — not a failed check. The findings are
@@ -550,21 +596,59 @@ def run_label_check(file_path: str, item_id=None) -> dict:
         ocr_text = ''
         ocr_available = False
 
-    prompt = build_prompt(rules, ocr_text, nutrition_reference(item_id))
-    report = call_gemini(_image_bytes(image), prompt)
-    findings = cross_reference(report.findings, rules, ocr_text)
-    # Highlighting is best-effort decoration on a report that is already
-    # complete: a locator failure must not lose the findings.
-    try:
-        attach_regions(findings, read, rules)
-    except Exception:  # noqa: BLE001
-        logger.exception('Could not locate highlight regions for %s', file_path)
+    # The pack's real dimensions, which the artwork states about itself in the
+    # internal-use block at its foot ("Size(cm): 2.6 x 8"). Read here rather
+    # than asked for, because it is the one source the artwork vouches for —
+    # and read AFTER the OCR pass so a flattened PDF, which has no vector text
+    # at all, can still be read. Only fills a gap the reviewer left; see
+    # `PackageSpec.with_declared_panel` for why the PDF's page size is not a
+    # fallback.
+    declared = metrology.artwork_declared_size(file_path)
+    if declared is None and ocr_text:
+        declared = metrology.parse_declared_size(ocr_text, 'DECLARED_OCR')
+    spec = spec.with_declared_panel(declared)
+
+    findings = []
+    if ai_rules:
+        prompt = build_prompt(ai_rules, ocr_text, nutrition_reference(item_id))
+        report = call_gemini(_image_bytes(image), prompt)
+        findings = cross_reference(report.findings, ai_rules, ocr_text)
+        # Highlighting is best-effort decoration on a report that is already
+        # complete: a locator failure must not lose the findings.
+        try:
+            attach_regions(findings, read, ai_rules)
+        except Exception:  # noqa: BLE001
+            logger.exception('Could not locate highlight regions for %s',
+                             file_path)
+
+    # The measurement half. No model call, no OCR, no highlight boxes — a
+    # dimension is not a place on the artwork, and pointing at one would be
+    # inventing a location for a number that came off a form.
+    skipped = []
+    if measurement_rules:
+        if spec.configured:
+            measured, skipped = dimensions.run_dimension_checks(
+                measurement_rules, spec, image)
+            findings.extend(measured)
+        else:
+            skipped = [
+                {'rule_id': rule.code, 'rule_name': rule.name,
+                 'reason': 'no package dimensions were entered for this check'}
+                for rule in measurement_rules
+            ]
+
+    findings = in_checklist_order(findings, rules)
 
     return {
         'findings': [f.model_dump() for f in findings],
         'summary': summarise(findings),
         'ocr_text': ocr_text,
         'ocr_available': ocr_available,
+        # Every ACTIVE rule, including the ones skipped. Kept as the total so
+        # the report can say "21 of 26 checked" — a count that silently
+        # shrank to match what ran would hide the gap it exists to show.
         'rule_count': len(rules),
+        'skipped': skipped,
+        'package_spec': spec.as_dict() if spec.configured else None,
         'preview_url': preview_url,
     }
