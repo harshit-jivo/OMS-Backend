@@ -16,6 +16,8 @@ from .models import Notification
 _ENTITY_MODULE = {
     "paymentreceipt": "payments",
     "bankdeposit": "deposits",
+    "backdate": "backdate",
+    "productionorder": "production",
 }
 
 
