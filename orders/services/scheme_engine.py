@@ -416,61 +416,49 @@ def _resolve_conflicts(proposals):
 # Pack factors — turning a BOX giveaway into the pieces SAP ships
 # ---------------------------------------------------------------------------
 
-def _apply_pack_factors(proposals):
-    """Fill in ``qty_pieces`` on every proposal.
+def _apply_pack_factors(proposals, lines):
+    """Fill in ``benefit_item_name`` and ``qty_pieces`` on every proposal.
 
     A scheme may be written in cartons ("1 box free"), but a SAP DocumentLine
     quantity is always in single units — the paid line sends the order's `qty`,
     which is pieces. Shipping a BOX benefit unconverted therefore under-delivers
     by the pack size: one carton of a 4-per-carton item arrives as one bottle.
 
-    The factor comes from the *giveaway* item, not the item that earned it. A
-    product with no usable sal_factor2 falls back to 1, which is the same
-    behaviour as before this conversion existed.
+    Both the name and the factor come from the *giveaway* item, read in the
+    category of the line that earned it. A code alone does not identify a
+    product: 192 codes carry a different `sal_factor2` per category, so a
+    category-blind pack size can ship 12 or 1 pieces where 20 were meant, and a
+    category-blind name mislabels the giveaway outright. See
+    `sap_sync.product_lookup`, which also owns the fallback for a code the
+    category does not stock.
     """
-    # Every giveaway needs a NAME; only BOX ones need a pack factor. One query
-    # answers both, so naming the items costs nothing on top of a lookup that
-    # was already happening.
-    all_codes = {p.benefit_item_code for p in proposals if p.benefit_item_code}
-    box_codes = {
-        p.benefit_item_code
-        for p in proposals
-        if p.free_uom == 'BOX' and p.benefit_item_code
-    }
-    if not all_codes:
+    if not any(p.benefit_item_code for p in proposals):
         return proposals
 
-    from django.apps import apps
-
-    factors = {}
-    names = {}
     try:
-        Product = apps.get_model('sap_sync', 'Product')
-    except LookupError:
-        Product = None
+        from sap_sync import product_lookup
+    except ImportError:  # pragma: no cover - sap_sync optional at import time
+        return proposals
 
-    if Product is not None:
-        for item_code, factor, item_name in (
-            Product.objects.filter(item_code__in=all_codes)
-            .values_list('item_code', 'sal_factor2', 'item_name')
-        ):
-            # The same item_code exists once per category; both the pack size
-            # and the name are properties of the product, so any row with a
-            # usable value will do.
-            if item_code not in names and (item_name or '').strip():
-                names[item_code] = item_name.strip()
-            if item_code in box_codes:
-                value = _to_decimal(factor)
-                if value > ZERO and item_code not in factors:
-                    factors[item_code] = value
+    categories = {
+        p.line_index: str(_get(lines[p.line_index], 'category', '') or '').strip()
+        for p in proposals
+    }
+    # One query per distinct category, which on all but a mixed order is one.
+    catalogues = {}
+    for category in set(categories.values()):
+        catalogues[category] = product_lookup.resolve(
+            (p.benefit_item_code for p in proposals
+             if categories[p.line_index] == category),
+            category,
+        )
 
     for proposal in proposals:
-        proposal.benefit_item_name = names.get(proposal.benefit_item_code, '')
+        info = catalogues[categories[proposal.line_index]].get(proposal.benefit_item_code)
+        proposal.benefit_item_name = info.item_name if info else ''
         if proposal.free_uom != 'BOX':
             continue
-        proposal.qty_pieces = _tidy(
-            proposal.qty * factors.get(proposal.benefit_item_code, Decimal('1'))
-        )
+        proposal.qty_pieces = _tidy(proposal.qty * (info.pack_size if info else Decimal('1')))
 
     return proposals
 
@@ -580,7 +568,7 @@ def resolve_schemes(card_code, category, lines, on_date=None, ctx=None, strict_c
                     qty_is_user_supplied=user_supplied,
                 ))
 
-    return _apply_pack_factors(_resolve_conflicts(proposals))
+    return _apply_pack_factors(_resolve_conflicts(proposals), lines)
 
 
 def applicable_schemes(card_code, category='', on_date=None):
