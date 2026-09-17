@@ -12,7 +12,7 @@ from ..models import Product, Party, PartyAddress, Branch, SyncLog
 from .connection import SAPConnection
 import requests
 from django.conf import settings
-from ..models import SalesQuotationLog , SalesOrderLog
+from ..models import SalesQuotationLog , SalesOrderLog, SalesCancelledLog
 from orders.services.scheme_rules import (
     get_party_product_scheme,
 )
@@ -234,6 +234,32 @@ def print_sap_payload(label, payload):
     formatted_payload = json.dumps(payload, indent=2, default=str)
     print(f"{label}\n{formatted_payload}")
     logger.warning("%s\n%s", label, formatted_payload)
+
+
+def _readable_sap_error(text):
+    """Pull the human-readable reason out of a SAP Service Layer error body.
+
+    The Service Layer returns errors as
+    {"error": {"code": N, "message": {"lang": "...", "value": "the reason"}}}.
+    We surface that `value` so the user sees *why* SAP refused (e.g. "Cannot
+    cancel a document with a base/target document"), not the raw JSON. Falls
+    back to the raw text for anything that isn't that shape (e.g. a transport
+    error with no body).
+    """
+    if not text:
+        return 'SAP did not return an error message.'
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return str(text).strip()
+    err = data.get('error') if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        msg = err.get('message')
+        if isinstance(msg, dict) and msg.get('value'):
+            return str(msg['value']).strip()
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+    return str(text).strip()
 
 
 def _to_float(value, default=0.0):
@@ -1439,6 +1465,104 @@ class SyncService:
                 log.save()
 
                 raise Exception(response.text)
+
+        except Exception as e:
+            log.status = 'FAILED'
+            log.error_message = str(e)
+            log.completed_at = timezone.now()
+            log.save()
+            raise
+
+
+    def cancel_sales_order(self, order, doc_entry, reason=None):
+        """Cancel an already-created SAP Sales Order via the Service Layer.
+
+        `POST /Orders(DocEntry)/Cancel` is SAP B1's canonical way to cancel a
+        sales order — it sets the document's status to Cancelled (returning 204
+        No Content on success). This is a real financial reversal, so it is only
+        ever called for an order that actually reached SAP; `doc_entry` is the
+        SAP DocEntry recorded on the order's successful SalesOrderLog.
+
+        SAP refuses the cancel when the order has already been copied to a
+        Delivery or Invoice ("...base document..."), which is correct — those
+        downstream documents must be cancelled first. We surface SAP's message
+        rather than force it, and the OMS status is only moved by the caller
+        AFTER this returns cleanly, so a refusal leaves OMS unchanged.
+
+        Logged to SalesCancelledLog (its own `sales_cancellation_logs` table,
+        the cancel-side counterpart of SalesOrderLog), keyed by order_id and
+        carrying the DocEntry and the cancellation reason, so the audit trail
+        shows every cancel attempt start-to-response.
+        """
+        # One Service Layer credential set; the Mart/Oil difference is the
+        # company DB, resolved inside the try below so a misconfiguration is
+        # recorded on the cancel log rather than thrown before it exists.
+        order_user = settings.SALES_ORDER_USER
+        order_password = settings.SALES_ORDER_PASSWORD
+
+        log = SalesCancelledLog.objects.create(
+            order_id=order.id,
+            status='STARTED',
+            sap_doc_entry=doc_entry,
+            cancellation_reason=(reason or '').strip() or None,
+            request_data={'action': 'cancel', 'DocEntry': doc_entry},
+        )
+
+        try:
+            # A distributor order is ALWAYS company 3 (Mart), so the cancel must
+            # log into the Mart company DB — never the OIL fallback the category
+            # resolver would use. Fail loudly if Mart isn't configured.
+            company_db = str(getattr(settings, 'HANA_MART_COMPANY_DB', '') or '').strip()
+            if not company_db:
+                raise Exception(
+                    "HANA_MART_COMPANY_DB is not configured; cannot cancel a Mart "
+                    "sales order without the Mart company database."
+                )
+            log.request_data = {
+                'action': 'cancel', 'DocEntry': doc_entry, 'company_db': company_db,
+            }
+            log.save(update_fields=['request_data'])
+
+            if (
+                not hasattr(self, 'sap_session')
+                or getattr(self, 'sap_company_db', None) != company_db
+                or getattr(self, 'sap_username', None) != order_user
+            ):
+                self.sap_login(
+                    company_db=company_db,
+                    username=order_user,
+                    password=order_password,
+                )
+
+            url = f"{settings.HANA_SERVICE_LAYER_URL}/Orders({int(doc_entry)})/Cancel"
+            print(f"SAP order cancel URL: {url}")
+            logger.warning("SAP order cancel URL: %s", url)
+
+            response = self.sap_session.post(
+                url,
+                verify=self.sap_verify,
+                timeout=self.sap_timeout,
+            )
+            logger.info(
+                "SAP Cancel response | status=%s | body=%s",
+                response.status_code,
+                (response.text or '')[:500],
+            )
+
+            # 204 No Content is the documented success; accept 200 defensively.
+            if response.status_code in (200, 204):
+                log.status = 'SUCCESS'
+                log.response_data = response.text or 'Cancelled'
+                log.completed_at = timezone.now()
+                log.save()
+                return {'cancelled': True, 'doc_entry': doc_entry}
+
+            log.status = 'FAILED'
+            log.response_data = response.text          # raw body, for audit
+            log.error_message = _readable_sap_error(response.text)  # the reason
+            log.completed_at = timezone.now()
+            log.save()
+            raise Exception(log.error_message)
 
         except Exception as e:
             log.status = 'FAILED'

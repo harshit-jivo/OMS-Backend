@@ -70,9 +70,18 @@ class GetInventoryReportView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        branch, error = get_branch_or_error(request)
-        if error:
-            return error
+        # A Mart-only user (their sole assigned category is MART) sees the Mart
+        # company's stock and nothing else: the branch param is ignored for them
+        # so they cannot ask for OIL/BEVERAGE, and conversely no other user can
+        # reach MART because get_branch_or_error's whitelist has never included
+        # it. `category_names()` returns the primary FK unioned with the M2M and
+        # an empty set for the unscoped (admins), who keep the OIL/BEVERAGE view.
+        if request.user.category_names() == {'MART'}:
+            branch = 'MART'
+        else:
+            branch, error = get_branch_or_error(request)
+            if error:
+                return error
 
         # ?warehouses=BH-BT,BH-PF narrows the report (and every total in it) to
         # the warehouses billing actually cares about.

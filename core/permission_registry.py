@@ -48,6 +48,13 @@ REGISTRY: dict[str, dict[str, str]] = {
         'orders.decision.simple':   'Approve/reject orders (simple flow)',
         'orders.status.transition': 'Move orders through the status flow',
         'orders.mart.decide':       'Approve/reject Mart (distributor) orders',
+        # Cancel a completed (SAP-posted) Mart order, reversing its SAP Sales
+        # Order. Separate from `orders.mart.decide` on purpose: cancelling an
+        # order already booked into SAP is a heavier, financial action than
+        # approving/rejecting a pending one, so it can be withheld from an
+        # approver who may only work the queue. Granted to mart_approval by
+        # users/0037.
+        'orders.mart.cancel':       'SO Cancel (cancel Mart orders in SAP)',
         # Company-wide visibility, as opposed to `orders.sales.view`, which is
         # the right to see the orders already IN YOUR SCOPE. `_get_base_orders`
         # decides that scope, and it did so by matching `user.role.name`
@@ -72,11 +79,23 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Order_Flow_Settings':      'Order Flow Settings',
         'Product_Stock':            'Stock',
         'Reports':                  'Reports',
+        # Split out of the umbrella `Reports` key so the warehouse-wise SAP
+        # stock report can be granted on its own — e.g. to a mart_approval user
+        # who should see inventory but none of the sales reports. `Reports` no
+        # longer opens it; users/0036 back-grants this key to everyone who held
+        # `Reports`, so the split takes nobody's access away.
+        'Inventory_Report':         'Inventory Report',
+        # Completed distributor (Mart) orders, aggregated distributor-wise and
+        # SKU-wise. A standalone per-user grant like Inventory_Report — NOT part
+        # of the umbrella `Reports` key, so it is handed out per person.
+        'Distributor_Report':       'Distributor Report',
         'Einvoice':                 'e-Invoice (IRN)',
         'Ewaybill':                 'e-Way Bill',
         'HAIS':                     'Hardware Assets (HAIS)',
         'Distributor':              'Distributor',
-        'Mart_Approval':            'Mart Approval',
+        # Label is "Orders" (the mart_approval desk's main order queue); the KEY
+        # stays 'Mart_Approval' so no grants, routes or migrations move.
+        'Mart_Approval':            'Orders',
         'Device_Management':        'Device Management',
         # Staff orders — an internal order raised against an employee ID
         # rather than a party, priced from each product's staff rate. Two
