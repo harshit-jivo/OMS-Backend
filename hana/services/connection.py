@@ -708,10 +708,13 @@ class Queries():
         every warehouse (~450 items x 58 warehouses), and all but a few hundred
         of those are zeros that would only be summed back to nothing.
         """
-        if branch == 'BEVERAGE':
-            s = Queries.BEVERAGE_SCHEMA
-        else:
-            s = Queries.OIL_SCHEMA
+        # Resolve through the one gate that knows every company DB. The old
+        # `BEVERAGE -> beverage else -> oil` fork silently served OIL data for
+        # a MART request — exactly the cross-company leak _schema_for_branch
+        # exists to prevent (see HanaSchemaError). MART holds warehouse-wise FG
+        # stock the same way, and its OITM carries the same U_* UDFs this query
+        # selects, so no branch-specific SQL is needed.
+        s = Queries._schema_for_branch(branch)
 
         filters = [
             'T0."ItemCode" LIKE \'FG%\'',

@@ -466,9 +466,12 @@ class OrderRateApprovalSerializer(serializers.ModelSerializer):
 class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source="status.name")
     # items = OrderItemSerializer(many=True, read_only=True)
-    # items_count = serializers.IntegerField(source="items.count", read_only=True)
+    # The order-list rows never carried a line count, so the web "Items" column
+    # fell back to 0. `OrdersByUserView` already prefetches `items`, so this
+    # `.count()` reads the prefetch cache — no extra query per row.
+    items_count = serializers.IntegerField(source="items.count", read_only=True)
     # categories = serializers.SerializerMethodField()
-    status_display = serializers.CharField(source="status.name", read_only=True)
+    status_display = serializers.SerializerMethodField()
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     # rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
@@ -485,6 +488,22 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return obj.created_by.username
         return None
+
+    def get_status_display(self, obj):
+        """What the ORDER OWNER (distributor) should see.
+
+        A distributor must not see their Mart order as "Approved" until it is
+        actually booked in SAP (status Completed = 9). While it is only
+        "Approved" (Mart Approved = 6 — the desk approved it but the SAP push has
+        not yet succeeded), show the pending "Mart Approval" label instead: the
+        distributor cares about their order, not the SAP push. The Mart Approval
+        desk still sees the real state (and the SAP-failed badge + Resend) on its
+        own queue, which reads the order status directly, not this serializer.
+        """
+        # 6 = Approved (Mart Approved), 9 = Completed — see orders/services/mart_posting.py
+        if obj.order_type == 'DISTRIBUTOR' and obj.status_id == 6:
+            return 'Mart Approval'
+        return obj.status.name if obj.status_id else ''
 
     class Meta:
         model = Order
@@ -511,11 +530,11 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "status_display",
             "created_by",
             "created_by_name",
-            "created_at",   
-            "delivery_date",  
+            "created_at",
+            "delivery_date",
             # "sap_doc_number",
             # "items",
-            # "items_count",
+            "items_count",
             # "categories",
             # "rate_approvals",
         ]
