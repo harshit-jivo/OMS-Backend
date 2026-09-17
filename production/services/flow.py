@@ -44,6 +44,7 @@ from production.models import (
     ProductionOrderActionLog,
     ProductionOrderFlow,
 )
+from production.services import notify as notify_service
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,9 @@ def open_flow(order):
 
     log(order, action=LogAction.SYNC,
         remarks=f'Synced from SAP and routed to {chosen.workflow.code}.')
+    # Inside the same transaction as the routing: an order that fails to
+    # route is not stored, and must not have announced itself either.
+    notify_service.stage_awaiting(flow, order)
     return flow
 
 
@@ -181,10 +185,12 @@ def approve(flow, *, user, remarks=''):
         _point_at(flow, None)
         flow.save(update_fields=['status', 'current_stage', 'current_user',
                                  'updated_at'])
+        notify_service.decided(flow.production_order, approved=True, actor=user)
         return flow
 
     _point_at(flow, following[0].id)
     flow.save(update_fields=['current_stage', 'current_user', 'updated_at'])
+    notify_service.stage_awaiting(flow, flow.production_order)
     return flow
 
 
@@ -208,6 +214,8 @@ def reject(flow, *, user, remarks):
     _point_at(flow, None)
     flow.save(update_fields=['status', 'current_stage', 'current_user',
                              'updated_at'])
+    notify_service.decided(flow.production_order, approved=False, actor=user,
+                           remarks=remarks)
     return flow
 
 

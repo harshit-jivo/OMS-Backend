@@ -33,10 +33,14 @@ logger = logging.getLogger(__name__)
 
 #: Event names this module owns. The framework only validates the shape
 #: (`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$`); the meaning is ours.
-BACKDATE_SUBMITTED = 'BACKDATE_SUBMITTED'
+#: A request has reached a stage and somebody must act. Fired on submission
+#: AND on every advance, because "it is now yours" is the same fact either
+#: time — there is no separate SUBMITTED event, which would have told the
+#: first approver the same thing twice under two names.
+BACKDATE_AWAITING_APPROVAL = 'BACKDATE_AWAITING_APPROVAL'
+#: The chain finished. Sent to the REQUESTER, not to the approvers.
 BACKDATE_APPROVED = 'BACKDATE_APPROVED'
 BACKDATE_REJECTED = 'BACKDATE_REJECTED'
-BACKDATE_AWAITING_APPROVAL = 'BACKDATE_AWAITING_APPROVAL'
 
 
 def _users(ids):
