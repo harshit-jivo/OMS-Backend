@@ -8,16 +8,27 @@ closed when the handler dispositions it (ADVANCE / RETURN), stamping
 visit, so an invoice that bounces has multiple visits to the same stage — and
 each visit's dwell time is captured independently for reporting.
 """
+from datetime import datetime, time as clock_time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Invoice, PaymentDetail, Stage, StageEvent, UserStageAccess
+from .models import (AlertMute, Invoice, PaymentDetail, Stage, StageEvent,
+                     UserStageAccess)
 
 # Cut-off after which an arriving invoice is flagged "late received".
 LATE_HOUR = 18  # 6 PM
+
+# Weekdays the office is closed, as Python's `date.weekday()` numbers them
+# (Mon=0 ... Sun=6). Sunday is the standing off day, so the dwell clock must
+# not run across it: an invoice that lands on Saturday evening is not two days
+# late on Monday morning, nobody was at the desk in between. Overridable via
+# settings so a second off day (or none, e.g. in a test) needs no code change.
+DEFAULT_OFF_WEEKDAYS = (6,)  # Sunday
 
 # Stage statuses that force the invoice back a step.
 RETURN_STATUSES = {'RETURN', 'REJECTED'}
@@ -31,6 +42,11 @@ REASON_REQUIRED_STATUSES = {'HOLD', 'DEBIT', 'RETURN', 'REJECTED'}
 TRANSPORT_ONLY_STAGE_CODES = {'bilty_grpo'}
 
 PRE_AUDIT_STAGE_CODE = 'pre_audit'
+# Terminal desk. `auto_advance_to_payment` walks an invoice here once the
+# document turns up posted in SAP, whatever desk it was sitting at.
+PAYMENT_STAGE_CODE = 'payment'
+# The desk that owns the SAP-saved sweep, and so the button that runs it.
+SAVE_IN_SAP_STAGE_CODE = 'save_in_sap'
 TRANSPORT_APPROVAL_STAGE_CODE = 'transport_approval'
 # Stages reached by a DETOUR, never as the next step along the line. They are
 # excluded from `stage_route` on purpose: Pre-Audit's linear neighbour must stay
@@ -43,6 +59,12 @@ DETOUR_STAGE_CODES = {TRANSPORT_APPROVAL_STAGE_CODE}
 JSAP_STAGE_CODE = 'jsap_approval'
 # Category names (normalised) that don't require a hold amount on a partial hold.
 NO_HOLD_AMOUNT_CATEGORIES = {'rm-pm', 'pm-pm', 'pm/pm'}
+
+# Stamped on the zero-length visits `fast_track` writes for the desks an invoice
+# was sent past. It is deliberately NOT in any Stage.status_choices — no desk can
+# choose it, it only ever appears on a bypassed visit — so reports can separate
+# "this desk decided X" from "this desk never saw it".
+SKIPPED_STATUS = 'SKIPPED'
 
 
 # ---------------------------------------------------------------------------
@@ -98,27 +120,163 @@ def stage_recipients(stage):
     )
 
 
+def _full_hold_note(invoice):
+    """The FULL-hold NOTE on the invoice's CURRENT visit, or None.
+
+    Keyed on (stage, entered_at) so it is scoped to THIS visit — an invoice that
+    was held here, released, and later came back is not still considered held.
+    Earliest first: if a desk somehow records two holds on one visit, the clock
+    stopped at the first.
+    """
+    return (StageEvent.objects
+            .filter(invoice=invoice,
+                    stage=invoice.current_stage,
+                    entered_at=invoice.current_stage_entered_at,
+                    hold_type=StageEvent.HoldType.FULL)
+            .order_by('created_at')
+            .first())
+
+
 def is_full_hold(invoice):
     """True if the invoice's CURRENT stage visit carries a FULL hold note.
 
     A full hold keeps the invoice in place (partial holds advance it), so the
     presence of a FULL hold event on this visit means it's parked on purpose."""
-    return StageEvent.objects.filter(
+    return _full_hold_note(invoice) is not None
+
+
+def full_hold_invoice_ids(invoice_ids):
+    """Of `invoice_ids`, those whose CURRENT visit carries a FULL hold.
+
+    The set form exists because the queue and the alert sweep both need to
+    exclude held invoices from a LIST — calling `is_full_hold` per row is one
+    query per invoice, which is the N+1 this avoids. Matching on
+    (invoice, stage, entered_at) against the invoice's own current pointers is
+    what scopes it to the CURRENT visit rather than any past hold.
+    """
+    if not invoice_ids:
+        return set()
+    rows = (StageEvent.objects
+            .filter(invoice_id__in=invoice_ids,
+                    hold_type=StageEvent.HoldType.FULL)
+            .values_list('invoice_id', 'stage_id', 'entered_at'))
+    if not rows:
+        return set()
+    current = dict(
+        Invoice.objects.filter(id__in=[r[0] for r in rows])
+        .values_list('id', 'current_stage_id'))
+    entered = dict(
+        Invoice.objects.filter(id__in=[r[0] for r in rows])
+        .values_list('id', 'current_stage_entered_at'))
+    return {
+        inv_id for inv_id, stage_id, ent in rows
+        if current.get(inv_id) == stage_id and entered.get(inv_id) == ent
+    }
+
+
+# ---------------------------------------------------------------------------
+# Alert mutes — "stop emailing me about this one", scoped to the stage visit
+# ---------------------------------------------------------------------------
+def alert_mute_map(invoice_ids):
+    """{invoice_id: AlertMute} for those whose CURRENT visit is muted.
+
+    Same shape and the same reason as `full_hold_invoice_ids`: the queue, the
+    Alerts page and the email sweep all need this for a LIST, and a per-row
+    lookup would be one query each. A mute row is only honoured while the
+    invoice is still on the visit it was set for, so the match is against the
+    invoice's own current pointers — a stale row from an earlier visit to the
+    same desk is simply not found.
+    """
+    if not invoice_ids:
+        return {}
+    rows = list(AlertMute.objects
+                .filter(invoice_id__in=invoice_ids, is_active=True)
+                .select_related('created_by'))
+    if not rows:
+        return {}
+    pointers = dict(
+        (i, (st, ent)) for i, st, ent in
+        Invoice.objects.filter(id__in=[r.invoice_id for r in rows])
+        .values_list('id', 'current_stage_id', 'current_stage_entered_at'))
+    return {
+        r.invoice_id: r for r in rows
+        if pointers.get(r.invoice_id) == (r.stage_id, r.stage_entered_at)
+    }
+
+
+def is_alert_muted(invoice):
+    """True if the invoice's CURRENT visit is muted for alert emails."""
+    return bool(alert_mute_map([invoice.id]))
+
+
+def set_alert_mute(invoice, user, reason):
+    """Mute alert emails for the invoice's current stage visit.
+
+    A written reason is mandatory — the whole point of the flag is that the
+    next person to look at a silent overdue invoice can see why it is silent.
+
+    The row is keyed to the visit, so re-muting after the invoice has moved
+    creates a new row rather than reviving the old one; `update_or_create` only
+    ever revives a mute for the very same visit, which is the case where the
+    user un-ticked and ticked again.
+    """
+    reason = (reason or '').strip()
+    if not reason:
+        raise ValidationError('A reason is required to stop the alert emails.')
+    if invoice.status != Invoice.Status.IN_PROGRESS:
+        raise ValidationError('Only an in-progress invoice can be muted.')
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice at this stage.')
+    mute, _created = AlertMute.objects.update_or_create(
         invoice=invoice,
         stage=invoice.current_stage,
-        entered_at=invoice.current_stage_entered_at,
-        hold_type=StageEvent.HoldType.FULL,
-    ).exists()
+        stage_entered_at=invoice.current_stage_entered_at,
+        defaults={'reason': reason, 'is_active': True,
+                  'created_by': user, 'cleared_at': None, 'cleared_by': None},
+    )
+    return mute
 
 
-def stuck_visits(now=None):
+def clear_alert_mute(invoice, user):
+    """Un-mute the invoice's current visit. No-op if it was not muted.
+
+    Kept as a flip rather than a delete so the audit trail of who silenced it,
+    and who turned it back on, survives.
+    """
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice at this stage.')
+    updated = (AlertMute.objects
+               .filter(invoice=invoice,
+                       stage=invoice.current_stage,
+                       stage_entered_at=invoice.current_stage_entered_at,
+                       is_active=True)
+               .update(is_active=False, cleared_at=timezone.now(),
+                       cleared_by=user))
+    return bool(updated)
+
+
+def stuck_visits(now=None, stage_ids=None):
     """Every in-progress invoice sitting at its stage beyond that stage's
-    threshold. Returns a list of (invoice, stage, days_stuck)."""
+    threshold. Returns a list of (invoice, stage, days_stuck).
+
+    `stage_ids` restricts the scan to those stages, which is how `AlertsView`
+    limits a non-superuser to their own desks: filtering in SQL rather than
+    dropping rows after the dwell-time loop keeps the per-invoice work
+    proportional to what the caller can actually see.
+
+    The dwell test is per-invoice Python rather than SQL because the threshold
+    lives on the stage and `days_at_stage` carries the rounding contract; at
+    tracker's scale (hundreds of open invoices) one query plus a loop is
+    cheaper than the alternative, and it keeps one definition of "stuck".
+    """
     now = now or timezone.now()
+    qs = (Invoice.objects
+          .filter(status=Invoice.Status.IN_PROGRESS)
+          .select_related('current_stage'))
+    if stage_ids is not None:
+        qs = qs.filter(current_stage_id__in=stage_ids)
     out = []
-    for inv in (Invoice.objects
-                .filter(status=Invoice.Status.IN_PROGRESS)
-                .select_related('current_stage')):
+    for inv in qs:
         days = days_at_stage(inv, now)
         if days > inv.current_stage.threshold_days:
             out.append((inv, inv.current_stage, days))
@@ -132,13 +290,84 @@ def _is_late(dt):
     return timezone.localtime(dt).hour >= LATE_HOUR
 
 
+def _off_weekdays():
+    """The closed weekdays, read per call so `override_settings` works in tests."""
+    return frozenset(getattr(settings, 'TRACKER_OFF_WEEKDAYS', DEFAULT_OFF_WEEKDAYS))
+
+
+def _business_tz():
+    """The timezone whose calendar decides when a day starts and ends.
+
+    Django's TIME_ZONE is 'UTC' project-wide, and a UTC Sunday is not the same
+    24 hours as the office's Sunday — in IST it runs from Sunday 05:30 to
+    Monday 05:30, so five and a half hours of Monday morning would be written
+    off and five and a half hours of Sunday would still be charged. The office
+    calendar therefore needs its own zone, independent of how the rest of the
+    project stores and renders time.
+    """
+    name = getattr(settings, 'TRACKER_BUSINESS_TIMEZONE', '') or ''
+    return ZoneInfo(name) if name else timezone.get_current_timezone()
+
+
+def _off_day_seconds(start, end):
+    """How many seconds of the span [start, end) fall on a closed day.
+
+    Walks one weekday at a time in 7-day strides rather than day by day: an
+    invoice parked for a year is 52 iterations, not 365, and the stuck sweep
+    runs this for every open invoice.
+    """
+    off = _off_weekdays()
+    if not off or end <= start:
+        return 0.0
+    tz = _business_tz()
+    local_start, local_end = start.astimezone(tz), end.astimezone(tz)
+    total = 0.0
+    for weekday in off:
+        # Step back to the most recent such weekday at or before the start,
+        # since the span may begin part-way through one.
+        day = local_start.date()
+        day -= timedelta(days=(day.weekday() - weekday) % 7)
+        while day <= local_end.date():
+            day_start = datetime.combine(day, clock_time.min, tzinfo=tz)
+            lo = max(local_start, day_start)
+            hi = min(local_end, day_start + timedelta(days=1))
+            if hi > lo:
+                total += (hi - lo).total_seconds()
+            day += timedelta(days=7)
+    return total
+
+
 def _days_between(start, end):
-    seconds = (end - start).total_seconds()
-    return Decimal(seconds / 86400).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    """Elapsed days between two instants, NOT COUNTING CLOSED DAYS (Sunday).
+
+    This is the one definition of the tracker's clock: it feeds the live "days
+    at this stage" figure, the stuck-beyond-threshold test, and the `days_spent`
+    stamped on a visit when it closes. Sunday is skipped because the number is a
+    service-level measure — how long a desk has held an invoice — and a desk
+    nobody is sitting at cannot be holding anything up. Left in, a Saturday
+    arrival read as overdue against a one-day threshold first thing Monday, and
+    every stage average carried a weekend the handler could not have used.
+
+    Note that `days_spent` values written BEFORE this change still include
+    Sundays; only visits closed from now on are weekend-free. The historical
+    rows are left as they are rather than back-computed, so no past figure
+    silently changes under a report someone has already read.
+    """
+    seconds = (end - start).total_seconds() - _off_day_seconds(start, end)
+    return Decimal(max(seconds, 0.0) / 86400).quantize(
+        Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
 def days_at_stage(invoice, now=None):
-    """Live dwell time (in days) at the invoice's current stage."""
+    """Live dwell time (in days) at the invoice's current stage.
+
+    Sundays are not counted — see `_days_between`.
+
+    A FULL hold does NOT pause this — the clock keeps running while an invoice
+    is parked, so the true age of anything sitting on a desk stays visible. Full
+    holds are instead kept out of the stuck-alert EMAILS and out of the queue's
+    Current tab; the ageing itself is deliberately unadjusted.
+    """
     now = now or timezone.now()
     return _days_between(invoice.current_stage_entered_at, now)
 
@@ -153,6 +382,26 @@ def _category_name(invoice):
 
 def _is_transport(invoice):
     return _category_name(invoice) == 'transport'
+
+
+def next_stage(invoice):
+    """The desk this invoice is due at next, or None if there is nowhere to go.
+
+    Derived from `stage_route`, so it honours the same rules the flow engine
+    does: a non-Transport invoice never sees Bilty/GRPO, and detour desks are
+    not steps along the line. None at the terminal desk, and None for an invoice
+    that is finished or sitting somewhere off the route (a detour), where
+    "next" is decided on the way out rather than being a fixed step.
+    """
+    if invoice.status != Invoice.Status.IN_PROGRESS:
+        return None
+    route = stage_route(invoice)
+    codes = [s.code for s in route]
+    try:
+        position = codes.index(invoice.current_stage.code)
+    except ValueError:
+        return None                     # on a detour: the target is computed later
+    return route[position + 1] if position + 1 < len(route) else None
 
 
 def stage_route(invoice):
@@ -226,6 +475,296 @@ def _route_neighbour(invoice, step):
         return None
     nxt = idx + step
     return route[nxt] if 0 <= nxt < len(route) else None
+
+
+FAST_TRACK_FROM_CODE = 'entry'
+FAST_TRACK_TO_CODE = 'sap_approval'
+
+
+@transaction.atomic
+def fast_track(invoice, user, remarks):
+    """Send an invoice straight from Invoice Entry to SAP Approval.
+
+    The desks in between — Bilty/GRPO, Pre-Audit, Data Entry — are recorded as
+    SKIPPED rather than omitted. Each gets a closed visit stamped
+    `entered_at == exited_at` and `days_spent = 0`, carrying the same remarks and
+    the user who fast-tracked it.
+
+    Writing the skipped rows is not bookkeeping pedantry. Every duration and
+    bottleneck figure in `reports.py` is derived from `StageEvent` visits, and
+    `stage_route` is what the flow display walks. An invoice that simply
+    teleported would leave those desks with fewer visits than invoices passed
+    through them, so their averages would silently describe a different
+    population than their counts — and nobody reading the report would know a
+    desk had been bypassed at all. A zero-day visit says "this desk was skipped,
+    here is who did it and why", which is the auditable version of the same fact.
+
+    `remarks` are MANDATORY: this bypasses Pre-Audit, and Pre-Audit is where
+    holds and debits are captured. Skipping it silently would lose the only
+    record of why an invoice avoided the money checks.
+    """
+    if invoice.current_stage.code != FAST_TRACK_FROM_CODE:
+        raise ValidationError(
+            'Only an invoice at Invoice Entry can be sent straight to SAP Approval.')
+    if not (remarks or '').strip():
+        raise ValidationError(
+            'A reason is mandatory when skipping Pre-Audit and Data Entry.')
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice.')
+
+    route = stage_route(invoice)
+    codes = [s.code for s in route]
+    if FAST_TRACK_TO_CODE not in codes:
+        raise ValidationError('SAP Approval is not on this invoice\'s route.')
+    start = codes.index(invoice.current_stage.code)
+    end = codes.index(FAST_TRACK_TO_CODE)
+    if end <= start:
+        raise ValidationError('SAP Approval is not ahead of this invoice.')
+
+    now = timezone.now()
+    target = route[end]
+    skipped = route[start + 1:end]
+
+    # Close the Entry visit as a normal ADVANCE so its dwell time is real.
+    visit = _open_event(invoice)
+    if visit:
+        visit.event_type = StageEvent.EventType.ADVANCE
+        visit.remarks = remarks
+        visit.acted_by = user
+        visit.exited_at = now
+        visit.days_spent = _days_between(visit.entered_at, now)
+        visit.save()
+
+    # Zero-length visits for the desks that were bypassed.
+    for stage in skipped:
+        StageEvent.objects.create(
+            invoice=invoice, stage=stage,
+            event_type=StageEvent.EventType.ADVANCE,
+            stage_status=SKIPPED_STATUS,
+            remarks=remarks, acted_by=user,
+            entered_at=now, exited_at=now, days_spent=Decimal('0.00'),
+        )
+
+    invoice.current_stage = target
+    invoice.current_stage_entered_at = now
+    invoice.rejection_pending = False
+    invoice.is_locked = True            # it has left entry; entry can no longer edit
+    invoice.save()
+
+    _release_stranded_note(invoice, target)
+    StageEvent.objects.create(
+        invoice=invoice, stage=target,
+        event_type=StageEvent.EventType.RECEIVE,
+        receiving_note=(
+            StageEvent.ReceivingNote.LATE if _is_late(now)
+            else StageEvent.ReceivingNote.ON_TIME
+        ),
+        acted_by=user, entered_at=now,
+    )
+    return invoice
+
+
+def auto_advance_to_payment(invoice, user, remarks, *, now=None):
+    """Walk an invoice to the Payment desk because SAP already has it posted.
+
+    The trigger is factual rather than procedural: if an A/P invoice for this
+    vendor and number exists in OPCH/ORPC, the work the middle desks exist to
+    do has demonstrably been done — the document was checked, approved and
+    saved. Leaving the tracker row parked at Pre-Audit after that does not
+    protect anything, it just makes the queue and every ageing figure describe
+    a state of the world that ended some time ago.
+
+    The desks in between are recorded as SKIPPED zero-length visits, exactly as
+    `fast_track` does and for the same reason: a bypassed desk that leaves no
+    row would quietly drop out of the visit counts that every duration and
+    bottleneck figure in `reports.py` is built from, and nobody reading the
+    report would know the invoice had been through. `remarks` are written onto
+    every one of those rows, so the passage explains itself wherever it is read
+    — the queue, the timeline, the decision log, the export.
+
+    Position is compared on `Stage.order`, not on the route's list index,
+    because an invoice can be sitting at a DETOUR desk (Transport Approval)
+    which `stage_route` deliberately leaves out. An index lookup would raise for
+    exactly the invoices most likely to be stranded.
+
+    `user=None` means the system acted (the nightly sweep), matching how the
+    JSAP sync records a decision made outside the tracker.
+    """
+    if invoice.status != Invoice.Status.IN_PROGRESS:
+        raise ValidationError('Only an in-progress invoice can be advanced.')
+    if not (remarks or '').strip():
+        raise ValidationError('A reason is mandatory for automatic progression.')
+    if not can_act(user, invoice):
+        raise PermissionDenied('You cannot act on this invoice.')
+
+    target = Stage.objects.filter(code=PAYMENT_STAGE_CODE, is_active=True).first()
+    if target is None:
+        raise ValidationError('The Payment stage is not configured.')
+    if invoice.current_stage_id == target.id:
+        raise ValidationError('This invoice is already at Payment.')
+    if invoice.current_stage.order > target.order:
+        raise ValidationError('This invoice is already past Payment.')
+
+    now = now or timezone.now()
+    # Its OWN route, so a non-Transport invoice is not credited with a
+    # Bilty/GRPO visit it was never supposed to make.
+    skipped = [s for s in stage_route(invoice)
+               if s.order > invoice.current_stage.order and s.id != target.id]
+
+    with transaction.atomic():
+        # The desk it was actually sitting at closes with its real dwell time;
+        # only the untouched desks ahead of it are zero-length.
+        visit = _open_event(invoice)
+        if visit:
+            visit.event_type = StageEvent.EventType.ADVANCE
+            visit.stage_status = SKIPPED_STATUS
+            visit.remarks = remarks
+            visit.acted_by = user
+            visit.exited_at = now
+            visit.days_spent = _days_between(visit.entered_at, now)
+            visit.save()
+
+        for stage in skipped:
+            StageEvent.objects.create(
+                invoice=invoice, stage=stage,
+                event_type=StageEvent.EventType.ADVANCE,
+                stage_status=SKIPPED_STATUS,
+                remarks=remarks, acted_by=user,
+                entered_at=now, exited_at=now, days_spent=Decimal('0.00'),
+            )
+
+        invoice.current_stage = target
+        invoice.current_stage_entered_at = now
+        invoice.rejection_pending = False
+        invoice.is_locked = True
+        invoice.save()
+
+        _release_stranded_note(invoice, target)
+        StageEvent.objects.create(
+            invoice=invoice, stage=target,
+            event_type=StageEvent.EventType.RECEIVE,
+            receiving_note=(
+                StageEvent.ReceivingNote.LATE if _is_late(now)
+                else StageEvent.ReceivingNote.ON_TIME
+            ),
+            remarks=remarks, acted_by=user, entered_at=now,
+        )
+    return invoice
+
+
+def sap_saved_remarks(document):
+    """The sentence written onto every visit the automatic progression closes.
+
+    Carries the SAP document it was matched to, so a reader who doubts the jump
+    can go and look at the document rather than take the sweep's word for it.
+    There is no column for this — it lives in the remarks, which is what every
+    screen already shows.
+    """
+    doc_type = (document.get('doc_type') or 'AP_INVOICE').replace('_', ' ').title()
+    date = document.get('doc_date')
+    dated = f" dated {date:%d-%m-%Y}" if hasattr(date, 'strftime') else ''
+    return (f"Automatic progression — already saved in SAP as {doc_type} "
+            f"{document.get('docnum')}{dated} "
+            f"({document.get('table')} DocEntry {document.get('docentry')} in "
+            f"{document.get('schema')}). Intervening stages marked skipped.")
+
+
+def sync_sap_saved(invoice_ids=None, user=None, *, dry_run=False, limit=None):
+    """Find in-progress invoices SAP has already posted and walk them to Payment.
+
+    Returns a summary dict: `advanced` (list of {invoice, document, from_stage}),
+    `errors`, `checked`, and `cross_company` — invoices whose document exists but
+    in a different company database, which are REPORTED and never advanced (see
+    `sap.posted_documents_for`).
+
+    Idempotent: an invoice already at Payment is not a candidate, so a second
+    run over the same data changes nothing.
+    """
+    from . import sap
+
+    qs = (Invoice.objects
+          .filter(status=Invoice.Status.IN_PROGRESS)
+          .exclude(current_stage__code=PAYMENT_STAGE_CODE)
+          .exclude(party_code='')
+          .select_related('current_stage', 'branch', 'unit', 'category'))
+    if invoice_ids is not None:
+        qs = qs.filter(id__in=list(invoice_ids))
+    qs = qs.order_by('id')
+    if limit:
+        qs = qs[:limit]
+
+    candidates = list(qs)
+    posted = sap.posted_documents_for(candidates)
+
+    advanced, errors = [], []
+    for invoice in candidates:
+        document = posted.get(invoice.id)
+        if not document:
+            continue
+        from_stage = invoice.current_stage.name
+        remarks = sap_saved_remarks(document)
+        if dry_run:
+            advanced.append({'invoice': invoice, 'document': document,
+                             'from_stage': from_stage})
+            continue
+        try:
+            auto_advance_to_payment(invoice, user, remarks)
+            advanced.append({'invoice': invoice, 'document': document,
+                             'from_stage': from_stage})
+        except (ValidationError, PermissionDenied) as exc:
+            errors.append({'invoice': invoice,
+                           'detail': str(getattr(exc, 'message', exc))})
+
+    unmatched = [i for i in candidates if i.id not in posted]
+    return {
+        'checked': len(candidates),
+        'advanced': advanced,
+        'errors': errors,
+        'cross_company': sap.cross_company_documents_for(unmatched),
+    }
+
+
+def _release_stranded_note(invoice, stage):
+    """Clear the way for a new visit to `stage`, or say plainly why it is blocked.
+
+    Holds and pending rejections used to be written as RECEIVE rows with
+    `exited_at` NULL and `entered_at` copied from the visit they annotated. They
+    are annotations, not occupancies, and `StageEvent.EventType.NOTE` exists so
+    they stop being mistaken for one — but rows written before that change are
+    still out there, sitting open at desks their invoice left weeks ago.
+
+    They are invisible until the invoice comes back. Then
+    `tracker_stage_event_one_open_visit_per_stage` (UNIQUE on (invoice, stage)
+    WHERE exited_at IS NULL AND event_type <> 'NOTE') rejects the new RECEIVE,
+    and the desk sees "the server refused the request" with nothing to act on.
+    Four invoices sat at Invoice Entry for a fortnight that way.
+
+    A row is provably one of those annotations when a SIBLING row exists at the
+    same stage with the same `entered_at`: a real visit is opened once, so it has
+    no twin. Those are reclassified to NOTE — the same repair by hand, and the
+    shape the code writes today — and the advance proceeds.
+
+    Anything else is a genuinely unfinished visit, which this must NOT paper
+    over: it raises, naming the event and the date, so whoever is holding the
+    invoice can be asked what happened to it.
+    """
+    stranded = list(StageEvent.objects
+                    .filter(invoice=invoice, stage=stage, exited_at__isnull=True)
+                    .exclude(event_type=StageEvent.EventType.NOTE))
+    for row in stranded:
+        twin = (StageEvent.objects
+                .filter(invoice=invoice, stage=stage, entered_at=row.entered_at)
+                .exclude(pk=row.pk)
+                .exists())
+        if not twin:
+            raise ValidationError(
+                f'An unfinished visit to "{stage.name}" is still open for this '
+                f'invoice (event {row.pk}, opened '
+                f'{timezone.localtime(row.entered_at):%d-%m-%Y}). It has to be '
+                f'closed before the invoice can return to that desk.')
+        row.event_type = StageEvent.EventType.NOTE
+        row.save(update_fields=['event_type'])
+    return len(stranded)
 
 
 def _open_event(invoice):
@@ -465,6 +1004,7 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
         PaymentDetail.objects.get_or_create(invoice=invoice)
     invoice.save()
 
+    _release_stranded_note(invoice, target)
     StageEvent.objects.create(
         invoice=invoice, stage=target,
         event_type=StageEvent.EventType.RECEIVE,
@@ -605,6 +1145,10 @@ def sync_jsap(invoice, *, user=None):
 
     Returns {'changed': bool, 'action': ADVANCE|RETURN|None, 'status': {...}}.
     Safe to call on any invoice: one not at the JSAP desk is a no-op.
+
+    A `status` carrying reason 'sap_unreachable' means the lookup FAILED, not
+    that the invoice is pending. `sync_jsap_all` counts those separately so the
+    caller can say so instead of reporting a quiet, false all-clear.
     """
     from . import jsap
 
@@ -663,7 +1207,7 @@ def sync_jsap_all(*, user=None, limit=None):
     if limit:
         qs = qs[:limit]
 
-    advanced, returned, waiting, errors = [], [], [], []
+    advanced, returned, waiting, errors, unreachable = [], [], [], [], []
     for inv in qs:
         try:
             res = sync_jsap(inv, user=user)
@@ -674,10 +1218,13 @@ def sync_jsap_all(*, user=None, limit=None):
             advanced.append(inv.pk)
         elif res['action'] == 'RETURN':
             returned.append(inv.pk)
+        elif (res.get('status') or {}).get('reason') == 'sap_unreachable':
+            # Kept out of `waiting`: these are unknown, not pending.
+            unreachable.append(inv.pk)
         else:
             waiting.append(inv.pk)
-    return {'advanced': advanced, 'returned': returned,
-            'waiting': waiting, 'errors': errors}
+    return {'advanced': advanced, 'returned': returned, 'waiting': waiting,
+            'unreachable': unreachable, 'errors': errors}
 
 
 def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',

@@ -79,9 +79,9 @@ class RateApprovalReasonTests(SimpleTestCase):
 class CommodityRateApprovalTests(SimpleTestCase):
     """A zero agreed rate means "no rate agreed", not "free".
 
-    For a commodity that is the norm rather than an omission — the price tracks
-    the market — so the line goes for approval every time. For anything else a
-    zero is unmapped master data and stays exempt.
+    There is no benchmark for such a line to clear, so it goes for approval
+    whatever the sub group. A MISSING assignment row is still a different case
+    and stays exempt.
     """
 
     def test_commodity_with_zero_agreed_rate_requires_approval(self):
@@ -100,12 +100,23 @@ class CommodityRateApprovalTests(SimpleTestCase):
 
         self.assertIsNotNone(_get_rate_approval_reason(item, 0, 900))
 
-    def test_a_premium_sub_group_with_no_agreed_rate_stays_exempt(self):
+    def test_a_premium_sub_group_with_no_agreed_rate_also_requires_approval(self):
         # OLIVE is premium, not a commodity — per
-        # OrderItemSerializer.get_variety_type.
+        # OrderItemSerializer.get_variety_type — and used to be exempt on that
+        # basis. ORD-20260912-0007 is why it no longer is: its OLIVE line sold
+        # 100 units at Rs 0.0010 against a zero agreed rate and reached the
+        # auditor without a single approval gate looking at the price.
         item = {"item_name": "Olive Oil", "sub_group": "OLIVE", "qty": 10}
 
-        self.assertIsNone(_get_rate_approval_reason(item, 0, 999))
+        self.assertIsNotNone(_get_rate_approval_reason(item, 0, 999))
+
+    def test_the_real_order_that_slipped_through_now_flags(self):
+        olive = {"item_name": "EXTRA LIGHT OLIVE 5 LTR TIN 4 PCS",
+                 "sub_group": "OLIVE", "qty": 100}
+        canola = {"item_name": "REFINED OIL 15 LTR", "sub_group": "CANOLA", "qty": 500}
+
+        self.assertIsNotNone(_get_rate_approval_reason(olive, 0, 0.0010))
+        self.assertIsNotNone(_get_rate_approval_reason(canola, 0, 2880.9524))
 
     def test_a_zero_priced_commodity_line_stays_exempt(self):
         item = {"item_name": "Mustard Oil", "sub_group": "MUSTARD", "qty": 10}

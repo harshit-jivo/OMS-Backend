@@ -1,6 +1,7 @@
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
     OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer,
@@ -30,7 +31,7 @@ from .serializers import (
     BranchSerializer, CategorySerializer, GstRateSerializer, GstTypeSerializer,
     InvoiceDetailSerializer, InvoiceListSerializer, InvoiceModeSerializer,
     InvoiceWriteSerializer, PaymentDetailSerializer, StageEventSerializer,
-    StageSerializer, StuckAlertSerializer, UnitSerializer,
+    StageSerializer, UnitSerializer, notified_users,
 )
 
 
@@ -283,6 +284,19 @@ class LookupsView(APIView):
 def _flag_true(value):
     """Query-param truthiness: ?x=1 / true / yes."""
     return str(value or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _parse_date(value):
+    """`YYYY-MM-DD` from a query param, or None.
+
+    Returns None for anything unparseable rather than raising: a filter is a
+    view of the queue, and a half-typed date in the box should show an
+    unfiltered list, not a 500.
+    """
+    value = (value or '').strip()
+    if not value:
+        return None
+    return parse_date(value)
 
 
 def _can_use_entry(user):
@@ -548,7 +562,32 @@ class MyQueueView(APIView):
             status=Invoice.Status.IN_PROGRESS,
         ).order_by('-current_stage_entered_at', '-id')
 
+        # Optional filters. Both narrow the queue itself, so the per-stage tab
+        # counts below reflect what the user is actually looking at rather than
+        # an unfiltered total the visible rows contradict.
+        category = (request.query_params.get('category') or '').strip()
+        if category:
+            qs = qs.filter(category__name__iexact=category)
+        # Dated on ARRIVAL AT THIS DESK, matching how the queue is ordered —
+        # "what reached me in this period", not when the invoice was raised.
+        # `date_to` is taken as inclusive of that whole day: users type a date,
+        # not an instant, and a naive `__lte` on a datetime silently drops
+        # everything after midnight of the end date.
+        date_from = _parse_date(request.query_params.get('date_from'))
+        date_to = _parse_date(request.query_params.get('date_to'))
+        if date_from:
+            qs = qs.filter(current_stage_entered_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(current_stage_entered_at__date__lte=date_to)
+
         invoices = list(qs)
+
+        # A FULL hold parks an invoice on purpose, and it is already listed in
+        # the Hold tab. Leaving it in Current too showed it twice and padded the
+        # desk's actionable count with work nobody can act on. Partial holds are
+        # NOT excluded — they advance, so they are never sitting here anyway.
+        held_ids = services.full_hold_invoice_ids([i.id for i in invoices])
+        invoices = [i for i in invoices if i.id not in held_ids]
         counts = {}
         for inv in invoices:
             counts[inv.current_stage_id] = counts.get(inv.current_stage_id, 0) + 1
@@ -574,7 +613,9 @@ class MyQueueView(APIView):
             invoice_id__in=inv_ids, exited_at__isnull=False
         ).select_related('stage', 'acted_by').order_by('invoice_id', 'exited_at'):
             latest_closed[ev.invoice_id] = ev  # last wins == latest exit
+        mutes = services.alert_mute_map(inv_ids)
         for r in rows:
+            r.update(_mute_fields(mutes.get(r['id'])))
             ev = latest_closed.get(r['id'])
             if ev and ev.event_type == StageEvent.EventType.RETURN:
                 r['arrived_via_return'] = True
@@ -861,6 +902,146 @@ class BulkActionView(APIView):
         }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
 
 
+class FastTrackView(APIView):
+    """Send invoices straight from Invoice Entry to SAP Approval.
+
+    Separate from `BulkActionView` on purpose. That view walks the route one
+    step at a time and every rule it enforces assumes adjacency; this one
+    deliberately jumps several desks, so giving it its own endpoint keeps the
+    bypass explicit at the API surface instead of hiding it behind an extra flag
+    on the normal advance. It is also the thing you want to be able to find when
+    auditing how an invoice reached SAP Approval without a Pre-Audit decision.
+
+    Permission is the entry desk (`IsTrackerEntry`), and `services.fast_track`
+    additionally requires `can_act` plus mandatory remarks.
+    """
+    permission_classes = [IsTrackerEntry]
+
+    def post(self, request):
+        ids = request.data.get('ids') or []
+        remarks = request.data.get('remarks', '')
+        if not ids:
+            return Response({'detail': 'No invoices selected.'},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        processed, errors = [], []
+        for invoice in _scoped_queryset(request.user).filter(pk__in=ids):
+            try:
+                services.fast_track(invoice, request.user, remarks)
+                processed.append(invoice.id)
+            except (ValidationError, PermissionDenied) as exc:
+                errors.append({'id': invoice.id,
+                               'detail': str(getattr(exc, 'message', exc))})
+        return Response({
+            'processed': processed,
+            'errors': errors,
+            'processed_count': len(processed),
+        }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
+
+
+
+
+class SapSavedSyncView(APIView):
+    """Run the SAP-saved sweep on demand — the Save in SAP desk's button.
+
+    Same service the nightly `sync_sap_saved` command calls, so the button and
+    the job cannot drift apart. Pass `ids` to check only those invoices (the
+    selected rows); omit it to sweep every in-progress invoice.
+
+    Restricted to people who work the Save in SAP desk, plus tracker admins and
+    superusers. It is not a destructive action, but it moves other desks'
+    invoices to Payment, so it should not be reachable by every tracker user.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def post(self, request):
+        if not self._may_sweep(request.user):
+            return Response(
+                {'detail': 'Only the Save in SAP desk can run this sweep.'},
+                status=http.HTTP_403_FORBIDDEN)
+
+        ids = request.data.get('ids') or None
+        dry_run = _flag_true(request.data.get('dry_run'))
+        result = services.sync_sap_saved(
+            invoice_ids=ids, user=request.user, dry_run=dry_run)
+
+        return Response({
+            'checked': result['checked'],
+            'dry_run': dry_run,
+            'advanced_count': len(result['advanced']),
+            'advanced': [{
+                'id': row['invoice'].id,
+                'invoice_number': row['invoice'].invoice_number,
+                'party_name': row['invoice'].party_name,
+                'from_stage': row['from_stage'],
+                'sap_table': row['document']['table'],
+                'sap_docnum': row['document']['docnum'],
+                'sap_docentry': row['document']['docentry'],
+            } for row in result['advanced']],
+            'errors': [{'id': e['invoice'].id,
+                        'invoice_number': e['invoice'].invoice_number,
+                        'detail': e['detail']} for e in result['errors']],
+            # Reported, never advanced — see services.sync_sap_saved.
+            'cross_company_count': len(result['cross_company']),
+        }, status=http.HTTP_200_OK)
+
+    @staticmethod
+    def _may_sweep(user):
+        if user.is_superuser or _is_tracker_admin(user):
+            return True
+        stage = Stage.objects.filter(
+            code=services.SAVE_IN_SAP_STAGE_CODE).values_list('id', flat=True).first()
+        return bool(stage) and stage in services.accessible_stage_ids(user)
+
+
+class AlertMuteView(APIView):
+    """Stop (or resume) the stuck-alert emails for invoices at this desk.
+
+    POST with `ids` and a `reason` mutes; DELETE with `ids` un-mutes. A reason is
+    mandatory on the way in and not asked for on the way out — turning the
+    reminders back on needs no justification.
+
+    The mute suppresses the EMAIL only, and only for the stage visit the invoice
+    is on right now (see `tracker.models.AlertMute`). Nothing here changes the
+    invoice's ageing, its overdue flag, or whether it appears in the queue.
+    """
+    permission_classes = [IsTrackerUser]
+
+    def post(self, request):
+        return self._apply(request, mute=True)
+
+    def delete(self, request):
+        return self._apply(request, mute=False)
+
+    def _apply(self, request, mute):
+        ids = request.data.get('ids') or []
+        reason = request.data.get('reason', '')
+        if not ids:
+            return Response({'detail': 'No invoices selected.'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        if mute and not str(reason).strip():
+            return Response(
+                {'detail': 'A reason is required to stop the alert emails.'},
+                status=http.HTTP_400_BAD_REQUEST)
+
+        processed, errors = [], []
+        for invoice in _scoped_queryset(request.user).filter(pk__in=ids):
+            try:
+                if mute:
+                    services.set_alert_mute(invoice, request.user, reason)
+                else:
+                    services.clear_alert_mute(invoice, request.user)
+                processed.append(invoice.id)
+            except (ValidationError, PermissionDenied) as exc:
+                errors.append({'id': invoice.id,
+                               'detail': str(getattr(exc, 'message', exc))})
+        return Response({
+            'processed': processed,
+            'errors': errors,
+            'processed_count': len(processed),
+        }, status=http.HTTP_207_MULTI_STATUS if errors else http.HTTP_200_OK)
+
+
 class AdminInvoicesView(APIView):
     """Master list of EVERY invoice for the tracker admin, with filters.
 
@@ -921,18 +1102,102 @@ class ReportsView(APIView):
         return Response(build_report(request.query_params))
 
 
+def _mute_fields(mute):
+    """The mute half of a row's payload — always present, null when not muted.
+
+    Kept as explicit nulls rather than omitted keys so the client never has to
+    distinguish "not muted" from "this endpoint doesn't report mutes".
+    """
+    return {
+        'email_muted': bool(mute),
+        'email_mute_reason': mute.reason if mute else '',
+        'email_muted_by': (getattr(mute.created_by, 'username', None)
+                           if mute and mute.created_by_id else None),
+        'email_muted_at': mute.created_at if mute else None,
+    }
+
+
+def _stuck_alert_payload(invoice, stage, days, alert, mute=None):
+    """One live stuck row, in the exact shape `StuckAlertSerializer` emits.
+
+    `alert` is the matching `StuckAlert` ledger row or None. The ledger-only
+    fields are null when the sweep has not yet recorded this visit — the row is
+    still real and still stuck, it just has no email history. `id` is therefore
+    nullable and NOT a usable React key; the client keys on `invoice`, which is
+    unique here because an invoice sits at exactly one stage at a time.
+    """
+    return {
+        'id': alert.id if alert else None,
+        'invoice': invoice.id,
+        'invoice_number': invoice.invoice_number,
+        'party_name': invoice.party_name,
+        'invoice_value': str(invoice.invoice_value),
+        'stage': stage.id,
+        'stage_name': stage.name,
+        'stage_code': stage.code,
+        'stage_entered_at': invoice.current_stage_entered_at,
+        'days_stuck': str(days),
+        'threshold_days': stage.threshold_days,
+        'over_by': float(days) - stage.threshold_days,
+        'is_active': True,          # live-derived rows are stuck by definition
+        'last_notified_at': alert.last_notified_at if alert else None,
+        'notified': notified_users(alert),
+        'created_at': alert.created_at if alert else None,
+        'updated_at': alert.updated_at if alert else None,
+        **_mute_fields(mute),
+    }
+
+
 class AlertsView(APIView):
-    """Active stuck-invoice alerts, scoped to the stages the user handles.
-    Superusers see all. Pass ?all=true (superuser) to include everything."""
+    """Stuck-invoice alerts, scoped to the stages the user handles.
+
+    Computed LIVE from `services.stuck_visits()`, not read out of the
+    `StuckAlert` table. The table is written only by the `scan_stuck_alerts`
+    sweep, so reading it made this screen a cache of a scheduled job: when the
+    sweep is not running the page renders "0 stuck invoices — every desk is
+    inside its threshold", which is indistinguishable from genuinely good news.
+    That is exactly how 566 overdue invoices showed as an empty screen. Deriving
+    the rows from the same dwell-time rule the sweep uses means the page is
+    correct on its own and cannot silently go blank.
+
+    `StuckAlert` still matters as the EMAIL LEDGER: it records who was mailed
+    about a given visit. Rows are joined in here for the "Mailed to" column, so
+    an alert the sweep has never seen simply shows as not-yet-mailed rather than
+    disappearing.
+    """
     permission_classes = [IsTrackerAlerts]
 
     def get(self, request):
-        qs = StuckAlert.objects.filter(is_active=True).select_related(
-            'invoice', 'stage').prefetch_related('notifications__user')
-        if not request.user.is_superuser:
-            stage_ids = services.accessible_stage_ids(request.user)
-            qs = qs.filter(stage_id__in=stage_ids)
-        return Response(StuckAlertSerializer(qs, many=True).data)
+        stage_ids = (None if request.user.is_superuser
+                     else services.accessible_stage_ids(request.user))
+        visits = services.stuck_visits(stage_ids=stage_ids)
+
+        # One query for the ledger, keyed the same way the sweep keys a row:
+        # (invoice, stage, stage_entered_at) identifies one VISIT, so a second
+        # trip to the same desk does not inherit the first trip's emails.
+        ledger = {}
+        if visits:
+            rows = (StuckAlert.objects
+                    .filter(invoice_id__in=[inv.id for inv, _, _ in visits])
+                    .prefetch_related('notifications__user'))
+            for row in rows:
+                ledger[(row.invoice_id, row.stage_id, row.stage_entered_at)] = row
+
+        # Muted visits are still listed here — the mute only silences the
+        # email. They carry the flag and the reason so the desk can see at a
+        # glance which overdue rows are deliberately not being chased.
+        mutes = services.alert_mute_map([inv.id for inv, _s, _d in visits])
+
+        data = [
+            _stuck_alert_payload(
+                inv, stage, days,
+                ledger.get((inv.id, stage.id, inv.current_stage_entered_at)),
+                mutes.get(inv.id))
+            for inv, stage, days in visits
+        ]
+        # Worst offenders first — the point of the screen is triage.
+        data.sort(key=lambda d: d['over_by'], reverse=True)
+        return Response(data)
 
 
 class PaymentDetailView(APIView):

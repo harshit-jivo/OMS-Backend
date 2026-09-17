@@ -100,7 +100,20 @@ def load_image(path: str):
 
     # `poppler_path` empty means "on PATH" — correct on the Linux host, and
     # configurable because Windows dev boxes install poppler wherever.
+    #
+    # Verified rather than trusted, for the reason spelled out in
+    # `ocr._tesseract`: `.env` is per-host, a deployment file seeded from a
+    # developer's carries a `C:\...` path, and handing that to `pdf2image` on
+    # the Linux host makes every PDF upload fail with "Could not read that
+    # file as a PDF or an image" while poppler sits installed and on PATH.
     poppler = getattr(settings, 'POPPLER_PATH', '') or None
+    if poppler and not os.path.isdir(poppler):
+        logger.warning(
+            'POPPLER_PATH points at %s, which is not a directory on this '
+            'host — ignoring it and looking for poppler on PATH. Clear the '
+            'setting in the .env for this host if poppler is on PATH here.',
+            poppler)
+        poppler = None
     try:
         pages = convert_from_path(path, dpi=RENDER_DPI, poppler_path=poppler)
     except Exception as exc:  # noqa: BLE001 — pdf2image wraps several

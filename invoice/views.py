@@ -112,6 +112,41 @@ def branches_for_user(user):
     return branches or None
 
 
+def _history_actor(request):
+    """Who to record on an `InvocieHistory` row, as a username string.
+
+    `InvocieHistory.created_by` is a CharField, and every other writer in this
+    module passes `request.user` straight into it — Django coerces the instance
+    with `str()`, which `AbstractUser.__str__` defines as the username. This
+    returns that same string, so a row written by the status-update path is
+    attributed identically to one written by create, edit, delete or restore.
+
+    Why it exists: that path read the actor out of the request BODY
+    (`request.data.get('user')`), and no client has ever sent that key — the
+    review screen PATCHes `{status, rejection_reason}` and nothing more
+    (`invoiceReview/helpers.ts:updateInvoiceStatus`). So every approval,
+    rejection, SAP post and credit-limit row landed with `created_by` NULL,
+    while the paths using `request.user` produced none. Measured on live: 192
+    POSTED_TO_SAP, 162 ERROR, 9 APPROVED and 6 CL_RAISED rows with no actor on
+    them. Those 369 are not recoverable — `audit.AuditLog` does not cover
+    `/api/invoice/` paths (`audit/pages.py:_PATH_RULES`), so nothing else in
+    the system recorded who made those decisions.
+
+    The body value survives as a FALLBACK, never as the first choice. These
+    views are `AllowAny`, so an unauthenticated caller really can reach them,
+    and a name such a caller declares about itself is worth keeping as a hint
+    while being worth nothing as proof — which is exactly why it must not
+    override an authenticated identity. `None` when there is neither, so
+    "nobody knows" stays distinguishable from a real name instead of becoming
+    the literal string 'AnonymousUser'.
+    """
+    user = getattr(request, 'user', None)
+    if user is not None and getattr(user, 'is_authenticated', False):
+        return user.get_username()
+    claimed = str(request.data.get('user') or '').strip()
+    return claimed[:125] or None
+
+
 def scope_logs_to_user(invoice_logs, request):
     """Narrow an InvoiceLog queryset to the branches the caller may see."""
     branches = branches_for_user(getattr(request, 'user', None))
@@ -216,7 +251,6 @@ class InvoicelogStatusUpdateView(APIView):
             )
 
         new_status = request.data.get('status')
-        user = request.data.get('user')
 
         if new_status not in dict(InvoiceLog.STATUS_CHOICES):
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
@@ -250,10 +284,8 @@ class InvoicelogStatusUpdateView(APIView):
                     rejection_reason=invoice_log.rejection_reason,
                     error_message=invoice_log.error_message,
                     invoice_payload=invoice_log.invoice_payload,
-                    created_by=user,
+                    created_by=_history_actor(request),
         )
-        print(f"Creator{invoice_log.created_by}")
-        print(f"Approver{request.user}")
         invoice_log.save()
         return Response({'message': 'Status updated successfully'}, status=status.HTTP_200_OK)
     
