@@ -209,6 +209,44 @@ today (flag NULL → `CardName`); the trap is simply defused.
 all three schemas. That is 9 copies of the same logic, and drift between them is
 invisible until a bill prints wrong. Diff before assuming they match.
 
+### 2026-09-18 — service invoices printed completely blank (fixed)
+
+An invoice raised as a **service** document (`OINV."DocType" = 'S'` — no item,
+`Quantity` 0, the description carried on the line) printed with nothing on it at
+all. Not just a missing QR: no party, no amounts, no lines.
+
+`OMS_SP_GST_INVOICE` ended with
+
+```sql
+INNER JOIN "OITM" ON "OITM"."ItemCode" = "INV1"."ItemCode"
+```
+
+and a service line has **no `ItemCode`**, so every row was dropped and the proc
+returned zero rows. The IRN and QR vanished with them, because they are
+correlated subqueries in the SELECT list — with no rows they are never
+evaluated, which is why `OMS_IRN_LOG` could look perfectly correct while the
+bill showed nothing. Reported against 726090103 / 726090104 (DocEntry
+80465/80466), whose `OMS_IRN_LOG` rows were fine all along.
+
+Fixed by making that one join a `LEFT JOIN`. `OITM."ItemCode"` is unique, so it
+cannot multiply rows; the only lines whose behaviour changes are the ones that
+were being dropped. Measured on live Oil before deploying: **11,508 lines across
+11,503 invoices, every one of them `DocType = 'S'`** — and **zero** goods
+invoices affected (no goods line anywhere has an ItemCode missing from OITM).
+
+Deployed 2026-09-18 to `JIVO_OIL_HANADB` (both `OMS_SP_GST_INVOICE` and
+`OMS_SP_GST_INVOICE_SAP`), `JIVO_MART_HANADB`, `JIVO_BEVERAGES_HANADB` and the
+three `TEST_*` copies. Mart had 77 affected invoices, Beverages none — but the
+latent bug was there too.
+
+> **Still open — the SAP-side service report.** SAP's own service-invoice
+> layout runs `CRYSTAL_AR_INVOICE_SERVICES`, and that proc reads QR/IRN from
+> `"@UTL_MDEXTH"` **only**. It never got the `OMS_IRN_LOG` UNION that
+> `OMS_SP_GST_INVOICE` has, so an OMS-generated IRN still prints blank there.
+> It returns rows (it does not join `OITM`), so the bill looks fine apart from
+> the missing IRN/QR — easy to miss. Same gap applies to the other `CRYSTAL_*`
+> procs.
+
 ### The e-invoice path does NOT share this logic
 
 The IRN is built in [`einvoice/mapping.py`](../mapping.py), not by this proc, and
