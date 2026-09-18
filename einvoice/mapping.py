@@ -2,9 +2,10 @@
 Map a SAP Business One Service Layer Invoice (OINV / `Invoices` entity) into the
 NIC e-Invoice (IRN) request JSON, schema 1.1.
 
-Pure/among-Python: `build_irn(sap_invoice, hsn_map)` takes an already-fetched
-invoice dict plus a resolved {HSNEntry: hsn_code} map and returns the IRN payload.
-The SAP fetch + HSN resolution live in `einvoice.sap` so this stays testable.
+Pure/among-Python: `build_irn(sap_invoice, hsn_map, sac_map)` takes an
+already-fetched invoice dict plus resolved {HSNEntry: hsn_code} and
+{SACEntry: sac_code} maps and returns the IRN payload. The SAP fetch + code
+resolution live in `einvoice.sap` so this stays testable.
 
 Field sources (see docs/NIC_EINVOICE_EWAYBILL_REFERENCE.md §5, §10):
   SellerDtls  <- VATRegNum (issuing branch GSTIN) + EWayBillDetails.DispatchFrom*
@@ -19,7 +20,8 @@ master at fetch time — matched on the document's own PayToCode/ShipToCode, the
 same join the bill print and the GSTR-1 extracts use. Mapping a raw SAP dict
 without that repair still works; it just yields URP (B2C_NOT_ELIGIBLE) and no
 ShipDtls.
-  ItemList    <- DocumentLines (HSN via IndiaHsn, IGST vs CGST+SGST per SAP tax code)
+  ItemList    <- DocumentLines (HSN via IndiaHsn / SAC via IndiaSacCode,
+                 IGST vs CGST+SGST per SAP tax code)
   ValDtls     <- summed over items
 
 The buyer/ship-to GSTINs are read straight off EWayBillDetails here. SAP leaves
@@ -158,15 +160,20 @@ def _party(keys, values):
     return {k: v for k, v in zip(keys, values) if v is not None}
 
 
-def build_irn(sap_invoice: dict, hsn_map: dict | None = None) -> dict:
+def build_irn(sap_invoice: dict, hsn_map: dict | None = None,
+              sac_map: dict | None = None) -> dict:
     """
     Convert a SAP Service Layer invoice dict to an IRN JSON payload (schema 1.1).
 
-    `hsn_map` maps a line's HSNEntry (int) to its HSN code string (see
-    einvoice.sap.resolve_hsn). Lines whose HSN cannot be resolved get "" so the
-    pre-submit validator flags them rather than silently sending a bad code.
+    `hsn_map` maps a line's HSNEntry (int) to its HSN code string and `sac_map`
+    maps its SACEntry to its SAC code (see einvoice.sap.resolve_hsn /
+    resolve_sac). Both are needed: a service invoice (OINV.DocType = 'S') has
+    no HSNEntry on any line, so it resolves entirely through `sac_map`. Lines
+    whose code cannot be resolved get "" so the pre-submit validator flags them
+    rather than silently sending a bad code.
     """
     hsn_map = hsn_map or {}
+    sac_map = sac_map or {}
     ewb = sap_invoice.get("EWayBillDetails") or {}
     axe = sap_invoice.get("AddressExtension") or {}
     lines = sap_invoice.get("DocumentLines") or []
@@ -216,11 +223,15 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None) -> dict:
         else:
             igst = tax_total
         tot_item = _r2(ass + cgst + sgst + igst)
-        hsn = hsn_map.get(ln.get("HSNEntry")) or ""
+        # HSN first, then SAC: a line carries one or the other, never both.
+        # IsServc follows NIC's own rule rather than which map the code came
+        # from, because Jivo's SAC master (OSAC) also holds goods HSNs — NIC
+        # requires IsServc = "Y" exactly when the code is a 99-series SAC.
+        hsn = hsn_map.get(ln.get("HSNEntry")) or sac_map.get(ln.get("SACEntry")) or ""
         item_list.append({
             "SlNo": str(i),
             "PrdDesc": _clean(ln.get("ItemDescription") or ln.get("ItemCode")),
-            "IsServc": "N",
+            "IsServc": "Y" if hsn.startswith("99") else "N",
             "HsnCd": hsn,
             "Qty": qty,
             "Unit": (ln.get("MeasureUnit") or "NOS").upper(),

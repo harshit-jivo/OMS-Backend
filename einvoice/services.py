@@ -609,8 +609,8 @@ def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=N
 
     # 1. fetch + map
     try:
-        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
-        invoice = mapping.build_irn(sap_invoice, hsn_map)
+        sap_invoice, hsn_map, sac_map = sap.fetch_invoice_for_irn(docentry, company_db)
+        invoice = mapping.build_irn(sap_invoice, hsn_map, sac_map)
     except Exception as exc:  # noqa: BLE001 — SAP fetch / mapping failure
         logger.exception("auto IRN: fetch/map failed for DocEntry %s", docentry)
         return _log("FAILED", error_code="FETCH", error_message=str(exc))

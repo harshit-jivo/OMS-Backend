@@ -192,7 +192,10 @@ def validate_invoice(invoice: dict) -> list[dict]:
 
         hsn = str(item.get("HsnCd", "") or "")
         if not hsn:
-            err(f"{f}.HsnCd", "HSN_REQUIRED", "HSN code is mandatory (could not be resolved from SAP). [2176]")
+            err(f"{f}.HsnCd", "HSN_REQUIRED",
+                "HSN/SAC code is mandatory and could not be resolved from SAP. "
+                "Set the line's HSN Code (goods) or SAC (service invoice) in "
+                "SAP and re-fetch. [2176]")
         elif not RE_HSN.match(hsn):
             err(f"{f}.HsnCd", "BAD_HSN", "HSN must be 4-8 digits (min 6; 4 allowed if turnover < Rs 5cr). [2176]")
 

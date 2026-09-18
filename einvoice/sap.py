@@ -10,6 +10,7 @@ uncached login to that company so the fetch is explicit and side-effect free.
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import quote
 
 import requests
@@ -215,6 +216,44 @@ def resolve_hsn(entries, company_db: str | None = None, session=None) -> dict:
                     out[ent] = code
         except (requests.RequestException, ValueError):
             logger.warning("Could not resolve HSN for IndiaHsn(%s)", ent)
+    return out
+
+
+#: SAP's own zero-padding of a standard 6-digit SAC ('00' + 99xxxx). Deliberately
+#: narrow — see resolve_sac.
+_SAP_PADDED_SAC = re.compile(r"^0099\d{4}$")
+
+
+def resolve_sac(entries, company_db: str | None = None, session=None) -> dict:
+    """Map SAP line SACEntry (OSAC AbsEntry) -> SAC code string via the
+    IndiaSacCode entity.
+
+    Service invoices (OINV.DocType = 'S') carry NO HSNEntry at all — SAP puts
+    the code in SACEntry instead, and goods lines leave SACEntry null. So the
+    two lookups are complements, not alternatives, and an invoice that is
+    entirely services resolves entirely through here.
+
+    SAP's shipped SAC master (AbsEntry < 0) stores the standard codes
+    zero-padded to 8 chars — '00995411' for SAC 995411 — which NIC rejects, so
+    that exact padding is undone. Nothing else is: Jivo's user-defined rows
+    include malformed codes ('0901190') and goods HSNs, and stripping their
+    zeros would turn a code the validator would have caught into a wrong one
+    that looks right. Those are passed through as-is to fail validation.
+    """
+    session = session or get_session(company_db)
+    out = {}
+    for ent in {e for e in entries if e not in (None, "", -1)}:
+        try:
+            resp = session.get(f"{_base()}/IndiaSacCode({int(ent)})",
+                               verify=_verify(), timeout=_timeout())
+            if resp.status_code == 200:
+                code = str(resp.json().get("ServiceCode") or "").strip()
+                if _SAP_PADDED_SAC.match(code):
+                    code = code[2:]
+                if code:
+                    out[ent] = code
+        except (requests.RequestException, ValueError):
+            logger.warning("Could not resolve SAC for IndiaSacCode(%s)", ent)
     return out
 
 
@@ -466,14 +505,20 @@ def normalize_buyer_gstin(invoice: dict, session) -> dict:
 
 def fetch_invoice_for_irn(docentry: int, company_db: str | None = None, session=None):
     """Fetch an invoice, repair its seller and buyer blocks and resolve all its
-    line HSN codes in one session. Returns (invoice_dict, hsn_map)."""
+    line HSN *and* SAC codes in one session.
+
+    Returns (invoice_dict, hsn_map, sac_map). A service invoice resolves only
+    through sac_map and a goods invoice only through hsn_map, so both are
+    needed to cover every document type — see resolve_sac.
+    """
     session = session or get_session(company_db)
     invoice = fetch_invoice(docentry, session=session)
     normalize_seller_branch(invoice, session)
     normalize_buyer_gstin(invoice, session)
-    entries = [ln.get("HSNEntry") for ln in (invoice.get("DocumentLines") or [])]
-    hsn_map = resolve_hsn(entries, session=session)
-    return invoice, hsn_map
+    lines = invoice.get("DocumentLines") or []
+    hsn_map = resolve_hsn([ln.get("HSNEntry") for ln in lines], session=session)
+    sac_map = resolve_sac([ln.get("SACEntry") for ln in lines], session=session)
+    return invoice, hsn_map, sac_map
 
 
 def _ddmmyyyy_to_iso(dt):
