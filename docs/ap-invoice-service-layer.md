@@ -88,7 +88,14 @@ vendor's own allowed list** (`OCRD` → `WTX1`), otherwise SAP rejects with
 `1250000075`. Read the vendor's permitted codes and present only those. Let SAP
 compute `WTAmount`; do not send it.
 
-## 4. The attachment problem (`-5002`)
+## 4. The attachment problem (`-5002`) — FIXED 2026-08-25
+
+> **Status: resolved.** The root cause was a flapping CIFS mount on `.222`
+> (details below); fixed by disabling SMB idle auto-disconnect on the `.52` file
+> server and remounting the shares `hard`. Creating new attachments via
+> `Attachments2` — and therefore `ap/attachment/` — works. OMS still retries once
+> on `-5002` in case the mount is mid-reconnect. The history below is kept
+> because the failure returns if `.222`↔`.52` connectivity degrades again.
 
 Posting a copy of a GRPO that *has* an attachment fails:
 
@@ -175,8 +182,9 @@ Backend — `serviceLayer/ap_views.py`, routed in `serviceLayer/urls.py`:
 |---|---|
 | `GET /api/service-layer/ap/open-grpos/?branch=OIL` | List open GRPOs (optional `vendor`, `search`) |
 | `GET /api/service-layer/ap/grpo/?branch=OIL&doc_num=` | One GRPO + its **open lines only** (also accepts `doc_entry`) |
-| `GET /api/service-layer/ap/vendor-tds/?branch=OIL&card_code=` | Vendor WT flag + active TDS code master |
-| `POST /api/service-layer/ap/invoice/?branch=OIL` | Create the A/P invoice |
+| `GET /api/service-layer/ap/vendor-tds/?branch=OIL&card_code=` | Vendor WT flag + **its assigned** TDS codes (`BPWithholdingTaxCollection`), enriched from the master |
+| `POST /api/service-layer/ap/attachment/?branch=OIL` | Upload the vendor invoice file → SAP `Attachments2` → returns `AttachmentEntry` |
+| `POST /api/service-layer/ap/invoice/?branch=OIL` | Create the A/P invoice **as a SAP draft** |
 
 The POST takes **friendly fields, not a raw SAP payload** (unlike the older
 `SAPInvoiceCreateView`), and builds the SAP body server-side — so the client can
@@ -184,15 +192,48 @@ never send a malformed `BaseType`/`BaseEntry`. Body:
 
 ```json
 {"grpo_entry": 25771, "num_at_card": "INV/2026/01",
- "doc_date": "2026-08-25", "due_date": "2026-09-15", "comments": "…",
- "attachment_entry": 170738,
- "tds": {"liable": true, "wt_code": "TDS"},
+ "doc_date": "2026-08-25", "tax_date": "2026-08-24", "due_date": "2026-09-15",
+ "comments": "…", "attachment_entry": 170738,
+ "tds": {"liable": true, "wt_codes": ["1041", "1042"]},
  "lines": [{"base_line": 0, "quantity": 42, "unit_price": 5.0}]}
 ```
 
 `quantity`/`unit_price` are **optional per line** — omit them and SAP copies the
 GRPO values. The frontend only sends them when the user actually changed the
-value. Posts as `SAP_APPROVER_USER` so SAP doesn't intercept into a draft.
+value.
+
+**Dates** map to the SAP A/P invoice screen: `doc_date → DocDate` (Posting Date),
+`tax_date → TaxDate` (Document Date, the date on the vendor's invoice),
+`due_date → DocDueDate` (Due Date). `num_at_card → NumAtCard` is the Vendor Ref.
+No., auto-filled from the GRPO's `NumAtCard` and editable.
+
+**TDS** — `tds.wt_codes` is a **list**; each becomes one
+`WithholdingTaxDataCollection` row (`{WTCode}`) with `WTLiable = tYES`. A single
+`tds.wt_code` is still accepted. The picker offers only the vendor's assigned
+codes (`applicable_only = true`); if the vendor has none assigned it falls back
+to the full active master and says so.
+
+### Posted as a DRAFT for approval
+
+The create posts to **`/Drafts`** (not `/PurchaseInvoices`) as the **drafter
+user** (`HANA_USERNAME`), with `DocObjectCode = "oPurchaseInvoices"`. This is the
+opposite of `SAPInvoiceCreateView`, which posts live as `SAP_APPROVER_USER` — AP
+entry deliberately routes through SAP's approval procedure. The response carries
+`is_draft: true` plus the draft's `doc_entry`/`doc_num` (the **draft number** the
+user quotes to the approver). The GRPO is **not** closed until the draft is
+approved and added in SAP.
+
+### Attachment upload (`ap/attachment/`)
+
+The user uploads the vendor invoice at the AP-entry step (multipart field
+`file`), exactly as they would in the SAP client. The backend `POST`s it to SAP
+**`Attachments2`** in the branch's company DB and returns its `AbsoluteEntry` as
+`attachment_entry`, which the frontend passes into the invoice draft. Creating an
+`Attachments2` row is the **only** way to obtain an `AttachmentEntry` — the
+separate file-upload utility puts bytes on the share but yields no entry. An
+uploaded file **supersedes** reusing the GRPO's own attachment. Type/size are
+enforced server-side (15 MB; pdf/image/office/txt/eml) and `-5002` is retried
+once (see §4 — that flapping-mount bug is fixed).
 
 Frontend — `pages/Ap_Invoice_Entry.tsx`, `services/apInvoiceService.ts`,
 `styles/Ap_Invoice_Entry.css`, route `/Ap_Invoice_Entry` in `App.tsx`.
@@ -209,7 +250,7 @@ same screen they already use (Tracker Config → Users).
 | `tracker_entry` / `tracker_user` | No |
 
 Defined once per side and mirrored: `ROLE_PAGE_MAP` in `tracker/permissions.py`
-(page key `Ap_Invoice_Entry`, enforced by `IsTrackerAP` on all four endpoints)
+(page key `Ap_Invoice_Entry`, enforced by `IsTrackerAP` on all five endpoints)
 and `TRACKER_ROLE_PAGES` in `src/config/pageAccess.ts` (drives the sidebar link,
 the in-page guard and the post-login landing page). `TRACKER_ROLE_NAMES` derives
 from `ROLE_PAGE_MAP`, so the tracker-admin user management picked the role up

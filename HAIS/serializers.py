@@ -198,3 +198,48 @@ class AssetSerializer(serializers.ModelSerializer):
         if user and user.is_authenticated:
             return getattr(user, "username", "") or str(user)
         return ""
+
+
+class PublicAssetSerializer(serializers.ModelSerializer):
+    """What an ANONYMOUS scanner sees.
+
+    A QR sticker on a laptop is readable by anyone who picks the laptop up, so
+    this endpoint has no session behind it and the field list is the whole
+    security control. It is an allow-list, deliberately: adding a field to
+    `AssetSerializer` must never widen what the public page leaks, and a
+    `fields = "__all__"` here would do exactly that the next time the model
+    grows a column.
+
+    WHAT IS DELIBERATELY NOT HERE
+    -----------------------------
+    * `current_user_id` / `prev_user_id` — employee numbers, and the previous
+      holder is nobody's business at a sticker;
+    * `purchase_invoice_no`, `purchase_invoice_date`, `amount`, `vendor` —
+      what the company paid and who it bought from;
+    * `logs` — the full handover history: who had this machine, when, and why
+      it moved. That is a movement record of named staff.
+
+    What IS here is the answer to "whose is this and how do I return it":
+    the device, its holder, and a way to reach them.
+    """
+
+    asset_type_name = serializers.CharField(source="asset_type.name", default="", read_only=True)
+    department_name = serializers.CharField(source="department.name", default="", read_only=True)
+    storage_type_names = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Asset
+        fields = [
+            # Identity of the DEVICE.
+            "asset_id", "serial_num",
+            "asset_type_name", "company", "model_num", "working_status",
+            # Configuration, so a scanner can confirm it is the right machine.
+            "processor", "memory", "operating_system", "storage",
+            "storage_type_names", "warranty_ends",
+            # Whose it is, and how to return it.
+            "current_user_name", "department_name", "email_id", "current_location",
+        ]
+        read_only_fields = fields
+
+    def get_storage_type_names(self, obj):
+        return [s.name for s in obj.storage_types.all()]

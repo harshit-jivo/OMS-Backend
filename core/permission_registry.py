@@ -48,6 +48,15 @@ REGISTRY: dict[str, dict[str, str]] = {
         'orders.decision.simple':   'Approve/reject orders (simple flow)',
         'orders.status.transition': 'Move orders through the status flow',
         'orders.mart.decide':       'Approve/reject Mart (distributor) orders',
+        # Company-wide visibility, as opposed to `orders.sales.view`, which is
+        # the right to see the orders already IN YOUR SCOPE. `_get_base_orders`
+        # decides that scope, and it did so by matching `user.role.name`
+        # against seven literals -- so any role outside that list fell through
+        # to `Order.objects.none()` and its holder got a dashboard of zeroes
+        # rather than a refusal. This key is how a role says "no scoping",
+        # without a new literal having to be added to that function each time
+        # an administrator invents a role.
+        'orders.sales.view_all':    'View every order, company-wide',
     },
 
     # --- Admin pages (legacy extra_pages keys, verbatim from
@@ -69,11 +78,53 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Distributor':              'Distributor',
         'Mart_Approval':            'Mart Approval',
         'Device_Management':        'Device Management',
+        # Staff orders — an internal order raised against an employee ID
+        # rather than a party, priced from each product's staff rate. Two
+        # keys, not one: reading the staff catalogue to PLACE an order and
+        # setting the rates the company sells to its own people at are
+        # different authorities, and the second is the one worth withholding.
+        #
+        # Both were `adminOnly` on the route and grantable to nobody, while
+        # `orders/staff-products/` carried no permission_classes at all — so
+        # the page was admin-only and the endpoint behind it took writes from
+        # any signed-in user. These keys are what closes that.
+        'Staff':                    'Staff Orders',
+        'Staff_Rate_Assignment':    'Staff Rate Assignment',
+        # The order/revenue analytics screen, formerly `/Dashboard`. It was
+        # ungated for one structural reason — it doubled as the landing page,
+        # so denying it would have looped the user — and `/Home` taking that
+        # job is what let it become a normal page with a normal key.
+        # Back-granted to today's dashboard roles by users/0034.
+        'Sales_Dashboard':          'Sales Dashboard',
         # One key for the whole Legal module — Label Checker and Nutrition
         # Manager are one desk, the way `Distributor` covers both distributor
         # routes. Gates every legal/ endpoint via HasKeyOrRole, with the
         # `legal` role as the transitional fallback (see legal/views.py).
         'Legal':                    'Legal (Labels & Nutrition)',
+        # BackDate (BKDT) — temporary back-posting rights in SAP. TWO keys,
+        # because raising a request and deciding one are different authorities
+        # and the second is the one worth withholding.
+        #
+        # `BackDate_Approval` is necessary but NOT sufficient to approve: the
+        # backend also requires the caller to be the current effective user of
+        # that workflow stage (backdate/permissions.py). Holding the key alone
+        # opens the page and shows nothing actionable.
+        'BackDate':                 'BackDate — raise requests',
+        'BackDate_Approval':        'BackDate — approve/reject',
+
+        # PRDO (Production Orders) — SAP raises them, OMS approves them.
+        # Two keys for the same reason as BackDate: noticing and
+        # deciding are different authorities.
+        #
+        # `Production_Order_Approval` is necessary but NOT sufficient:
+        # the backend also requires the caller to be the current
+        # effective user of that workflow stage
+        # (production/permissions.py). The stage is also what scopes a
+        # user to a company — OMS has no user->company map that scopes
+        # documents, and a stage belongs to exactly one company's
+        # workflow.
+        'Production_Order':          'Production Order — view requests',
+        'Production_Order_Approval': 'Production Order — approve/reject',
     },
 
     # --- Payments actions (legacy keys, verbatim from
@@ -114,6 +165,23 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Tracker_Reports':          'Tracker — Reports',
         'Tracker_Admin':            'Tracker — Administration',
         'Ap_Invoice_Entry':         'AP Invoice Entry (vendor invoices)',
+    },
+
+    # --- Generic workflow engine (new-style keys) --------------------------
+    # Three keys, split by blast radius rather than by endpoint. Authoring a
+    # condition query is effectively authoring code, so it sits behind the
+    # same admin key as the rest of the configuration and NOT behind the
+    # runtime key an approver holds.
+    #
+    # Note that `workflow.task.act` is necessary but NOT sufficient to act on
+    # a task: the engine additionally requires the caller to be that task's
+    # effective actor (the stage's configured user, or their dated
+    # replacement), so holding this key never lets one approver act on
+    # another's task.
+    'workflow': {
+        'workflow.config.manage': 'Configure workflows, queries, stages and replacements',
+        'workflow.task.act':      'Approve/reject workflow tasks assigned to you',
+        'workflow.state.view':    'View workflow state and history for a document',
     },
 
     # HANA has no module here, deliberately: `hana/` endpoints are read-only

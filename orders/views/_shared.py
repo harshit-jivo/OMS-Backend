@@ -118,9 +118,31 @@ def _apply_billing_order_scope(queryset, user):
 
     return queryset.distinct()
 
+def sees_all_orders(user):
+    """True when `user` may see every order, unscoped.
+
+    Keyed rather than role-named on purpose. `_get_base_orders` below matched
+    `user.role.name` against seven literals, so a role outside that list —
+    every role an administrator creates on the Role Permissions page — fell
+    through to `Order.objects.none()`. Its holder then got a Sales Dashboard of
+    zeroes rather than a refusal, because `HasKey('Sales_Dashboard')` had
+    already let them onto the page. 'Billing Admin' was the first to hit it.
+
+    Admins are covered without being named: `effective_keys` returns the whole
+    registry for them. That also fixes a smaller bug in passing — the old
+    `role_name == 'admin'` test read the primary role only, so an admin holding
+    the role through `extra_roles`, or via `is_superuser`, was scoped to
+    nothing. `core.permissions` states the rule this now follows: every "does
+    this user hold role X" check must consult both.
+    """
+    from core.permissions import effective_keys
+
+    return 'orders.sales.view_all' in effective_keys(user)
+
+
 def _get_base_orders(user):
     """Scope orders by user role:
-    - admin: all orders
+    - anyone holding `orders.sales.view_all` (admins implicitly): all orders
     - manager: only orders created by this user
     - distributor: only the distributor's own orders (same scope as manager, so
       the dashboard shows all sections but only this distributor's data)
@@ -130,10 +152,11 @@ def _get_base_orders(user):
     - approver: orders pending approval (NEED_APPROVAL, RATE_APPROVAL)
     - billing: orders currently in billing or already handled by this billing user
     """
+    if sees_all_orders(user):
+        return Order.objects.all()
+
     role = getattr(user, 'role', None)
     role_name = getattr(role, 'name', '').lower() if role else ''
-    if role_name == 'admin':
-        return Order.objects.all()
     if role_name in ('manager', 'distributor'):
         return Order.objects.filter(created_by=user.id)
     if role_name == 'mart_approval':

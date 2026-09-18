@@ -350,6 +350,16 @@ class PaymentReceipt(TimeStampedModel):
             return True
         if self.created_by_id == user.id:
             return True
+        # The verifier's whole job is to check the physical money against the
+        # entry, and the cheque image IS that evidence — so this has to admit
+        # them. It cannot be expressed through `approvals` below: verification
+        # happens BEFORE the document enters the approval chain, so there is no
+        # PENDING request yet and the verifier has taken no approval action.
+        # Without this clause the verify screen showed the receipt but refused
+        # its attachment, which is the one thing the verifier needs to see.
+        from .permissions import has_permission_key, PAYMENTS_VERIFY
+        if has_permission_key(user, PAYMENTS_VERIFY):
+            return True
         # Anyone who can act on (or has acted on) its approval may see the file.
         return self.approvals.filter(
             Q(actions__approver=user) | Q(status='PENDING')).exists()

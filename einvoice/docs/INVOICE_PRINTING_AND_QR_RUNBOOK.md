@@ -140,6 +140,92 @@ exists, even before its QR is written.
 
 > Still QR-gated (correctly): the `"UNE QR Code"` subquery itself — an image needs a path.
 
+### The consignee (ship-to) name — three columns, only one of them usable
+
+On a **bill-to/ship-to** invoice the goods go to a party that is not the buyer.
+`OINV."Address2"` (which feeds the printed ship-to address block) holds **street
+lines only — no name**. The consignee's name lives in `OINV."ShipToCode"`. The
+proc therefore offers the report three candidate name columns, and they are not
+equivalent:
+
+| Column | Source | Usable? |
+|---|---|---|
+| `ShipToName` | ship-to address name, **gated on `OCRD."U_AddressIdPrint"='Y'`** | **No** — the flag is NULL for every customer in all three companies (Oil 1,186 / Mart 944 / Bev 1,272), so it always falls back to `OINV."CardName"`, i.e. the BUYER |
+| `CARD_CODE_SHIP` | `CRD1."Address"` when the invoice matches a **hardcoded whitelist** of CardCodes + name patterns, else `CardName` | **Yes**, for whitelisted parties — this is what the report should bind |
+| `ADD1` | `CRD1."Address"` from the main join (already keyed on `ShipToCode`) | Always the real ship-to name, but **unfiltered** — see the warning below |
+
+> ⚠️ **Do not bind the name to `ADD1`, or make `ShipToName` unconditional,
+> without cleaning master data first.** CRD1 address records here are named as
+> *labels*, not legal names. Printing them verbatim was measured across FY26-27
+> and changed **3,191 of 3,213** Oil invoices — `JIVO MART PVT LTD` →
+> `JIVO MART PVT LTD SONIPAT BHAKARPUR`, `PURE AGROCHEM CORPORATION` →
+> `PURE AGROCHEM CORPORATION DELIVERY`, and on 13 bills the name was lost
+> entirely, printing just `HARYANA`. The whitelist exists precisely because of
+> this. The clean long-term fix is to populate `CRD1."U_UTL_ST_ThLegName"`
+> (a UDF that exists for exactly this and is currently NULL everywhere) and read
+> that instead — it would end the DDL-per-customer treadmill.
+
+### 2026-09-10 — consignee name wrong on third-party bills (drift + a latent bug)
+
+**Symptom:** invoice **626090321** (Oil, DocEntry 80067) printed the ship-to
+address correctly (Gurgaon) but under the **buyer's** name, `SHRAY FOOD &
+BEVERAGES PRIVATE LIMITED`, instead of the consignee `RISHABGLOBAL INDUSTRIES
+PRIVATE LIMITED HARYANA`. Tax was correct throughout (`IGST@5`; place of supply
+follows the buyer under IGST Act s.10(1)(b)), as were the address lines,
+`ShipToCode`, and the base sales order — this was a **naming** defect only.
+
+**Root cause — procedure drift.** There are three copies of this logic in each
+schema: `CRYSTAL_AR_INVOICE_ITEMS` (SAP's own print), `OMS_SP_GST_INVOICE` (OMS
+print) and `OMS_SP_GST_INVOICE_SAP`. Someone had already fixed the base proc for
+this customer, adding `'CUSTA000993'` to the whitelist's CardCode list and
+`'RISHABGLOBAL INDUSTRIES PRIVATE LIMITED HARYANA%'` to its patterns. **The two
+OMS copies never picked it up**, so SAP printed the right name and OMS did not.
+Proof, by calling all three on the same DocEntry:
+
+```
+CRYSTAL_AR_INVOICE_ITEMS   CARD_CODE_SHIP = 'RISHABGLOBAL INDUSTRIES PRIVATE LIMITED HARYANA'
+OMS_SP_GST_INVOICE         CARD_CODE_SHIP = 'SHRAY FOOD & BEVERAGES PRIVATE LIMITED'
+OMS_SP_GST_INVOICE_SAP     CARD_CODE_SHIP = 'SHRAY FOOD & BEVERAGES PRIVATE LIMITED'
+```
+
+**Fixed in Oil** (both OMS procs, `CREATE OR REPLACE`, `IS_VALID` re-checked):
+the two whitelist entries were synced in, and all three procs now agree — a
+13-invoice regression comparison against the base proc returned **0 mismatches**,
+so ordinary (non-whitelisted) bills are untouched.
+
+**Also fixed in the same pass — a latent `BillToName` bug.** It matched
+`AdresType='B'` against `OINV."ShipToCode"`; a ship-to address name can never
+match a bill-to row, so the subquery returned NULL whenever it ran. It was
+harmless *only* because the `U_AddressIdPrint` gate never opens — anyone ticking
+that flag would have fixed the ship-to name and **blanked the bill-to name** in
+the same stroke. Now matched on `OINV."PayToCode"`. Printed output is unchanged
+today (flag NULL → `CardName`); the trap is simply defused.
+
+> **Still outstanding:** `CRYSTAL_AR_INVOICE_ITEMS` itself still carries the
+> `BillToName` bug (its line 10), and **Mart and Beverages have had neither fix**
+> — neither the whitelist sync nor the `PayToCode` correction.
+
+**Whenever you edit any one of these three procs, check the other two**, and in
+all three schemas. That is 9 copies of the same logic, and drift between them is
+invisible until a bill prints wrong. Diff before assuming they match.
+
+### The e-invoice path does NOT share this logic
+
+The IRN is built in [`einvoice/mapping.py`](../mapping.py), not by this proc, and
+it has a separate defect on the same invoices: `ShipDtls` is emitted only when a
+ship-to **GSTIN** is found (`mapping.py` ~line 313), and it is populated from
+`EWayBillDetails.ShipToGSTIN` — a property this Service Layer version does not
+expose — falling back to the BP address master. Where the ship-to address has no
+GSTIN recorded, **no `ShipDtls` block is sent at all**, so a genuine
+bill-to/ship-to supply is filed with NIC as a plain B2B sale to the buyer. That
+is the case for 626090321. Separately, where `ShipDtls` *is* emitted, its
+`LglNm` is taken from `BillToName` — the buyer, not the consignee.
+
+Measured on Oil, FY26-27 to date: **23** invoices with `ShipDtls` carrying the
+wrong name, **~76** third-party consignments with no `ShipDtls` at all. Not yet
+fixed — it changes what is filed with the GST portal, so it needs a compliance
+decision, not just a code change.
+
 ### Deploy / redeploy the SP
 The proc must exist in **every** company schema that prints invoices — it is
 deployed to `JIVO_OIL_HANADB`, `JIVO_BEVERAGES_HANADB` and `JIVO_MART_HANADB`

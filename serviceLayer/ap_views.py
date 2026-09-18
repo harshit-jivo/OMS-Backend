@@ -13,18 +13,29 @@ See docs/ap-invoice-service-layer.md for the verified payload rules:
   * TDS via WithholdingTaxDataCollection[{WTCode}] + WTLiable.
 
 Reads use SAPServiceLayerManager.get_session(branch) (cached, per-company).
-The create posts as the approver user (like SAPInvoiceCreateView) so SAP does
-not intercept it into a draft.
+The create posts a DRAFT (SAP /Drafts, DocObjectCode oPurchaseInvoices) as the
+DRAFTER user so it enters SAP's approval procedure; the response carries the
+draft's DocEntry/DocNum. The vendor invoice file is uploaded first via
+ap/attachment/ (SAP Attachments2) and its AttachmentEntry passed into the draft.
 """
 import logging
 
 from django.conf import settings
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from tracker.permissions import IsTrackerAP
 from .service import SAPServiceLayerManager
+
+# Max attachment accepted for upload (a vendor invoice PDF/scan).
+AP_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
+# Extensions users actually attach to an A/P invoice; keep it tight.
+AP_ATTACHMENT_ALLOWED_EXT = {
+    ".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".doc", ".docx",
+    ".xls", ".xlsx", ".txt", ".eml", ".msg",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +69,23 @@ class _SLViewMixin:
 
     permission_classes = [IsTrackerAP]
 
-    def _get(self, branch, path):
+    def _get(self, branch, path, page_size=None):
+        """GET `path`, retrying once after a re-auth.
+
+        `page_size` sets `Prefer: odata.maxpagesize`. Service Layer caps a
+        collection at 20 rows and hands back an `@odata.nextLink` — and `$top`
+        does NOT lift that cap, it only bounds it. Any list read here that can
+        exceed 20 rows must ask for a bigger page or it is silently truncated,
+        which is exactly how the WT-code master used to lose codes (including
+        ones actually assigned to the vendor).
+        """
+        headers = {'Prefer': f'odata.maxpagesize={int(page_size)}'} if page_size else None
         session = SAPServiceLayerManager.get_session(branch)
-        resp = session.get(_sl(path), timeout=30)
+        resp = session.get(_sl(path), headers=headers, timeout=30)
         if resp.status_code == 401:
             SAPServiceLayerManager.clear_session(branch)
             session = SAPServiceLayerManager.get_session(branch)
-            resp = session.get(_sl(path), timeout=30)
+            resp = session.get(_sl(path), headers=headers, timeout=30)
         return resp
 
 
@@ -98,7 +119,9 @@ class OpenGRPOListView(_SLViewMixin, APIView):
             f"&$filter={' and '.join(filters)}"
             "&$orderby=DocEntry desc&$top=50"
         )
-        resp = self._get(branch, params)
+        # page_size, not just $top: SL caps a collection at 20 rows, so this
+        # list silently showed 20 of the 50 it asked for.
+        resp = self._get(branch, params, page_size=100)
         if resp.status_code != 200:
             code, msg = _sap_error(resp)
             return Response({"error": msg, "code": code}, status=resp.status_code)
@@ -204,9 +227,15 @@ class GRPODetailView(_SLViewMixin, APIView):
 class VendorTDSView(_SLViewMixin, APIView):
     """GET /api/service-layer/ap/vendor-tds/?branch=OIL&card_code=VENDA001320
 
-    Whether the vendor is subject to withholding, plus the active WT-code master
-    that populates the TDS dropdown. SAP enforces the per-vendor allowed list on
-    post; we offer the active codes and surface any rejection.
+    Whether the vendor is subject to withholding, plus the WT codes ACTUALLY
+    ASSIGNED to this vendor (BusinessPartners/BPWithholdingTaxCollection),
+    enriched with name/rate/section from the WithholdingTaxCodes master.
+
+    SAP enforces the per-vendor allowed list on post, so offering the whole
+    master (what this did before) invited a rejection the user could not have
+    predicted. If the vendor has no codes assigned we fall back to the full
+    active master and say so via `applicable_only=False`, rather than blocking
+    the desk with an empty list.
     """
 
     def get(self, request):
@@ -217,12 +246,16 @@ class VendorTDSView(_SLViewMixin, APIView):
                             status=status.HTTP_400_BAD_REQUEST)
 
         safe = card_code.replace("'", "''")
+        # BPWithholdingTaxCollection is the vendor's assigned WT codes; it comes
+        # back with the entity (no $expand needed) when named in $select.
         bp = self._get(
             branch,
             f"BusinessPartners('{safe}')"
-            "?$select=CardCode,CardName,SubjectToWithholdingTax,WTCode",
+            "?$select=CardCode,CardName,SubjectToWithholdingTax,WTCode,"
+            "BPWithholdingTaxCollection",
         )
         vendor = {}
+        assigned = []
         if bp.status_code == 200:
             b = bp.json()
             vendor = {
@@ -231,26 +264,116 @@ class VendorTDSView(_SLViewMixin, APIView):
                 "subject_to_wt": b.get("SubjectToWithholdingTax") == "boYES",
                 "default_wt_code": b.get("WTCode"),
             }
+            assigned = [w.get("WTCode")
+                        for w in (b.get("BPWithholdingTaxCollection") or [])
+                        if w.get("WTCode")]
 
+        # Master supplies the display name / rate / section for each code.
         master = self._get(
             branch,
             "WithholdingTaxCodes"
             "?$select=WTCode,WTName,Rate,OfficialCode,Inactive"
             "&$filter=Inactive eq SAPB1.BoYesNoEnum'tNO'&$top=200",
+            page_size=500,   # without this SL returns only the first 20 codes
         )
-        codes = []
+        by_code = {}
         if master.status_code == 200:
-            codes = [
-                {
+            for c in master.json().get("value", []):
+                by_code[c["WTCode"]] = {
                     "wt_code": c["WTCode"],
                     "wt_name": c.get("WTName"),
                     "rate": c.get("Rate"),
                     "section": c.get("OfficialCode"),
                 }
-                for c in master.json().get("value", [])
-            ]
 
-        return Response({"branch": branch, "vendor": vendor, "tds_codes": codes})
+        if assigned:
+            # Keep a code the master doesn't resolve rather than dropping it
+            # silently — the user still needs to see it is assigned.
+            codes = [by_code.get(w, {"wt_code": w, "wt_name": None,
+                                     "rate": None, "section": None})
+                     for w in assigned]
+            applicable_only = True
+        else:
+            codes = list(by_code.values())
+            applicable_only = False
+
+        return Response({"branch": branch, "vendor": vendor,
+                         "tds_codes": codes, "applicable_only": applicable_only})
+
+
+class APAttachmentUploadView(APIView):
+    """POST /api/service-layer/ap/attachment/?branch=OIL   (multipart: file=<file>)
+
+    Uploads ONE file to SAP as a new Attachments2 row in the branch's company DB
+    and returns its AbsoluteEntry, which the caller passes back as
+    `attachment_entry` when creating the AP invoice draft. This is how the user
+    attaches the vendor's invoice at the AP-entry step (SAP re-uploads it here
+    rather than reusing the GRPO's copy).
+
+    Creating an Attachments2 row is the ONLY way to obtain an AttachmentEntry —
+    the separate file-upload utility puts bytes on the share but yields no entry.
+    The file lands in the company's AttachmentsFolderPath. The old -5002
+    ("attachments folder ... changed or removed") was a flapping CIFS mount,
+    fixed 2026-08-25; one retry is kept in case the mount is mid-reconnect.
+    """
+
+    permission_classes = [IsTrackerAP]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        branch = request.query_params.get("branch") or "OIL"
+        f = request.FILES.get("file")
+        if not f:
+            return Response({"error": "file is required (multipart field 'file')"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        name = f.name or "attachment"
+        ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+        if ext not in AP_ATTACHMENT_ALLOWED_EXT:
+            return Response({"error": f"File type {ext or '(none)'} is not allowed."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if f.size and f.size > AP_ATTACHMENT_MAX_BYTES:
+            mb = AP_ATTACHMENT_MAX_BYTES / (1024 * 1024)
+            return Response({"error": f"File exceeds the {mb:.0f} MB limit."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        content = f.read()
+        content_type = getattr(f, "content_type", None) or "application/octet-stream"
+
+        def _upload():
+            # No json= here: requests sets the multipart Content-Type itself, and
+            # the SL session carries no default Content-Type that would override it.
+            session = SAPServiceLayerManager.get_session(branch)
+            return session.post(
+                _sl("Attachments2"),
+                files={"files": (name, content, content_type)},
+                timeout=60,
+            )
+
+        try:
+            resp = _upload()
+            if resp.status_code == 401:
+                SAPServiceLayerManager.clear_session(branch)
+                resp = _upload()
+            if resp.status_code not in (200, 201):
+                code, _ = _sap_error(resp)
+                if str(code) == "-5002":     # transient CIFS reconnect — one retry
+                    resp = _upload()
+
+            if resp.status_code in (200, 201):
+                entry = resp.json().get("AbsoluteEntry")
+                logger.info("AP attachment uploaded: AttachmentEntry=%s file=%s (branch=%s)",
+                            entry, name, branch)
+                return Response({"attachment_entry": entry, "file_name": name},
+                                status=status.HTTP_201_CREATED)
+
+            code, msg = _sap_error(resp)
+            logger.warning("AP attachment upload failed (branch=%s file=%s): %s %s",
+                           branch, name, code, msg)
+            return Response({"error": msg, "code": code}, status=resp.status_code)
+        except Exception as exc:  # noqa: BLE001 - surface the SL/network failure
+            logger.exception("AP attachment upload error (branch=%s)", branch)
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
 
 class APInvoiceCreateView(APIView):
@@ -259,12 +382,14 @@ class APInvoiceCreateView(APIView):
     Body (friendly fields; the SAP payload is built here, never passed through):
       {
         "grpo_entry": 25773,                 # required
-        "num_at_card": "INV/2026/01",        # required (vendor's invoice no)
-        "doc_date": "2026-08-25",            # optional (yyyy-mm-dd)
-        "due_date": "2026-09-14",            # optional
+        "num_at_card": "INV/2026/01",        # required (Vendor Ref. No. / NumAtCard)
+        "doc_date": "2026-08-25",            # optional Posting Date  (DocDate)
+        "tax_date": "2026-08-24",            # optional Document Date (TaxDate)
+        "due_date": "2026-09-14",            # optional Due Date      (DocDueDate)
         "comments": "…",                     # optional
-        "attachment_entry": 170747,          # optional (e.g. reuse GRPO's)
-        "tds": {"liable": true, "wt_code": "TDS"},   # optional
+        "attachment_entry": 170747,          # optional (uploaded, or reuse GRPO's)
+        "tds": {"liable": true, "wt_codes": ["1041", "1042"]},  # optional, multiple
+                                              #   (single "wt_code" still accepted)
         "lines": [                            # required: which GRPO lines + overrides
           {"base_line": 1, "quantity": 696, "unit_price": 23.0},
           {"base_line": 2}
@@ -315,17 +440,27 @@ class APInvoiceCreateView(APIView):
         payload = {"NumAtCard": num_at_card, "DocumentLines": document_lines}
         if card_code:
             payload["CardCode"] = card_code
-        for src, dst in (("doc_date", "DocDate"), ("due_date", "DocDueDate"),
-                         ("comments", "Comments")):
+        # SAP dates: doc_date -> DocDate (Posting Date), tax_date -> TaxDate
+        # (Document Date, the date on the vendor's invoice), due_date ->
+        # DocDueDate (Payment Due Date).
+        for src, dst in (("doc_date", "DocDate"), ("tax_date", "TaxDate"),
+                         ("due_date", "DocDueDate"), ("comments", "Comments")):
             if data.get(src):
                 payload[dst] = data[src]
         if data.get("attachment_entry") is not None:
             payload["AttachmentEntry"] = int(data["attachment_entry"])
 
+        # TDS / withholding: accept multiple codes (tds.wt_codes), with
+        # back-compat for a single tds.wt_code. Each becomes one row of
+        # WithholdingTaxDataCollection; SAP still enforces the vendor's list.
         tds = data.get("tds") or {}
-        if tds.get("liable") and tds.get("wt_code"):
+        wt_codes = tds.get("wt_codes")
+        if not wt_codes and tds.get("wt_code"):
+            wt_codes = [tds["wt_code"]]
+        wt_codes = [c for c in (wt_codes or []) if c]
+        if tds.get("liable") and wt_codes:
             payload["WTLiable"] = "tYES"
-            payload["WithholdingTaxDataCollection"] = [{"WTCode": tds["wt_code"]}]
+            payload["WithholdingTaxDataCollection"] = [{"WTCode": c} for c in wt_codes]
 
         # CardCode is normally copied from the GRPO base line, but SAP wants it on
         # the header too; fetch it if the client didn't send it.
@@ -337,29 +472,37 @@ class APInvoiceCreateView(APIView):
             if look.status_code == 200:
                 payload["CardCode"] = look.json().get("CardCode")
 
-        user = settings.SAP_APPROVER_USER
-        password = settings.SAP_APPROVER_PASSWORD
+        # AP invoices are entered as DRAFTS so they run through SAP's approval
+        # procedure. Post to /Drafts as the DRAFTER user (HANA_USERNAME) — the
+        # approver user would bypass approval and post a live invoice, which is
+        # exactly what we don't want here. DocObjectCode marks the draft as an
+        # A/P invoice; SAP returns the draft's own DocEntry/DocNum (the "draft
+        # number") the user quotes to the approver.
+        payload["DocObjectCode"] = "oPurchaseInvoices"
+        user = settings.HANA_USERNAME
+        password = settings.HANA_PASSWORD
         try:
             session = SAPServiceLayerManager.get_session_for(user, password, branch)
-            resp = session.post(_sl("PurchaseInvoices"), json=payload, timeout=40)
+            resp = session.post(_sl("Drafts"), json=payload, timeout=40)
             if resp.status_code == 401:
                 SAPServiceLayerManager.clear_session(branch)
                 session = SAPServiceLayerManager.get_session_for(user, password, branch)
-                resp = session.post(_sl("PurchaseInvoices"), json=payload, timeout=40)
+                resp = session.post(_sl("Drafts"), json=payload, timeout=40)
 
             if resp.status_code in (200, 201):
                 d = resp.json()
-                logger.info("AP invoice posted: DocEntry=%s DocNum=%s (branch=%s, GRPO=%s)",
+                logger.info("AP invoice DRAFT created: DocEntry=%s DocNum=%s (branch=%s, GRPO=%s)",
                             d.get("DocEntry"), d.get("DocNum"), branch, grpo_entry)
                 return Response(
-                    {"doc_entry": d.get("DocEntry"), "doc_num": d.get("DocNum"),
+                    {"is_draft": True,
+                     "doc_entry": d.get("DocEntry"), "doc_num": d.get("DocNum"),
                      "doc_total": d.get("DocTotal"), "card_code": d.get("CardCode"),
                      "num_at_card": d.get("NumAtCard")},
                     status=status.HTTP_201_CREATED,
                 )
 
             code, msg = _sap_error(resp)
-            logger.warning("AP invoice failed (branch=%s GRPO=%s): %s %s",
+            logger.warning("AP invoice draft failed (branch=%s GRPO=%s): %s %s",
                            branch, grpo_entry, code, msg)
             return Response({"error": msg, "code": code}, status=resp.status_code)
 

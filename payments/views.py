@@ -1254,15 +1254,24 @@ class _AttachmentUploadBase(APIView):
                         status=http_status.HTTP_502_BAD_GATEWAY)
 
         # Recorded on the document's timeline, not just in the attachment
-        # table. An upload is an edit — it changes what an approver is being
-        # asked to sign off — but it arrives through its own endpoint and
-        # never touches the document's `update()`, so nothing used to write a
-        # history row and the Edit History card could not show it.
+        # table. An upload arrives through its own endpoint and never touches
+        # the document's `update()`, so nothing used to write a history row and
+        # the Edit History card could not show it.
         #
-        # Logged as UPDATED with a one-field diff so it reads like any other
-        # change: old value is what was attached before, new value includes
-        # the file just added.
+        # But only a LATER upload is an edit. The client attaches the cheque
+        # image moments after POSTing the receipt — that is part of raising it,
+        # not a change to it — so logging that as UPDATED put an "edited"
+        # entry on every receipt the instant it was created, before anyone had
+        # touched it. The Edit History card is meant to answer "what changed
+        # after this was raised", and a creation-time attachment is not that.
+        #
+        # The test is the document's own lifecycle, not a time window: while it
+        # is still DRAFT nobody downstream has seen it, so there is nothing to
+        # have changed FROM. Once it has been verified or sent for approval,
+        # every further attachment genuinely alters what an approver is signing
+        # off and is logged as UPDATED with a one-field diff.
         from .services import log_status
+        is_initial = document.status == self.model.Status.DRAFT
         try:
             rows = list(attachment_services.for_document(document))
             after = sorted(a.get_attachment_type_display() for a in rows)
@@ -1275,8 +1284,21 @@ class _AttachmentUploadBase(APIView):
                 document,
                 from_status=document.status, to_status=document.status,
                 user=request.user,
-                action=PaymentStatusHistory.Action.UPDATED,
-                change_data={'attachments': {'old': before, 'new': after}},
+                # CREATED, not UPDATED, for the first attachment. The Edit
+                # History card selects rows by `action === 'UPDATED'`, so this
+                # is what actually keeps a creation-time file off it — a null
+                # diff alone would still render as an edit with no detail. The
+                # row is still written, so the file remains visible on the main
+                # timeline where it belongs.
+                action=(PaymentStatusHistory.Action.CREATED if is_initial
+                        else PaymentStatusHistory.Action.UPDATED),
+                # No diff on the initial attachment: `change_data` is what the
+                # card renders as "old -> new", and there is no meaningful
+                # "old" for a file that arrived with the document.
+                change_data=(
+                    None if is_initial
+                    else {'attachments': {'old': before, 'new': after}}
+                ),
                 reason=f'Attached {attachment.get_attachment_type_display()}.',
             )
         except Exception:                                   # noqa: BLE001

@@ -40,6 +40,7 @@ VALUE_BUILDERS = [
     ('get_draft_verification', ('REF1', 'OIL')),
     ('get_invoice_status', ('W', 'OIL')),
     ('get_docEntry', (1001, 'OIL')),
+    ('get_order_doc_entry', (1001, 'OIL')),
     ('get_quotation_status', ([1, 2, 3], 'OIL')),
     ('get_sales_orders_for_party', ('C001', 'OIL')),
     ('get_sales_orders_for_product', ('FG1',)),

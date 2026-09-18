@@ -158,6 +158,17 @@ INSTALLED_APPS = [
     # HAIS — Hardware Asset Identification Software. Owns its own `hais`
     # Postgres schema (created by its initial migration), same as payments.
     'HAIS',
+    # Generic, configuration-driven approval workflow engine. Owns its own
+    # `workflow` Postgres schema (created by its initial migration), same as
+    # payments and HAIS. Independent of `approvals`, which keeps serving
+    # PAYMENT and DEPOSIT untouched.
+    'workflow',
+    'backdate',
+    # PRDO — Production Order approval. Owns its own `production`
+    # Postgres schema; drives the same Workflow Engine as `backdate`.
+    # SAP is the point of origin: orders arrive via
+    # `manage.py sync_production_orders`, never from a user.
+    'production',
 ]
 
 MIDDLEWARE = [
@@ -254,32 +265,19 @@ DATABASES = {
         'ENGINE': 'django.db.backends.dummy',
         'HOST': config('HANA_DB_HOST'),
         'PORT': config('HANA_DB_PORT'),
-        # Default HANA schema / company DB used by raw queries
-        # (hana/services/connection.py:60, tracker/sap.py:21).
-        # `.env` has historically defined this as HANA_DB_OIL_NAME, so accept
-        # that (and HANA_COMPANY_DB, which holds the same value) rather than
-        # requiring a duplicate HANA_DB_NAME key. Explicit HANA_DB_NAME still
-        # wins if it is set.
-        'SCHEMA': config(
-            'HANA_DB_NAME',
-            default=config(
-                'HANA_DB_OIL_NAME',
-                default=config('HANA_COMPANY_DB', default=''),
-            ),
-        ),
+        # Company-DB schemas — every value comes from .env, NOTHING hardcoded.
+        # OIL is required (bare config, boots-loud if missing); beverage/mart/
+        # test fall back only across other .env keys, ending in '' (which
+        # disables that company) rather than any literal schema name.
+        'SCHEMA': config('HANA_DB_NAME', default=config('HANA_DB_OIL_NAME')),
         'OIL_SCHEMA': config('HANA_DB_OIL_NAME'),
-        # Same story as SCHEMA above: `.env` carries the beverage company DB as
-        # HANA_BEVERAGE_COMPANY_DB / HANA_COMPANY_DB_BEVERAGES, and has
-        # HANA_DB_BEVERAGE_NAME commented out. Fall back through those instead
-        # of hard-requiring a key that isn't set, which stops Django booting.
         'BEVERAGE_SCHEMA': config(
             'HANA_DB_BEVERAGE_NAME',
-            default=config(
-                'HANA_BEVERAGE_COMPANY_DB',
-                default=config('HANA_COMPANY_DB_BEVERAGES', default=''),
-            ),
+            default=config('HANA_BEVERAGE_COMPANY_DB',
+                           default=config('HANA_COMPANY_DB_BEVERAGES', default='')),
         ),
         'MART_SCHEMA': config('HANA_DB_MART_NAME', default=''),
+        'TEST_SCHEMA': config('HANA_DB_TEST_NAME', default=''),
         'USER': config('HANA_DB_USER'),
         'PASSWORD': config('HANA_DB_PASSWORD'),
     },
@@ -298,27 +296,22 @@ CRYSTAL_URL = config('CRYSTAL_URL')
 SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)
 SALES_ORDER_PASSWORD = config('SALES_ORDER_PASSWORD', default=HANA_PASSWORD)
 
+# Company DBs — all sourced from .env, NO hardcoded schema names. OIL is
+# required; beverage/mart fall back only across other .env keys and end in ''
+# (blank disables that company) instead of a literal default.
 HANA_OIL_COMPANY_DB = config('HANA_DB_OIL_NAME')
-# Same fallback chain as DATABASES['hana']['BEVERAGE_SCHEMA'] above. `.env`
-# carries this value under any of three names and has had each of them
-# commented out at different times, so requiring one outright stops Django
-# booting — which is exactly what a bare config() call here did.
 HANA_BEVERAGE_COMPANY_DB = config(
-    'HANA_BEVERAGE_COMPANY_DB',
-    default=config(
-        'HANA_DB_BEVERAGE_NAME',
-        default=config('HANA_COMPANY_DB_BEVERAGES',
-                       default='JIVO_BEVERAGES_HANADB'),
-    ),
+    'HANA_DB_BEVERAGE_NAME',
+    default=config('HANA_BEVERAGE_COMPANY_DB',
+                   default=config('HANA_COMPANY_DB_BEVERAGES', default='')),
 )
 # Third company (Mart). Blank disables everything Mart-specific.
-# The .env defines this as HANA_DB_MART_NAME (matching HANA_DB_OIL_NAME /
-# HANA_DB_BEVERAGE_NAME); keep the legacy HANA_MART_COMPANY_DB name as a
-# fallback so older environments keep working.
 HANA_MART_COMPANY_DB = config(
     'HANA_DB_MART_NAME',
-    default=config('HANA_MART_COMPANY_DB', default='JIVO_MART_HANADB'),
+    default=config('HANA_MART_COMPANY_DB', default=''),
 )
+# Test / non-production company DB (blank when not testing).
+HANA_TEST_COMPANY_DB = config('HANA_DB_TEST_NAME', default='')
 # Profit center (OPRC.PrcCode) to stamp on Mart sales-order lines. Mart does not
 # use per-sub_group profit centers like Oil/Beverage, so this is a single code.
 # Blank (default) omits CostingCode entirely, letting SAP apply its own default
@@ -585,6 +578,10 @@ REST_FRAMEWORK = {
         "user": config('THROTTLE_USER', default='2000/hour'),
         # Credential-checking endpoints only.
         "login": config('THROTTLE_LOGIN', default='10/min'),
+        # The unauthenticated HAIS device page (a scanned QR sticker). A human
+        # scans one device at a time; this only has to stop a scraper walking a
+        # list of serials for the staff names and emails behind them.
+        "hais_public_device": config('THROTTLE_HAIS_PUBLIC', default='30/min'),
     },
 }
 
@@ -673,6 +670,21 @@ DEFAULT_FROM_EMAIL = config(
 # stage's users again. Prevents the periodic sweep from spamming.
 TRACKER_ALERT_EMAIL_COOLDOWN_HOURS = config(
     'TRACKER_ALERT_EMAIL_COOLDOWN_HOURS', default=24, cast=int)
+
+# The office calendar the tracker's dwell clock runs on.
+#
+# TIME_ZONE above is 'UTC' for the whole project and is deliberately left that
+# way; this is only about which 24 hours count as "Sunday" when tracker decides
+# how long an invoice has sat on a desk. A UTC Sunday starts at 05:30 IST, which
+# would write off half of Monday morning and still charge half of Sunday.
+TRACKER_BUSINESS_TIMEZONE = config('TRACKER_BUSINESS_TIMEZONE',
+                                   default='Asia/Kolkata')
+# Weekdays the office is closed, as Python numbers them (Mon=0 ... Sun=6).
+# Dwell time does not accrue on these days. Comma-separated; empty means the
+# clock runs every day, as it did before.
+TRACKER_OFF_WEEKDAYS = tuple(
+    int(d) for d in config('TRACKER_OFF_WEEKDAYS', default='6').split(',') if d.strip()
+)
 
 
 # CORS_ALLOW_ALL_ORIGINS wildcards the ORIGIN only — it does NOT allow arbitrary
@@ -825,6 +837,53 @@ EINV_CREDENTIALS = {
     for g in EINV_GSTINS
 }
 
+# ---- Jivo Mart NIC credentials (a DIFFERENT PAN from the Oil/Beverages GSTINs) ----
+# Mart (PAN AAFCJ4102J) is a separate legal entity from Oil/Beverages
+# (PAN AACCJ4223F), so it has its OWN NIC client-id/secret. Those two are shared
+# across all of Mart's state GSTINs (per NIC: client-id/secret are per-PAN); the
+# API username/password are per-GSTIN. This mirrors the Oil multi-GSTIN block
+# above, except the per-GSTIN client-id/secret default to MART's, not Oil's.
+#
+# List Mart's issuing GSTINs in MART_EINV_GSTINS and give each one its own
+# MART_EINV_<GSTIN>_USERNAME / _PASSWORD. The single-GSTIN form the .env shipped
+# with (MART_EINV_GSTIN + MART_EINV_USERNAME/PASSWORD) is still honoured as one
+# entry, so nothing breaks.
+#
+# Each Mart GSTIN is folded into EINV_CREDENTIALS so the per-invoice resolver
+# (`EInvoiceClient(gstin=seller_gstin)` in einvoice.services, keyed off the
+# invoice's own VATRegNum) authenticates as the right Mart registration — no code
+# path is Mart-specific. NOTE: live Mart invoices are issued mostly from the
+# Haryana GSTIN 06AAFCJ4102J1ZU; that GSTIN needs its own username/password here
+# or its IRNs will fail auth. The NIC encryption public key is per-ENVIRONMENT
+# (not per-taxpayer), so it defaults to the shared EINV key.
+_MART_CLIENT_ID = config('MART_EINV_CLIENT_ID', default='')
+_MART_CLIENT_SECRET = config('MART_EINV_CLIENT_SECRET', default='')
+_MART_PUBLIC_KEY = config('MART_EINV_PUBLIC_KEY_PATH', default=EINV["PUBLIC_KEY_PATH"])
+
+_MART_GSTINS = [g.strip() for g in config('MART_EINV_GSTINS', default='').split(',') if g.strip()]
+_MART_SINGLE = config('MART_EINV_GSTIN', default='').strip()
+if _MART_SINGLE and _MART_SINGLE not in _MART_GSTINS:
+    _MART_GSTINS.append(_MART_SINGLE)
+
+for _mg in _MART_GSTINS:
+    _u = config(f'MART_EINV_{_mg}_USERNAME', default='')
+    _p = config(f'MART_EINV_{_mg}_PASSWORD', default='')
+    # Back-compat: the bare MART_EINV_USERNAME/PASSWORD belong to MART_EINV_GSTIN.
+    if not _u and _mg == _MART_SINGLE:
+        _u = config('MART_EINV_USERNAME', default='')
+        _p = config('MART_EINV_PASSWORD', default='')
+    EINV_CREDENTIALS[_mg] = {
+        "GSTIN": _mg,
+        "USERNAME": _u,
+        "PASSWORD": _p,
+        "CLIENT_ID": config(f'MART_EINV_{_mg}_CLIENT_ID', default=_MART_CLIENT_ID),
+        "CLIENT_SECRET": config(f'MART_EINV_{_mg}_CLIENT_SECRET', default=_MART_CLIENT_SECRET),
+        "PUBLIC_KEY_PATH": config(f'MART_EINV_{_mg}_PUBLIC_KEY_PATH', default=_MART_PUBLIC_KEY),
+    }
+    # So a DocNum search / company picker that walks EINV_GSTINS sees Mart too.
+    if _mg not in EINV_GSTINS:
+        EINV_GSTINS.append(_mg)
+
 # When true, creating a real invoice (serviceLayer.SAPInvoiceCreateView, type=INVOICE)
 # fires automatic IRN generation for that DocEntry in the background. Every attempt
 # is recorded in einvoice_irn_generation_log. Off by default — enable in .env.
@@ -891,15 +950,16 @@ PAYMENTS_SMB_PASSWORD = config(
 # HANA_OIL_COMPANY_DB is always tried first). Comma-separated in .env.
 EINV_COMPANY_DBS = [d.strip() for d in config(
     'EINV_COMPANY_DBS',
-    default='JIVO_OIL_HANADB,JIVO_BEVERAGES_HANADB,JIVO_MART_HANADB,'
-            'TEST_OIL_15122025',
+    default=','.join(d for d in (
+        HANA_OIL_COMPANY_DB, HANA_BEVERAGE_COMPANY_DB,
+        HANA_MART_COMPANY_DB, HANA_TEST_COMPANY_DB) if d),
 ).split(',') if d.strip()]
 
 # Non-production (test) company DBs. Generating an IRN from one of these while the
 # NIC target is PRODUCTION still works, but produces a real live e-invoice for test
 # data — so a loud "cancel it immediately" warning is attached to the result.
 EINV_TEST_COMPANY_DBS = [d.strip() for d in config(
-    'EINV_TEST_COMPANY_DBS', default='TEST_OIL_15122025',
+    'EINV_TEST_COMPANY_DBS', default=HANA_TEST_COMPANY_DB,
 ).split(',') if d.strip()]
 
 # ---------------------------------------------------------------------------

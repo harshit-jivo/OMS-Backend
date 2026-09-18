@@ -5,6 +5,7 @@ This was a single 5,919-line `orders/views.py`. It is being split by domain
 that happen without touching a single caller: `orders.views.<anything>` still
 resolves exactly as it did.
 
+    crystal.py         sales order print, rendered by the Crystal service
     lifecycle.py       placing an order and moving it through its flow
     queries.py         read-only order lists, details, logs, status tracking
     dashboards.py      dashboard/reporting views (read-only)
@@ -35,6 +36,7 @@ using its own. The patch silently does nothing and the test passes anyway.
 Patch where a name is LOOKED UP: `orders.views.notifications.<name>`.
 """
 from .ai import *  # noqa: F401,F403
+from .crystal import *  # noqa: F401,F403
 from .flow_config import *  # noqa: F401,F403
 from .lifecycle import *  # noqa: F401,F403
 from .queries import *  # noqa: F401,F403
@@ -47,7 +49,7 @@ from .masters import *  # noqa: F401,F403
 from .notifications import *  # noqa: F401,F403
 
 from . import (  # noqa: F401
-    _shared, ai, dashboards, flow_config, lifecycle, mart, masters,
+    _shared, ai, crystal, dashboards, flow_config, lifecycle, mart, masters,
     notifications, queries, schemes, stock, templates,
 )
 

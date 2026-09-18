@@ -7,14 +7,17 @@ active rows for populating a form dropdown.
 from django.db.models import Q
 from rest_framework import viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
 
 from .models import Asset, AssetType, Department, StorageType
 from .serializers import (
     AssetSerializer,
     AssetTypeSerializer,
     DepartmentSerializer,
+    PublicAssetSerializer,
     StorageTypeSerializer,
 )
 
@@ -104,3 +107,53 @@ class AssetViewSet(viewsets.ModelViewSet):
                 {"detail": f'No device matches the scanned code "{code}".'}, status=404
             )
         return Response(self.get_serializer(asset).data)
+
+
+class PublicAssetByCodeView(APIView):
+    """Resolve a scanned QR to a device, WITHOUT a session.
+
+    The point of the sticker: it is scanned with whatever phone is to hand,
+    usually by someone who has no OMS account and never will. Requiring a
+    login here made the QR useless to everyone except the team that already
+    has the register open.
+
+    THREE THINGS KEEP THIS SAFE, and all three are load bearing.
+
+    1. `PublicAssetSerializer`, an allow-list. See its docstring for what is
+       held back and why.
+
+    2. SERIAL NUMBER ONLY. The authenticated `by-serial` also accepts an Asset
+       ID, and Asset IDs are SEQUENTIAL — `_next_asset_id` hands out
+       JIVO-LAP-0001, 0002, 0003. Accepting them here would let anyone walk
+       the range and dump the register, one employee's name and email at a
+       time. A serial number is a manufacturer string; it cannot be guessed,
+       only read off a device you are holding.
+
+    3. Its own throttle scope. Serial numbers are not guessable but they are
+       not secret either, and a scraper with a list of them should not get the
+       whole staff directory in one pass.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []  # No session is involved; never 401 a scanner.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "hais_public_device"
+
+    def get(self, request):
+        code = (request.query_params.get("code") or "").strip()
+        if not code:
+            return Response({"detail": "code is required."}, status=400)
+
+        asset = (
+            Asset.objects.select_related("asset_type", "department")
+            .prefetch_related("storage_types")
+            .filter(serial_num__iexact=code)
+            .first()
+        )
+        if not asset:
+            # The same message whether the serial is unknown or malformed:
+            # confirming that a serial EXISTS is itself a small leak.
+            return Response(
+                {"detail": f'No device matches the scanned code "{code}".'}, status=404
+            )
+        return Response(PublicAssetSerializer(asset).data)

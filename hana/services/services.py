@@ -1,5 +1,5 @@
 # services.py
-from .connection import HANAConnection, Queries
+from .connection import HANAConnection, Queries, column_exists
 
 
 class SalesOrderService():
@@ -26,8 +26,15 @@ class SalesOrderService():
         double the connect cost for no gain.
         """
         with HANAConnection() as conn:
+            # `U_OMS_REF` is a user-defined field on the OIL company's ORDR and
+            # on no other, so naming it unconditionally failed the entire
+            # beverage report with "invalid column name". Asked once per
+            # process per company; see `column_exists`.
+            has_oms_ref = column_exists(
+                conn, Queries._schema_for_branch(branch), 'ORDR', 'U_OMS_REF')
             lines = conn.execute(
-                Queries.get_pending_dispatch(branch, from_date, to_date)
+                Queries.get_pending_dispatch(
+                    branch, from_date, to_date, has_oms_ref)
             )
             invoices = conn.execute(
                 Queries.get_order_invoices(branch, from_date, to_date)
@@ -222,4 +229,11 @@ class SalesOrderService():
             query = Queries.get_docEntry(docNum, branch)
             result = conn.execute(query)
             
+        return result
+
+    def get_order_doc_entry(self , docNum, branch='OIL'):
+        with HANAConnection() as conn:
+            query = Queries.get_order_doc_entry(docNum, branch)
+            result = conn.execute(query)
+
         return result

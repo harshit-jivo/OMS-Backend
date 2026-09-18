@@ -30,18 +30,92 @@ AGEING_BUCKETS = [
 ]
 
 
-def _filter_invoices(params):
+def _filter_invoices(params, with_dates=True):
+    """The report's invoice population.
+
+    `with_dates=False` drops the created-at window but keeps branch/unit/
+    category. The per-stage flow metrics need that: they are counted by when an
+    invoice ARRIVED at a desk, so an invoice raised in March that reached SAP
+    Approval in September belongs in September's arrivals. Filtering the
+    population by creation date first would have silently excluded it.
+    """
     qs = Invoice.objects.select_related('current_stage', 'category')
     frm, to = params.get('from'), params.get('to')
-    if frm:
-        qs = qs.filter(created_at__date__gte=frm)
-    if to:
-        qs = qs.filter(created_at__date__lte=to)
+    if with_dates:
+        if frm:
+            qs = qs.filter(created_at__date__gte=frm)
+        if to:
+            qs = qs.filter(created_at__date__lte=to)
     for f in ('branch', 'unit', 'category'):
         val = params.get(f)
         if val:
             qs = qs.filter(**{f'{f}_id': val})
     return qs
+
+
+def _window(qs, params, field):
+    """Apply the report's date window to `field` on an event queryset."""
+    frm, to = params.get('from'), params.get('to')
+    if frm:
+        qs = qs.filter(**{f'{field}__date__gte': frm})
+    if to:
+        qs = qs.filter(**{f'{field}__date__lte': to})
+    return qs
+
+
+def _flow_by_stage(params, stages):
+    """Arrivals and decisions per stage inside the selected window.
+
+    **Volume** counts stage VISITS that began in the window — "how many invoices
+    reached this desk". `NOTE` rows are excluded and that exclusion is load-
+    bearing: a note copies the visit's `entered_at` (see `services.apply_action`),
+    so counting it would report a second arrival that never happened, and a desk
+    that holds a lot would look busier than it is.
+
+    **Decisions** counts what each desk decided. A decision is dated when it was
+    MADE, which differs by row: a visit closes at `exited_at`, while a note —
+    a full hold, or a rejection parked awaiting its reason — never closes, so it
+    is dated by `created_at`. Both are counted, so an invoice held and later
+    advanced contributes a HOLD and an OK; those are two real decisions by that
+    desk, not double counting.
+    """
+    inv_ids = list(_filter_invoices(params, with_dates=False)
+                   .values_list('id', flat=True))
+    base = StageEvent.objects.filter(invoice_id__in=inv_ids)
+
+    arrivals = dict(
+        _window(base.exclude(event_type=StageEvent.EventType.NOTE),
+                params, 'entered_at')
+        .values_list('stage_id').annotate(n=Count('id'))
+    )
+
+    decided = defaultdict(lambda: defaultdict(int))
+    closed_rows = _window(
+        base.exclude(event_type=StageEvent.EventType.NOTE)
+            .filter(exited_at__isnull=False).exclude(stage_status=''),
+        params, 'exited_at',
+    ).values_list('stage_id', 'stage_status')
+    note_rows = _window(
+        base.filter(event_type=StageEvent.EventType.NOTE).exclude(stage_status=''),
+        params, 'created_at',
+    ).values_list('stage_id', 'stage_status')
+    for stage_id, status in list(closed_rows) + list(note_rows):
+        decided[stage_id][status] += 1
+
+    out = []
+    for s in stages:
+        statuses = decided.get(s.id, {})
+        out.append({
+            'stage_code': s.code,
+            'stage_name': s.name,
+            'order': s.order,
+            'arrived': arrivals.get(s.id, 0),
+            'decided': sum(statuses.values()),
+            'decisions': [{'status': k, 'count': v}
+                          for k, v in sorted(statuses.items(),
+                                             key=lambda kv: (-kv[1], kv[0]))],
+        })
+    return out
 
 
 def _round(v):
@@ -151,6 +225,11 @@ def build_report(params):
             'avg_cycle_days': avg_cycle,
         },
         'pending_by_stage': pending_by_stage,
+        # Throughput, not backlog: what MOVED through each desk in the window,
+        # and what each desk decided. `pending_by_stage` above is the snapshot of
+        # what is sitting there right now — the two answer different questions
+        # and will not tally.
+        'flow_by_stage': _flow_by_stage(params, stages),
         'avg_days_per_stage': avg_days_per_stage,
         'bottleneck_by_person': by_person,
         'bottleneck_by_vendor': by_vendor,

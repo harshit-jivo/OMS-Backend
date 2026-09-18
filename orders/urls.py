@@ -3,6 +3,7 @@ from django.urls import path,include
 from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
 from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView
 from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
+from .views.crystal import SalesOrderPrintView
 
 urlpatterns=[
     
@@ -24,6 +25,9 @@ urlpatterns=[
     path('mart/<int:order_id>/reject/', MartRejectView.as_view(), name='mart-reject'),
     path('mart/<int:order_id>/resend-sap/', MartResendSapView.as_view(), name='mart-resend-sap'),
     path('sales-order-status/', SalesOrderSapStatusView.as_view(), name='sales-order-sap-status'),
+    # Sales order PDF from the Crystal service — the ORDR counterpart of
+    # invoice/crystal/. No client calls it yet; see orders/views/crystal.py.
+    path('crystal/', SalesOrderPrintView.as_view(), name='sales-order-crystal'),
     path('party-products/<str:card_code>/', PartyProductsView.as_view(), name='party-products'),
     path('schemes/', SchemeListView.as_view(), name='schemes'),
     path('schemes/manage/', SchemeManageListView.as_view(), name='schemes-manage'),

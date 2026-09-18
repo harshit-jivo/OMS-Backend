@@ -97,10 +97,39 @@ class ComplianceRule(models.Model):
     different rule after a restore.
     """
 
+    #: How the rule is judged. AI rules are sent to Gemini as a sentence;
+    #: MEASUREMENT rules are not sent at all and are answered by
+    #: `legal.dimensions` from the package dimensions the reviewer supplies.
+    #:
+    #: The split exists because a model cannot measure. Asking Gemini whether
+    #: a circle is 4 mm across gets a confident number with nothing behind it,
+    #: which is the same reason `schemas.GeminiRuleFinding` refuses to let it
+    #: supply coordinates. A measurement rule's `rule_text` is documentation
+    #: for the legal desk, not a prompt.
+    CHECK_AI = 'AI'
+    CHECK_MEASUREMENT = 'MEASUREMENT'
+    CHECK_TYPES = [
+        (CHECK_AI, 'AI — judged from the label image'),
+        (CHECK_MEASUREMENT, 'Measurement — computed from package dimensions'),
+    ]
+
     code = models.CharField(
         max_length=50, unique=True,
         help_text='Stable identifier used as rule_id in the report '
                   '(e.g. FSSAI_LICENCE). Permanent once reports cite it.',
+    )
+    check_type = models.CharField(
+        max_length=20, choices=CHECK_TYPES, default=CHECK_AI,
+        help_text='AI rules are judged from the label image. Measurement '
+                  'rules are computed from the dimensions entered on the '
+                  'check form and are never sent to the AI — their code must '
+                  'be one the backend implements.',
+    )
+    params = models.JSONField(
+        default=dict, blank=True,
+        help_text='Optional settings for a measurement rule, e.g. '
+                  '{"tolerance_de": 10} for the fortification colour check. '
+                  'Ignored by AI rules.',
     )
     name = models.CharField(
         max_length=150,

@@ -12,6 +12,7 @@ travel: the order flow reads those too, so they now live in `._shared`.
 from urllib import request
 from orders.models import OrdersLog, Parties, Order, OrderItem, OrderStatus, OrderRateApproval
 from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasAnyKey, HasKey
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from datetime import datetime
@@ -33,6 +34,7 @@ from ._shared import (
     BILLING_DECISION_ACTION_IDS,
     BILLING_REJECTED_ACTION_ID,
     _get_base_orders,
+    sees_all_orders,
 )
 
 
@@ -203,7 +205,16 @@ def _build_state_item_sales(filtered_orders, state_map):
     
 
 class WDashboardKPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    """The web Sales Dashboard's KPI numbers.
+
+    Behind `Sales_Dashboard` since the page split: `/Dashboard` was open to
+    every signed-in user only because it doubled as the landing page, and
+    `/Home` taking that job is what let the analytics carry a gate. The web
+    client is the only caller (`pages/dashboard/useDashboard.ts`).
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasKey('Sales_Dashboard')]
 
     def get(self, request):
         today = timezone.now().date()
@@ -281,7 +292,10 @@ class WDashboardKPIView(APIView):
 
         role = getattr(request.user, 'role', None)
         role_name = getattr(role, 'name', '').lower() if role else ''
-        if role_name == 'admin':
+        # Keyed, not role-named — see `sees_all_orders`. A custom role granted
+        # company-wide visibility gets the headcount tile too, instead of the
+        # tile silently vanishing for everyone who is not literally 'admin'.
+        if sees_all_orders(request.user):
             user_counts = {
                 'manager': User.objects.filter(role__name__iexact='manager', is_active=True).count(),
                 'auditor': User.objects.filter(role__name__iexact='auditor', is_active=True).count(),
@@ -393,7 +407,17 @@ class WDashboardKPIView(APIView):
         })
 
 class WDashboardChartsView(APIView):
-    permission_classes = [IsAuthenticated]
+    """Chart series for the Sales Dashboard — and for the State-Wise report.
+
+    Two screens, two gates, one endpoint: `StateWise_Report.tsx` calls this
+    same URL with a `status` filter, and that page sits under the `Reports`
+    grant. `HasKey('Sales_Dashboard')` here would have silently emptied the
+    State-Wise report for everyone holding `Reports` alone, so the gate names
+    both keys explicitly rather than falling back to bare `IsAuthenticated`.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasAnyKey('Sales_Dashboard', 'Reports')]
 
     def get(self, request):
         now = timezone.now()
@@ -740,7 +764,8 @@ class WDashboardChartsView(APIView):
         ]
 
         # CHART 5: Category-wise Sales (selected month)
-        category_order_scope = completed_orders if role_name == 'admin' else filtered_orders
+        category_order_scope = (completed_orders if sees_all_orders(request.user)
+                                else filtered_orders)
         category_sales = (
             OrderItem.objects
             .filter(order__in=category_order_scope)

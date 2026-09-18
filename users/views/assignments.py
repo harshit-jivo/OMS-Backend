@@ -16,15 +16,45 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from core.permissions import IsAdminRole, is_admin
+from core.permissions import HasKey, IsAdminRole, effective_keys, is_admin
 from users.models import User, UserPartyAssignment, PartyProductAssignment
 from sap_sync.models import Party, Product, active_product_q
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Q
 from ._shared import (
+    _get_user_assignment_categories,
     _get_user_assignment_category,
     _normalize_category,
 )
+
+
+#: The key that governs the Party Assignment screen, for both reading someone
+#: else's assignments and rewriting them.
+PARTY_ASSIGNMENT_KEY = 'Party_Assignment'
+
+
+def _party_assignment_permissions():
+    """Gate for the Party Assignment screen: the key, not the admin role.
+
+    `Party_Assignment` was already grantable from the Permissions page and from
+    a role's bundle — but it only opened the PAGE, while every write behind it
+    still demanded `IsAdminRole`. A role granted the page therefore got a screen
+    it could read and not use, and because `Party_Assignment.tsx` catches every
+    exception alike, the 403 surfaced to the user as "check your connection".
+
+    Granting the key now carries the authority the grant implies. This is not a
+    widening of who CAN be given the power — an administrator had to tick the
+    box either way — it is the tick box finally meaning what it says.
+
+    Still a real boundary: party assignment decides which customers a
+    salesperson can see, so an ungranted user gets 403 exactly as before.
+    """
+    return [IsAuthenticated(), HasKey(PARTY_ASSIGNMENT_KEY)]
+
+
+def _may_manage_party_assignments(user):
+    """True for admins and for anyone holding the Party Assignment key."""
+    return PARTY_ASSIGNMENT_KEY in effective_keys(user)
 
 
 def _combo_free_defaults(data):
@@ -94,27 +124,6 @@ def _get_party_for_assignment(card_code, category):
         if party:
             return party
     return queryset.order_by('id').first()
-
-
-def _get_user_assignment_categories(user):
-    """All categories assigned to the user (normalized), falling back to the
-    single primary `category` FK for users created before multi-category."""
-    names = []
-    seen = set()
-    manager = getattr(user, 'categories', None)
-    if manager is not None:
-        try:
-            for cat in manager.all():
-                name = _normalize_category(getattr(cat, 'category', cat))
-                if name and name not in seen:
-                    seen.add(name)
-                    names.append(name)
-        except Exception:
-            names = []
-    if names:
-        return names
-    primary = _get_user_assignment_category(user)
-    return [primary] if primary else []
 
 
 def _resolve_requested_category(user, requested):
@@ -232,7 +241,8 @@ class PartyUsersView(APIView):
     reading and rewriting it belong to the assignment-management screen.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def get(self, request, card_code):
         category = _normalize_category(request.query_params.get('category'))
@@ -276,7 +286,8 @@ class AssignPartiesView(APIView):
     the company.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def post(self, request):
         user_id = request.data.get('user_id')
@@ -347,7 +358,8 @@ class AssignPartiesView(APIView):
 class BulkAssignUsersPartiesView(APIView):
     """Bulk party assignment from an upload. Administrators only."""
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def post(self, request):
         rows = request.data.get('rows', [])
@@ -397,17 +409,23 @@ class BulkAssignUsersPartiesView(APIView):
                 errors.append(f'Row {row_number}: user {user_identifier} not found')
                 continue
 
-            user_category = _get_user_assignment_category(user)
-            if not user_category:
+            # Every category the user holds, in order, rather than the primary
+            # alone. A user set to both OIL and BEVERAGES has parties in both,
+            # and matching only the primary rejected each row from the other
+            # with "party not found in OIL" — which reads as bad data in the
+            # sheet rather than as a limit of the lookup.
+            user_categories = _get_user_assignment_categories(user)
+            if not user_categories:
                 errors.append(f'Row {row_number}: user {user.username} has no category')
                 continue
 
-            party = Party.objects.filter(
-                card_code=card_code,
-                category__iexact=user_category,
-            ).order_by('id').first()
+            party = (Party.objects
+                     .filter(card_code=card_code, category__in=user_categories)
+                     .order_by('id').first())
             if not party:
-                errors.append(f'Row {row_number}: party {card_code} not found in {user_category}')
+                errors.append(
+                    f'Row {row_number}: party {card_code} not found in '
+                    + '/'.join(user_categories))
                 continue
             user_category = _normalize_category(party.category)
 
@@ -615,6 +633,380 @@ class BulkAssignPartyToProductView(APIView):
                 'errors': errors
             }
         }, status=status.HTTP_200_OK)
+
+# ── Rate revisions across many parties ──────────────────────────────────────
+#
+# Everything above this point assigns and prices ONE party at a time, which is
+# the wrong shape for the job that actually comes up: "Haryana's mustard goes up
+# ₹4 on Monday" is one item across forty parties, not forty items on one party.
+# Through the single-party screen that is forty selections and forty rate
+# prompts, and nothing at the end says whether the forty agree.
+#
+# These two endpoints are that job. The first answers "what is assigned across
+# this set of parties, and are they already on the same price"; the second
+# writes one revision to all of them.
+
+
+def _selection_category_counts(selections):
+    """How many of `selections` a product of a given category could reach.
+
+    A selection is (card_code, party_category). A party with a category holds
+    only that category's products — the rule `BulkAssignPartyToProductView`
+    already applies when writing — so an OIL item is not "missing" from a
+    BEVERAGES party, it is unreachable there. Counting those as missing is what
+    makes a fully-assigned state look half-assigned.
+
+    Returns (wildcard_count, {category: count}); the reach of category C is
+    `wildcard_count + by_category.get(C, 0)`.
+    """
+    wildcard = 0
+    by_category = {}
+    for _card_code, category in selections:
+        if category:
+            by_category[category] = by_category.get(category, 0) + 1
+        else:
+            wildcard += 1
+    return wildcard, by_category
+
+
+def _revised_rate(current, rate_mode, amount):
+    """One assignment's new rate, or None if the change would go below zero."""
+    if rate_mode == 'set':
+        revised = amount
+    elif rate_mode == 'percent':
+        revised = Decimal(current) * (Decimal('100') + amount) / Decimal('100')
+    else:
+        revised = Decimal(current) + amount
+
+    revised = revised.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+    return None if revised < 0 else revised
+
+
+class BulkPartyProductsView(APIView):
+    """What is assigned across a set of parties, one row per product.
+
+    POST {"party_selections": [{"card_code": "C001", "category": "OIL"}, ...]}
+
+    Each row carries how many of the selected parties hold the product and the
+    spread of rates they hold it at, so a price that has drifted apart across a
+    state is visible BEFORE anything is rewritten — the question the
+    single-party screen cannot answer at all.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasKey('Party_Product_Assignment')]
+
+    def post(self, request):
+        selections = _normalize_party_selections(
+            request.data.get('party_selections'),
+            request.data.get('card_codes'),
+        )
+        if not selections:
+            return Response(
+                {'success': False, 'message': 'party selection is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        card_codes = {card_code for card_code, _ in selections}
+        wildcards = {card_code for card_code, category in selections if not category}
+        exact = {selection for selection in selections if selection[1]}
+
+        assignments = [
+            assignment
+            for assignment in PartyProductAssignment.objects.filter(
+                card_code__in=card_codes,
+                is_active=True,
+            )
+            if assignment.card_code in wildcards
+            or (assignment.card_code, _normalize_category(assignment.category)) in exact
+        ]
+
+        # One query for the catalogue. `PartyProductsView` above runs a product
+        # lookup per assignment, which at forty parties is thousands of round
+        # trips for a screen that is meant to open at once.
+        catalogue = {
+            (product.item_code, _normalize_category(product.category)): product
+            for product in Product.objects.filter(
+                active_product_q(),
+                item_code__in={assignment.item_code for assignment in assignments},
+            )
+        }
+
+        rows = {}
+        for assignment in assignments:
+            category = _normalize_category(assignment.category)
+            product = catalogue.get((assignment.item_code, category))
+            # Deleted or deactivated in SAP: it cannot be ordered, so it is not
+            # something to re-price either.
+            if not product:
+                continue
+
+            rate = float(assignment.basic_rate)
+            row = rows.get((assignment.item_code, category))
+            if row is None:
+                rows[(assignment.item_code, category)] = {
+                    'item_code': product.item_code,
+                    'item_name': product.item_name,
+                    'category': category,
+                    'brand': product.brand,
+                    'variety': product.variety,
+                    'sub_group': product.sub_group,
+                    'sal_pack_unit': product.sal_pack_unit,
+                    'party_count': 1,
+                    'min_rate': rate,
+                    'max_rate': rate,
+                    '_rates': {rate: 1},
+                }
+                continue
+
+            row['party_count'] += 1
+            row['min_rate'] = min(row['min_rate'], rate)
+            row['max_rate'] = max(row['max_rate'], rate)
+            row['_rates'][rate] = row['_rates'].get(rate, 0) + 1
+
+        wildcard_count, by_category = _selection_category_counts(selections)
+
+        products_list = []
+        for row in rows.values():
+            rates = row.pop('_rates')
+            # The rate most of the selection already sits on — the sensible
+            # default for the "new rate" box. Ties go to the higher rate rather
+            # than to dict order, so the suggestion is at least stable.
+            common_rate, common_count = max(rates.items(), key=lambda pair: (pair[1], pair[0]))
+            reach = wildcard_count + by_category.get(row['category'], 0)
+            row['distinct_rates'] = len(rates)
+            row['common_rate'] = common_rate
+            row['common_rate_parties'] = common_count
+            row['eligible_parties'] = reach
+            row['missing_parties'] = max(reach - row['party_count'], 0)
+            products_list.append(row)
+
+        products_list.sort(
+            key=lambda row: (row['category'], (row['item_name'] or row['item_code']).upper())
+        )
+
+        return Response({
+            'success': True,
+            'data': {
+                'parties': len(selections),
+                'products': products_list,
+                'total_products': len(products_list),
+            },
+        })
+
+
+class BulkUpdatePartyProductRatesView(APIView):
+    """One rate revision, written to every selected party at once.
+
+    POST {
+      "party_selections": [{"card_code": "C001", "category": "OIL"}, ...],
+      "items": [{"item_code": "FG001", "category": "OIL", "basic_rate": 152.5}],
+      "rate_mode": "set" | "percent" | "amount",   # default "set"
+      "apply_to": "existing" | "all"               # default "existing"
+    }
+
+    `percent` and `amount` move each party's OWN rate, which is the whole point
+    of offering them: a 5% rise across a state whose parties sit on different
+    price lists has no single figure to write. Because they need a rate to move
+    from, they only touch parties that already hold the product — `apply_to:
+    "all"` is a `set`-mode option, and is forced back to "existing" otherwise.
+
+    "existing" is the default because the dangerous mistake here is a silent
+    WIDENING: a mis-set toggle that hands forty parties a product they were
+    never meant to be able to order reads, on every screen afterwards, exactly
+    like a deliberate assignment.
+
+    Each row is written with `save()` rather than a bulk `.update()`, so the
+    audit trail carries every individual price change — the same reason
+    `AssignPartiesView` deactivates one row at a time.
+    """
+
+    RATE_MODES = ('set', 'percent', 'amount')
+    APPLY_MODES = ('existing', 'all')
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasKey('Party_Product_Assignment')]
+
+    def post(self, request):
+        selections = _normalize_party_selections(
+            request.data.get('party_selections'),
+            request.data.get('card_codes'),
+        )
+        items = request.data.get('items') or []
+        rate_mode = str(request.data.get('rate_mode') or 'set').strip().lower()
+        apply_to = str(request.data.get('apply_to') or 'existing').strip().lower()
+
+        if not selections:
+            return Response(
+                {'success': False, 'message': 'party selection is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(items, list) or not items:
+            return Response(
+                {'success': False, 'message': 'items is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if rate_mode not in self.RATE_MODES:
+            return Response(
+                {'success': False,
+                 'message': 'rate_mode must be one of ' + ', '.join(self.RATE_MODES)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if apply_to not in self.APPLY_MODES:
+            return Response(
+                {'success': False,
+                 'message': 'apply_to must be one of ' + ', '.join(self.APPLY_MODES)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if rate_mode != 'set':
+            apply_to = 'existing'
+
+        errors = []
+        parsed_items = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+
+            item_code = str(raw.get('item_code') or '').strip()
+            category = _normalize_category(raw.get('category'))
+            raw_value = raw.get('basic_rate', raw.get('value'))
+
+            if not item_code or not category:
+                errors.append('An item was sent without an item code or a category.')
+                continue
+            try:
+                amount = Decimal(str(raw_value))
+            except (TypeError, ValueError, ArithmeticError):
+                errors.append(f'{item_code}|{category}: "{raw_value}" is not a number.')
+                continue
+            if rate_mode == 'set' and amount < 0:
+                errors.append(f'{item_code}|{category}: a rate cannot be negative.')
+                continue
+            if not _active_product_exists(item_code, category):
+                errors.append(f'{item_code}|{category}: not found or inactive.')
+                continue
+
+            parsed_items.append((item_code, category, amount))
+
+        if not parsed_items:
+            return Response({
+                'success': False,
+                'message': 'Nothing was applied.',
+                'data': {
+                    'updated': 0,
+                    'created': 0,
+                    'unchanged': 0,
+                    'skipped': 0,
+                    'parties': len(selections),
+                    'items': 0,
+                    'errors': errors,
+                },
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        card_codes = {card_code for card_code, _ in selections}
+        item_codes = {item_code for item_code, _, _ in parsed_items}
+
+        # Both lookups up front. The write loop below is O(parties x items), and
+        # a query inside it is the difference between one second and forty.
+        known_codes = set()
+        known_parties = set()
+        for card_code, category in Party.objects.filter(
+            card_code__in=card_codes
+        ).values_list('card_code', 'category'):
+            known_codes.add(card_code)
+            known_parties.add((card_code, _normalize_category(category)))
+
+        existing = {
+            (
+                assignment.card_code,
+                assignment.item_code,
+                _normalize_category(assignment.category),
+            ): assignment
+            for assignment in PartyProductAssignment.objects.filter(
+                card_code__in=card_codes,
+                item_code__in=item_codes,
+            )
+        }
+
+        updated = created = unchanged = skipped = 0
+
+        for card_code, party_category in sorted(
+            selections, key=lambda selection: (selection[0], selection[1] or '')
+        ):
+            if party_category:
+                party_exists = (card_code, party_category) in known_parties
+            else:
+                party_exists = card_code in known_codes
+            if not party_exists:
+                category_label = f'|{party_category}' if party_category else ''
+                errors.append(f'{card_code}{category_label}: party not found.')
+                continue
+
+            for item_code, category, amount in parsed_items:
+                # An OIL party cannot hold a MART rate. Not an error — pricing a
+                # mixed selection in one pass is the normal case.
+                if party_category and category != party_category:
+                    continue
+
+                assignment = existing.get((card_code, item_code, category))
+
+                if assignment is not None and assignment.is_active:
+                    revised = _revised_rate(assignment.basic_rate, rate_mode, amount)
+                    if revised is None:
+                        errors.append(
+                            f'{card_code}: {item_code}|{category} would fall below zero — '
+                            f'left at {assignment.basic_rate}.'
+                        )
+                        continue
+                    if revised == assignment.basic_rate:
+                        unchanged += 1
+                        continue
+
+                    assignment.basic_rate = revised
+                    assignment.assigned_by = request.user
+                    assignment.save(update_fields=['basic_rate', 'assigned_by', 'updated_at'])
+                    updated += 1
+                    continue
+
+                # Not assigned, or assigned and switched off. Only a "set" run
+                # reaches these, and only when it was told to.
+                if apply_to != 'all':
+                    skipped += 1
+                    continue
+
+                assignment, was_created = PartyProductAssignment.objects.update_or_create(
+                    card_code=card_code,
+                    item_code=item_code,
+                    category=category,
+                    defaults={
+                        'basic_rate': amount,
+                        'is_active': True,
+                        'assigned_by': request.user,
+                    },
+                )
+                existing[(card_code, item_code, category)] = assignment
+                if was_created:
+                    created += 1
+                else:
+                    updated += 1
+
+        return Response({
+            'success': not errors,
+            'message': (
+                f'Updated: {updated}, Added: {created}, '
+                f'Already at that rate: {unchanged}, Not assigned: {skipped}'
+            ),
+            'data': {
+                'updated': updated,
+                'created': created,
+                'unchanged': unchanged,
+                'skipped': skipped,
+                'parties': len(selections),
+                'items': len(parsed_items),
+                'errors': errors,
+            },
+        }, status=status.HTTP_200_OK)
+
 
 class BulkAssignProductsToPartyView(APIView):
     """
@@ -954,7 +1346,8 @@ class RemoveProductFromPartyView(APIView):
 class RemovePartyAssignmentView(APIView):
     """Revoke a party assignment. Administrators only."""
 
-    permission_classes = [IsAuthenticated, IsAdminRole]
+    def get_permissions(self):
+        return _party_assignment_permissions()
 
     def post(self, request):
         user_id = request.data.get('user_id')
@@ -1010,7 +1403,11 @@ class UserPartiesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, user_id):
-        if user_id != request.user.pk and not is_admin(request.user):
+        # Reading someone else's record is the assignment screen's job, so it
+        # follows the same key as the writes — otherwise a user granted
+        # Party_Assignment could open the page and save, but not see which
+        # parties were already ticked.
+        if user_id != request.user.pk and not _may_manage_party_assignments(request.user):
             return Response(
                 {'success': False,
                  'message': 'You may only view your own party assignments'},

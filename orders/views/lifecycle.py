@@ -57,6 +57,7 @@ from .notifications import send_order_notifications
 from orders.services.order_flow import ORDER_FLOW_TYPE_ASM, ORDER_FLOW_TYPE_BILLING, _get_initial_flow_status, _get_next_order_flow_status, _get_order_flow_type_for_order, _get_order_primary_category, _get_party_flow_config
 from orders.services.order_templates import _save_template_if_unique
 from orders.services.rate_approval import (
+    _authorised_basic_rate,
     _get_rate_approval_reason,
     _rate_approval_remarks,
     assign_rate_approvers,
@@ -415,9 +416,14 @@ class UpdateOrderView(APIView):
         for item in items:
             created_items.append(_create_order_item(order, item, _to_float, _to_bool))
 
-            bp = _to_float(item.get('price_list_basic', 0))
-            mp = _to_float(item.get('basic_price', 0))
-            rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+            # The AGREED rate from party_product_assignments, not the form's
+            # price list — see `_get_rate_approval_reason` for why the two are
+            # not interchangeable.
+            authorised_rate = _authorised_basic_rate(
+                order.card_code, item.get('item_code'), item.get('category'))
+            basic_price = _to_float(item.get('basic_price', 0))
+            rate_approval_reason = _get_rate_approval_reason(
+                item, authorised_rate, basic_price)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
@@ -456,6 +462,7 @@ class UpdateOrderView(APIView):
                 flow_type=order_flow_type,
                 force_foc_flow=order.is_foc,
                 config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
+                requires_rate_approval=needs_approval,
             )
         if next_status:
             order.status = next_status
@@ -601,9 +608,11 @@ class CreateOrderView(APIView):
             created_items = []
             for item in items:
                 created_items.append(_create_order_item(order, item, _to_float, _to_bool))
-                bp = _to_float(item.get('price_list_basic', 0))
-                mp = _to_float(item.get('basic_price', 0))
-                rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+                authorised_rate = _authorised_basic_rate(
+                    order.card_code, item.get('item_code'), item.get('category'))
+                basic_price = _to_float(item.get('basic_price', 0))
+                rate_approval_reason = _get_rate_approval_reason(
+                    item, authorised_rate, basic_price)
                 if rate_approval_reason:
                     needs_approval = True
                     flagged_items.append(rate_approval_reason)
@@ -642,6 +651,7 @@ class CreateOrderView(APIView):
                     flow_type=order_flow_type,
                     force_foc_flow=order.is_foc,
                     config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
+                    requires_rate_approval=needs_approval,
                 )
 
             # If the edit sends the order back into Rate Approval, a fresh approval
@@ -759,9 +769,14 @@ class CreateOrderView(APIView):
         created_items = []
         for item in items:
             created_items.append(_create_order_item(order, item, _to_float, _to_bool))
-            bp = _to_float(item.get('price_list_basic', 0))
-            mp = _to_float(item.get('basic_price', 0))
-            rate_approval_reason = _get_rate_approval_reason(item, bp, mp)
+            # The AGREED rate from party_product_assignments, not the form's
+            # price list — see `_get_rate_approval_reason` for why the two are
+            # not interchangeable.
+            authorised_rate = _authorised_basic_rate(
+                order.card_code, item.get('item_code'), item.get('category'))
+            basic_price = _to_float(item.get('basic_price', 0))
+            rate_approval_reason = _get_rate_approval_reason(
+                item, authorised_rate, basic_price)
             if rate_approval_reason:
                 needs_approval = True
                 flagged_items.append(rate_approval_reason)
@@ -809,6 +824,7 @@ class CreateOrderView(APIView):
             flow_type=order_flow_type,
             force_foc_flow=order.is_foc,
             config=party_flow_config,
+            requires_rate_approval=needs_approval,
         )
         if next_status:
             order.status = next_status
