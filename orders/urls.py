@@ -4,6 +4,7 @@ from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,Order
 from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView
 from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
 from .views.crystal import SalesOrderPrintView
+from .views.queries import MasterOrderCreatorsView, MasterOrderListView
 
 urlpatterns=[
     
@@ -42,6 +43,8 @@ urlpatterns=[
     path('dashboardW/', WDashboardKPIView.as_view(), name='Wdashboard'),
     path('dashboardW/charts/',WDashboardChartsView.as_view(), name='Wdashboard-charts'),
     path('status-tracking/',OrderStatusTrackingView.as_view(), name='status-tracking'),
+    path('master/', MasterOrderListView.as_view(), name='order-master'),
+    path('master/creators/', MasterOrderCreatorsView.as_view(), name='order-master-creators'),
     path("<int:order_id>/orderlogs/",OrderLogsByOrderView.as_view(),name="order-logs-by-orderid"),
     path("orderdetailsbyid/<int:order_id>/",OrderDetailsByOrderView.as_view(),name="order-details-by-id"),
     path("<int:order_id>/orderdetails/",OrderDetailsByOrderView.as_view(),name="order-details-by-orderid"),
