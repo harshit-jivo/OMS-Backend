@@ -38,6 +38,8 @@ from ._shared import (
     BILLING_DECISION_ACTION_IDS,
     BILLING_REJECTED_ACTION_ID,
     _get_base_orders,
+    _get_user_category_names,
+    sees_all_orders,
 )
 
 
@@ -864,6 +866,46 @@ def _parse_date(value):
     return parse_date(value)
 
 
+def _master_orders_for(user):
+    """Every order the master page may show `user`, across all creators.
+
+    NOT `_get_base_orders`. That answers "which orders is this user working
+    on" — a billing user gets the billing stages, an approver gets what is
+    pending on them — which is a queue, not an overview. The master page is
+    the overview, so it starts from every order and narrows only by WHO the
+    user is allowed to see, never by what stage the order is at.
+
+    The narrowing is the holder's own categories. That is the fix for the bug
+    this page shipped with: it was gated on `orders.sales.view_all`, and
+    because `_get_base_orders` reads that same key, granting it so somebody
+    could open this page also unscoped their queue and tracker. A BEVERAGES
+    billing user went from 705 orders to all 3,060 — OIL included — everywhere
+    in the app, not just here.
+
+    Holders of `orders.sales.view_all` still see everything: that key means
+    "no scoping" and this is the one place it should still say so.
+
+    Category, and NOT main group. `_apply_billing_order_scope` narrows by both,
+    which is right for a queue and wrong for an overview: an OIL user assigned
+    the single main group ROI would see 137 of the 1,675 OIL orders, a page
+    that hides 92% of its own subject. The complaint this fixes is about
+    categories — a BEVERAGES user seeing OIL — so categories are what it
+    filters on. It is read-only, and wider than that user's billing queue by
+    design.
+
+    A user with no category at all is unscoped here, which is
+    `_apply_billing_order_scope`'s own rule too: no scope configured means no
+    scope applied.
+    """
+    orders = Order.objects.all()
+    if sees_all_orders(user):
+        return orders
+    categories = _get_user_category_names(user)
+    if not categories:
+        return orders
+    return orders.filter(items__category__in=categories).distinct()
+
+
 class MasterOrderListView(APIView):
     """The order master view: every order, who raised it, and its stage history.
 
@@ -918,11 +960,11 @@ class MasterOrderListView(APIView):
     }
 
     def get_permissions(self):
-        return [IsAuthenticated(), HasKey('orders.sales.view_all')]
+        return [IsAuthenticated(), HasKey('orders.master.view')]
 
     def get(self, request):
         orders = (
-            _get_base_orders(request.user)
+            _master_orders_for(request.user)
             .select_related('status', 'created_by')
             .prefetch_related(
                 Prefetch(
@@ -1056,11 +1098,11 @@ class MasterOrderCreatorsView(APIView):
     """
 
     def get_permissions(self):
-        return [IsAuthenticated(), HasKey('orders.sales.view_all')]
+        return [IsAuthenticated(), HasKey('orders.master.view')]
 
     def get(self, request):
         creators = (
-            _get_base_orders(request.user)
+            _master_orders_for(request.user)
             .exclude(created_by=None)
             .values('created_by_id', 'created_by__username')
             .distinct()

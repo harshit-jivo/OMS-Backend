@@ -57,6 +57,20 @@ REGISTRY: dict[str, dict[str, str]] = {
         # without a new literal having to be added to that function each time
         # an administrator invents a role.
         'orders.sales.view_all':    'View every order, company-wide',
+        # The Order Master page, and ONLY that page.
+        #
+        # It was gated on `orders.sales.view_all` because that key already
+        # meant "see every order". Reusing it was wrong: that key is also what
+        # `_get_base_orders` reads, so granting it to open one page silently
+        # unscoped the holder's queue, tracker and dashboards too. A BEVERAGES
+        # billing user given it went from 705 orders to all 3,060 — OIL
+        # included — everywhere in the app, not just on the master page.
+        #
+        # This key opens the page and nothing else. The page still narrows to
+        # the holder's own CATEGORIES, so a BEVERAGES user sees every BEVERAGES
+        # order company-wide rather than every order; holders of
+        # `orders.sales.view_all` keep seeing everything.
+        'orders.master.view':       'Open the Order Master page',
     },
 
     # --- Admin pages (legacy extra_pages keys, verbatim from
