@@ -18,12 +18,14 @@ from unittest.mock import patch
 
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
+from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 
 from users.models import User, UserRole
 
 from .models import PaymentMethodEntry, PaymentReceipt
 from .serializers import PaymentReceiptSerializer
+from .tests_support import uniq
 from .views import _receipt_queryset
 
 
@@ -42,10 +44,21 @@ class ReceiptListQueryCountTests(TestCase):
     def setUp(self):
         role, _ = UserRole.objects.get_or_create(name='payments_and_deposit')
         self.user = User.objects.create(
-            username='perf_user', name='Perf', role=role)
+            username=uniq('perf_user-'), name='Perf', role=role)
+        # Warm the ContentType cache. The generic prefetches (attachments,
+        # status history) resolve a content type on first use and cache it for
+        # the process. That is a FIXED cost, paid once, but it lands inside
+        # whichever measurement runs first and would read as a difference
+        # between the two counts compared below — which are about per-ROW cost.
+        ContentType.objects.get_for_model(PaymentReceipt)
 
     def _serialize_list(self):
-        qs = _receipt_queryset(self.user)
+        # `_receipt_queryset` is the production queryset — the thing under
+        # test, prefetches and all — but it is then narrowed to the receipts
+        # THIS test created. On the shared TEST database it would otherwise
+        # serialize the live rows as well, which changes the row count without
+        # changing anything about the N+1 behaviour being measured.
+        qs = _receipt_queryset(self.user).filter(created_by=self.user)
         with CaptureQueriesContext(connection) as ctx:
             data = PaymentReceiptSerializer(qs, many=True).data
         return data, len(ctx)
@@ -90,34 +103,32 @@ class ReceiptListQueryCountTests(TestCase):
         # allocations) rather than the None a list returns.
         self.assertIsNotNone(data['sap_branch'])
 
-    def test_approval_is_read_from_the_prefetch(self):
-        """`.order_by()` on a prefetched manager re-queries; `.all()` does not."""
-        from django.contrib.contenttypes.models import ContentType
+    def test_approval_is_read_without_a_query_per_row(self):
+        """The list renders each document's flow without scaling queries.
 
-        from approvals.models import ApprovalRequest, ApprovalWorkflow
+        The old failure mode was a manager method re-queried per row. The flow
+        is a one-to-one, so it is fetched with the document; this asserts the
+        count does not move when the list grows.
+        """
+        from .models import FlowStatus, PaymentReceiptFlow
+        from .tests_workflow_fixtures import payments_workflow
 
-        ct = ContentType.objects.get_for_model(PaymentReceipt)
-        workflow = ApprovalWorkflow.objects.create(
-            code='PAY_PERF', name='Perf', document_type='PAYMENT',
-            company='OIL')
+        workflow, stages = payments_workflow(
+            self.user, company='OIL', code='PAY_PERF', documents='receipts')
+
+        def _flow(receipt):
+            PaymentReceiptFlow.objects.create(
+                receipt=receipt, workflow=workflow, status=FlowStatus.PENDING,
+                current_stage=stages[0], total_stage=1)
+
         for i in range(4):
-            receipt = _receipt(f'RC-PERF-E{i}', self.user)
-            ApprovalRequest.objects.create(
-                workflow=workflow, content_type=ct, object_id=receipt.pk,
-                company='OIL', amount=receipt.total_amount,
-                document_number=receipt.receipt_no,
-                status=ApprovalRequest.Status.PENDING)
+            _flow(_receipt(f'RC-PERF-E{i}', self.user))
 
         data, four = self._serialize_list()
         self.assertTrue(all(row['approval'] for row in data))
 
         for i in range(4, 10):
-            receipt = _receipt(f'RC-PERF-E{i}', self.user)
-            ApprovalRequest.objects.create(
-                workflow=workflow, content_type=ct, object_id=receipt.pk,
-                company='OIL', amount=receipt.total_amount,
-                document_number=receipt.receipt_no,
-                status=ApprovalRequest.Status.PENDING)
+            _flow(_receipt(f'RC-PERF-E{i}', self.user))
         _, ten = self._serialize_list()
 
         self.assertEqual(

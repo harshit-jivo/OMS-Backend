@@ -81,63 +81,6 @@ class CollectionPerson(TimeStampedModel):
         return self.name
 
 
-class PaymentMethodMapping(models.Model):
-    """Which SAP House Bank Account each payment method posts to.
-
-    NOT a bank master — SAP owns that (see payments.bank_master). This table
-    holds only business configuration: one bank can expose several G/L accounts
-    and OMS cannot guess which one a tender should use, so an administrator
-    says it once here and no user ever sees a G/L number again.
-
-    `bank_key` is SAP's "BANKCODE:GLACCOUNT" and is stored as plain text on
-    purpose: SAP is the master, so a foreign key is impossible, and resolution
-    happens against the live cache every time it is used.
-
-    CASH is the exception, and the reason `gl_account` exists: a cash drawer
-    is not a house bank, has no DSC1 row in SAP and therefore no `bank_key` to
-    point at. Its G/L is named directly instead. The two columns are mutually
-    exclusive by tender, never both.
-    """
-
-    company = models.CharField(max_length=20, choices=CATEGORY_CHOICES,
-                               db_index=True)
-    payment_method = models.CharField(max_length=20)
-    # SAP "BANKCODE:GLACCOUNT" for a banked tender. Blank for CASH.
-    bank_key = models.CharField(max_length=80, blank=True, default='')
-    # The G/L a CASH tender debits, and the same account a deposit of that
-    # cash later credits — one drawer, so one account, which is what makes the
-    # clearing account provably net to zero.
-    #
-    # Blank for every banked method: those resolve through `bank_key` against
-    # SAP's live house-bank master, and a second account here could disagree
-    # with it.
-    gl_account = models.CharField(max_length=30, blank=True, default='')
-    # Reserved for future fallback ordering; the unique constraint below means
-    # exactly one active mapping per (company, method) today.
-    priority = models.PositiveSmallIntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'payment_method_mapping'
-        ordering = ['company', 'payment_method', 'priority']
-        constraints = [
-            # "Exactly one active mapping per method" enforced in the DATABASE,
-            # not just the serializer — a second active row would make the
-            # posting account ambiguous, and any other write path would bypass
-            # a Python-only check. Partial, so deactivated rows can pile up as
-            # history without colliding.
-            models.UniqueConstraint(
-                fields=['company', 'payment_method'],
-                condition=Q(is_active=True),
-                name='payment_method_mapping_one_active'),
-        ]
-
-    def __str__(self):
-        return f'{self.company} {self.payment_method} -> {self.bank_key}'
-
-
 class PaymentReceipt(TimeStampedModel):
     """A payment received from a party (SAP: IncomingPayments / ORCT)."""
 
@@ -307,8 +250,13 @@ class PaymentReceipt(TimeStampedModel):
 
     attachments = GenericRelation('attachments.Attachment',
                                   related_query_name='payment_receipt')
-    approvals = GenericRelation('approvals.ApprovalRequest',
-                                related_query_name='payment_receipt')
+
+    # The append-only timeline, as a relation so a LIST can prefetch it. The
+    # serializer needs the latest REJECTED row per document to show why it came
+    # back; without this it issued one query PER ROW, which is what the old
+    # `approvals__actions` prefetch used to cover.
+    status_history = GenericRelation('PaymentStatusHistory',
+                                     related_query_name='payment_receipt')
 
     class Meta:
         db_table = 'payment_receipt'
@@ -352,17 +300,18 @@ class PaymentReceipt(TimeStampedModel):
             return True
         # The verifier's whole job is to check the physical money against the
         # entry, and the cheque image IS that evidence — so this has to admit
-        # them. It cannot be expressed through `approvals` below: verification
-        # happens BEFORE the document enters the approval chain, so there is no
-        # PENDING request yet and the verifier has taken no approval action.
-        # Without this clause the verify screen showed the receipt but refused
-        # its attachment, which is the one thing the verifier needs to see.
+        # them. It cannot be expressed through the approval flow: verification
+        # happens BEFORE the document enters approval, so there is no flow yet
+        # and the verifier has taken no approval action. Without this clause
+        # the verify screen showed the receipt but refused its attachment,
+        # which is the one thing the verifier needs to see.
         from .permissions import has_permission_key, PAYMENTS_VERIFY
         if has_permission_key(user, PAYMENTS_VERIFY):
             return True
-        # Anyone who can act on (or has acted on) its approval may see the file.
-        return self.approvals.filter(
-            Q(actions__approver=user) | Q(status='PENDING')).exists()
+        # Anyone who must act on it now, or who acted on it before, may see the
+        # file. "Now" is resolved from the workflow stage rather than from a
+        # stored approver; "before" is read from this module's own history.
+        return _may_see_through_approval(self, user)
 
 
 class PaymentMethodEntry(models.Model):
@@ -427,6 +376,44 @@ class PaymentMethodEntry(models.Model):
     # references an existing cheque by this key, so it can only be banked once
     # the receipt itself has posted.
     sap_check_key = models.IntegerField(null=True, blank=True)
+
+    # ── The receiving account, as chosen when the payment was entered ───────
+    #
+    # A SNAPSHOT, written by the server from the account the user selected and
+    # never recomputed. The account a payment went into is a fact about that
+    # payment, not a lookup: resolving it again later means a bank closed in
+    # SAP, or an administrator's edit, silently rewrites history. Bank deposits
+    # already store their destination this way (see BankDeposit below); this
+    # brings receipts into line.
+    #
+    # NOTE `bank_name` above is the CUSTOMER'S bank, printed on their cheque.
+    # The bank WE receive into is `receiving_bank_name`. Conflating them would
+    # make a receipt claim the customer banks with us.
+    #
+    # `db_default=''` as well as `default=''`: the DATABASE keeps the blank
+    # default. Without it Django drops the column default after adding it,
+    # and code still running from the previous release — which does not know
+    # these columns — has its inserts rejected under NOT NULL for the length
+    # of the deploy. Blank is the true legacy value: such a line was entered
+    # without choosing an account.
+    #
+    # What the client sends: `account_key` alone — "BANKCODE:GLACCOUNT" for a
+    # banked tender, the G/L for cash. Every other column here is resolved
+    # server-side from that key and the receipt's company, so a client can
+    # never name the G/L its money posts to.
+    account_key = models.CharField(max_length=80, blank=True, default='',
+                                   db_default='')
+    gl_account = models.CharField(max_length=30, blank=True, default='',
+                                  db_default='')
+    # Blank for CASH: a drawer has no house bank.
+    bank_code = models.CharField(max_length=30, blank=True, default='',
+                                 db_default='')
+    receiving_bank_name = models.CharField(max_length=150, blank=True,
+                                           default='', db_default='')
+    account_number = models.CharField(max_length=50, blank=True, default='',
+                                      db_default='')
+    branch = models.CharField(max_length=100, blank=True, default='',
+                              db_default='')
 
     class Meta:
         db_table = 'payment_method_entry'
@@ -546,9 +533,26 @@ class BankDeposit(TimeStampedModel):
         CANCELLED = 'CANCELLED', 'Cancelled'
 
     class DepositType(models.TextChoices):
+        """What this deposit is FOR, which is not the same as what it contains.
+
+        MIXED was removed. It existed because a deposit's arithmetic used to
+        add cash and cheques into one figure, so a deposit carrying both
+        needed a name — but the two are not comparable amounts. A cheque
+        reached the bank when its own RECEIPT posted to SAP; the deposit only
+        records the DAY it was physically handed over. Cash is the only money
+        a deposit actually moves.
+
+        With the arithmetic now cash-only, a cheque riding along on a CASH
+        deposit costs nothing: it is recorded, not counted. So the label went
+        back to meaning what it says.
+
+        It was never trustworthy anyway — at the time of removal 9 deposits
+        were tagged MIXED while holding pure cash, and one tagged CHEQUE held
+        pure cash. Migration 0042 re-derives every row from its contents.
+        """
+
         CASH = 'CASH', 'Cash'
         CHEQUE = 'CHEQUE', 'Cheque'
-        MIXED = 'MIXED', 'Mixed (cash + cheque)'
 
     deposit_no = models.CharField(max_length=40, unique=True)
 
@@ -566,12 +570,29 @@ class BankDeposit(TimeStampedModel):
     bank_code = models.CharField(max_length=30, blank=True, default='')
     bank_gl_account = models.CharField(max_length=50, blank=True, default='')
     bank_display_name = models.CharField(max_length=150, blank=True, default='')
+    # The G/L this deposit EMPTIES — the drawer the cash came out of, as a
+    # snapshot beside the destination above. It is currently resolved live on
+    # every read, so changing the configuration retrospectively changes what an
+    # old deposit says it emptied; storing it ends that. Populated in a later
+    # phase from the cash accounts of the receipts being deposited, which is
+    # what makes the clearing account provably net to zero.
+    source_gl_account = models.CharField(max_length=30, blank=True,
+                                         default='', db_default='')
     deposit_type = models.CharField(
         max_length=10, choices=DepositType.choices, default=DepositType.CASH)
 
-    # Sum of the linked receipts, computed in the service.
+    # The CASH in the linked receipts, computed in the service.
+    #
+    # CASH ONLY — cheques are deliberately excluded. A cheque is already in
+    # SAP under its own receipt, so adding its value here would produce a
+    # figure that matches neither the SAP posting nor anything a person could
+    # count. What the employee carries is cash plus some pieces of paper whose
+    # value has already been banked; only the cash is at stake.
     collected_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    # What was actually banked. May be less; then a reason is mandatory.
+    # The CASH actually banked, and exactly what the SAP document is for. May
+    # be less than collected — the AP team sometimes spends part of a
+    # collection before it reaches the bank — and then a reason is mandatory.
+    # Zero is legal: a cheque-only deposit banks no cash and posts nothing.
     deposit_amount = models.DecimalField(max_digits=15, decimal_places=2)
     shortfall_reason = models.TextField(blank=True, default='')
     bank_charge = models.DecimalField(max_digits=15, decimal_places=2, default=0)
@@ -622,8 +643,13 @@ class BankDeposit(TimeStampedModel):
 
     attachments = GenericRelation('attachments.Attachment',
                                   related_query_name='bank_deposit')
-    approvals = GenericRelation('approvals.ApprovalRequest',
-                                related_query_name='bank_deposit')
+
+    # The append-only timeline, as a relation so a LIST can prefetch it. The
+    # serializer needs the latest REJECTED row per document to show why it came
+    # back; without this it issued one query PER ROW, which is what the old
+    # `approvals__actions` prefetch used to cover.
+    status_history = GenericRelation('PaymentStatusHistory',
+                                     related_query_name='bank_deposit')
 
     class Meta:
         db_table = 'payment_bank_deposit'
@@ -635,7 +661,11 @@ class BankDeposit(TimeStampedModel):
                          name='idx_dep_bank_date'),
         ]
         constraints = [
-            models.CheckConstraint(condition=Q(deposit_amount__gt=0),
+            # `gte`, not `gt`: a CHEQUE-ONLY deposit banks no cash at all, so
+            # zero is the correct and only honest value for it. Now that
+            # `deposit_amount` counts cash alone, `> 0` would reject exactly
+            # the deposits that are supposed to post nothing to SAP.
+            models.CheckConstraint(condition=Q(deposit_amount__gte=0),
                                    name='bank_deposit_amount_positive'),
             # These two encode exactly the rules already enforced in the mobile
             # UI, so the API cannot be bypassed to store an invalid deposit.
@@ -660,8 +690,7 @@ class BankDeposit(TimeStampedModel):
             return True
         if self.created_by_id == user.id:
             return True
-        return self.approvals.filter(
-            Q(actions__approver=user) | Q(status='PENDING')).exists()
+        return _may_see_through_approval(self, user)
 
 
 class BankDepositLine(models.Model):
@@ -691,6 +720,51 @@ class BankDepositLine(models.Model):
 # ---------------------------------------------------------------------------
 # SAP integration
 # ---------------------------------------------------------------------------
+
+
+def _may_see_through_approval(document, user):
+    """True when `user` holds this document now, or decided it before.
+
+    TWO ROUTES IN, and they answer different questions.
+
+    NOW is resolved from the workflow stage the document is parked at, never
+    from a stored approver: reassigning a stage, or a stand-in covering a
+    replacement, changes who must act with nothing on the document updated, and
+    the person who must act has to be able to open it.
+
+    BEFORE is read from this module's own append-only history. Someone who
+    approved a receipt last week keeps access to what they approved, even
+    though the document has moved on and the stage is now somebody else's.
+    Without that, an approver could not answer a question about their own
+    decision.
+
+    Shared by `PaymentReceipt.can_be_viewed_by` and
+    `BankDeposit.can_be_viewed_by`, which differ only in what else they admit.
+    """
+    username = getattr(user, 'username', '') or ''
+    if not username:
+        return False
+
+    from django.contrib.contenttypes.models import ContentType
+
+    from . import workflow_flow
+
+    # --- holds it now -----------------------------------------------------
+    flow = workflow_flow.flow_of(document)
+    if flow is not None and flow.current_stage_id:
+        if workflow_flow.effective_user_id(flow.current_stage_id) == user.pk:
+            return True
+
+    # --- acted on it before -----------------------------------------------
+    return PaymentStatusHistory.objects.filter(
+        content_type=ContentType.objects.get_for_model(type(document)),
+        object_id=document.pk,
+        action__in=(PaymentStatusHistory.Action.APPROVED,
+                    PaymentStatusHistory.Action.REJECTED,
+                    PaymentStatusHistory.Action.RETURNED),
+        changed_by_username=username,
+    ).exists()
+
 
 class SapCallLog(models.Model):
     """One row per HTTP call to the Service Layer.
@@ -753,6 +827,113 @@ class SapCallLog(models.Model):
         return f'{self.endpoint} [{self.status}]'
 
 
+# ---------------------------------------------------------------------------
+# Workflow runtime — payments' own, one flow row per document
+# ---------------------------------------------------------------------------
+#
+# The Workflow Engine owns CONFIGURATION (workflows, queries, stages,
+# replacements) and nothing else; every module owns its own runtime. See
+# docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md §0.1.
+#
+# Payments therefore owns three things, and these are two of them — the third
+# is `PaymentStatusHistory` below, which was already the module's append-only
+# log and needs no replacement.
+#
+# There is deliberately NO TASK TABLE. A task row per stage would hold a stage
+# id, a sequence and a status that the engine and this flow already hold
+# between them, and the copy is what makes a "reassign everything waiting"
+# migration necessary. The pending queue is a filter on the flow.
+
+
+class FlowStatus(models.TextChoices):
+    """Where a document is in its approval, independent of its SAP state."""
+
+    PENDING = 'PENDING', 'Pending approval'
+    APPROVED = 'APPROVED', 'Approved'
+    REJECTED = 'REJECTED', 'Rejected'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class _PaymentFlowBase(models.Model):
+    """Shared shape of the receipt and deposit flows.
+
+    Abstract: each document gets its OWN table with its own UNIQUE foreign key,
+    because "exactly one flow row per document" is a database constraint here,
+    not a convention.
+
+    `current_stage` is THE integration. It stores the ENGINE's stage id and
+    never a copy of that stage's name, sequence or user — so an administrator
+    reassigning a stage re-routes every document already waiting there with
+    nothing in payments updated. `current_user` below is a denormalised
+    convenience for lists and is NOT the authority: "who may act now?" is
+    always answered by
+    `workflow.services.assignments.get_stage_assignment(current_stage_id)`,
+    which also applies temporary replacements.
+    """
+
+    status = models.CharField(
+        max_length=12, choices=FlowStatus.choices, default=FlowStatus.PENDING,
+        db_index=True)
+    # PROTECT: deleting configuration must never silently rewrite the history
+    # of what a document was routed through.
+    workflow = models.ForeignKey(
+        'workflow.Workflow', on_delete=models.PROTECT, related_name='+')
+    current_stage = models.ForeignKey(
+        'workflow.WorkflowStage', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+', db_column='current_stage')
+    # Display only — see the class docstring. Never read to decide authority.
+    current_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+')
+    # Stage count when the document was submitted, for "2 of 3" in the UI.
+    total_stage = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+    @property
+    def is_open(self):
+        return self.status == FlowStatus.PENDING
+
+
+class PaymentReceiptFlow(_PaymentFlowBase):
+    """Approval state of one receipt."""
+
+    receipt = models.OneToOneField(
+        PaymentReceipt, on_delete=models.CASCADE, related_name='flow')
+
+    class Meta:
+        db_table = 'payment_receipt_flow'
+        indexes = [
+            models.Index(fields=['status', 'current_stage'],
+                         name='idx_rcpflow_queue'),
+            models.Index(fields=['current_stage'], name='idx_rcpflow_stage'),
+        ]
+
+    def __str__(self):
+        return f'{self.receipt_id} [{self.status}]'
+
+
+class BankDepositFlow(_PaymentFlowBase):
+    """Approval state of one deposit."""
+
+    deposit = models.OneToOneField(
+        BankDeposit, on_delete=models.CASCADE, related_name='flow')
+
+    class Meta:
+        db_table = 'payment_bank_deposit_flow'
+        indexes = [
+            models.Index(fields=['status', 'current_stage'],
+                         name='idx_depflow_queue'),
+            models.Index(fields=['current_stage'], name='idx_depflow_stage'),
+        ]
+
+    def __str__(self):
+        return f'{self.deposit_id} [{self.status}]'
+
+
 class PaymentStatusHistory(models.Model):
     """Append-only activity timeline for receipts AND deposits.
 
@@ -785,6 +966,11 @@ class PaymentStatusHistory(models.Model):
         APPROVED = 'APPROVED', 'Approved'
         REJECTED = 'REJECTED', 'Rejected'
         RETURNED = 'RETURNED', 'Returned to creator'
+        # SAP refused a posting that had already been approved, so the document
+        # went back to its last approver for a retry. A distinct event from
+        # RETURNED (which goes to the creator) and never a deletion of the
+        # APPROVED row it follows — the timeline keeps both.
+        REOPENED = 'REOPENED', 'Reopened after a SAP failure'
         CANCELLED = 'CANCELLED', 'Cancelled'
         SAP_POST_STARTED = 'SAP_POST_STARTED', 'SAP posting started'
         SAP_POSTED = 'SAP_POSTED', 'Posted to SAP'
@@ -808,6 +994,14 @@ class PaymentStatusHistory(models.Model):
     # Null for anything that is not an approval event.
     level = models.PositiveSmallIntegerField(null=True, blank=True)
     level_label = models.CharField(max_length=60, blank=True, default='')
+    # The workflow stage this event happened at, BY REFERENCE. `level` and
+    # `level_label` above are the rendered position ("Level 2 of 2") and stay
+    # for the timeline; this says WHICH configured stage decided, so a renamed
+    # or reassigned stage never rewrites what a past row means. SET_NULL
+    # because deleting configuration must not delete history.
+    stage = models.ForeignKey(
+        'workflow.WorkflowStage', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+', db_column='stage_id')
     # `sap_doc_entry` / `sap_doc_num` lived here and were dropped in migration
     # 0031. A posting row carried its own copy to avoid a join, but the document
     # this row points at already holds the authoritative pair, and every

@@ -19,6 +19,7 @@ from rest_framework.test import APIClient
 from users.models import User, UserRole
 
 from . import services
+from .tests_support import history_of, only
 from .models import BankDeposit, PaymentStatusHistory
 from .permissions import DEPOSIT_CREATE
 
@@ -279,7 +280,9 @@ class PerformedByNameTests(TestCase):
         from .serializers import PaymentStatusHistorySerializer
         services.log_status(self.deposit, to_status='DRAFT', user=self.user,
                             action=Action.UPDATED, reason='Edited.')
-        rows = list(PaymentStatusHistory.objects.filter(action=Action.UPDATED))
+        # Scoped to this deposit: the shared TEST database holds history
+        # rows for real deposits too.
+        rows = list(history_of(self.deposit).filter(action=Action.UPDATED))
         return PaymentStatusHistorySerializer(rows, many=True).data[0]
 
     def test_the_full_name_is_resolved(self):
@@ -294,7 +297,9 @@ class PerformedByNameTests(TestCase):
                             action=Action.UPDATED, reason='Edited.')
         username = self.user.username
         self.user.delete()
-        rows = list(PaymentStatusHistory.objects.filter(action=Action.UPDATED))
+        # Scoped to this deposit: the shared TEST database holds history
+        # rows for real deposits too.
+        rows = list(history_of(self.deposit).filter(action=Action.UPDATED))
         data = PaymentStatusHistorySerializer(rows, many=True).data[0]
         self.assertEqual(data['performed_by_name'], username)
 
@@ -302,7 +307,7 @@ class PerformedByNameTests(TestCase):
         from .serializers import PaymentStatusHistorySerializer
         services.log_status(self.deposit, to_status='POSTED', user=None,
                             action=Action.SAP_POSTED, reason='Posted.')
-        row = PaymentStatusHistory.objects.get(action=Action.SAP_POSTED)
+        row = only(history_of(self.deposit), action=Action.SAP_POSTED)
         data = PaymentStatusHistorySerializer([row], many=True).data[0]
         self.assertEqual(data['performed_by_name'], 'System')
 
@@ -316,7 +321,9 @@ class PerformedByNameTests(TestCase):
             services.log_status(self.deposit, to_status='DRAFT',
                                 user=self.user, action=Action.UPDATED,
                                 reason=f'Edit {i}.')
-        rows = list(PaymentStatusHistory.objects.filter(action=Action.UPDATED))
+        # Scoped to this deposit: the shared TEST database holds history
+        # rows for real deposits too.
+        rows = list(history_of(self.deposit).filter(action=Action.UPDATED))
         with CaptureQueriesContext(connection) as ctx:
             data = PaymentStatusHistorySerializer(rows, many=True).data
         self.assertEqual(len(data), 6)
@@ -342,42 +349,27 @@ class SourceGlAccountTests(TestCase):
     def test_the_field_is_exposed(self):
         self.assertIn('source_gl_account', self._data())
 
-    def _cash_mapping(self, gl_account):
-        from .models import PaymentMethodMapping
-        PaymentMethodMapping.objects.update_or_create(
-            company='OIL', payment_method='CASH',
-            defaults={'bank_key': '', 'gl_account': gl_account,
-                      'is_active': True})
+    def test_it_reports_the_source_frozen_on_the_deposit(self):
+        """The drawer this deposit empties, as recorded when it was submitted.
 
-    def test_it_resolves_the_cash_mapping_account(self):
-        """The deposit empties the drawer the CASH receipts filled."""
-        self._cash_mapping('1105001')
-        self.assertEqual(self._data()['source_gl_account'], '1105001')
-
-    def test_it_follows_the_cash_account_when_that_changes(self):
-        """There is no separate override any more — one drawer, one account.
-
-        A second configurable value could only ever disagree with the cash
-        G/L, and then the clearing account would not net to zero.
+        It used to be resolved live from the CASH payment-method mapping, so a
+        deposit displayed whatever that table said TODAY. The mapping has been
+        retired: the source is frozen onto the deposit at submit, from the
+        receipts it actually banks, and read straight back here.
         """
-        self._cash_mapping('1105003')
+        self.deposit.source_gl_account = '1105003'
+        self.deposit.save(update_fields=['source_gl_account'])
         self.assertEqual(self._data()['source_gl_account'], '1105003')
 
-    def test_an_unmapped_company_reports_null_not_a_blank(self):
-        """The UI omits the row rather than printing an empty account."""
-        from .models import PaymentMethodMapping
-        PaymentMethodMapping.objects.filter(
-            company='OIL', payment_method='CASH').delete()
-        self.assertIsNone(self._data()['source_gl_account'])
+    def test_a_deposit_with_no_source_reports_null_not_a_blank(self):
+        """The UI omits the row rather than printing an empty account.
 
-    def test_an_inactive_mapping_is_ignored(self):
-        """Deactivating the mapping must not leave a stale account in use."""
-        from .models import PaymentMethodMapping
-        self._cash_mapping('1105001')
-        PaymentMethodMapping.objects.filter(
-            company='OIL', payment_method='CASH').update(is_active=False)
+        Blank now means the deposit empties no drawer — a cheque-only deposit,
+        whose cheques reached the bank when their own receipts posted.
+        """
+        self.deposit.source_gl_account = ''
+        self.deposit.save(update_fields=['source_gl_account'])
         self.assertIsNone(self._data()['source_gl_account'])
-
 
 class AttachmentUploadIsLoggedTests(TestCase):
     """An upload lands on the document's timeline, not only in its own table.
@@ -430,3 +422,63 @@ class AttachmentUploadIsLoggedTests(TestCase):
         change = self._rows(deposit).get().change_data['attachments']
         self.assertIn('Bank deposit slip', change['old'])
         self.assertEqual(len(change['new']), 2)
+
+
+class DepositLineNamesTheReceiptsSapDocumentTests(TestCase):
+    """A deposit line says where its RECEIPT is recorded in SAP.
+
+    A deposit posts its CASH share and nothing else — a cheque reached the bank
+    when its own receipt posted, so re-posting it would debit the bank twice.
+    Correct, and invisible: the approver sees a deposit for the full amount and
+    one SAP document covering part of it.
+
+    These fields are the missing half, so the app can account for the cheques
+    under the document they actually live in.
+    """
+
+    def setUp(self):
+        from .models import BankDepositLine, PaymentMethodEntry, PaymentReceipt
+
+        self.user = _user('dl_creator', [DEPOSIT_CREATE])
+        self.deposit = _deposit('DEP-DL-1', self.user)
+        self.receipt = PaymentReceipt.objects.create(
+            receipt_no='RCP-DL-1', company='OIL', card_code='C1',
+            payment_date=date(2026, 9, 1), total_amount=Decimal('400.00'),
+            is_advance=True, sap_branch_id=1,
+            status=PaymentReceipt.Status.POSTED,
+            sap_doc_entry=501, sap_doc_num=8001,
+            created_by=self.user)
+        PaymentMethodEntry.objects.create(
+            receipt=self.receipt, method=PaymentMethodEntry.Method.CHEQUE,
+            amount=Decimal('400.00'), cheque_number='112233',
+            bank_name='SBI', cheque_date=date(2026, 9, 1))
+        BankDepositLine.objects.create(
+            deposit=self.deposit, receipt=self.receipt,
+            amount=Decimal('400.00'))
+
+    def _line(self):
+        from .serializers import BankDepositSerializer
+
+        return BankDepositSerializer(self.deposit).data['lines'][0]
+
+    def test_the_line_reports_the_receipts_sap_document(self):
+        line = self._line()
+        self.assertEqual(line['receipt_sap_doc_num'], 8001)
+        self.assertEqual(line['receipt_sap_doc_entry'], 501)
+
+    def test_an_unposted_receipt_reports_null_not_a_guess(self):
+        """A deposit can be raised over a receipt still awaiting SAP."""
+        self.receipt.sap_doc_num = None
+        self.receipt.sap_doc_entry = None
+        self.receipt.save(update_fields=['sap_doc_num', 'sap_doc_entry'])
+
+        line = self._line()
+        self.assertIsNone(line['receipt_sap_doc_num'])
+        self.assertIsNone(line['receipt_sap_doc_entry'])
+
+    def test_the_cheque_identity_travels_with_it(self):
+        """So the number on screen can be matched to the paper."""
+        method = self._line()['methods'][0]
+        self.assertEqual(method['method'], 'CHEQUE')
+        self.assertEqual(method['cheque_number'], '112233')
+        self.assertEqual(method['bank_name'], 'SBI')

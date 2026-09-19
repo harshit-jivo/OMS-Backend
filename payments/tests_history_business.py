@@ -16,8 +16,9 @@ from rest_framework.test import APIClient
 
 from users.models import User, UserRole
 
-from . import services
-from .models import PaymentMethodEntry, PaymentReceipt, PaymentStatusHistory
+from . import services, workflow_flow
+from .models import (FlowStatus, PaymentMethodEntry, PaymentReceipt,
+                     PaymentStatusHistory)
 from .permissions import PAYMENTS_APPROVE, PAYMENTS_CREATE, PAYMENTS_VERIFY
 
 Action = PaymentStatusHistory.Action
@@ -161,23 +162,16 @@ class WriterActionTests(TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        from approvals.models import (
-            ApprovalLevel,
-            ApprovalLevelApprover,
-            ApprovalWorkflow,
-        )
+        from .tests_workflow_fixtures import payments_workflow
+
         self.creator = _user('w_creator', [PAYMENTS_CREATE])
         self.verifier = _user('w_verifier', [PAYMENTS_VERIFY])
         # Both are needed: the KEY says they may approve payments at all, the
-        # level grant says which rung they hold.
+        # STAGE says which one is theirs to decide.
         self.approver = _user('w_approver', [PAYMENTS_APPROVE])
-        workflow = ApprovalWorkflow.objects.create(
-            code='PAYMENT_OIL_HIST', name='OIL payments',
-            document_type='PAYMENT', company='OIL')
-        level = ApprovalLevel.objects.create(
-            workflow=workflow, sequence=1, name='Accountant Review')
-        ApprovalLevelApprover.objects.create(
-            level=level, user=self.approver, company='OIL')
+        self.workflow, self.stages = payments_workflow(
+            self.approver, company='OIL', code='PAYMENT_OIL_HIST',
+            documents='receipts')
 
     # 3 + 5 — verification is ONE business event, at the verify stage.
     def test_verification_records_one_verified_event(self):
@@ -201,32 +195,34 @@ class WriterActionTests(TestCase):
         self.assertEqual(by_action[Action.VERIFIED], 'w_verifier')
 
     # 6 + 7 — approval is recorded on the payment timeline, with its rung.
-    def test_approval_records_an_approved_event_with_its_level(self):
-        from approvals import services as approval_services
+    def test_approval_records_an_approved_event_with_its_stage(self):
+        from . import workflow_flow
 
         receipt = _receipt('RC-W-3', self.creator)
         services.verify_receipt(receipt.pk, self.verifier)
 
-        request = receipt.approvals.first()
-        approval_services.approve(
-            request_id=request.pk, user=self.approver, remarks='Looks right.')
+        receipt.refresh_from_db()
+        workflow_flow.approve(receipt.flow, user=self.approver,
+                              remarks='Looks right.')
 
         approved = _rows(receipt).filter(action=Action.APPROVED)
         self.assertEqual(approved.count(), 1)
         row = approved.first()
         self.assertEqual(row.level, 1)
+        # BY REFERENCE, not by name: a renamed stage never rewrites history.
+        self.assertEqual(row.stage_id, self.stages[0].id)
         self.assertEqual(row.changed_by_username, 'w_approver')
         self.assertEqual(row.reason, 'Looks right.')
 
     def test_rejection_records_a_rejected_event(self):
-        from approvals import services as approval_services
+        from . import workflow_flow
 
         receipt = _receipt('RC-W-4', self.creator)
         services.verify_receipt(receipt.pk, self.verifier)
 
-        request = receipt.approvals.first()
-        approval_services.reject(
-            request_id=request.pk, user=self.approver, remarks='Short by 50.')
+        receipt.refresh_from_db()
+        workflow_flow.reject(receipt.flow, user=self.approver,
+                             remarks='Short by 50.')
 
         rejected = _rows(receipt).filter(action=Action.REJECTED)
         self.assertEqual(rejected.count(), 1)
@@ -274,22 +270,14 @@ class LifecycleSequenceTests(TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-        from approvals.models import (
-            ApprovalLevel,
-            ApprovalLevelApprover,
-            ApprovalWorkflow,
-        )
-        # The poster resolves the SAP company database from this mapping.
+        from .tests_workflow_fixtures import payments_workflow
+
         self.creator = _user('seq_creator', [PAYMENTS_CREATE])
         self.verifier = _user('seq_verifier', [PAYMENTS_VERIFY])
         self.approver = _user('seq_approver', [PAYMENTS_APPROVE])
-        workflow = ApprovalWorkflow.objects.create(
-            code='PAYMENT_OIL_SEQ', name='OIL payments',
-            document_type='PAYMENT', company='OIL')
-        level = ApprovalLevel.objects.create(
-            workflow=workflow, sequence=1, name='Accountant Review')
-        ApprovalLevelApprover.objects.create(
-            level=level, user=self.approver, company='OIL')
+        self.workflow, self.stages = payments_workflow(
+            self.approver, company='OIL', code='PAYMENT_OIL_SEQ',
+            documents='receipts')
 
     def _actions(self, receipt):
         return [str(a) for a in
@@ -310,22 +298,22 @@ class LifecycleSequenceTests(TestCase):
 
     def test_sap_success_sequence(self):
         """CREATED -> VERIFIED -> PENDING_APPROVAL -> APPROVED -> started -> posted."""
-        from approvals import services as approval_services
+        from . import workflow_flow
 
         receipt = _receipt('RC-SEQ-2', self.creator)
         services.log_status(receipt, to_status='DRAFT', user=self.creator,
                             action=Action.CREATED.value, reason='Receipt created.')
         services.verify_receipt(receipt.pk, self.verifier)
 
-        request = receipt.approvals.first()
+        receipt.refresh_from_db()
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.return_value = {'DocEntry': 999, 'DocNum': 555, 'TransId': 77}
             # The SAP call is deferred to transaction.on_commit so a 5-second
             # posting does not hold the approval's row locks. A TestCase rolls
             # back and never commits, so the callbacks must be run explicitly.
             with self.captureOnCommitCallbacks(execute=True):
-                approval_services.approve(request_id=request.pk,
-                                          user=self.approver, remarks='ok')
+                workflow_flow.approve(receipt.flow, user=self.approver,
+                                      remarks='ok')
 
         self.assertEqual(self._actions(receipt), [
             Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
@@ -337,8 +325,15 @@ class LifecycleSequenceTests(TestCase):
         self.assertEqual(receipt.sap_doc_entry, 999)
 
     def test_sap_failure_sequence(self):
-        """A SAP rejection reads as SAP_FAILED, with no anonymous row."""
-        from approvals import services as approval_services
+        """A SAP rejection reads as SAP_FAILED, and nothing is reopened.
+
+        There is no REOPENED row because nothing reopened: the final approval
+        does not complete the flow, so a refusal leaves the document exactly
+        where it already was, at its final stage with the approver who can
+        retry it. A REOPENED row here would record a hand-back that never
+        happened.
+        """
+        from . import workflow_flow
 
         from .sap_client import SapError
 
@@ -347,26 +342,33 @@ class LifecycleSequenceTests(TestCase):
                             action=Action.CREATED.value, reason='Receipt created.')
         services.verify_receipt(receipt.pk, self.verifier)
 
-        request = receipt.approvals.first()
+        receipt.refresh_from_db()
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.side_effect = SapError('Posting period locked',
                                         status_code=400, sap_code='-4013')
             with self.captureOnCommitCallbacks(execute=True):
-                approval_services.approve(request_id=request.pk,
-                                          user=self.approver, remarks='ok')
+                workflow_flow.approve(receipt.flow, user=self.approver,
+                                      remarks='ok')
 
         self.assertEqual(self._actions(receipt), [
             Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
             Action.APPROVED.value, Action.SAP_POST_STARTED.value, Action.SAP_FAILED.value,
         ])
         self.assertNotIn(Action.STATUS_CHANGED.value, self._actions(receipt))
+        self.assertNotIn(Action.REOPENED.value, self._actions(receipt))
         receipt.refresh_from_db()
         # The state machine is untouched by this change.
         self.assertEqual(receipt.status, PaymentReceipt.Status.PENDING_ERROR)
+        # THE FLOW NEVER COMPLETED. It is still PENDING at the final stage,
+        # which is what makes the retry possible and what stops a refused
+        # document reading as an approved one.
+        receipt.flow.refresh_from_db()
+        self.assertEqual(receipt.flow.status, FlowStatus.PENDING)
+        self.assertTrue(workflow_flow.is_at_final_stage(receipt.flow))
 
     def test_retry_after_failure_appends_a_clean_second_attempt(self):
         """The exact sequence from the reported receipt."""
-        from approvals import services as approval_services
+        from . import workflow_flow
 
         from .sap_client import SapError
 
@@ -375,22 +377,24 @@ class LifecycleSequenceTests(TestCase):
                             action=Action.CREATED.value, reason='Receipt created.')
         services.verify_receipt(receipt.pk, self.verifier)
 
-        request = receipt.approvals.first()
+        receipt.refresh_from_db()
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.side_effect = SapError('Posting period locked',
                                         status_code=400, sap_code='-4013')
             with self.captureOnCommitCallbacks(execute=True):
-                approval_services.approve(request_id=request.pk,
-                                          user=self.approver, remarks='first')
+                workflow_flow.approve(receipt.flow, user=self.approver,
+                                      remarks='first')
 
-        # The failure reopens the approval at its final rung; the approver
-        # retries from their own queue. Existing behaviour, unchanged.
-        request.refresh_from_db()
+        # The flow stayed at its FINAL STAGE, so the approver retries straight
+        # from their own queue. The earlier APPROVED row is kept and the second
+        # attempt is appended after it — history is never rewritten to hide the
+        # attempt that failed.
+        receipt.refresh_from_db()
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.return_value = {'DocEntry': 21971, 'DocNum': 826246664}
             with self.captureOnCommitCallbacks(execute=True):
-                approval_services.approve(request_id=request.pk,
-                                          user=self.approver, remarks='retry')
+                workflow_flow.approve(receipt.flow, user=self.approver,
+                                      remarks='retry')
 
         self.assertEqual(self._actions(receipt), [
             Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,

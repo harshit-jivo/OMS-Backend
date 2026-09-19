@@ -76,6 +76,125 @@ def get_company_banks(company, *, force_refresh=False):
                    'synced_at': payload['synced_at']}
 
 
+def _cash_keys(company):
+    company = (company or '').upper()
+    return f'cash_master:fresh:{company}', f'cash_master:stale:{company}'
+
+
+def get_company_cash_accounts(company, *, force_refresh=False):
+    """Return (accounts, meta) for `company` — the same contract as banks.
+
+    `accounts` is a list of dicts: gl_account, account_name, `key` (the G/L,
+    since a drawer has no bank code) and `label`.
+
+    Separate cache keys from the bank list because the two come from different
+    SAP tables and one being unreadable says nothing about the other.
+    """
+    fresh_key, stale_key = _cash_keys(company)
+
+    if not force_refresh:
+        cached = cache.get(fresh_key)
+        if cached is not None:
+            return cached['accounts'], {'source': 'cache', 'available': True,
+                                        'stale': False,
+                                        'synced_at': cached['synced_at']}
+
+    try:
+        accounts = hana_queries.fetch_company_cash_accounts(company=company)
+    except Exception as exc:                                  # noqa: BLE001
+        logger.warning('cash master: could not read cash accounts for %s: %s',
+                       company, str(exc)[:200])
+        stale = cache.get(stale_key)
+        if stale is not None:
+            return stale['accounts'], {'source': 'stale', 'available': True,
+                                       'stale': True,
+                                       'synced_at': stale['synced_at']}
+        return [], {'source': 'none', 'available': False, 'stale': False,
+                    'synced_at': None}
+
+    payload = {'accounts': accounts, 'synced_at': timezone.now().isoformat()}
+    cache.set(fresh_key, payload, timeout=TTL)
+    cache.set(stale_key, payload, timeout=_STALE_TTL)
+    return accounts, {'source': 'sap', 'available': True, 'stale': False,
+                      'synced_at': payload['synced_at']}
+
+
+def find_cash_account(company, selector):
+    """One cash account of this company, by G/L code.
+
+    Matched only against the company's own list, which is what enforces
+    company isolation: another company's drawer is simply not in it. A frozen
+    or non-postable account is not in it either, because the query excludes
+    them — so "no longer selectable" and "never existed" refuse identically.
+
+    Raises BankMasterUnavailable when the list could not be established, and
+    ValidationError when it could and the account is not in it.
+    """
+    wanted = (selector or '').strip()
+    if not wanted:
+        return None
+
+    accounts, meta = get_company_cash_accounts(company)
+    if not meta['available']:
+        raise BankMasterUnavailable(
+            'Unable to verify cash accounts because SAP is currently '
+            'unavailable.')
+
+    # Exact, like find_bank_exact: the key IS the G/L for a drawer, and no
+    # looser match may stand in for the account the user picked.
+    for account in accounts:
+        if account['key'] == wanted:
+            return account
+
+    options = ', '.join(a['gl_account'] for a in accounts) or 'none'
+    raise ValidationError(
+        f"The selected cash account '{wanted}' is not a valid cash account "
+        f'for {company}. Available: {options}.')
+
+
+def find_bank_exact(company, account_key):
+    """One bank account by its canonical `key` ("BANKCODE:GLACCOUNT"), exactly.
+
+    The Incoming Payment path uses this, NOT `find_bank`. A user picks one
+    receiving account, and the key is that account's identity — so nothing
+    short of the complete key may select it:
+
+        "INB:1104102" -> that account
+        "INB"         -> refused (OIL holds three INB accounts)
+        "1104102"     -> refused (a G/L alone is not the key)
+
+    `find_bank`'s fallbacks (G/L, then bare bank code, first account wins)
+    exist for older deposit values and stay there. Reusing them here let a
+    bare "INB" silently choose one of three accounts — an automatic selection
+    the user never made.
+
+    Scoped to the company's own list: identical keys in two company databases
+    (a physically shared bank account) are two separate, valid accounts, each
+    resolved within its own company.
+
+    Raises BankMasterUnavailable if the list could not be established, and
+    ValidationError if it could and the key is not in it.
+    """
+    wanted = (account_key or '').strip()
+    if not wanted:
+        return None
+
+    banks, meta = get_company_banks(company)
+    if not meta['available']:
+        raise BankMasterUnavailable(
+            'Unable to verify bank information because SAP is currently '
+            'unavailable.')
+
+    for bank in banks:
+        if bank['key'] == wanted:
+            return bank
+
+    raise ValidationError(
+        f"'{wanted}' is not a bank account of {company}. Select the "
+        f'receiving account from the list (a bank code or G/L on its own is '
+        f'not enough to identify one account).')
+
+
 def find_bank(company, selector):
     """One bank account, by `key` ("CODE:GL"), GL account, or bank code.
 
@@ -118,95 +237,17 @@ def find_bank(company, selector):
 # Payment method -> SAP account resolution
 # ---------------------------------------------------------------------------
 
-class PaymentAccountResolver:
-    """Resolve the SAP account a payment method is deposited into.
-
-    Two inputs, deliberately separated:
-      * SAP owns the ACCOUNTS (bank_master, cached from DSC1)
-      * OMS owns the CHOICE of which account each method uses
-        (PaymentMethodMapping)
-
-    Note this is always OUR account. On a cheque it is where we bank the money;
-    the bank the customer's cheque is drawn on is a different thing entirely,
-    typed by the collector and sent to SAP as BankCode.
-    """
-
-    def __init__(self, company):
-        self.company = (company or '').upper()
-        self._banks = None
-        self._meta = None
-        self._mappings = None
-
-    def _load(self):
-        if self._banks is None:
-            self._banks, self._meta = get_company_banks(self.company)
-        return self._banks, self._meta
-
-    def _mapping_for(self, method):
-        if self._mappings is None:
-            from .models import PaymentMethodMapping
-            self._mappings = {
-                m.payment_method: m.bank_key
-                for m in PaymentMethodMapping.objects.filter(
-                    company=self.company, is_active=True)
-            }
-        return self._mappings.get(method)
-
-    def cash_gl(self):
-        """The company's configured cash G/L. Never from DSC1.
-
-        Read from the CASH payment-method mapping — the same table every other
-        tender resolves through. A cash drawer has no DSC1 row in SAP, so it
-        names its G/L directly instead of a house bank.
-        """
-        from .models import PaymentMethodMapping
-        row = (PaymentMethodMapping.objects
-               .filter(company=self.company, payment_method='CASH',
-                       is_active=True)
-               .first())
-        return (row.gl_account or '').strip() if row else ''
-
-    def deposit_source_gl(self):
-        """The G/L a deposit CREDITS — the drawer being emptied.
-
-        THE SAME ACCOUNT the cash receipt debited. One drawer, one account, so
-        the clearing account provably nets to zero; a separately configured
-        value could only ever make it not.
-
-        This used to read `SapCompanyMap.deposit_source_gl_account`, on the
-        stated grounds that SAP rejects a cash-flow account (OACT.Finanse='Y')
-        as the CardCode of a DocType 'A' transfer. That is not true, and the
-        live data says so: 1105001 has Finanse='Y' and SAP accepted it as the
-        CardCode of deposits 21977 and 21963, whose journals read
-        Dr 2201102 / Cr 1105001. Every configured row held the same value in
-        both columns anyway.
-        """
-        return self.cash_gl()
-
-    def resolve(self, payment_method, *, bank_key=None):
-        """Our deposit account for one method, or None when nothing is mapped.
-
-        Raises BankMasterUnavailable if SAP could not be reached and nothing
-        was cached; ValidationError if the mapped account is gone from SAP.
-        """
-        banks, meta = self._load()
-        if not meta['available']:
-            raise BankMasterUnavailable(
-                'Unable to verify bank information because SAP is currently '
-                'unavailable.')
-
-        selector = bank_key or self._mapping_for(payment_method)
-        if not selector:
-            return None
-
-        found = find_bank(self.company, selector)
-        if found is None:
-            return None
-        return {
-            'bank_code': found['bank_code'],
-            'bank_name': found['display_name'],
-            'gl_account': found['gl_account'],
-            'account_number': found['account_number'],
-            'branch': found['branch'],
-            'bank_key': found['key'],
-        }
+# `PaymentAccountResolver` lived here, from line 240 to the end of this file.
+#
+# It answered "which SAP account does this payment method use for this
+# company?" by reading `PaymentMethodMapping` — one admin-chosen account per
+# method — and resolving it against SAP's house-bank list.
+#
+# Both halves are gone. The collector now picks the receiving account on the
+# payment itself and it is frozen onto the line, so there is nothing to resolve
+# at read time and no table to resolve it from.
+#
+# What remains in this module is the SAP side alone: `get_company_banks` and
+# `get_company_cash_accounts` supply the lists the picker offers, and
+# `find_bank_exact` / `find_cash_account` turn a chosen key back into an
+# account.

@@ -118,7 +118,10 @@ class VerificationDelayTests(TestCase):
                                     'received_from_type'])
 
         out = collection_performance(None, self.start, self.end)
-        person_row = next(r for r in out['results'] if r['kind'] == 'person')
+        # By CODE, not "the first person row": the shared TEST database holds
+        # real collection people whose receipts fall in the same window.
+        person_row = next(r for r in out['results']
+                          if r['kind'] == 'person' and r['code'] == person.code)
         self.assertEqual(person_row['avg_verify_days'], 5.0)
 
     def test_the_table_lists_collection_people_not_logins(self):
@@ -180,9 +183,28 @@ class VerificationDelayTests(TestCase):
         out = collection_performance(
             None, self.start, self.end, sort='avg_verify_days',
             direction='desc')
-        # Slowest first; the row with no figure sorts to the bottom.
-        self.assertEqual(out['results'][0]['avg_verify_days'], 8.0)
-        self.assertIsNone(out['results'][-1]['avg_verify_days'])
+        rows = out['results']
+
+        # The claim is the ORDERING, and it has to hold across every row the
+        # table returns — on the shared TEST database that includes real
+        # collectors, not just the two created here. Asserting the property
+        # rather than `results[0]` is also the stronger statement.
+        figures = [r['avg_verify_days'] for r in rows]
+        present = [f for f in figures if f is not None]
+        self.assertEqual(present, sorted(present, reverse=True),
+                         'slowest first')
+        self.assertEqual(figures, present + [None] * (len(figures) - len(present)),
+                         'rows with no figure sort to the bottom, never between')
+
+        # ...and this test's own two rows obey it: the slow collector carries
+        # the 8-day figure and sorts above the banker, who has none at all.
+        def row_for(person):
+            return next(r for r in rows
+                        if r['kind'] == 'person' and r['code'] == person.code)
+
+        self.assertEqual(row_for(slow)['avg_verify_days'], 8.0)
+        self.assertIsNone(row_for(banker)['avg_verify_days'])
+        self.assertLess(rows.index(row_for(slow)), rows.index(row_for(banker)))
 
     def test_the_sla_is_published_to_the_client(self):
         """So the UI colours "late" with the same number the server counted."""

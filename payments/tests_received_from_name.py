@@ -15,6 +15,7 @@ from rest_framework.test import APIClient
 
 from users.models import User, UserRole
 
+from .tests_support import uniq
 from .models import (
     CollectionPerson,
     PaymentMethodEntry,
@@ -40,7 +41,12 @@ def _company():
 
 
 def _person(name, code):
-    return CollectionPerson.objects.create(name=name, code=code, company='OIL')
+    # `code` is unique and the shared TEST database already holds real
+    # collection people — GOLDY among them. Every assertion here is on the
+    # NAME (that is the whole subject of this file), so the code is made
+    # unique once here rather than at each of the fifteen call sites.
+    return CollectionPerson.objects.create(
+        name=name, code=uniq(f'{code[:12]}-'), company='OIL')
 
 
 # The backfill migration's rule, kept here verbatim so the test proves the
@@ -263,11 +269,12 @@ class UnchangedBehaviourTests(_WriteMixin, TestCase):
         self._save(self._create_payload(a))
         self._save(self._create_payload(b, card_code='CUST2'))
 
-        rows = (PaymentReceipt.objects
-                .filter(received_from_person__isnull=False)
-                .values('received_from_person').distinct())
+        # Scoped to the two collectors this test created: the shared TEST
+        # database holds real receipts against real people, and the claim here
+        # is about THESE two, not about the table as a whole.
+        mine = PaymentReceipt.objects.filter(received_from_person__in=[a, b])
+        rows = mine.values('received_from_person').distinct()
         self.assertEqual(rows.count(), 2)
         # ...even though the snapshot name is identical for both.
-        names = set(PaymentReceipt.objects.values_list(
-            'received_from_name', flat=True))
+        names = set(mine.values_list('received_from_name', flat=True))
         self.assertEqual(names, {'GOLDY'})

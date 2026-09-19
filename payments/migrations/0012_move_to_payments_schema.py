@@ -80,7 +80,12 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('payments', '0011_alter_paymentmethodentry_method_paymentmethodmapping'),
-        ('approvals', '0002_remove_approvallevel_threshold_hours'),
+        # The `approvals` app was REMOVED once payments moved to the
+        # Workflow Engine. Its dependency edge is dropped with it —
+        # Django only needs the graph to resolve, and an applied
+        # migration is never re-run. The body above already tolerates
+        # the models being absent (`LookupError`), so this migration
+        # still applies cleanly to a fresh database.
         ('attachments', '0001_initial'),
         ('core', '0002_alter_documentcounter_fiscal_year'),
     ]

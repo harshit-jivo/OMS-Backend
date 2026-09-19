@@ -15,6 +15,7 @@ so it comes from the environment — an allow-list — and never from a request.
 """
 import logging
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 
 from django.core.cache import cache
@@ -278,6 +279,107 @@ def fetch_account_name(*, company, gl_account):
         logger.warning('Could not read the name of G/L %s in %s: %s',
                        gl, company, error)
         return ''
+
+
+def cash_accounts_sql(schema):
+    """The company's selectable cash drawers, from the chart of accounts.
+
+    A cash drawer has no DSC1 row — DSC1 holds house BANK accounts — so cash
+    is identified by where it sits in the account tree instead: the postable
+    children of the configured cash node (settings.SAP_CASH_PARENT_ACCOUNT,
+    verified as 1105000 "CASH IN HAND" in all three company databases).
+
+    Why this rule and not another, all checked against live data:
+      * The parent itself is a summary node (Postable='N'), so `Postable='Y'`
+        excludes it without naming it.
+      * `Frozen='N'` is what retires a drawer: freezing it in SAP removes it
+        from this list with no OMS change.
+      * OACT."CashBox" is 'N' on every account that actually receives cash in
+        this deployment, so SAP's own cash flag cannot be the rule.
+      * `Finanse='Y'` and `GroupMask=1` match every bank account and most
+        assets — far too broad.
+      * Matching AcctName on "CASH" would pick up the summary node and is
+        string matching, not an accounting classification.
+
+    Cross-checked against posting history: ORCT."CashAcct" over real documents
+    returns exactly this set and nothing else.
+
+    The parent is a BIND PARAMETER; only the schema is interpolated, and that
+    comes from the environment allow-list, never from a request.
+    """
+    return f'''
+        SELECT
+            T0."AcctCode" AS "gl_account",
+            T0."AcctName" AS "account_name"
+        FROM "{schema}"."OACT" AS T0
+        WHERE T0."FatherNum" = ?
+          AND T0."Postable"  = 'Y'
+          AND T0."Frozen"    = 'N'
+        ORDER BY T0."AcctCode"
+    '''
+
+
+def fetch_company_cash_accounts(*, company):
+    """Live read of the company's selectable cash G/L accounts.
+
+    Raises if SAP is unreachable, or if the cash node is not configured —
+    caching and outage behaviour belong to the service layer above, exactly as
+    for `fetch_company_banks`.
+    """
+    parent = str(getattr(settings, 'SAP_CASH_PARENT_ACCOUNT', '') or '').strip()
+    if not parent:
+        raise ValidationError(
+            'No cash account group is configured. Set SAP_CASH_PARENT_ACCOUNT '
+            'to the chart-of-accounts node that holds the cash drawers.')
+
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(cash_accounts_sql(schema), [parent])
+
+    out = []
+    for row in rows:
+        gl = str(row.get('gl_account') or '').strip()
+        if not gl:
+            continue
+        name = str(row.get('account_name') or '').strip() or gl
+        out.append({
+            'gl_account': gl,
+            'account_name': name,
+            # The same shape a bank account exposes, so one dropdown component
+            # and one `account_key` contract serve both. A cash drawer has no
+            # bank, so `key` is the G/L itself.
+            'key': gl,
+            'label': f'{gl} - {name}',
+        })
+    return out
+
+
+def fetch_account_classification(*, company, gl_account):
+    """One account's tree position and flags, or None when it cannot be read.
+
+    Used to validate the CONFIGURED cash node (that it exists and is a summary
+    account), never to decide whether a payment may use an account.
+    """
+    code = str(gl_account or '').strip()
+    if not code:
+        return None
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(
+            f'SELECT "AcctCode" AS "gl_account", "AcctName" AS "account_name", '
+            f'"Postable" AS "postable", "Frozen" AS "frozen", '
+            f'"Levels" AS "levels" FROM "{schema}"."OACT" '
+            f'WHERE "AcctCode" = ?', [code])
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        'gl_account': str(row.get('gl_account') or '').strip(),
+        'account_name': str(row.get('account_name') or '').strip(),
+        'postable': str(row.get('postable') or '').strip().upper(),
+        'frozen': str(row.get('frozen') or '').strip().upper(),
+        'levels': row.get('levels'),
+    }
 
 
 def fetch_company_banks(*, company):

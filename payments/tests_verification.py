@@ -23,7 +23,8 @@ from .models import (
     PaymentReceipt,
     PaymentStatusHistory,
 )
-from .permissions import PAYMENTS_CREATE, PAYMENTS_VERIFY
+from .permissions import (PAYMENTS_APPROVE, PAYMENTS_CREATE,
+                          PAYMENTS_VERIFY)
 
 
 def _user(username, keys=()):
@@ -33,6 +34,14 @@ def _user(username, keys=()):
         extra_pages=list(keys))
 
 
+#: Fixture receipts are dated in a year no real row occupies. This suite runs
+#: against the shared TEST database, and the list assertions below need to know
+#: which receipts are theirs; a date window is the endpoint's own way of saying
+#: so, and `date.today()` is not usable because real receipts are raised today.
+FIXTURE_DATE = date(2035, 6, 1)
+FIXTURE_WINDOW = '?date_from=2035-01-01&date_to=2035-12-31'
+
+
 def _receipt(no, creator, *, amount='100.00', verification='PENDING',
              status=PaymentReceipt.Status.DRAFT, company='OIL'):
     # An advance with a branch: `validate_receipt` then passes without invoice
@@ -40,7 +49,7 @@ def _receipt(no, creator, *, amount='100.00', verification='PENDING',
     # allocation or branch rules, which have their own tests.
     receipt = PaymentReceipt.objects.create(
         receipt_no=no, company=company, card_code='CUST1',
-        payment_date=date.today(), total_amount=Decimal(amount),
+        payment_date=FIXTURE_DATE, total_amount=Decimal(amount),
         is_advance=True, sap_branch_id=1,
         status=status, verification_status=verification,
         created_by=creator)
@@ -71,20 +80,18 @@ class _NoSapMixin:
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        from approvals.models import (
-            ApprovalLevel,
-            ApprovalLevelApprover,
-            ApprovalWorkflow,
-        )
-        self.approver = _user('wf_approver')
+        from .tests_workflow_fixtures import payments_workflow
+
+        # One workflow per company, each with a single stage — the shape the
+        # new engine allows. A receipt is routed by its document NUMBER, so
+        # the query projects `doc_no`; see tests_workflow_fixtures.
+        self.approver = _user('wf_approver', [PAYMENTS_APPROVE])
+        self.stages_by_company = {}
         for company in ('OIL', 'MART'):
-            workflow = ApprovalWorkflow.objects.create(
-                code=f'PAYMENT_{company}_TEST', name=f'{company} payments',
-                document_type='PAYMENT', company=company)
-            level = ApprovalLevel.objects.create(
-                workflow=workflow, sequence=1, name='Approver')
-            ApprovalLevelApprover.objects.create(
-                level=level, user=self.approver, company=company)
+            _workflow, stages = payments_workflow(
+                self.approver, company=company,
+                code=f'PAYMENT_{company}_TEST', documents='receipts')
+            self.stages_by_company[company] = stages
 
 
 class VerificationPermissionTests(_NoSapMixin, TestCase):
@@ -358,7 +365,10 @@ class AtomicityTests(_NoSapMixin, TestCase):
             content_type=ContentType.objects.get_for_model(PaymentReceipt),
             object_id=receipt.pk,
             action=PaymentStatusHistory.Action.VERIFIED).count(), 1)
-        self.assertEqual(receipt.approvals.count(), 1)
+        # Exactly one flow, still open at its first stage.
+        receipt.refresh_from_db()
+        self.assertIsNotNone(getattr(receipt, 'flow', None))
+        self.assertTrue(receipt.flow.is_open)
 
 
 class MaterialEditTests(_NoSapMixin, TestCase):
@@ -469,13 +479,17 @@ class QueueFilterTests(TestCase):
     # 25
     def test_pagination_envelope_is_unchanged(self):
         resp = self.client.get(
-            reverse('payment-receipt-list') + '?verification_status=PENDING')
+            reverse('payment-receipt-list') + FIXTURE_WINDOW
+            + '&verification_status=PENDING')
         payload = resp.data['data']
         self.assertIn('results', payload)
+        # Two of this suite's three fixtures are PENDING (RC-Q-1 and the MART
+        # one); the window keeps the live queue out of the count.
         self.assertEqual(payload['pagination']['total'], 2)
         self.assertEqual(payload['pagination']['page'], 1)
 
     def test_no_filter_returns_everything(self):
         """The new parameter is opt-in - omitting it changes nothing."""
-        self.assertEqual(len(self._list()), 3)
+        self.assertEqual(self._list(FIXTURE_WINDOW),
+                         {'RC-Q-1', 'RC-Q-2', 'RC-Q-3'})
 

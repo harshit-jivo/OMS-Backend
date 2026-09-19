@@ -38,7 +38,15 @@ def remove_roles(apps, schema_editor):
     """
     UserRole = apps.get_model('users', 'UserRole')
     User = apps.get_model('users', 'User')
-    ApprovalLevel = apps.get_model('approvals', 'ApprovalLevel')
+    # The old approval engine is being retired. While it still exists a role
+    # wired into one of its levels must survive this reverse, exactly as
+    # before; once the app is gone there is no such wiring to protect, so its
+    # absence is not an error. LookupError is the only thing that changes
+    # here — the rule itself is untouched.
+    try:
+        ApprovalLevel = apps.get_model('approvals', 'ApprovalLevel')
+    except LookupError:
+        ApprovalLevel = None
     for name, _ in PAYMENT_ROLES:
         role = UserRole.objects.filter(name=name).first()
         if not role:
@@ -48,7 +56,8 @@ def remove_roles(apps, schema_editor):
             or User.objects.filter(extra_roles=role).exists()
             # ApprovalLevel.role is PROTECT as well — a role wired into a
             # workflow must survive the reverse just like an assigned one.
-            or ApprovalLevel.objects.filter(role=role).exists()
+            or (ApprovalLevel is not None
+                and ApprovalLevel.objects.filter(role=role).exists())
         )
         if not in_use:
             role.delete()
@@ -58,9 +67,18 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('users', '0026_user_extra_roles'),
-        # The reverse path reads approvals.ApprovalLevel, so that app's tables
-        # must exist before this migration runs on a fresh database.
-        ('approvals', '0001_initial'),
+        # The reverse path reads approvals.ApprovalLevel WHEN THAT APP IS
+        # STILL INSTALLED, so its tables must exist first. This dependency is
+        # the one thing that must be removed in the same change that removes
+        # the `approvals` app, or a fresh-database replay will look for a
+        # migration that no longer exists. `remove_roles` above already
+        # tolerates the model being gone.
+        # The `approvals` app was REMOVED once payments moved to the
+        # Workflow Engine. Its dependency edge is dropped with it —
+        # Django only needs the graph to resolve, and an applied
+        # migration is never re-run. The body above already tolerates
+        # the models being absent (`LookupError`), so this migration
+        # still applies cleanly to a fresh database.
     ]
 
     operations = [

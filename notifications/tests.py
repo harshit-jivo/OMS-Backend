@@ -48,7 +48,9 @@ BUSINESS_MODULES = {
     "orders",
     "payments",
     "deposits",
-    "approvals",
+    # `approvals` was the per-module approval engine; it has been removed. The
+    # generic Workflow Engine replaced it and the same direction rule applies.
+    "workflow",
     "inventory",
     "invoices",
     "invoice",

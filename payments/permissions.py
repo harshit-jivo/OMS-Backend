@@ -201,3 +201,130 @@ class ReadOrCreateDeposit(BasePermission):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return bool(request.user and request.user.is_authenticated)
         return has_permission_key(request.user, DEPOSIT_CREATE)
+
+
+# ---------------------------------------------------------------------------
+# Acting on a document in approval — the two-condition rule
+# ---------------------------------------------------------------------------
+#
+# Under the Workflow Engine, holding the approve key is NOT enough and being
+# the stage's user is NOT enough. Both are required, and the second is resolved
+# from the engine on every check rather than from anything stored on the flow:
+# a stage reassigned, or a temporary replacement started, changes who may act
+# with nothing in payments updated.
+#
+# See docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md §8 and §13 ("approving
+# requires BOTH the permission key AND being that effective user").
+
+
+def approve_key_for(document):
+    """The permission key that lets someone approve THIS kind of document."""
+    from .models import PaymentReceipt
+
+    return (PAYMENTS_APPROVE if isinstance(document, PaymentReceipt)
+            else DEPOSIT_APPROVE)
+
+
+def may_act_on(user, flow, document=None):
+    """(allowed, reason) — may this user decide this document right now?
+
+    The two refusals say different things on purpose: "you may not approve
+    payments at all" and "this one is not yours" are different problems with
+    different fixes, and a single message would send people to the wrong one.
+    """
+    from .models import FlowStatus
+    from .workflow_flow import effective_user_id
+
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False, 'Authentication required.'
+
+    document = document if document is not None else _document_of(flow)
+    if not has_permission_key(user, approve_key_for(document)):
+        return False, 'You do not have permission to approve this document.'
+
+    if flow is None or flow.status != FlowStatus.PENDING:
+        return False, 'This document is not awaiting approval.'
+    if not flow.current_stage_id:
+        return False, 'This document is not waiting at any stage.'
+
+    effective = effective_user_id(flow.current_stage_id)
+    if effective is None:
+        return False, ('This stage is no longer configured in the workflow. '
+                       'Ask a workflow administrator to check it.')
+    if effective != user.pk:
+        return False, 'This document is not awaiting your approval.'
+
+    # --- SAP state -------------------------------------------------------
+    #
+    # The flow alone cannot answer this. Since the final approval no longer
+    # completes the flow (payments/workflow_flow.py), a document whose SAP post
+    # is in flight, already succeeded, or may have succeeded is still sitting
+    # at its final stage with a PENDING flow — and must not be approved again.
+    #
+    # PENDING_ERROR is the one SAP state that deliberately stays actionable:
+    # SAP answered "no", nothing was committed there, and the approver holding
+    # the document is the person who corrects it and retries.
+    from .workflow_flow import UNPOSTABLE_STATUSES, is_at_final_stage
+
+    if getattr(document, 'sap_doc_entry', None):
+        return False, 'This document is already posted to SAP.'
+
+    status = getattr(document, 'status', '')
+    if status in UNPOSTABLE_STATUSES:
+        if status == 'POSTING_TO_SAP':
+            return False, ('A SAP posting for this document is already in '
+                           'progress. Wait for it to finish.')
+        if status == 'SAP_UNKNOWN':
+            return False, ('SAP did not answer the last posting, so it is not '
+                           'yet known whether this document was created there. '
+                           'It must be verified before it can be posted again.')
+        return False, 'This document is already posted to SAP.'
+
+    # A RETRY may only happen at the FINAL stage — that is the only stage whose
+    # approval posts to SAP, so it is the only one a SAP failure can return to.
+    # A PENDING_ERROR document parked anywhere else is a configuration problem,
+    # and approving it there would advance the workflow without ever retrying
+    # the posting that failed.
+    if status == 'PENDING_ERROR' and not is_at_final_stage(flow):
+        return False, ('This document failed to post to SAP and is not at its '
+                       'final approval stage, so it cannot be retried here. '
+                       'Ask a workflow administrator to check the workflow.')
+
+    # NOBODY APPROVES THEIR OWN MONEY. The old engine enforced this with a
+    # `forbid_self_approval` flag on each workflow; the new engine has no such
+    # concept, so it lives here — it is a payments business rule, not routing.
+    # A configuration that names the raiser as their own stage user therefore
+    # blocks rather than silently self-approving.
+    if getattr(document, 'created_by_id', None) == user.pk:
+        return False, 'You cannot approve a document you raised yourself.'
+
+    return True, ''
+
+
+def _document_of(flow):
+    from .models import PaymentReceiptFlow
+
+    if flow is None:
+        return None
+    return flow.receipt if isinstance(flow, PaymentReceiptFlow) else flow.deposit
+
+
+class IsPaymentsApprovalAdmin(BasePermission):
+    """Who may manage payments master data and approval configuration.
+
+    Replaces `approvals.permissions.IsApprovalAdmin`, which lived in the engine
+    being retired and imported payments' own keys back out of it. Same rule:
+    an administrator, or a holder of the payments dashboard key.
+    """
+
+    message = 'You do not have permission to manage payments configuration.'
+
+    def has_permission(self, request, view):
+        from core.permissions import is_admin
+
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if is_admin(user):
+            return True
+        return has_permission_key(user, PAYMENTS_DASHBOARD)

@@ -144,11 +144,11 @@ INSTALLED_APPS = [
     # Dynamic UI labels — admin-editable field labels served to web + mobile
     'uilabels',
     # Receive Payment / Bank Deposit. `core` holds the shared base model and
-    # document-number generator; `approvals` is the generic multi-level engine
-    # (usable by any document type); `attachments` stores files on the existing
-    # shared network folders.
+    # document-number generator; `attachments` stores files on the existing
+    # shared network folders. Approvals are the generic Workflow Engine's job
+    # (`workflow`), which payments drives through `payments/workflow_flow.py`;
+    # the old per-module `approvals` engine has been removed.
     'core',
-    'approvals',
     'attachments',
     'payments',
     # Reusable notification framework. Empty skeleton for now — Orders still
@@ -312,6 +312,17 @@ HANA_MART_COMPANY_DB = config(
 )
 # Test / non-production company DB (blank when not testing).
 HANA_TEST_COMPANY_DB = config('HANA_DB_TEST_NAME', default='')
+# The chart-of-accounts node whose children are the company's cash drawers
+# (OACT."FatherNum"). It says WHERE to look for cash accounts — never which one
+# to use: there is no default cash G/L, the user picks one per payment.
+#
+# Verified across OIL, BEVERAGES and MART (live and test): node 1105000
+# "CASH IN HAND", level 3, Postable='N', whose postable children are exactly
+# the accounts ORCT has ever recorded cash against. Configured rather than
+# written into the code so a chart-of-accounts change is a setting, not a
+# release. Blank disables the cash-account endpoint (it reports that it is
+# not configured) rather than guessing.
+SAP_CASH_PARENT_ACCOUNT = config('SAP_CASH_PARENT_ACCOUNT', default='')
 # Profit center (OPRC.PrcCode) to stamp on Mart sales-order lines. Mart does not
 # use per-sub_group profit centers like Oil/Beverage, so this is a single code.
 # Blank (default) omits CostingCode entirely, letting SAP apply its own default
@@ -945,6 +956,28 @@ PAYMENTS_SMB_USERNAME = config(
     'PAYMENTS_SMB_USERNAME', default=config('EINV_QR_SMB_USERNAME', default=''))
 PAYMENTS_SMB_PASSWORD = config(
     'PAYMENTS_SMB_PASSWORD', default=config('EINV_QR_SMB_PASSWORD', default=''))
+
+# ---------------------------------------------------------------------------
+# Payments: recovery of SAP posts lost to a restart
+# ---------------------------------------------------------------------------
+# The final approval defers its SAP call to `transaction.on_commit`, which is
+# NOT durable — a restart between the commit and the callback loses the call
+# and leaves the document in POSTING_TO_SAP owing a post nothing will make.
+# `manage.py run_scheduler` sweeps for these; see payments/sap_recovery.py.
+#
+# MIN AGE: how long a document must have been owing a post before the sweep
+# treats it as lost, guarding the (millisecond-wide) window where a call is in
+# flight but has not yet written its SapCallLog row. 30 is a deliberately large
+# margin for production. Drop it to 2-5 during testing, where a dev-server
+# autoreload strands a document on almost every code change and a half-hour
+# wait makes recovery look broken.
+PAYMENTS_SAP_STRANDED_MIN_AGE_MINUTES = config(
+    'PAYMENTS_SAP_STRANDED_MIN_AGE_MINUTES', default=30, cast=int)
+
+# How often the worker sweeps. Cheap: two indexed queries returning nothing in
+# the normal case. Floored at 30s in payments/scheduler_jobs.py.
+PAYMENTS_SAP_SWEEP_INTERVAL_SECONDS = config(
+    'PAYMENTS_SAP_SWEEP_INTERVAL_SECONDS', default=300, cast=int)
 
 # Company DBs scanned when looking up an invoice by DocNum (the configured
 # HANA_OIL_COMPANY_DB is always tried first). Comma-separated in .env.

@@ -53,19 +53,45 @@ def _history(document, **kwargs):
 
 
 def _reopen_approval(document, reason):
-    """Return the approval to its final rung after SAP refused the document.
+    """Leave the document with its final approver after SAP refused it.
+
+    The flow is normally already there — the final approval no longer completes
+    it (see workflow_flow's module docstring) — so this confirms the position
+    and refreshes the effective user. It is also the repair path for a flow
+    that completed without a posted document.
 
     Wrapped defensively for the same reason as `_history`: the SAP outcome has
-    already been recorded on the document, and failing to reopen must not lose
-    that or raise into the caller. A warning is enough — the document is still
+    already been recorded on the document, and failing here must not lose that
+    or raise into the caller. A warning is enough — the document is still
     correctly in PENDING_ERROR either way.
     """
-    from approvals.services import reopen_final_level
+    from .workflow_flow import return_to_final_stage
 
     try:
-        return reopen_final_level(document, reason=reason)
+        return return_to_final_stage(document, reason=reason)
     except Exception:                                    # noqa: BLE001
         logger.exception('Could not reopen the approval for %s', document.pk)
+        return None
+
+
+def _complete_approval(document):
+    """Complete the flow now that SAP has accepted the document.
+
+    THE FINAL APPROVAL IS ONLY COMPLETE HERE. Until SAP returns a document key
+    the flow stays at its final stage, so this is what turns an authorisation
+    into a finished approval.
+
+    Wrapped defensively: the money has already moved in SAP, and a failure to
+    tidy the flow must never turn a posted payment into an error. A flow left
+    PENDING against a POSTED document is visible and repairable; a raised
+    exception here would not be.
+    """
+    from .workflow_flow import complete_after_sap
+
+    try:
+        return complete_after_sap(document)
+    except Exception:                                    # noqa: BLE001
+        logger.exception('Could not complete the approval for %s', document.pk)
         return None
 
 
@@ -349,6 +375,11 @@ def post_document(document, payload, *, user=None):
         _history(fresh, action='POST_SUCCESS', status='SUCCESS',
                  response=fresh.sap_response, doc_entry=doc_entry,
                  doc_num=doc_num, user=user)
+
+        # SAP HAS ACCEPTED IT, SO THE FINAL APPROVAL IS NOW COMPLETE. In the
+        # same transaction as the POSTED write, so a document can never be
+        # POSTED with its flow still waiting at the final stage.
+        _complete_approval(fresh)
 
         # The journey is over — tell the two people who put their name to the
         # money: the creator and the verifier. SUCCESS only; a failure goes

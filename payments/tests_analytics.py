@@ -26,6 +26,7 @@ from .models import (
 )
 from .permissions import PAYMENTS_DASHBOARD
 from .views import PaymentDashboardView
+from .tests_support import uniq
 
 TODAY = date(2026, 8, 5)
 
@@ -398,12 +399,12 @@ class DashboardViewTests(TestCase):
     def setUpTestData(cls):
         User = get_user_model()
         cls.user = User.objects.create_user(
-            username='dash-granted', password='x',
+            username=uniq('dash-granted-'), password='x',
             extra_pages=[PAYMENTS_DASHBOARD])
         # Holds every ACTION permission but NOT the dashboard grant — the case
         # that proves doing the work does not imply seeing the totals.
         cls.worker = User.objects.create_user(
-            username='dash-worker', password='x',
+            username=uniq('dash-worker-'), password='x',
             extra_pages=['Payments_Create', 'Payments_Approve',
                          'Deposit_Create', 'Deposit_Approve'])
 

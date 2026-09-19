@@ -17,6 +17,7 @@ from django.test import SimpleTestCase, TestCase
 
 from payments import sap_payloads
 from payments.hana_queries import series_name_for
+from payments.tests_support import uniq
 
 
 class _Entry:
@@ -297,6 +298,14 @@ class DepositEligibilityTests(TestCase):
         self.PaymentMethodEntry.objects.create(
             receipt=self.receipt, method=method, amount=Decimal('1000'),
             **extra)
+        # The deposit's amounts follow the CASH in it, so they cannot be fixed
+        # in setUp before the method is known: a CHEQUE receipt collects no
+        # cash at all, and leaving ₹1,000 here would make the fixture itself
+        # invalid rather than testing what it means to test.
+        cash = Decimal('1000') if method == 'CASH' else Decimal('0')
+        self.deposit.collected_amount = cash
+        self.deposit.deposit_amount = cash
+        self.deposit.save(update_fields=['collected_amount', 'deposit_amount'])
 
     def test_cash_receipt_can_be_deposited(self):
         from payments.services import validate_deposit
@@ -338,7 +347,11 @@ class DepositablePickerTests(TestCase):
         from payments.models import PaymentMethodEntry, PaymentReceipt
         self.PaymentMethodEntry = PaymentMethodEntry
         self.PaymentReceipt = PaymentReceipt
-        role = UserRole.objects.create(name='admin', display_name='Admin')
+        # `admin` is a REAL role in the shared TEST database, so the name
+        # is made unique; what this fixture needs is a role the user holds,
+        # not that particular name.
+        role = UserRole.objects.create(name=uniq('admin-'),
+                                       display_name='Admin')
         self.user = User.objects.create_superuser(
             username='pick-admin', password='pw', name='Pick')
         self.user.role = role
@@ -422,15 +435,28 @@ class SapPostableAmountTests(TestCase):
         self.person = CollectionPerson.objects.create(
             name='P', code='ZZAMT', company='OIL')
 
-    def _deposit_with(self, methods_and_amounts):
-        """One receipt per (method, amount), all in one deposit."""
+    def _deposit_with(self, methods_and_amounts, banked=None):
+        """One receipt per (method, amount), all in one deposit.
+
+        `collected_amount` is the CASH in those receipts and nothing else: a
+        cheque reached the bank under its own receipt, so the deposit carries
+        it as a record of the day it was handed in, not as an amount.
+
+        `banked` is the cash actually paid in. It defaults to all of it; pass
+        less to model the AP team spending part of a collection on the way to
+        the bank, which is what `shortfall_reason` exists for.
+        """
+        cash = Decimal(str(sum(a for m, a in methods_and_amounts
+                               if m == 'CASH')))
+        banked = cash if banked is None else Decimal(str(banked))
         deposit = self.BankDeposit.objects.create(
             deposit_no=f'DEP-{len(methods_and_amounts)}-{id(self)%9999}',
             company='OIL', deposit_date=date(2026, 8, 13),
             deposited_by=self.person, bank_gl_account='1104107',
             bank_key='ICICI:1104107',
-            collected_amount=sum(a for _, a in methods_and_amounts),
-            deposit_amount=sum(a for _, a in methods_and_amounts),
+            collected_amount=cash,
+            deposit_amount=banked,
+            shortfall_reason=('Spent before banking.' if banked < cash else ''),
             created_by=self.user)
         for index, (method, amount) in enumerate(methods_and_amounts):
             receipt = self.PaymentReceipt.objects.create(
@@ -461,12 +487,59 @@ class SapPostableAmountTests(TestCase):
         self.assertEqual(sap_postable_amount(deposit), Decimal('0'))
 
     def test_mixed_posts_only_the_cash_share(self):
-        """₹50,000 cash + ₹20,000 cheque = ₹70,000 collected, ₹50,000 to SAP."""
+        """₹50,000 cash + ₹20,000 cheque: the cheque is not collected at all.
+
+        `collected_amount` is ₹50,000, not ₹70,000. The cheque debited the
+        bank when its receipt posted, so counting it here would produce a
+        figure matching neither SAP nor the notes in anyone's hand.
+        """
         from payments.services import sap_postable_amount
         deposit = self._deposit_with([('CASH', 50000), ('CHEQUE', 20000)])
 
-        self.assertEqual(deposit.collected_amount, Decimal('70000'))
+        self.assertEqual(deposit.collected_amount, Decimal('50000'))
         self.assertEqual(sap_postable_amount(deposit), Decimal('50000'))
+
+    def test_a_short_deposit_posts_ONLY_WHAT_WAS_BANKED(self):
+        """THE BUG THIS EXISTS FOR.
+
+        The AP team collected ₹50,000 in cash, spent ₹8,000 of it, and banked
+        ₹42,000. SAP must credit the drawer ₹42,000 — the money that actually
+        left it. The old code summed the receipts' CASH entries and ignored
+        `deposit_amount` entirely, so it posted the full ₹50,000 and told SAP
+        the drawer was ₹8,000 emptier than it really was.
+
+        Observed live on DEP-OIL-20260919-000002: 618,000 credited out of the
+        drawer against 2,091 actually banked.
+        """
+        from payments.services import sap_postable_amount
+        deposit = self._deposit_with([('CASH', 50000)], banked=42000)
+
+        self.assertEqual(sap_postable_amount(deposit), Decimal('42000'))
+
+    def test_a_short_MIXED_deposit_ignores_the_cheque_entirely(self):
+        """The cheque must not soak up any part of the shortfall.
+
+        ₹50,000 cash + ₹20,000 cheque, ₹42,000 banked. The cheque is already
+        in SAP, so the shortfall is cash by construction and SAP sees ₹42,000
+        — not ₹62,000 (cheque added back) and not ₹22,000 (cheque deducted).
+        """
+        from payments.services import sap_postable_amount
+        deposit = self._deposit_with(
+            [('CASH', 50000), ('CHEQUE', 20000)], banked=42000)
+
+        self.assertEqual(sap_postable_amount(deposit), Decimal('42000'))
+
+    def test_cash_all_spent_posts_nothing(self):
+        """A shortfall can be total, and then there is no SAP document.
+
+        Zero is a legal `deposit_amount` — the same state a cheque-only
+        deposit is in — and it routes to the no-posting-needed path rather
+        than sending SAP a document for nothing.
+        """
+        from payments.services import sap_postable_amount
+        deposit = self._deposit_with([('CASH', 50000)], banked=0)
+
+        self.assertEqual(sap_postable_amount(deposit), Decimal('0'))
 
     # Patched at its definition site: services imports post_document INSIDE
     # the function, so there is no services.post_document attribute to patch.
@@ -500,7 +573,11 @@ class DepositPayloadTests(SimpleTestCase):
         deposit = SimpleNamespace(
             deposit_no='DEP-1', deposit_date=date(2026, 8, 13),
             currency='INR', bank_gl_account='1104107', remarks='',
-            slip_number='SLIP-9', deposit_amount=Decimal('50000'))
+            slip_number='SLIP-9', deposit_amount=Decimal('50000'),
+            # Banked in full: no shortfall, so Remarks are unchanged by the
+            # reason composer. See DepositRemarksTests for the short case.
+            collected_amount=Decimal('50000'), shortfall_reason='',
+            shortfall=Decimal('0'))
 
         payload = sap_payloads.build_deposit(
             deposit, bpl_id=2, series=2564, amount=Decimal('50000'),
@@ -520,7 +597,11 @@ class DepositPayloadTests(SimpleTestCase):
         deposit = SimpleNamespace(
             deposit_no='DEP-3', deposit_date=date(2026, 8, 13),
             currency='INR', bank_gl_account='1104107', remarks='',
-            slip_number='', deposit_amount=Decimal('50000'))
+            slip_number='', deposit_amount=Decimal('50000'),
+            # Banked in full: no shortfall, so the reason composer
+            # leaves Remarks untouched. See DepositRemarksTests.
+            collected_amount=Decimal('50000'), shortfall_reason='',
+            shortfall=Decimal('0'))
 
         payload = sap_payloads.build_deposit(deposit, amount=Decimal('30000'),
                                              source_gl='1105001')
@@ -533,7 +614,11 @@ class DepositPayloadTests(SimpleTestCase):
         deposit = SimpleNamespace(
             deposit_no='DEP-2', deposit_date=date(2026, 8, 13),
             currency='INR', bank_gl_account='1104107', remarks='',
-            slip_number='', deposit_amount=Decimal('100'))
+            slip_number='', deposit_amount=Decimal('100'),
+            # Banked in full: no shortfall, so the reason composer
+            # leaves Remarks untouched. See DepositRemarksTests.
+            collected_amount=Decimal('100'), shortfall_reason='',
+            shortfall=Decimal('0'))
 
         payload = sap_payloads.build_deposit(deposit, amount=Decimal('100'),
                                              source_gl='1105003')
@@ -541,3 +626,113 @@ class DepositPayloadTests(SimpleTestCase):
         for key in ('DepositType', 'DepositAccount', 'AllocationAccount',
                     'Commission', 'JournalRemarks', 'CheckLines', 'TotalLC'):
             self.assertNotIn(key, payload)
+
+
+def _dep(*, collected='600.00', banked='600.00', reason='', remarks='',
+         no='DEP-OIL-20260919-000003'):
+    """A deposit stand-in for the remarks composer, with a real `shortfall`."""
+    collected, banked = Decimal(collected), Decimal(banked)
+    return SimpleNamespace(
+        deposit_no=no, remarks=remarks, shortfall_reason=reason,
+        collected_amount=collected, deposit_amount=banked,
+        shortfall=collected - banked,
+        # Only `build_deposit` reads these; the remarks composer ignores them.
+        deposit_date=date(2026, 9, 19), currency='INR', slip_number='',
+        bank_gl_account='2201102')
+
+
+class DepositRemarksTests(SimpleTestCase):
+    """What SAP is told about a deposit, and why the shortfall reason is in it.
+
+    A short deposit posts LESS than was collected. SAP saw only the smaller
+    number, so anyone reconciling the cash account there found a credit that
+    did not match the day's collections and nothing explaining the gap — the
+    reason existed, but only in OMS.
+    """
+
+    def remarks(self, **kw):
+        return sap_payloads.build_deposit_remarks(_dep(**kw))
+
+    # -- unchanged when nothing is missing ---------------------------------
+
+    def test_a_full_deposit_sends_the_remarks_alone(self):
+        self.assertEqual(self.remarks(remarks='Cash for 18 Sep'),
+                         'Cash for 18 Sep')
+
+    def test_a_full_deposit_with_no_remarks_sends_the_deposit_number(self):
+        """Remarks are mandatory on this SAP configuration."""
+        self.assertEqual(self.remarks(), 'OMS DEP-OIL-20260919-000003')
+
+    def test_a_cheque_only_deposit_is_unaffected(self):
+        """Nothing collected, nothing banked — no shortfall to explain."""
+        self.assertEqual(
+            self.remarks(collected='0.00', banked='0.00', remarks='Cheques'),
+            'Cheques')
+
+    # -- the reason travels -------------------------------------------------
+
+    def test_the_shortfall_reason_reaches_sap(self):
+        """THE POINT OF THIS. Both figures and the reason, beside the remark."""
+        self.assertEqual(
+            self.remarks(banked='90.00', reason='spent on freight',
+                         remarks='Testing 2 remarks'),
+            'Testing 2 remarks | SHORT 510.00 of 600.00 collected: '
+            'spent on freight')
+
+    def test_with_no_remarks_the_deposit_number_leads(self):
+        self.assertEqual(
+            self.remarks(banked='90.00', reason='spent on freight'),
+            'OMS DEP-OIL-20260919-000003 | SHORT 510.00 of 600.00 collected: '
+            'spent on freight')
+
+    def test_a_shortfall_with_no_reason_still_declares_itself(self):
+        """Validation demands a reason, so this is defensive — but an
+        unexplained gap must still be visible rather than silently absent."""
+        self.assertEqual(
+            self.remarks(banked='90.00', remarks='Testing'),
+            'Testing | SHORT 510.00 of 600.00 collected')
+
+    def test_amounts_are_two_decimal_places_and_carry_no_symbol(self):
+        """DocCurrency already names the currency, and a rupee sign has to
+        survive the Service Layer and HANA NVARCHAR to be worth sending."""
+        text = self.remarks(collected='1000', banked='0.50', reason='r')
+        self.assertIn('SHORT 999.50 of 1000.00 collected', text)
+        self.assertTrue(text.isascii(), text)
+
+    # -- the 254-character limit -------------------------------------------
+
+    def test_long_remarks_are_clipped_and_the_reason_survives_whole(self):
+        """The failure this ordering prevents: an unexplained credit in SAP."""
+        text = self.remarks(banked='90.00', reason='spent on freight',
+                            remarks='x' * 400)
+
+        self.assertEqual(len(text), sap_payloads.REMARKS_MAX)
+        self.assertIn('SHORT 510.00 of 600.00 collected: spent on freight',
+                      text)
+        self.assertTrue(text.startswith('x'))
+
+    def test_a_reason_long_enough_to_fill_the_field_leaves_no_remarks(self):
+        text = self.remarks(banked='90.00', reason='y' * 400, remarks='keep me')
+
+        self.assertEqual(len(text), sap_payloads.REMARKS_MAX)
+        self.assertNotIn('keep me', text)
+        self.assertIn('SHORT 510.00 of 600.00 collected: yyy', text)
+
+    def test_nothing_ever_exceeds_the_column(self):
+        for kw in ({'remarks': 'z' * 500},
+                   {'banked': '1.00', 'reason': 'q' * 500},
+                   {'banked': '1.00', 'reason': 'q' * 300,
+                    'remarks': 'z' * 300},
+                   {'no': 'D' * 300}):
+            self.assertLessEqual(len(self.remarks(**kw)),
+                                 sap_payloads.REMARKS_MAX, kw)
+
+    # -- it is actually wired into the payload ------------------------------
+
+    def test_build_deposit_uses_it(self):
+        payload = sap_payloads.build_deposit(
+            _dep(banked='90.00', reason='spent on freight',
+                 remarks='Testing 2 remarks'),
+            amount=Decimal('90.00'), source_gl='1105001')
+
+        self.assertIn('spent on freight', payload['Remarks'])

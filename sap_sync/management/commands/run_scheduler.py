@@ -24,6 +24,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 from django_apscheduler.jobstores import DjangoJobStore
 
+from payments import scheduler_jobs as payments_jobs
 from sap_sync.scheduler import (
     RECONCILE_INTERVAL_SECONDS,
     reconcile_schedules,
@@ -102,6 +103,10 @@ class Command(BaseCommand):
         self.stdout.write(f'Reconciled: {added} active schedule(s), {removed} removed.')
 
         if options['once']:
+            # Still sweep. `--once` is used to check configuration, and a
+            # stranded payment is worth recovering whether or not the worker
+            # then stays up.
+            payments_jobs.sweep_stranded_posts()
             release_singleton_lock()
             return
 
@@ -118,6 +123,15 @@ class Command(BaseCommand):
             coalesce=True,
             jobstore='memory',
         )
+
+        # Payments: re-post anything whose approval landed but whose SAP call
+        # was lost to a restart. Registered here because this is the one
+        # process in the system that runs scheduled work; the job itself and
+        # its interval belong to payments. It sweeps once immediately, since
+        # the restart that just happened is itself a cause of stranding.
+        sweep_job = payments_jobs.register(scheduler)
+        self.stdout.write(
+            f'Stranded SAP post sweep every {sweep_job.trigger.interval.total_seconds():.0f}s.')
 
         def shutdown(signum, _frame):
             logger.info('Scheduler received signal %s, shutting down', signum)

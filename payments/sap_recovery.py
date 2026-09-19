@@ -1,13 +1,25 @@
 """Recover documents whose approval landed but whose SAP post never ran.
 
-THE FAILURE THIS EXISTS FOR. `_on_receipt_approved` records the approval and
-then defers the SAP call to `transaction.on_commit`, so a SAP failure cannot
-roll the approval back. That is right, but it leaves a window: once the
-approval transaction commits, the callback is the ONLY thing that will ever
-post the document, and it is not durable. If the worker is restarted between
-the commit and the callback — a deploy, a recycle, an OOM kill — the callback
-is simply lost. The approval says APPROVED, the document still says
-PENDING_APPROVAL, and no SAP call was ever made.
+THE FAILURE THIS EXISTS FOR. The final approval commits and defers the SAP call
+to `transaction.on_commit`, so a 5-7 second call does not hold the approval's
+row locks. But that callback is NOT durable: if the worker is restarted between
+the commit and the callback — a deploy, a recycle, an OOM kill — it is simply
+lost. The document is left owing a SAP post that nothing will ever make.
+
+HOW THE STRANDED STATE IS RECOGNISED NOW. It changed with the final-stage
+lifecycle. The flow no longer completes on approval, so "flow APPROVED but
+document not POSTED" — the old signature — can no longer occur. What marks a
+document as owing a post is its own status: the final approval sets
+POSTING_TO_SAP *before* it commits, precisely so the intent survives the loss
+of the callback. A document is therefore stranded when it is POSTING_TO_SAP and
+no SAP call was ever logged for it.
+
+WHY THE AGE THRESHOLD MATTERS. POSTING_TO_SAP is now set at approval time,
+before the call is made, so a document is legitimately in that state with no
+SapCallLog row for as long as the request takes to reach SAP. Sweeping it in
+that window would post it twice. `MIN_STRANDED_AGE` keeps the sweep away from
+anything recent; only documents that have sat unposted far longer than any call
+could take are considered lost.
 
 Nothing else recovers it. `post_receipt_to_sap` has exactly one caller (that
 callback), and `reconcile_sap_cancellations` only scans documents already
@@ -16,65 +28,100 @@ observed on RCP-OIL-20260905-000002, which sat approved with zero SAP call logs
 while four other receipts approved minutes either side posted normally.
 
 WHAT THIS IS NOT. It is not a retry for SAP failures. A document SAP rejected
-is PENDING_ERROR and is deliberately reopened to its approver; one SAP never
+is PENDING_ERROR and stays with its final approver to retry; one SAP never
 answered is SAP_UNKNOWN and must NOT be reposted, because it may already exist
 there. Both are excluded below. This targets only the case where SAP was never
 called at all, which is provable: no sap_doc_entry AND no SapCallLog row.
 """
 import logging
+from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
-
-from approvals.models import ApprovalRequest
+from django.utils import timezone
 
 from .models import BankDeposit, PaymentReceipt, SapCallLog
 
 logger = logging.getLogger(__name__)
 
+#: Default minutes a document must have been owing a SAP post before the sweep
+#: treats it as lost. Overridden by `PAYMENTS_SAP_STRANDED_MIN_AGE_MINUTES`.
+DEFAULT_STRANDED_MIN_AGE_MINUTES = 30
 
-def find_stranded(model, *, company='', limit=None):
-    """Documents whose approval is APPROVED but which never reached SAP.
+#: How long a document must have been owing a SAP post before the sweep will
+#: treat it as lost.
+#:
+#: HOW SMALL CAN THIS SAFELY BE? The guard protects one window: a call that is
+#: genuinely in flight but has not yet written its SapCallLog row, which the
+#: sweep would otherwise post a second time. That window is bounded by where
+#: the log row is written, NOT by how long SAP takes to answer —
+#: `sap_poster.post_document` calls `_log_start()` OUTSIDE any atomic block, so
+#: the row autocommits and becomes visible BEFORE the HTTP request leaves. The
+#: gap between committing POSTING_TO_SAP and committing that row is two
+#: statements: milliseconds. (And if `_log_start` itself raises, it does so
+#: before the request is made, so no call happens at all.)
+#:
+#: 30 minutes is therefore a very large margin, chosen because the cost of
+#: waiting is a delayed payment while the cost of being too eager is a
+#: DUPLICATE one. It is left as the default for exactly that reason.
+#:
+#: It is configurable because the margin is worth trading down during testing,
+#: where a dev-server autoreload strands a document on almost every code change
+#: and a 30-minute wait makes the recovery feel broken. Anything at or above a
+#: minute stays far outside the real risk window.
+MIN_STRANDED_AGE = timedelta(
+    minutes=getattr(settings, 'PAYMENTS_SAP_STRANDED_MIN_AGE_MINUTES',
+                    DEFAULT_STRANDED_MIN_AGE_MINUTES))
+
+
+def find_stranded(model, *, company='', limit=None, min_age=None):
+    """Documents whose final approval landed but which never reached SAP.
 
     Every condition here is a guard against reposting something that might
     already exist in SAP:
 
-      * status is still PENDING_APPROVAL — POSTING_TO_SAP means a call was in
-        flight and may have committed; PENDING_ERROR and SAP_UNKNOWN are
-        handled by their own flows and must not be swept.
+      * status is POSTING_TO_SAP — the marker the final approval commits before
+        the call is made. PENDING_ERROR and SAP_UNKNOWN are handled by their
+        own paths and must not be swept; PENDING_APPROVAL means no final
+        approval has been given at all.
       * no sap_doc_entry — belt and braces with the status check.
-      * the approval request is APPROVED — the document is genuinely finished
-        with its ladder, not merely parked at a rung.
       * NO SapCallLog row exists — the decisive one. A log row is written
         before the request leaves, so its absence proves no call was made.
+      * it has been in that state longer than `min_age` — see the module
+        docstring. Without this the sweep races every posting in flight.
+
+    The flow is NOT required to be APPROVED. Under the current lifecycle it is
+    still PENDING at the final stage while the post is owed, and only becomes
+    APPROVED once SAP has accepted the document.
     """
     ct = ContentType.objects.get_for_model(model)
+    cutoff = timezone.now() - (min_age if min_age is not None
+                               else MIN_STRANDED_AGE)
 
-    approved_ids = set(
-        ApprovalRequest.objects
-        .filter(content_type=ct, status=ApprovalRequest.Status.APPROVED)
-        .values_list('object_id', flat=True)
-    )
-    if not approved_ids:
+    owing = (model.objects
+             .filter(status=model.Status.POSTING_TO_SAP,
+                     sap_doc_entry__isnull=True,
+                     updated_at__lt=cutoff))
+    if company:
+        owing = owing.filter(company=company.upper())
+
+    owing_ids = set(owing.values_list('pk', flat=True))
+    if not owing_ids:
         return []
 
     # Documents that have ever had a SAP call attempted, by id.
     attempted_ids = set(
         SapCallLog.objects
-        .filter(content_type=ct, object_id__in=approved_ids)
+        .filter(content_type=ct, object_id__in=owing_ids)
         .values_list('object_id', flat=True)
     )
 
     qs = (model.objects
-          .filter(pk__in=approved_ids - attempted_ids,
-                  status=model.Status.PENDING_APPROVAL,
-                  sap_doc_entry__isnull=True)
+          .filter(pk__in=owing_ids - attempted_ids)
           .order_by('created_at'))
-    if company:
-        qs = qs.filter(company=company.upper())
     if limit:
         qs = qs[:limit]
     return list(qs)
-
 
 def _post(document):
     """Post one stranded document through the NORMAL path.
@@ -96,7 +143,7 @@ def recover_stranded_posts(*, company='', limit=None, dry_run=False):
     """Find and re-post approved documents whose SAP call never happened.
 
     Safe to run repeatedly and safe to run from cron: a document that posts
-    successfully leaves PENDING_APPROVAL, so it cannot be picked up twice, and
+    successfully leaves POSTING_TO_SAP, so it cannot be picked up twice, and
     `post_document`'s own duplicate guard is a second line of defence.
     """
     summary = {

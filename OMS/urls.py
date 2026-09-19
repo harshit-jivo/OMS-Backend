@@ -71,14 +71,14 @@ api_urlpatterns = [
     # Dynamic UI labels: ui-config/labels/ (public read) + admin CRUD.
     path('ui-config/', include('uilabels.urls')),
     path('payments/', include('payments.urls')),
-    path('approvals/', include('approvals.urls')),
     # Reusable notification framework read API (Payment/Deposit/future
     # modules). Separate from orders/notifications/ (old Orders system).
     path('notifications/', include('notifications.urls')),
     # HAIS — hardware asset register (own `hais` Postgres schema).
     path('hais/', include('HAIS.urls')),
-    # Generic workflow engine (own `workflow` Postgres schema). Separate from
-    # approvals/, which continues to serve PAYMENT and DEPOSIT.
+    # Generic workflow engine (own `workflow` Postgres schema). The single
+    # approval engine now — it replaced the per-module `approvals` app, whose
+    # routes and tables were removed once payments had moved across.
     path('workflow/', include('workflow.urls')),
     # BackDate (BKDT) — back-posting rights, own `backdate` Postgres
     # schema. Drives the generic workflow engine; owns its own runtime.

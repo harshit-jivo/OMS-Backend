@@ -18,6 +18,7 @@ from django.test import TestCase
 
 from notifications.models import Notification
 from notifications.providers.base import ProviderResult
+from payments.tests_support import notifications_of
 from payments.models import BankDeposit
 from payments.notification_events import (
     DEPOSIT_APPROVED,
@@ -35,7 +36,11 @@ class DepositsNotificationTests(TestCase):
         cls.company_a = Company.objects.create(name="Dep Co A")
         cls.company_b = Company.objects.create(name="Dep Co B")
         cls.submitter = User.objects.create(username="d_sub", name="Submitter", company=cls.company_a)
-        cls.approver = User.objects.create(username="d_appr", name="Approver", company=cls.company_a)
+        cls.approver = User.objects.create(
+            username="d_appr", name="Approver", company=cls.company_a,
+            # Being the stage's user is not enough: approving also
+            # requires the action key (payments.permissions.may_act_on).
+            extra_pages=["Deposit_Approve"])
         cls.other_company_user = User.objects.create(username="d_other", name="Other", company=cls.company_b)
 
     def _deposit(self, no="DEP-N-1"):
@@ -104,7 +109,9 @@ class DepositsNotificationTests(TestCase):
         deposit = self._deposit()
         created = publish_deposit_decision(deposit, None, approved=True)
         self.assertEqual(created, [])
-        self.assertEqual(Notification.objects.count(), 0)
+        # Scoped to THIS document: the shared TEST database already holds
+        # notifications for real ones.
+        self.assertEqual(notifications_of(deposit).count(), 0)
 
     # 9 (mobile provider receives the canonical deposit payload)
     def test_mobile_provider_receives_deposit_payload(self):
@@ -152,23 +159,32 @@ class DepositsNotificationTests(TestCase):
                 created = publish_deposit_decision(deposit, self.submitter, approved=True)
         self.assertEqual(len(created), 1)
 
-    # 16 + approval-hook path (successful approve hook creates exactly one record)
-    def test_approval_hook_creates_single_notification(self):
-        from payments.hooks import _on_deposit_approved
+    # 16 + the real approval path (exactly one record, no duplicate)
+    #
+    # Was `payments.hooks._on_deposit_approved` with a mocked ApprovalRequest;
+    # see tests_notifications.py for why that was replaced by the real engine
+    # path rather than re-mocked. The no-duplicate guarantee is what matters
+    # here and it is asserted against a genuine approval.
+    def test_approval_notifies_the_submitter_exactly_once(self):
+        from payments import workflow_flow
+        from payments.tests_workflow_fixtures import payments_workflow
 
-        deposit = self._deposit()
-        approval_request = mock.Mock()
-        approval_request.document = deposit
-        approval_request.submitted_by = self.submitter
-        approval_request._acting_user = self.approver
-        approval_request.pk = 1
-        # on_commit (SAP post) is NOT executed here → no SAP call, no push.
-        _on_deposit_approved(approval_request)
+        payments_workflow(self.approver, documents='deposits')
+        deposit = self._deposit('DEP-N-APPROVE')
+        deposit.created_by = self.submitter
+        # See tests_notifications.py: kept clear of the company live workflow
+        # configuration targets.
+        deposit.company = 'MART'
+        deposit.save(update_fields=['created_by', 'company'])
+        flow = workflow_flow.start(deposit, user=self.submitter)
+
+        # on_commit (the SAP post) is NOT executed here → no SAP call, no push.
+        workflow_flow.approve(flow, user=self.approver)
+
         qs = Notification.objects.filter(
-            user=self.submitter, event_type=DEPOSIT_APPROVED
-        )
+            user=self.submitter, event_type=DEPOSIT_APPROVED,
+            object_id=deposit.id)
         self.assertEqual(qs.count(), 1)  # exactly one — no duplicate
-        self.assertEqual(qs.first().object_id, deposit.id)
 
     # 12 + 13 (rollback → no notification record, no delivery)
     def test_rollback_no_records_no_delivery(self):

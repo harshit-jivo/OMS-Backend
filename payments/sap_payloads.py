@@ -75,6 +75,66 @@ def build_cheque_remarks(receipt, cheque_entries):
     return f'{base} | {user[:room]}' if room > 0 else base[:REMARKS_MAX]
 
 
+def build_deposit_remarks(deposit):
+    """SAP Remarks for a deposit, carrying the SHORTFALL REASON.
+
+        Cash for 18 Sep | SHORT 510.00 of 600.00 collected: spent on freight
+
+    WHY THE REASON BELONGS IN SAP. A short deposit posts less than was
+    collected — the AP team spends part of a collection before it reaches the
+    bank — and SAP is told only the smaller figure. Anyone reconciling the cash
+    account in SAP then sees a credit that does not match the day's collections
+    with nothing explaining the gap, and has to come back to OMS to find out
+    why. The reason is already mandatory in OMS for exactly this question, so
+    it travels with the number that raised it.
+
+    ORDER AND TRUNCATION. The shortfall note is the BASE and the user's remarks
+    are appended, so when the 254-character limit bites it is the free text
+    that is clipped. Losing the reason would leave an unexplained credit, which
+    is the failure this exists to prevent; losing the tail of a remark does
+    not. Same contract as `build_cheque_remarks`.
+
+    NO CURRENCY SYMBOL. The amounts are written plain. `DocCurrency` already
+    carries the currency, and a rupee sign has to survive the Service Layer and
+    HANA's NVARCHAR — the same round trip that has already mangled an em-dash
+    into a replacement character elsewhere in this database.
+
+    A deposit with no shortfall is unchanged: remarks alone, or the deposit
+    number when there are none, exactly as before.
+    """
+    user = (deposit.remarks or '').strip()
+
+    # `shortfall` is collected minus banked, both CASH-only. Zero on a deposit
+    # banked in full, and never negative — the server refuses a deposit
+    # exceeding what was collected — but the guard costs nothing and keeps a
+    # half-edited draft out of SAP's Comments.
+    shortfall = deposit.shortfall
+    reason = (deposit.shortfall_reason or '').strip()
+
+    if shortfall is None or shortfall <= 0:
+        # Unchanged behaviour. Remarks are MANDATORY on this SAP
+        # configuration, so the deposit number stands in when there are none.
+        return (user or f'OMS {deposit.deposit_no}')[:REMARKS_MAX]
+
+    note = f'SHORT {money(shortfall):.2f} of {money(deposit.collected_amount):.2f} collected'
+    if reason:
+        note = f'{note}: {reason}'
+
+    # The deposit number leads when there are no remarks, so the SAP document
+    # can still be traced back to OMS.
+    base = note if user else f'OMS {deposit.deposit_no} | {note}'
+    if not user:
+        return base[:REMARKS_MAX]
+
+    combined = f'{user} | {base}'
+    if len(combined) <= REMARKS_MAX:
+        return combined
+    # Clip the USER portion only, keeping the whole shortfall note. If the note
+    # alone already fills the field there is no room for remarks at all.
+    room = REMARKS_MAX - len(base) - 3
+    return f'{user[:room]} | {base}' if room > 0 else base[:REMARKS_MAX]
+
+
 def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None, series=None):
     """SAP IncomingPayments payload for one receipt.
 
@@ -245,7 +305,9 @@ def build_deposit(deposit, *, bpl_id=None, series=None, amount=None,
         'TransferAccount': deposit.bank_gl_account,
         'TransferSum': money(total),
         'TransferDate': _iso(deposit.deposit_date),
-        'Remarks': (deposit.remarks or f'OMS {deposit.deposit_no}')[:REMARKS_MAX],
+        # Carries the SHORTFALL REASON when there is one, so SAP explains its
+        # own number. See build_deposit_remarks.
+        'Remarks': build_deposit_remarks(deposit),
     }
     if bpl_id is not None:
         payload['BPLID'] = bpl_id
