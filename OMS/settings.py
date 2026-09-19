@@ -899,6 +899,15 @@ EINV_AUTO_GENERATE = _parse_bool(config('EINV_AUTO_GENERATE', default='false'), 
 EINV_MIRROR_HANA = _parse_bool(config('EINV_MIRROR_HANA', default='false'), default=False)
 EINV_SAP_WRITEBACK = _parse_bool(config('EINV_SAP_WRITEBACK', default='false'), default=False)
 
+# EINV_MIRROR_UDO: ALSO write the IRN into the SAP add-on's UDO table
+# @UTL_MDEXTH. The two tables feed different printers and both are needed —
+# OMS_IRN_LOG for the OMS bill print, @UTL_MDEXTH for every SAP-side Crystal
+# layout, which reads only that one. OMS_IRN_LOG is always written first; this
+# is the additional, best-effort write (see einvoice/sap_udo.py and
+# einvoice/docs/OMS_IRN_TO_SAP_UDO_TRANSFER.md). Off by default: turning it on
+# starts writing into a live SAP object table, and no company grants DELETE.
+EINV_MIRROR_UDO = _parse_bool(config('EINV_MIRROR_UDO', default='false'), default=False)
+
 # Also write the IRN QR as a .png FILE into this directory on every generation.
 # Point it at the Windows share on another server, e.g.
 #   EINV_QR_SAVE_DIR=\\JIVO-APP\OMS_Attachments\Bitmap
@@ -923,6 +932,22 @@ EINV_QR_SAVE_DIRS = {
 }
 # Drop unconfigured company DBs (blank key) so lookups can't match by accident.
 EINV_QR_SAVE_DIRS = {k: v for k, v in EINV_QR_SAVE_DIRS.items() if k and v}
+
+# SECOND copy of each QR PNG, into the OMS attachment share. EINV_QR_SAVE_DIRS
+# above now points at the SAP Bitmaps folders (that is the path recorded in
+# U_UTL_QRPT and the one Crystal actually opens), so these keep OMS's own copy
+# as well. Defaults derive from EINV_QR_ROOT, matching where OMS used to write.
+# A folder identical to the company's EINV_QR_SAVE_DIRS entry is skipped rather
+# than written twice.
+EINV_OMS_QR_SAVE_DIRS = {
+    HANA_OIL_COMPANY_DB: config(
+        'EINV_OMS_QR_SAVE_DIR_OIL', default=rf'{_EINV_QR_ROOT}\OIL_ATTACHMENTS\Bitmap'),
+    HANA_BEVERAGE_COMPANY_DB: config(
+        'EINV_OMS_QR_SAVE_DIR_BEVERAGE', default=rf'{_EINV_QR_ROOT}\BEVERAGE_ATTACHMENTS\Bitmap'),
+    HANA_MART_COMPANY_DB: config(
+        'EINV_OMS_QR_SAVE_DIR_MART', default=rf'{_EINV_QR_ROOT}\MART_ATTACHMENTS\Bitmap'),
+}
+EINV_OMS_QR_SAVE_DIRS = {k: v for k, v in EINV_OMS_QR_SAVE_DIRS.items() if k and v}
 # Credentials for the share (needed when the Django service account can't reach it
 # on its own). Username may be 'user' or 'DOMAIN\\user'. Blank = write as the
 # process account (no explicit SMB auth). Requires the `smbprotocol` package.
