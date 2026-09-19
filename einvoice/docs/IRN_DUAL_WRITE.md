@@ -146,11 +146,29 @@ the file shares and will report misleading results.
    python manage.py test_qr_share
    ```
 
+   > ⚠️ **This only covers three of the six folders.** `test_qr_share` reads
+   > `settings.EINV_QR_SAVE_DIRS` and nothing else — i.e. the three **SAP** folders.
+   > It never probes `EINV_OMS_QR_SAVE_DIRS`, even though the OMS write is the
+   > must-never-fail path. "All 3 QR folder(s) reachable and writable" is **not**
+   > the all-clear step 2 asks for. Until the command covers both maps, probe the
+   > OMS folders too — same logic, different dict:
+   >
+   > ```python
+   > from django.conf import settings
+   > from einvoice.management.commands.test_qr_share import Command
+   > cmd = Command()
+   > for db, d in settings.EINV_OMS_QR_SAVE_DIRS.items():
+   >     print(db, cmd._probe(d))
+   > ```
+
 2. **All six folders exist and are writable.** `MART_ATTACHMENTS\Bitmap` has no
    confirmed historical use — no stored path has ever referenced it — so it is
    the one most likely to be missing. The writer creates the folder if it can,
    but this is now on the must-never-fail path, so confirm rather than discover
    it at the first Mart IRN.
+
+   *(2026-09-19: all six verified reachable and writable on `10.10.101.118`,
+   including `MART_ATTACHMENTS\Bitmap`.)*
 
 3. **Both commands report cleanly**, with the flag still off:
 
@@ -165,6 +183,20 @@ the file shares and will report misleading results.
    If `repair_qr_files` says a folder is *empty or unreadable* it refuses to act
    rather than concluding that every file is missing. Treat that as a share
    problem, not as a repair backlog.
+
+   > **…unless the folder is legitimately empty.** The guard cannot tell "empty"
+   > from "unreadable", so a company that has never generated an OMS IRN trips it
+   > on a perfectly healthy share — and takes the whole command to **exit 2**.
+   > That is Mart today: 0 signed rows in `OMS_IRN_LOG`, nothing ever written to
+   > `MART_ATTACHMENTS\Bitmap`, yet the probe in step 1 writes/reads/deletes there
+   > fine. Before treating exit 2 as a share fault, check the row count:
+   >
+   > ```sql
+   > SELECT COUNT(*) FROM "<schema>"."OMS_IRN_LOG" WHERE "U_UTL_IST" = 'S';
+   > ```
+   >
+   > Zero means the message is a false positive. It will keep firing until that
+   > company's first IRN lands, so **do not wire exit 2 straight to an alert.**
 
 ---
 
@@ -316,3 +348,111 @@ string stored on the row, so it can always be rebuilt.
    the table rather than from `ONNM`. Harmless today; it would matter if anything
    created this object through the SAP UI. See
    `OMS_IRN_TO_SAP_UDO_TRANSFER.md` §10.
+
+---
+
+## 9. Enablement record — 2026-09-19
+
+Run on the app host `10.10.101.118`, file server `10.10.101.52`.
+
+### 9.1 Verified privileges — the connecting user is `B1i`, not `DSRN`
+
+`OMS_IRN_TO_SAP_UDO_TRANSFER.md` §2 documents `DSRN`. The application actually
+connects as **`B1i`**, and its grants differ per company — confirmed against
+`SYS.EFFECTIVE_PRIVILEGES` with `USER_NAME = CURRENT_USER`:
+
+| Schema | SELECT | INSERT | UPDATE | DELETE |
+|---|:--:|:--:|:--:|:--:|
+| `JIVO_OIL_HANADB` | ✅ | ✅ | ✅ | ❌ |
+| `JIVO_BEVERAGES_HANADB` | ✅ | ✅ | **❌** | ❌ |
+| `JIVO_MART_HANADB` | ✅ | ✅ | ✅ | ❌ |
+
+Beverages is the constrained company referred to throughout §5.5, §6 and §8.1.
+An `UPDATE` attempted there fails with HANA **error 258 `insufficient privilege`**
+(confirmed empirically, not just from the catalogue). The fix is one grant, and it
+also un-blocks IRN cancellations reaching Beverages' SAP-side rows:
+
+```sql
+GRANT UPDATE ON SCHEMA "JIVO_BEVERAGES_HANADB" TO B1I;
+```
+
+### 9.2 `.env`
+
+`EINV_MIRROR_UDO=true` added. Everything else §2 asks you to verify was already
+correct: `EINV_MIRROR_HANA=true`, the three `EINV_QR_SAVE_DIR_*` on the SAP
+Bitmaps folders, `EINV_QR_ROOT` on the OMS root, `EINV_QR_FILENAME={irn}.png`,
+SMB creds set, and all three company DBs resolving to live schemas.
+
+Two traps worth knowing:
+
+- **The company-DB keys are not named what §2 implies.** `settings.py` reads
+  `HANA_DB_OIL_NAME` / `HANA_DB_BEVERAGE_NAME` / `HANA_DB_MART_NAME` — *not*
+  `HANA_*_COMPANY_DB`. A stale `HANA_BEVERAGE_COMPANY_DB` in `.env` is shadowed
+  and never wins. Always confirm via the `manage.py shell` one-liner in §2, never
+  by grepping `.env`.
+- **`EINV_QR_FILENAME` is load-bearing and its code default is wrong for this.**
+  `settings.py` defaults to `{doc_no}.png`; the dual write needs `{irn}.png`,
+  because the file duplicate check matches on that name and `@UTL_MDEXTH` paths
+  are rebuilt as `<IRN>.png`. Never drop that line from `.env`.
+
+### 9.3 Backfill applied
+
+| | OIL | BEVERAGE | MART |
+|---|---|---|---|
+| `reconcile_udo_mirror --apply` | 6 rows → DocEntry 19043–19048 | 5 rows → DocEntry 5324–5328 | up to date (0 rows) |
+| `Creator='OMS'` after | 97 → **103** | 101 → **106** | — |
+| `repair_qr_files --apply` | 47 PNGs | ~75 PNGs | n/a |
+| PNG coverage after | 103/103 | 112/112 | n/a |
+
+All §5.3 invariants re-checked green in both companies: `MAX("DocEntry") − COUNT(*) = 0`,
+`DocNum = DocEntry`, and zero OMS rows duplicating an add-on `'S'` row.
+
+**The outcome that matters:** `CRYSTAL_AR_INVOICE_ITEMS` now returns the IRN, Ack
+number and QR path for these invoices and agrees with `OMS_SP_GST_INVOICE` — it
+read `@UTL_MDEXTH` only, so before the mirror they printed blank from every
+SAP-side layout. No error 305 in either company.
+
+### 9.4 `OMS_IRN_LOG` path normalisation
+
+Historic rows carried up to four path forms, two of them on hosts that no longer
+resolve (`\\20.20.45.25\…`, `\\JIVO-APP\…`), plus rows pointing into the **SAP**
+folder — which contradicts §1, where `OMS_IRN_LOG` is supposed to record the OMS
+folder. Normalised for Oil:
+
+```sql
+UPDATE "JIVO_OIL_HANADB"."OMS_IRN_LOG"
+   SET "U_UTL_QRPT" = '\\10.10.101.52\OMS_Attachments\OIL_ATTACHMENTS\Bitmap\'
+                      || "U_UTL_IRN" || '.png'
+ WHERE "U_UTL_IST" = 'S' AND LENGTH(IFNULL("U_UTL_IRN",'')) > 0;
+```
+
+**103 rows updated.** Always list the target folder first and exclude any row whose
+`<irn>.png` is absent, or the rewrite creates the silent blank-QR fault this doc
+exists to prevent. One Oil row was excluded on exactly that basis (BaseEntry 80518,
+a fresh IRN whose PNG had not reached the OMS folder); it keeps its SAP-folder path,
+which resolves.
+
+**Beverages is still pending** — the same statement against
+`BEVERAGE_ATTACHMENTS\Bitmap` covers **112 rows, all with their PNG present**, and
+fails only on the missing `UPDATE` grant in §9.1. Of those, only 16 are actually
+broken (`\\20.20.45.25\…`); the rest resolve today, so this is normalisation, not
+a repair.
+
+> **`EINV_QR_SAVE_DIR` points at a folder that does not exist.** The legacy
+> single-folder fallback is `\\10.10.101.52\OMS_Attachments\Bitmap`, but that share
+> holds only `OIL_ATTACHMENTS\`, `BEVERAGE_ATTACHMENTS\`, `MART_ATTACHMENTS\` — there
+> is no `Bitmap` directly under it. Any company falling through
+> `qr_dir_for_company()` will fail its QR save. Latent, not biting today.
+
+### 9.5 Still open
+
+1. **Restart the OMS service.** `EINV_MIRROR_UDO=true` is not read until then, so
+   new IRNs keep writing no UDO row and accruing fresh gaps — observed live: Oil
+   BaseEntry **80518** and a new Beverages row both appeared *during* this work,
+   minutes after `reconcile_udo_mirror` had reported "up to date".
+2. **Beverages `UPDATE` grant** (§9.1) — unblocks both the path rewrite and
+   cancellations.
+3. **Beverages has 2 rows with no QR path at all.** `repair_qr_files` cannot fix
+   these; they need `backfill_qr_png --company BEVERAGE` (note its report flag is
+   `--dry-run`, not `--apply`).
+4. **Mart has never been examined** for the UDO transfer and has 0 signed rows.
