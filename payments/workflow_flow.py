@@ -249,9 +249,17 @@ def _guard_postable(document):
             f'{document.sap_doc_entry}. It cannot be posted again.')
     if document.status in UNPOSTABLE_STATUSES:
         if document.status == 'POSTING_TO_SAP':
-            raise PaymentFlowError(
-                'A SAP posting for this document is already in progress. '
-                'Wait for it to finish before trying again.')
+            # ONLY refuse while a call is genuinely running. Reading the status
+            # alone cannot tell a live call from one whose worker died, and
+            # treating both as live is what left a receipt unactionable for 43
+            # hours. `posting_is_in_flight` reads the call log, which records
+            # the attempt rather than the intent.
+            from . import sap_settlement
+
+            if sap_settlement.posting_is_in_flight(document):
+                raise PaymentFlowError(
+                    'A SAP posting for this document is already in progress. '
+                    'Wait for it to finish before trying again.')
         if document.status == 'SAP_UNKNOWN':
             raise PaymentFlowError(
                 'SAP did not answer the last posting, so it is not yet known '
@@ -444,7 +452,10 @@ def approve(flow, *, user, remarks=''):
     _point_at(flow, decided_stage_id)
     flow.save(update_fields=['current_stage', 'current_user', 'updated_at'])
 
-    _queue_sap_post(document, user)
+    # NOTHING IS DISPATCHED HERE. The intent (POSTING_TO_SAP, above) is
+    # committed with this transaction; the caller runs `settle_after_approval`
+    # once it has landed. Queueing the call on `transaction.on_commit` is what
+    # made a lost callback into a permanently stuck document.
     notification_events_decision(document, approved=True, actor=user)
     return flow
 
@@ -506,18 +517,58 @@ def cancel(flow, *, user, remarks=''):
 # SAP
 # ---------------------------------------------------------------------------
 
-def _queue_sap_post(document, user):
-    """Post to SAP AFTER this transaction commits (the PRDO lifecycle).
+def document_of(flow):
+    """The receipt or deposit a flow belongs to.
 
-    A 5-7 second SAP call must not hold the approval's row locks, and a SAP
-    failure must not undo an approval that genuinely happened.
+    Public because settling is now the CALLER's job: anything that approves has
+    to be able to reach the document it must then settle.
     """
-    from .services import post_deposit_to_sap, post_receipt_to_sap
+    return _document_of(flow)
 
-    if isinstance(document, PaymentReceipt):
-        transaction.on_commit(lambda: post_receipt_to_sap(document, user=user))
-    else:
-        transaction.on_commit(lambda: post_deposit_to_sap(document, user=user))
+
+def sap_post_is_owed(document):
+    """True when this document has been approved and still owes a SAP post.
+
+    The INTENT, and it is durable: POSTING_TO_SAP is written inside the
+    approval's own transaction, so it survives any crash. The caller settles it
+    AFTER the transaction commits — see `settle_after_approval`.
+    """
+    statuses = _status_enum(document)
+    return (document.status == statuses.POSTING_TO_SAP
+            and not getattr(document, 'sap_doc_entry', None))
+
+
+def settle_after_approval(document, *, user=None):
+    """Do the SAP post, OUTSIDE the approval transaction. Returns the document.
+
+    WHY THIS IS NOT `transaction.on_commit` ANY MORE
+    -----------------------------------------------
+    It used to be. `on_commit` is not durable: a restart between the commit and
+    the callback loses it silently, and the document was then left in
+    POSTING_TO_SAP for ever with every guard refusing to touch it. That is how
+    RCP-OIL-20260919-000003 sat stranded for 43 hours with zero SAP call logs.
+
+    The call is made by the CALLER now, explicitly, after `approve()` has
+    returned and its transaction has committed. That keeps the two properties
+    the callback was chosen for — a 5-7 second SAP call does not hold the
+    approval's row locks, and a SAP refusal does not undo an approval that
+    genuinely happened — while making the call something a person can see,
+    re-run and test, rather than a side effect of committing.
+
+    Durability no longer rests on this call happening at all: the intent is
+    committed, and `sap_settlement.settle` is idempotent, so an approver's
+    retry or the recovery sweep reaches the same end state.
+    """
+    from . import sap_settlement
+
+    # Fresh, for the same reason `settle` re-reads: the caller's copy may
+    # predate the approval that created the intent.
+    document = document.__class__.objects.get(pk=document.pk)
+    if not sap_post_is_owed(document):
+        return document
+    # `claimed`: this caller just approved, having passed `_guard_postable`,
+    # so the posting is its own and it must not wait for itself.
+    return sap_settlement.settle(document, user=user, claimed=True)
 
 
 def is_at_final_stage(flow):

@@ -33,6 +33,50 @@ def money(value):
     return float(quantised)
 
 
+def oms_reference(document):
+    """The OMS document number, as it appears inside SAP's Comments.
+
+    THE ONLY WAY BACK FROM SAP TO OMS, and the reason it must ALWAYS be sent.
+    SAP is not told the OMS id in any structured field — there are no
+    user-defined fields on ORCT (see `build_incoming_payment`) — so this string
+    in Comments is the whole link.
+
+    It matters beyond reconciliation. When a posting is interrupted and it is
+    not known whether SAP took the document, the only safe way to find out is
+    to look for THIS reference in ORCT; without it the choice is between never
+    retrying (a stuck document) and retrying blind (a duplicate payment). See
+    `sap_poster.find_existing_posting`.
+    """
+    return getattr(document, 'receipt_no', None) or document.deposit_no
+
+
+def with_reference(reference, user_remarks, *, extra=''):
+    """SAP Remarks that ALWAYS carry the OMS reference.
+
+    The reference leads and is never clipped; the user's own words follow and
+    are clipped to fit SAP's 254 characters. That order is deliberate — losing
+    the tail of a remark costs nothing, losing the reference costs the ability
+    to tell whether the document posted at all.
+
+    THE BUG THIS FIXES. The old form was `(remarks or f'OMS {no}')`: an `or`,
+    so the moment a user typed anything the identifier was DROPPED. Every
+    receipt and deposit raised with a remark went to SAP anonymous, and
+    `RCP-OIL-20260919-000003` — stranded mid-post — could not be checked
+    against SAP because nothing there named it.
+    """
+    base = f'OMS {reference}'
+    if extra:
+        base = f'{base} | {extra}'
+    user = (user_remarks or '').strip()
+    if not user:
+        return base[:REMARKS_MAX]
+    combined = f'{base} | {user}'
+    if len(combined) <= REMARKS_MAX:
+        return combined
+    room = REMARKS_MAX - len(base) - 3
+    return f'{base} | {user[:room]}' if room > 0 else base[:REMARKS_MAX]
+
+
 def _iso(value):
     return value.isoformat() if value else None
 
@@ -99,8 +143,11 @@ def build_deposit_remarks(deposit):
     HANA's NVARCHAR — the same round trip that has already mangled an em-dash
     into a replacement character elsewhere in this database.
 
-    A deposit with no shortfall is unchanged: remarks alone, or the deposit
-    number when there are none, exactly as before.
+    THE REFERENCE ALWAYS LEADS. `OMS <deposit_no>` is the first thing in the
+    string whether or not there is a shortfall and whether or not the user
+    wrote anything — see `with_reference`. Without it a deposit interrupted
+    mid-post cannot be looked up in SAP, and the only choices left are never
+    retrying or retrying blind.
     """
     user = (deposit.remarks or '').strip()
 
@@ -112,27 +159,16 @@ def build_deposit_remarks(deposit):
     reason = (deposit.shortfall_reason or '').strip()
 
     if shortfall is None or shortfall <= 0:
-        # Unchanged behaviour. Remarks are MANDATORY on this SAP
-        # configuration, so the deposit number stands in when there are none.
-        return (user or f'OMS {deposit.deposit_no}')[:REMARKS_MAX]
+        return with_reference(deposit.deposit_no, user)
 
     note = f'SHORT {money(shortfall):.2f} of {money(deposit.collected_amount):.2f} collected'
     if reason:
         note = f'{note}: {reason}'
 
-    # The deposit number leads when there are no remarks, so the SAP document
-    # can still be traced back to OMS.
-    base = note if user else f'OMS {deposit.deposit_no} | {note}'
-    if not user:
-        return base[:REMARKS_MAX]
-
-    combined = f'{user} | {base}'
-    if len(combined) <= REMARKS_MAX:
-        return combined
-    # Clip the USER portion only, keeping the whole shortfall note. If the note
-    # alone already fills the field there is no room for remarks at all.
-    room = REMARKS_MAX - len(base) - 3
-    return f'{user[:room]} | {base}' if room > 0 else base[:REMARKS_MAX]
+    # Reference FIRST, then the shortfall note, then the user's words. The
+    # deposit number used to be dropped the moment a remark existed, which is
+    # what made a stranded deposit impossible to check against SAP.
+    return with_reference(deposit.deposit_no, user, extra=note)
 
 
 def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None, series=None):
@@ -168,7 +204,8 @@ def build_incoming_payment(receipt, *, bank_accounts, bpl_id=None, series=None):
         # Remarks is MANDATORY on this SAP configuration. The receipt number is
         # embedded so a human reading the document in SAP can trace it back,
         # even though it is not a queryable key.
-        'Remarks': (receipt.remarks or f'OMS {receipt.receipt_no}')[:REMARKS_MAX],
+        # ALWAYS carries the receipt number — see `with_reference`.
+        'Remarks': with_reference(receipt.receipt_no, receipt.remarks),
     }
     # Branch. Only sent when configured — an empty BPLID is itself an error.
     if bpl_id is not None:

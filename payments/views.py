@@ -719,13 +719,31 @@ def _document_permissions(document, user):
     # here, using the same `can_decide` it already computed — so a retry can
     # never be offered to someone who may not act.
     #
-    # PENDING_ERROR is the only status this is true of: SAP answered "no",
-    # nothing was committed there, and the flow is still at the final stage. A
-    # SAP_UNKNOWN document is deliberately excluded — `may_act_on` refuses it,
-    # so `can_decide` is already False and no retry is offered.
+    # THREE statuses mean "owed a SAP posting that has not happened", and all
+    # three are retryable by the effective approver:
+    #
+    #   PENDING_ERROR    SAP answered "no". Nothing was committed there.
+    #   SAP_UNKNOWN      SAP never answered. It may or may not hold it.
+    #   POSTING_TO_SAP   with no live call — the worker died, or the call never
+    #                    left. This is the one that used to have no way out at
+    #                    all (RCP-OIL-20260919-000003, stuck 43 hours).
+    #
+    # The last two are only safe to offer because a retry is no longer blind:
+    # `sap_settlement.settle` asks SAP for the document by its own reference
+    # before posting, so it adopts an existing posting rather than duplicating
+    # it. `can_decide` still gates all of them, so a retry can never reach
+    # somebody who may not act.
+    from . import sap_settlement
+
+    owes_sap_post = (
+        document.status in (Status.PENDING_ERROR, Status.SAP_UNKNOWN)
+        or (document.status == Status.POSTING_TO_SAP
+            and not sap_settlement.posting_is_in_flight(document))
+    )
     can_retry_sap = bool(
         can_decide
-        and document.status == Status.PENDING_ERROR
+        and owes_sap_post
+        and not document.sap_doc_entry
         and workflow_flow.is_at_final_stage(flow))
 
     return {
@@ -1407,6 +1425,27 @@ class _ApproveView(_DecisionView):
         except DjangoValidationError as exc:
             return fail('; '.join(exc.messages),
                         status=http_status.HTTP_409_CONFLICT)
+
+        # THE SAP POST, HERE, EXPLICITLY — not on `transaction.on_commit`.
+        #
+        # `approve()` has returned and its transaction has committed, so the
+        # intent (POSTING_TO_SAP) is durable. This call settles it. It is
+        # deliberately OUTSIDE the try above: a SAP refusal is not an approval
+        # failure, it is an outcome, and it comes back on the document for the
+        # approver to read and retry.
+        #
+        # Never raises for a SAP-side problem — `post_document` records the
+        # failure on the document and returns it. Only an unreachable HANA
+        # during the interrupted-post VERIFICATION can raise, and that must not
+        # lose the approval either: the intent stays committed and the retry
+        # stays available.
+        fresh = document.__class__.objects.get(pk=pk)
+        try:
+            workflow_flow.settle_after_approval(fresh, user=request.user)
+        except Exception:                                        # noqa: BLE001
+            logger.exception('SAP settlement failed for %s %s',
+                             document.__class__.__name__, pk)
+
         return ok(self.serializer(document.__class__.objects.get(pk=pk)).data,
                   message='Approved.')
 

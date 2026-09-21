@@ -655,19 +655,26 @@ class DepositRemarksTests(SimpleTestCase):
 
     # -- unchanged when nothing is missing ---------------------------------
 
-    def test_a_full_deposit_sends_the_remarks_alone(self):
+    def test_a_full_deposit_still_names_itself(self):
+        """The reference LEADS, always.
+
+        It used to be dropped the moment a remark existed — `(user or
+        f'OMS {no}')` — which left every deposit raised with a remark
+        anonymous in SAP and impossible to check after an interrupted post.
+        """
         self.assertEqual(self.remarks(remarks='Cash for 18 Sep'),
-                         'Cash for 18 Sep')
+                         'OMS DEP-OIL-20260919-000003 | Cash for 18 Sep')
 
     def test_a_full_deposit_with_no_remarks_sends_the_deposit_number(self):
         """Remarks are mandatory on this SAP configuration."""
         self.assertEqual(self.remarks(), 'OMS DEP-OIL-20260919-000003')
 
-    def test_a_cheque_only_deposit_is_unaffected(self):
-        """Nothing collected, nothing banked — no shortfall to explain."""
+    def test_a_cheque_only_deposit_has_no_shortfall_note(self):
+        """Nothing collected, nothing banked — no shortfall to explain. The
+        reference is still there, as it is on every document."""
         self.assertEqual(
             self.remarks(collected='0.00', banked='0.00', remarks='Cheques'),
-            'Cheques')
+            'OMS DEP-OIL-20260919-000003 | Cheques')
 
     # -- the reason travels -------------------------------------------------
 
@@ -676,8 +683,8 @@ class DepositRemarksTests(SimpleTestCase):
         self.assertEqual(
             self.remarks(banked='90.00', reason='spent on freight',
                          remarks='Testing 2 remarks'),
-            'Testing 2 remarks | SHORT 510.00 of 600.00 collected: '
-            'spent on freight')
+            'OMS DEP-OIL-20260919-000003 | SHORT 510.00 of 600.00 collected: '
+            'spent on freight | Testing 2 remarks')
 
     def test_with_no_remarks_the_deposit_number_leads(self):
         self.assertEqual(
@@ -690,7 +697,8 @@ class DepositRemarksTests(SimpleTestCase):
         unexplained gap must still be visible rather than silently absent."""
         self.assertEqual(
             self.remarks(banked='90.00', remarks='Testing'),
-            'Testing | SHORT 510.00 of 600.00 collected')
+            'OMS DEP-OIL-20260919-000003 | SHORT 510.00 of 600.00 collected'
+            ' | Testing')
 
     def test_amounts_are_two_decimal_places_and_carry_no_symbol(self):
         """DocCurrency already names the currency, and a rupee sign has to
@@ -709,7 +717,10 @@ class DepositRemarksTests(SimpleTestCase):
         self.assertEqual(len(text), sap_payloads.REMARKS_MAX)
         self.assertIn('SHORT 510.00 of 600.00 collected: spent on freight',
                       text)
-        self.assertTrue(text.startswith('x'))
+        # The REFERENCE leads and survives whole; the free text is what gets
+        # clipped. Losing the tail of a remark costs nothing; losing the
+        # reference costs the ability to tell whether the deposit posted.
+        self.assertTrue(text.startswith('OMS DEP-OIL-20260919-000003'))
 
     def test_a_reason_long_enough_to_fill_the_field_leaves_no_remarks(self):
         text = self.remarks(banked='90.00', reason='y' * 400, remarks='keep me')

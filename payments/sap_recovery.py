@@ -126,17 +126,23 @@ def find_stranded(model, *, company='', limit=None, min_age=None):
 def _post(document):
     """Post one stranded document through the NORMAL path.
 
-    Deliberately calls the same `post_*_to_sap` the approval hook calls, so a
-    recovered document goes through the identical duplicate guard, row lock,
-    payload build, call log and history rows as any other post. Nothing about
-    the resulting SAP document says it was recovered, because nothing about it
-    IS different — only the trigger was.
+    Deliberately the same entry point the approval request uses, so a
+    recovered document goes through the identical verification, duplicate
+    guard, row lock, payload build, call log and history rows as any other
+    post. Nothing about the resulting SAP document says it was recovered,
+    because nothing about it IS different — only the trigger was.
     """
-    from .services import post_deposit_to_sap, post_receipt_to_sap
+    from . import sap_settlement
 
-    if isinstance(document, PaymentReceipt):
-        return post_receipt_to_sap(document)
-    return post_deposit_to_sap(document)
+    # Through `settle`, not straight to the poster. The sweep sees documents
+    # whose SAP state is not knowable from OMS — a worker that died mid-call
+    # leaves exactly that — and `settle` asks SAP for the document by its own
+    # reference before posting. Calling the poster directly here would retry
+    # blind, which is how a customer gets charged twice.
+    #
+    # `claimed=False`: the sweep owns nothing, so it yields to any call that
+    # is genuinely in flight.
+    return sap_settlement.settle(document, claimed=False)
 
 
 def recover_stranded_posts(*, company='', limit=None, dry_run=False):

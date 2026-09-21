@@ -269,15 +269,31 @@ def may_act_on(user, flow, document=None):
     if getattr(document, 'sap_doc_entry', None):
         return False, 'This document is already posted to SAP.'
 
+    from . import sap_settlement
+
     status = getattr(document, 'status', '')
-    if status in UNPOSTABLE_STATUSES:
+
+    # TWO STATUSES THAT LOOK FINAL AND ARE NOT.
+    #
+    # POSTING_TO_SAP with no live call — the worker died, or the call never
+    # left. SAP_UNKNOWN — SAP never answered, so nobody knows. Both used to be
+    # refused outright, which left the document with no approve, no reject and
+    # no retry: RCP-OIL-20260919-000003 sat exactly like that for 43 hours.
+    #
+    # Neither is a reason to refuse any more, because a retry is no longer
+    # blind: `sap_settlement.settle` ASKS SAP for the document by its own
+    # reference before posting anything, so the duplicate these guards were
+    # protecting against cannot happen.
+    recoverable = (
+        (status == 'POSTING_TO_SAP'
+         and not sap_settlement.posting_is_in_flight(document))
+        or status == 'SAP_UNKNOWN'
+    )
+
+    if status in UNPOSTABLE_STATUSES and not recoverable:
         if status == 'POSTING_TO_SAP':
             return False, ('A SAP posting for this document is already in '
                            'progress. Wait for it to finish.')
-        if status == 'SAP_UNKNOWN':
-            return False, ('SAP did not answer the last posting, so it is not '
-                           'yet known whether this document was created there. '
-                           'It must be verified before it can be posted again.')
         return False, 'This document is already posted to SAP.'
 
     # A RETRY may only happen at the FINAL stage — that is the only stage whose

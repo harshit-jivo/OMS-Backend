@@ -473,7 +473,13 @@ class QueueFilterTests(TestCase):
 
     # 26
     def test_company_filter_still_applies_alongside(self):
-        found = self._list('?verification_status=PENDING&company=MART')
+        # FIXTURE_WINDOW, like every other case here: without it the query
+        # reaches the whole shared TEST database and picks up real receipts
+        # raised by people using the app (RCP-MART-20260921-000001 did exactly
+        # that). The window is this suite's way of asking only about its own
+        # fixtures.
+        found = self._list(
+            FIXTURE_WINDOW + '&verification_status=PENDING&company=MART')
         self.assertEqual(found, {'RC-Q-3'})
 
     # 25

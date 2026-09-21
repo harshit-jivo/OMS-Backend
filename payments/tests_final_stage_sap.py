@@ -159,9 +159,21 @@ class _SapStubbed(TestCase):
         return mock
 
     def _approve(self, flow, user, **kwargs):
-        """Approve, running the on_commit SAP post as the request would."""
-        with self.captureOnCommitCallbacks(execute=True):
-            return workflow_flow.approve(flow, user=user, **kwargs)
+        """Approve, then settle against SAP exactly as the request does.
+
+        The SAP post used to ride on `transaction.on_commit`, so this helper
+        ran the captured callbacks. It does not any more — a lost callback is
+        what stranded a receipt for 43 hours — so the caller makes the call
+        explicitly and this mirrors `_ApproveView.post`.
+
+        Approving WITHOUT this second line is now the honest way to simulate a
+        process that died between the commit and the SAP call; several tests
+        below do exactly that.
+        """
+        result = workflow_flow.approve(flow, user=user, **kwargs)
+        document = workflow_flow.document_of(flow)
+        workflow_flow.settle_after_approval(document, user=user)
+        return result
 
     def _actions(self, document):
         return list(history_of(document).order_by('created_at', 'id')
@@ -386,10 +398,23 @@ class PaymentFinalStageTests(_SapStubbed):
         self.assertEqual(flow.status, FlowStatus.PENDING)
         self.assertTrue(workflow_flow.is_at_final_stage(flow))
 
-    # -- the timeout case, which must NOT be retryable ---------------------
+    # -- the timeout case: retryable, because the retry ASKS SAP first -----
 
-    def test_a_sap_timeout_blocks_the_retry(self):
-        """SAP may hold the document. A second post could pay twice."""
+    def test_a_sap_timeout_leaves_the_retry_OPEN(self):
+        """SAP may hold the document — so the retry checks before posting.
+
+        THIS RULE WAS INVERTED, DELIBERATELY. It used to refuse: SAP might
+        already have the payment and a second post would pay twice. That was
+        the right call while OMS had no way to ask. It also meant a timed-out
+        document had no way forward at all — no approve, no reject, no retry —
+        which is a permanently stuck receipt by another name.
+
+        Every payload now carries `OMS <receipt_no>` in its Comments
+        (`sap_payloads.with_reference`), so `sap_settlement.settle` looks the
+        document up in ORCT and either ADOPTS what SAP already has or posts
+        knowing it is absent. The duplicate this guard protected against cannot
+        happen, so the guard costs only the stuck state.
+        """
         self._sap(SAP_SILENT)
         receipt, flow = self._at_final_stage()
 
@@ -398,9 +423,23 @@ class PaymentFinalStageTests(_SapStubbed):
         receipt.refresh_from_db()
         self.assertEqual(receipt.status, PaymentReceipt.Status.SAP_UNKNOWN)
         flow.refresh_from_db()
-        allowed, reason = may_act_on(self.final, flow)
-        self.assertFalse(allowed, 'a timed-out post must never be retried')
-        self.assertIn('did not answer', reason)
+        allowed, _reason = may_act_on(self.final, flow)
+        self.assertTrue(
+            allowed,
+            'a timed-out post must stay recoverable — the retry verifies '
+            'against SAP before it posts anything')
+
+    def test_a_timed_out_document_is_classified_as_UNCERTAIN(self):
+        """So the retry goes through verification rather than posting blind."""
+        from . import sap_settlement
+
+        self._sap(SAP_SILENT)
+        receipt, flow = self._at_final_stage()
+        self._approve(flow, self.final)
+
+        receipt.refresh_from_db()
+        self.assertEqual(sap_settlement.attempt_state(receipt),
+                         sap_settlement.UNCERTAIN)
 
     def test_a_posting_in_flight_blocks_a_second_approval(self):
         """Two approvals must not each post the same receipt.
@@ -409,10 +448,9 @@ class PaymentFinalStageTests(_SapStubbed):
         a second click; POSTING_TO_SAP is what does.
         """
         receipt, flow = self._at_final_stage()
-        # Approve WITHOUT running the on_commit callback: the document is left
-        # exactly as a request that has committed but not yet reached SAP.
-        with self.captureOnCommitCallbacks(execute=False):
-            workflow_flow.approve(flow, user=self.final)
+        # Approve WITHOUT settling: the document is left exactly as a request
+        # that has committed but died before reaching SAP.
+        workflow_flow.approve(flow, user=self.final)
 
         receipt.refresh_from_db()
         self.assertEqual(receipt.status, PaymentReceipt.Status.POSTING_TO_SAP)
@@ -1023,15 +1061,17 @@ class RecoveryKeepsHistoryTests(_SapStubbed):
             amount=Decimal('100.00'))
         flow = workflow_flow.start(receipt, user=self.creator)
 
-        # Approve WITHOUT running the callback — the lost-on_commit case this
-        # sweep exists for — then age it past the threshold.
-        with self.captureOnCommitCallbacks(execute=False):
-            workflow_flow.approve(flow, user=self.final)
+        # Approve WITHOUT settling — the interrupted-post case this sweep
+        # exists for — then age it past the threshold.
+        workflow_flow.approve(flow, user=self.final)
         PaymentReceipt.objects.filter(pk=receipt.pk).update(
             updated_at=timezone.now() - timedelta(hours=2))
 
-        self.assertEqual([r.pk for r in find_stranded(PaymentReceipt)],
-                         [receipt.pk])
+        # Membership, not equality. These run against the SHARED TEST
+        # database, where a genuinely stranded document raised by somebody
+        # using the app is visible too — RCP-OIL-20260919-000003 is one. What
+        # else the sweep finds is not this test's business.
+        self.assertIn(receipt.pk, [r.pk for r in find_stranded(PaymentReceipt)])
         before = list(history_of(receipt).order_by('id').values_list('id', flat=True))
 
         self._sap(SAP_OK)

@@ -686,3 +686,71 @@ def fetch_payment_trans_id(*, company, doc_entry):
         logger.warning('Could not read TransId for DocEntry %s in %s: %s',
                        doc_entry, company, error)
     return None
+
+
+def payment_by_reference_sql(schema):
+    """Find an Incoming Payment by the OMS reference inside its Comments.
+
+    SAP holds no OMS id in any structured field — ORCT has no user-defined
+    columns for it (see `sap_payloads.build_incoming_payment`) — so Comments is
+    the only link, and `sap_payloads.with_reference` guarantees the document
+    number is always in it.
+
+    `LIKE` over a 254-character column with no index on it is an acceptable
+    cost here: this runs only when a posting was interrupted and OMS has to
+    find out whether SAP took the document, which is rare and never in a hot
+    path. Being correct matters; being fast does not.
+
+    Cancelled documents are RETURNED, not filtered out. "SAP has a document for
+    this reference" is the question; a cancelled one still means the reference
+    was used, and re-posting over it is a decision for a person rather than
+    something to do silently.
+    """
+    return f'''
+        SELECT
+            T0."DocEntry"  AS "doc_entry",
+            T0."DocNum"    AS "doc_num",
+            T0."TransId"   AS "trans_id",
+            T0."Canceled"  AS "canceled",
+            T0."DocTotal"  AS "doc_total",
+            T0."Comments"  AS "comments"
+        FROM "{schema}"."ORCT" AS T0
+        WHERE T0."Comments" LIKE ?
+        ORDER BY T0."DocEntry"
+    '''
+
+
+def fetch_payment_by_reference(*, company, reference):
+    """Every Incoming Payment in SAP whose Comments name this OMS document.
+
+    THE IDEMPOTENCY KEY. When a posting was interrupted — the worker died
+    mid-call, or SAP never answered — OMS cannot know whether the document
+    exists there. Posting again risks a DUPLICATE customer payment, which is
+    the worst outcome in this module; never posting leaves the document stuck
+    for ever. This answers the question instead of guessing.
+
+    Returns a list of dicts (usually empty or one). A list rather than a single
+    row because finding TWO is itself the news: it means a duplicate already
+    happened and a person has to look.
+
+    RAISES on failure — deliberately, unlike `fetch_payment_cancellation`,
+    which returns None so reconciliation can skip a document quietly. Here a
+    silent None would be read as "SAP does not have it", and the caller would
+    post a second payment on the strength of a failed query. An unreachable
+    SAP must stop the retry, not license it.
+    """
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(payment_by_reference_sql(schema),
+                            [f'%{reference}%'])
+    found = []
+    for row in rows or []:
+        found.append({
+            'doc_entry': row.get('doc_entry'),
+            'doc_num': row.get('doc_num'),
+            'trans_id': row.get('trans_id'),
+            'canceled': str(row.get('canceled') or '').strip().upper() == 'Y',
+            'doc_total': row.get('doc_total'),
+            'comments': row.get('comments') or '',
+        })
+    return found

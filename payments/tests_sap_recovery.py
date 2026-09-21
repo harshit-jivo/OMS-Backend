@@ -81,13 +81,24 @@ class FindStrandedTests(TestCase):
             content_type=self.ct, object_id=receipt.pk, company_db='DB',
             endpoint='/IncomingPayments', status=status)
 
+    def _sweeps(self, receipt, **kwargs):
+        """Does the sweep pick up THIS receipt?
+
+        Membership, never list equality. These run against the SHARED TEST
+        database, where a genuinely stranded document raised by somebody using
+        the app is visible too — RCP-OIL-20260919-000003 is one, and it made
+        every exact-list assertion in this class fail. What else the sweep
+        finds is not what any of these tests is about.
+        """
+        return receipt.pk in [r.pk for r in find_stranded(PaymentReceipt,
+                                                          **kwargs)]
+
     # -- the case this exists for ------------------------------------------
 
     def test_finds_a_receipt_owed_a_sap_post_that_never_happened(self):
         receipt = self._receipt('RC-REC-0001')
         self._flow(receipt)
-        self.assertEqual(
-            [r.pk for r in find_stranded(PaymentReceipt)], [receipt.pk])
+        self.assertTrue(self._sweeps(receipt))
 
     def test_the_flow_state_is_not_what_decides_it(self):
         """The document's own status is the marker, not the flow's.
@@ -99,8 +110,7 @@ class FindStrandedTests(TestCase):
         receipt = self._receipt('RC-REC-0001B')
         flow = self._flow(receipt)
         self.assertEqual(flow.status, FlowStatus.PENDING)
-        self.assertEqual(
-            [r.pk for r in find_stranded(PaymentReceipt)], [receipt.pk])
+        self.assertTrue(self._sweeps(receipt))
 
     # -- everything that must NOT be swept ---------------------------------
 
@@ -113,57 +123,56 @@ class FindStrandedTests(TestCase):
         """
         receipt = self._receipt('RC-REC-0009', age=timedelta(seconds=5))
         self._flow(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     def test_ignores_a_receipt_with_a_sap_call_log(self):
         """The decisive guard: a log row proves a call was made."""
         receipt = self._receipt('RC-REC-0002')
         self._flow(receipt)
         self._call_log(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     def test_ignores_a_receipt_still_awaiting_approval(self):
         """No final approval was given, so no post is owed."""
         receipt = self._receipt('RC-REC-0003',
                                 status=PaymentReceipt.Status.PENDING_APPROVAL)
         self._flow(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     def test_ignores_a_posted_receipt(self):
         receipt = self._receipt('RC-REC-0005',
                                 status=PaymentReceipt.Status.POSTED,
                                 doc_entry=999)
         self._flow(receipt, status=FlowStatus.APPROVED, at_final=False)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     def test_ignores_a_receipt_with_a_doc_entry(self):
         """Belt and braces: a DocEntry means SAP has it, whatever the status."""
         receipt = self._receipt('RC-REC-0006', doc_entry=12345)
         self._flow(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     def test_ignores_a_sap_unknown_receipt(self):
         """The dangerous one: SAP may hold it, so it must never be reposted."""
         receipt = self._receipt('RC-REC-0007',
                                 status=PaymentReceipt.Status.SAP_UNKNOWN)
         self._flow(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     def test_ignores_a_pending_error_receipt(self):
         """SAP said no. That document is with its approver, not with us."""
         receipt = self._receipt('RC-REC-0008',
                                 status=PaymentReceipt.Status.PENDING_ERROR)
         self._flow(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt), [])
+        self.assertFalse(self._sweeps(receipt))
 
     # -- filters ------------------------------------------------------------
 
     def test_company_filter(self):
         receipt = self._receipt('RC-REC-0010')
         self._flow(receipt)
-        self.assertEqual(find_stranded(PaymentReceipt, company='OIL'),
-                         [receipt])
-        self.assertEqual(find_stranded(PaymentReceipt, company='MART'), [])
+        self.assertTrue(self._sweeps(receipt, company='OIL'))
+        self.assertFalse(self._sweeps(receipt, company='MART'))
 
     def test_min_age_is_configurable(self):
         receipt = self._receipt('RC-REC-0011', age=timedelta(minutes=2))

@@ -181,8 +181,10 @@ class RetryFlagTests(_Base):
                 mock.side_effect = sap
             else:
                 mock.return_value = sap
-            with self.captureOnCommitCallbacks(execute=True):
-                workflow_flow.approve(flow, user=self.final)
+            flow_ = flow
+            workflow_flow.approve(flow, user=self.final)
+            workflow_flow.settle_after_approval(
+                workflow_flow.document_of(flow_), user=self.final)
         receipt.refresh_from_db()
         return receipt
 
@@ -202,14 +204,27 @@ class RetryFlagTests(_Base):
         self.assertTrue(perms['can_decide'])
         self.assertTrue(perms['can_retry_sap'])
 
-    def test_a_timed_out_posting_offers_NO_retry(self):
-        """THE DANGEROUS ONE. SAP may hold the document already."""
+    def test_a_timed_out_posting_OFFERS_a_verified_retry(self):
+        """THE DANGEROUS ONE — and it is now offered, safely.
+
+        SAP may hold the document, so this used to offer nothing at all. That
+        removed the duplicate risk by removing every way forward: a timed-out
+        receipt had no approve, no reject and no retry, which is a permanently
+        stuck document.
+
+        The retry is offered now because it is no longer blind.
+        `sap_settlement.settle` looks the document up in ORCT by the
+        `OMS <receipt_no>` reference every payload carries, and either ADOPTS
+        what SAP already has or posts knowing it is absent. If SAP cannot be
+        reached the lookup raises and nothing is posted — the retry simply
+        stays available.
+        """
         receipt = self._final_approve(SAP_SILENT)
         self.assertEqual(receipt.status, PaymentReceipt.Status.SAP_UNKNOWN)
 
         perms = self._detail(receipt, self.final)['permissions']
-        self.assertFalse(perms['can_decide'])
-        self.assertFalse(perms['can_retry_sap'])
+        self.assertTrue(perms['can_decide'])
+        self.assertTrue(perms['can_retry_sap'])
 
     def test_a_posted_document_offers_no_retry(self):
         receipt = self._final_approve(SAP_OK)

@@ -311,9 +311,11 @@ class LifecycleSequenceTests(TestCase):
             # The SAP call is deferred to transaction.on_commit so a 5-second
             # posting does not hold the approval's row locks. A TestCase rolls
             # back and never commits, so the callbacks must be run explicitly.
-            with self.captureOnCommitCallbacks(execute=True):
-                workflow_flow.approve(receipt.flow, user=self.approver,
+            flow_ = receipt.flow
+            workflow_flow.approve(receipt.flow, user=self.approver,
                                       remarks='ok')
+            workflow_flow.settle_after_approval(
+                workflow_flow.document_of(flow_), user=self.approver)
 
         self.assertEqual(self._actions(receipt), [
             Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
@@ -346,9 +348,11 @@ class LifecycleSequenceTests(TestCase):
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.side_effect = SapError('Posting period locked',
                                         status_code=400, sap_code='-4013')
-            with self.captureOnCommitCallbacks(execute=True):
-                workflow_flow.approve(receipt.flow, user=self.approver,
+            flow_ = receipt.flow
+            workflow_flow.approve(receipt.flow, user=self.approver,
                                       remarks='ok')
+            workflow_flow.settle_after_approval(
+                workflow_flow.document_of(flow_), user=self.approver)
 
         self.assertEqual(self._actions(receipt), [
             Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
@@ -381,9 +385,11 @@ class LifecycleSequenceTests(TestCase):
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.side_effect = SapError('Posting period locked',
                                         status_code=400, sap_code='-4013')
-            with self.captureOnCommitCallbacks(execute=True):
-                workflow_flow.approve(receipt.flow, user=self.approver,
+            flow_ = receipt.flow
+            workflow_flow.approve(receipt.flow, user=self.approver,
                                       remarks='first')
+            workflow_flow.settle_after_approval(
+                workflow_flow.document_of(flow_), user=self.approver)
 
         # The flow stayed at its FINAL STAGE, so the approver retries straight
         # from their own queue. The earlier APPROVED row is kept and the second
@@ -392,9 +398,11 @@ class LifecycleSequenceTests(TestCase):
         receipt.refresh_from_db()
         with patch('payments.sap_poster.sap_post_payment') as post:
             post.return_value = {'DocEntry': 21971, 'DocNum': 826246664}
-            with self.captureOnCommitCallbacks(execute=True):
-                workflow_flow.approve(receipt.flow, user=self.approver,
+            flow_ = receipt.flow
+            workflow_flow.approve(receipt.flow, user=self.approver,
                                       remarks='retry')
+            workflow_flow.settle_after_approval(
+                workflow_flow.document_of(flow_), user=self.approver)
 
         self.assertEqual(self._actions(receipt), [
             Action.CREATED.value, Action.VERIFIED.value, Action.PENDING_APPROVAL.value,
