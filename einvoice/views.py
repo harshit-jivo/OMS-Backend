@@ -425,9 +425,15 @@ def cancel_irn(request):
     return Response(resp)
 
 
-#: NIC's "no such IRN for this seller" code. Not a failure — just the wrong
-#: identity to have asked, so a multi-GSTIN search treats it as "keep looking".
-_NOT_FOUND_CODES = {"2154"}
+#: Codes that mean "this identity cannot answer" rather than "the lookup is
+#: broken", so the search moves to the next GSTIN instead of giving up.
+#:
+#:   2154  no such IRN for THIS seller — the whole point of searching onward
+#:   1017  incorrect user id / user does not exist — a GSTIN listed in
+#:         EINV_CREDENTIALS with no usable NIC login. Expected: not every
+#:         registration Jivo bills under has API credentials provisioned, and
+#:         one that does not must not block the ones that do.
+_SKIP_CODES = {"2154", "1017"}
 
 
 def _candidate_gstins(preferred=None):
@@ -452,34 +458,48 @@ def _candidate_gstins(preferred=None):
 def _lookup_across_gstins(call, *args, preferred=None):
     """Run a NIC lookup against each configured seller GSTIN until one answers.
 
-    Returns the first real hit, tagged with the GSTIN that produced it. Only
-    "not found" moves on to the next identity — an auth or transport failure is
-    returned as-is, because retrying it under another GSTIN would just bury the
-    real problem behind a misleading 2154.
+    Returns the first real hit, tagged with the GSTIN that produced it.
+
+    A per-identity failure (unknown IRN, or a GSTIN with no working NIC login)
+    only disqualifies that identity — it must not end the search, or a single
+    unprovisioned registration makes every lookup fail. Anything else is
+    systemic and is returned straight away rather than repeated once per GSTIN.
+
+    When nothing is found, the response says what each identity answered, so
+    "genuinely not registered" is distinguishable from "we never got to ask".
     """
-    tried, last = [], None
+    attempts, systemic = [], None
     for gstin in _candidate_gstins(preferred):
-        client = EInvoiceClient(gstin=gstin)
         try:
-            data = getattr(client, call)(*args)
+            data = getattr(EInvoiceClient(gstin=gstin), call)(*args)
         except EInvoiceError as exc:
+            details = normalize_error_details(getattr(exc, "error_details", None)) or []
             codes = {str((d or {}).get("code") or (d or {}).get("ErrorCode") or "")
-                     for d in (normalize_error_details(getattr(exc, "error_details", None)) or [])
-                     if isinstance(d, dict)}
-            tried.append(gstin)
-            last = exc
-            if codes & _NOT_FOUND_CODES:
-                continue                       # wrong seller — try the next
-            return Response(build_error_response(exc), status=exc.status_code or 502)
+                     for d in details if isinstance(d, dict)}
+            msg = '; '.join(filter(None, (str((d or {}).get("message") or "")
+                                          for d in details if isinstance(d, dict)))) or str(exc)
+            attempts.append({"gstin": gstin, "codes": sorted(c for c in codes if c),
+                             "message": msg})
+            if codes & _SKIP_CODES:
+                continue                       # this identity cannot answer
+            systemic = exc
+            break                              # e.g. NIC down — asking again won't help
         except FileNotFoundError:
             return Response(_KEY_MISSING, status=500)
         if isinstance(data, dict):
             data = {**data, "_gstin": gstin}
         return Response(data)
 
-    body = build_error_response(last) if last else {"error": "No GSTIN configured."}
-    body["searched_gstins"] = tried
-    return Response(body, status=(last.status_code if last else 502) or 502)
+    if systemic is not None:
+        body = build_error_response(systemic)
+        body["attempts"] = attempts
+        return Response(body, status=systemic.status_code or 502)
+
+    return Response({
+        "error": "Not found under any configured seller GSTIN.",
+        "errors": [],
+        "attempts": attempts,
+    }, status=404 if attempts else 502)
 
 
 @api_view(["GET"])
