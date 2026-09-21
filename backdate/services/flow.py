@@ -38,6 +38,7 @@ configuration. That is the engine's normal path and needs no special support.
 import logging
 
 from django.db import transaction
+from django.utils import timezone
 from django.db.models import Q
 
 from workflow.exceptions import WorkflowError
@@ -167,6 +168,33 @@ def _guard(flow):
         raise BackDateError('This request is not waiting at any stage.')
 
 
+def _guard_not_expired(flow):
+    """An EXPIRED request must not be approved. Refuse, and say what to do.
+
+    `time_limit` is when the SAP rights stop. The serializer already refuses to
+    SAVE one in the past, but nothing stopped a request sitting in a queue
+    until its own expiry went by and then being approved: `OPEN_BKDT` would be
+    called with an expiry that has already passed, granting rights that are
+    over before they begin. Nobody would see a failure — SAP accepts it — and
+    the requester would simply find they still cannot post.
+
+    Refused rather than silently extended. The expiry is what the approver is
+    agreeing to, and moving it for them would approve something they were never
+    shown. The fix is an EDIT, which they are allowed to make on the request
+    they are holding, and the message says so.
+
+    Only on approval. A rejection of an expired request is perfectly sensible
+    and must stay possible.
+    """
+    backdate = flow.backdate
+    if backdate.time_limit and backdate.time_limit < timezone.now():
+        raise BackDateError(
+            f'These rights expired on '
+            f'{timezone.localtime(backdate.time_limit):%d %b %Y %H:%M} and '
+            f'cannot be approved as they stand. Edit the request to set a new '
+            f'expiry, then approve it.')
+
+
 @transaction.atomic
 def approve(flow, *, user, remarks=''):
     """Approve the current stage. Advances, or completes the flow.
@@ -194,6 +222,9 @@ def approve(flow, *, user, remarks=''):
     """
     flow = _locked(flow)
     _guard(flow)
+    # Before anything is written or sent: an expired grant is worthless, and
+    # approving one looks like success to everybody involved.
+    _guard_not_expired(flow)
 
     decided_stage_id = flow.current_stage_id
 
@@ -240,6 +271,9 @@ def reject(flow, *, user, remarks):
 
     flow = _locked(flow)
     _guard(flow)
+    # NO expiry guard here. Rejecting an expired request is exactly what an
+    # approver should be able to do — refusing it would strand the request
+    # with no way out at all.
 
     decided_stage_id = flow.current_stage_id
     log(flow.backdate, action=LogAction.REJECT, user=user,

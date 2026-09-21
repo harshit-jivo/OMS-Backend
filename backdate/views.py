@@ -115,10 +115,25 @@ def _ctx(request):
 # ---------------------------------------------------------------------------
 
 class SapUserListView(APIView):
-    """SAP logins for one company, for the request form's picker."""
+    """SAP logins for one company, for the request form's picker.
+
+    EITHER KEY OPENS THIS, and the reason is the edit form. An approver holds
+    `BackDate_Approval` and usually NOT `BackDate` — they never raise a request
+    of their own — but they ARE allowed to edit the one they are holding, which
+    is how a request SAP refused gets corrected and approved.
+
+    Gated on the requester key alone, both master endpoints answered 403 for
+    exactly those users, every time. The form read that as "SAP's lists are
+    unavailable" and fell back to free text, so the person most likely to be
+    fixing a wrong SAP user was the one person who had to TYPE it — the failure
+    mode the picker exists to prevent.
+
+    `CanReadRequests` is the same either-key rule the detail and history views
+    already use: seeing what SAP offers is reading, not raising.
+    """
 
     def get_permissions(self):
-        return [IsAuthenticated(), HasKey(bkdt_perms.REQUEST_KEY)]
+        return [IsAuthenticated(), bkdt_perms.CanReadRequests()]
 
     def get(self, request):
         company = (request.query_params.get('company') or '').strip().upper()
@@ -129,10 +144,10 @@ class SapUserListView(APIView):
 
 
 class DocumentTypeListView(APIView):
-    """SAP object types for one company."""
+    """SAP object types for one company. Either key — see `SapUserListView`."""
 
     def get_permissions(self):
-        return [IsAuthenticated(), HasKey(bkdt_perms.REQUEST_KEY)]
+        return [IsAuthenticated(), bkdt_perms.CanReadRequests()]
 
     def get(self, request):
         company = (request.query_params.get('company') or '').strip().upper()
