@@ -26,8 +26,12 @@ Two rules follow, and they are the whole convention:
 Builders that take a value return `(sql, params)`; `execute` accepts that pair
 directly, so callers in `services.py` are unchanged.
 """
+import logging
+
 from hdbcli import dbapi
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 class HanaSchemaError(ValueError):
@@ -56,11 +60,28 @@ class HANAConnection:
                 password=cfg['PASSWORD'],
             )
             self.cursor =  self.connection.cursor()
-            print("Connected to HANA successfully")
+            # NEVER print() here. Under nssm this process has a stdout pipe
+            # that nothing reads (AppStdout is unset), so a write to it raises
+            # OSError [WinError 233] "No process is on the other end of the
+            # pipe". That is not hypothetical: these two lines used to be
+            # print() calls, and they broke EVERY HANA-backed feature in the
+            # deployed service while working perfectly in a dev terminal,
+            # which has a real console attached.
+            #
+            # Worse, the print in the except branch raised the same OSError
+            # while handling the first one, which discarded the ConnectionError
+            # below and let a bare OSError escape — so the logged cause read
+            # "No process is on the other end of the pipe" and pointed
+            # investigation at SAP, which was healthy the whole time.
+            logger.debug('Connected to HANA at %s:%s', cfg['HOST'], cfg['PORT'])
             return True
               
         except Exception as e:
-            print(e)
+            # No password in this message: cfg['PASSWORD'] is deliberately not
+            # interpolated.
+            logger.warning('HANA connect failed for %s@%s:%s: %s',
+                           cfg.get('USER'), cfg.get('HOST'), cfg.get('PORT'), e,
+                           exc_info=True)
             raise ConnectionError(f"SAP connection failed: {str(e)}")
         
     def disconnect(self):

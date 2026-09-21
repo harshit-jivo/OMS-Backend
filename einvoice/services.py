@@ -194,11 +194,17 @@ def generate_and_store(invoice: dict, *, order_id=None, source=None):
     return record, result
 
 
-def cancel_and_store(irn: str, reason_code, remarks: str):
-    """Cancel an IRN at NIC and update the stored record. Returns (record, result)."""
+def cancel_and_store(irn: str, reason_code, remarks: str, *, gstin=None):
+    """Cancel an IRN at NIC and update the stored record. Returns (record, result).
+
+    `gstin` overrides the identity to cancel as. It matters for an IRN OMS did
+    not generate: there is no local record to read the seller from, so without
+    it the call goes out as the default GSTIN and NIC refuses — which is every
+    Jivo Mart IRN, Mart being a different PAN with its own credentials.
+    """
     # Cancel must be authenticated as the GSTIN that owns the IRN (multi-GSTIN PAN).
     record = IrnRecord.objects.filter(irn=irn).first()
-    seller_gstin = record.supplier_gstin if record else None
+    seller_gstin = gstin or (record.supplier_gstin if record else None)
     result = EInvoiceClient(gstin=seller_gstin).cancel_irn(irn, reason_code, remarks)  # raises on failure
     try:
         if record:
@@ -649,6 +655,35 @@ def _save_png_smb(directory: str, name: str, png: bytes, username: str, password
     return path
 
 
+def describe_nic_error(exc) -> str:
+    """An EInvoiceError rendered with NIC's own codes, for the failure log.
+
+    `str(exc)` is only the generic banner the client raises with — "IRN
+    generation failed" — while the thing you actually need, NIC's
+    [{ErrorCode, ErrorMessage}] list, sits on `exc.error_details` and was being
+    dropped. Every rejection therefore landed in OMS_IRN_LOG."U_UTL_RMK" as the
+    same unusable string, and diagnosing one meant rebuilding the payload by
+    hand to guess what NIC had objected to.
+
+    Returns e.g.
+        IRN generation failed | 2265: Item level assessable amount does not match
+    """
+    base = str(exc) or exc.__class__.__name__
+    details = normalize_error_details(getattr(exc, 'error_details', None))
+    parts = []
+    if isinstance(details, list):
+        for d in details:
+            if isinstance(d, dict):
+                code = str(d.get('code') or d.get('ErrorCode') or '').strip()
+                msg = str(d.get('message') or d.get('ErrorMessage') or '').strip()
+                parts.append(f'{code}: {msg}' if code else msg)
+            elif d:
+                parts.append(str(d))
+    elif details:
+        parts.append(str(details))
+    return f'{base} | ' + ' ; '.join(p for p in parts if p) if parts else base
+
+
 def log_failure_to_hana(*, docentry, invoice, error, company_db=None):
     """Write an 'F' row into OMS_IRN_LOG for a failed manual/interactive attempt
     (the auto path writes its own via auto_generate_irn). Gated + best-effort."""
@@ -699,6 +734,41 @@ def _duplicate_irn(invoice, exc):
         logger.warning("Could not look up existing IRN for duplicate doc %s",
                        (invoice.get("DocDtls") or {}).get("No"))
     return None
+
+
+def log_generation_attempt(*, docentry, company_db, outcome, trigger="manual",
+                           doc_no=None, irn=None, ack_no=None, irn_record=None,
+                           error_code=None, error_message=None, validation_errors=None,
+                           duration_ms=None):
+    """Record one attempt in IrnGenerationLog. Best-effort; never raises.
+
+    `auto_generate_irn` has always written this table, but the interactive path
+    (`irn_from_invoice`, which is what the UI's generate button calls) went
+    straight to `generate_and_store` and wrote nothing. The Logs tab was
+    therefore a record of automatic attempts only — and since most Beverage and
+    Mart IRNs are raised by hand, it looked like the tab only covered OIL.
+    """
+    try:
+        attempt_no = IrnGenerationLog.objects.filter(docentry=int(docentry)).count() + 1
+        return IrnGenerationLog.objects.create(
+            docentry=int(docentry),
+            company_db=company_db or getattr(settings, "HANA_OIL_COMPANY_DB", ""),
+            environment=current_environment(),
+            trigger=trigger,
+            attempt_no=attempt_no,
+            outcome=outcome,
+            doc_no=doc_no,
+            irn=irn,
+            ack_no=ack_no,
+            irn_record=irn_record,
+            error_code=error_code,
+            error_message=error_message,
+            validation_errors=validation_errors,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001 — logging must never break generation
+        logger.exception("Failed to write IrnGenerationLog for DocEntry %s", docentry)
+        return None
 
 
 def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=None):
