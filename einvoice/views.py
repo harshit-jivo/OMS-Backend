@@ -178,11 +178,11 @@ def irn_from_invoice(request, docentry):
     try:
         docentry, company_db = sap.resolve_invoice_ref(docentry, id_type, company_db)
         session = sap.get_session(company_db)
-        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db, session=session)
+        sap_invoice, hsn_map, sac_map = sap.fetch_invoice_for_irn(docentry, company_db, session=session)
     except sap.SapFetchError as exc:
         return Response({"error": str(exc)}, status=502)
 
-    invoice = mapping.build_irn(sap_invoice, hsn_map)
+    invoice = mapping.build_irn(sap_invoice, hsn_map, sac_map)
     errs = validation.validate_invoice(invoice)
 
     if request.method == "GET":

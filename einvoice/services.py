@@ -218,6 +218,16 @@ def cancel_and_store(irn: str, reason_code, remarks: str):
             oms_irn_log.mark_cancelled(irn)
         except Exception:
             logger.exception("OMS_IRN_LOG cancel-stamp failed for IRN %s", irn)
+
+    # The mirrored UDO row has to be stamped too, or the SAP-side bill keeps
+    # printing a cancelled IRN. Needs UPDATE on the schema — Beverages has not
+    # been granted it, so there this is a no-op until it is.
+    if getattr(settings, "EINV_MIRROR_UDO", False):
+        try:
+            from . import sap_udo
+            sap_udo.mark_cancelled(irn)
+        except Exception:
+            logger.exception("UDO mirror cancel-stamp failed for IRN %s", irn)
     return record, result
 
 
@@ -365,6 +375,19 @@ def qr_dir_for_company(company_db=None) -> str:
             or getattr(settings, "EINV_QR_SAVE_DIR", "") or "")
 
 
+def oms_qr_dir_for_company(company_db=None) -> str:
+    """The OMS attachment folder for this company — the SECOND place the QR PNG
+    is written, alongside the SAP Bitmaps folder `qr_dir_for_company` returns.
+
+    Separate setting because the two roots serve different readers: Crystal opens
+    the SAP path recorded in U_UTL_QRPT, while this copy is OMS's own retained
+    attachment. Blank (the default) disables the second write.
+    """
+    per_company = getattr(settings, "EINV_OMS_QR_SAVE_DIRS", None) or {}
+    default_db = getattr(settings, "HANA_OIL_COMPANY_DB", "")
+    return per_company.get(company_db or default_db) or ""
+
+
 def post_generate_hooks(record, result, *, company_db=None, docentry=None):
     """
     Best-effort side effects after a successful IRN generation, gated by settings:
@@ -373,24 +396,76 @@ def post_generate_hooks(record, result, *, company_db=None, docentry=None):
       - EINV_SAP_WRITEBACK -> write the IRN back onto the SAP invoice (e-Billing)
     Never raises; failures are logged so they can't break the IRN flow.
     """
-    # 1. QR PNG into the company's own folder. The path written here is what gets
-    #    stored in OMS_IRN_LOG.U_UTL_QRPT, so the report reads the same location.
-    qr_path = None
-    qr_dir = qr_dir_for_company(company_db)
-    if record is not None and qr_dir:
+    # 1. The QR PNG goes into TWO folders, and each table records the one its own
+    #    reader opens:
+    #
+    #      OMS_Attachments\<CO>_ATTACHMENTS\Bitmap  -> OMS_IRN_LOG.U_UTL_QRPT
+    #                                                  (the OMS bill print)
+    #      SAP Attachments\Jivo <Co>\Bitmaps        -> @UTL_MDEXTH.U_UTL_QRPT
+    #                                                  (the SAP Crystal layouts)
+    #
+    # 1a. OMS copy first, and it must not be skipped for any reason: without it
+    #     OMS cannot print the bill at all. A failure here is logged as an error,
+    #     not shrugged off.
+    oms_qr_path = None
+    oms_qr_dir = oms_qr_dir_for_company(company_db)
+    if record is not None and oms_qr_dir:
         try:
-            qr_path = save_qr_to_dir(record, qr_dir)
+            oms_qr_path = save_qr_to_dir(record, oms_qr_dir)
         except Exception:
-            logger.exception("QR file-save hook failed for doc %s (dir %s)",
-                             getattr(record, "doc_no", None), qr_dir)
+            logger.exception("QR OMS-folder save FAILED for doc %s (dir %s) - the OMS "
+                             "bill print will show no QR until repair_qr_files runs",
+                             getattr(record, "doc_no", None), oms_qr_dir)
+
+    # 1b. SAP copy, with a duplicate check: the add-on may already have written
+    #     this exact file (the name is the IRN, so a match really is the same
+    #     image). Skipping it avoids rewriting a file another process may be
+    #     reading mid-render.
+    sap_qr_path = None
+    sap_qr_dir = qr_dir_for_company(company_db)
+    if record is not None and sap_qr_dir and sap_qr_dir != oms_qr_dir:
+        try:
+            name = qr_file_name(doc_no=record.doc_no, irn=record.irn,
+                                ack_no=record.ack_no, environment=record.environment)
+            if qr_file_exists(sap_qr_dir, name):
+                import ntpath
+                sap_qr_path = ntpath.join(sap_qr_dir, name)
+                logger.info("QR already present in the SAP folder for doc %s (%s)",
+                            record.doc_no, name)
+            else:
+                sap_qr_path = save_qr_to_dir(record, sap_qr_dir)
+        except Exception:
+            logger.exception("QR SAP-folder save failed for doc %s (dir %s)",
+                             getattr(record, "doc_no", None), sap_qr_dir)
+
+    # What each table stores. Fall back to the other folder's path rather than
+    # record nothing — a QR in the wrong folder still prints; a NULL never does.
+    qr_path = oms_qr_path or sap_qr_path
 
     # 2. Row into HANA OMS_IRN_LOG (mirrors the SAP add-on's @UTL_MDEXTH shape).
+    #    This one comes FIRST and is the one that matters: OMS's own bill print
+    #    reads it, so an invoice without this row cannot be printed from OMS.
     if record is not None and getattr(settings, "EINV_MIRROR_HANA", False):
         try:
             from . import oms_irn_log
             oms_irn_log.write_success(record, docentry=docentry, qr_path=qr_path, schema=company_db)
         except Exception:
             logger.exception("OMS_IRN_LOG hook failed for doc %s", getattr(record, "doc_no", None))
+
+    # 2b. Same row into the SAP add-on's UDO table @UTL_MDEXTH, which is what the
+    #     SAP-side Crystal layouts read — they do not look at OMS_IRN_LOG at all.
+    #     Deliberately after the write above: this one may legitimately do
+    #     nothing (the add-on may already have IRN'd the invoice) and must never
+    #     put the OMS_IRN_LOG row at risk.
+    #     It records the SAP-folder path, not the OMS one: Crystal opens whatever
+    #     is in this row's U_UTL_QRPT, and it reads the SAP Bitmaps share.
+    if record is not None and getattr(settings, "EINV_MIRROR_UDO", False):
+        try:
+            from . import sap_udo
+            sap_udo.write_success(record, docentry=docentry,
+                                  qr_path=(sap_qr_path or qr_path), schema=company_db)
+        except Exception:
+            logger.exception("UDO mirror hook failed for doc %s", getattr(record, "doc_no", None))
 
     if docentry is not None and getattr(settings, "EINV_SAP_WRITEBACK", False) and result.get("Irn"):
         try:
@@ -487,6 +562,65 @@ def smb_username_for(server: str, username: str) -> str:
     if not username or "\\" in username or "@" in username:
         return username
     return f"{server}\\{username}"
+
+
+def qr_file_exists(directory: str, name: str) -> bool:
+    """Is `name` already in `directory`? Used as the duplicate check on the SAP
+    copy, per IRN.
+
+    A single stat, not a directory listing — the SAP Bitmaps folders hold ~19k
+    files in Oil alone, and listing them on every generation would cost far more
+    than the write it is trying to avoid. (`qr_dir_listing` is the bulk
+    equivalent, for the repair command.)
+
+    Returns False when the share cannot be reached, so a network problem makes us
+    attempt the write and log a real failure rather than silently skip it.
+    """
+    import ntpath
+    import os
+
+    smb_user = (getattr(settings, "EINV_QR_SMB_USERNAME", "") or "").strip()
+    is_unc = directory.replace("/", "\\").startswith("\\\\")
+    try:
+        if smb_user and is_unc:
+            import smbclient
+            server = directory.strip("\\/").replace("/", "\\").split("\\")[0]
+            smbclient.register_session(
+                server, username=smb_username_for(server, smb_user),
+                password=(getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "").strip())
+            return smbclient.path.exists(ntpath.join(directory, name))
+        return os.path.exists(os.path.join(directory, name))
+    except Exception:  # noqa: BLE001
+        logger.debug("QR existence check failed for %s in %s", name, directory, exc_info=True)
+        return False
+
+
+def qr_dir_listing(directory: str) -> set:
+    """Filenames already present in `directory`, lower-cased. Empty set if the
+    folder cannot be read.
+
+    This is the duplicate check for `repair_qr_files`: one listing per company
+    beats a stat call per row (Oil alone has ~19k), and it answers the only
+    question that matters — is the PNG the stored path points at actually there?
+    Goes through SMB with explicit credentials on a UNC path, exactly as
+    `save_signed_qr` does, so it sees the share the same way the writer will.
+    """
+    import os
+
+    smb_user = (getattr(settings, "EINV_QR_SMB_USERNAME", "") or "").strip()
+    is_unc = directory.replace("/", "\\").startswith("\\\\")
+    try:
+        if smb_user and is_unc:
+            import smbclient
+            server = directory.strip("\\/").replace("/", "\\").split("\\")[0]
+            smbclient.register_session(
+                server, username=smb_username_for(server, smb_user),
+                password=(getattr(settings, "EINV_QR_SMB_PASSWORD", "") or "").strip())
+            return {n.lower() for n in smbclient.listdir(directory)}
+        return {n.lower() for n in os.listdir(directory)}
+    except Exception:  # noqa: BLE001 — an unreadable share is reported by the caller
+        logger.exception("Could not list QR folder %s", directory)
+        return set()
 
 
 def _save_png_smb(directory: str, name: str, png: bytes, username: str, password: str) -> str:
@@ -609,8 +743,8 @@ def auto_generate_irn(docentry, *, company_db=None, trigger="manual", order_id=N
 
     # 1. fetch + map
     try:
-        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
-        invoice = mapping.build_irn(sap_invoice, hsn_map)
+        sap_invoice, hsn_map, sac_map = sap.fetch_invoice_for_irn(docentry, company_db)
+        invoice = mapping.build_irn(sap_invoice, hsn_map, sac_map)
     except Exception as exc:  # noqa: BLE001 — SAP fetch / mapping failure
         logger.exception("auto IRN: fetch/map failed for DocEntry %s", docentry)
         return _log("FAILED", error_code="FETCH", error_message=str(exc))
