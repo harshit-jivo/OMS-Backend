@@ -649,6 +649,35 @@ def _save_png_smb(directory: str, name: str, png: bytes, username: str, password
     return path
 
 
+def describe_nic_error(exc) -> str:
+    """An EInvoiceError rendered with NIC's own codes, for the failure log.
+
+    `str(exc)` is only the generic banner the client raises with — "IRN
+    generation failed" — while the thing you actually need, NIC's
+    [{ErrorCode, ErrorMessage}] list, sits on `exc.error_details` and was being
+    dropped. Every rejection therefore landed in OMS_IRN_LOG."U_UTL_RMK" as the
+    same unusable string, and diagnosing one meant rebuilding the payload by
+    hand to guess what NIC had objected to.
+
+    Returns e.g.
+        IRN generation failed | 2265: Item level assessable amount does not match
+    """
+    base = str(exc) or exc.__class__.__name__
+    details = normalize_error_details(getattr(exc, 'error_details', None))
+    parts = []
+    if isinstance(details, list):
+        for d in details:
+            if isinstance(d, dict):
+                code = str(d.get('code') or d.get('ErrorCode') or '').strip()
+                msg = str(d.get('message') or d.get('ErrorMessage') or '').strip()
+                parts.append(f'{code}: {msg}' if code else msg)
+            elif d:
+                parts.append(str(d))
+    elif details:
+        parts.append(str(details))
+    return f'{base} | ' + ' ; '.join(p for p in parts if p) if parts else base
+
+
 def log_failure_to_hana(*, docentry, invoice, error, company_db=None):
     """Write an 'F' row into OMS_IRN_LOG for a failed manual/interactive attempt
     (the auto path writes its own via auto_generate_irn). Gated + best-effort."""
