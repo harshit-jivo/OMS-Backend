@@ -19,7 +19,7 @@ from rest_framework.response import Response
 from . import mapping, qr as qrgen, sap
 from . import services, validation
 from .client import EInvoiceClient, EInvoiceError
-from .errors import build_error_response
+from .errors import build_error_response, normalize_error_details
 from .models import IrnRecord, IrnGenerationLog
 from .sample import sample_invoice
 
@@ -425,22 +425,85 @@ def cancel_irn(request):
     return Response(resp)
 
 
+#: NIC's "no such IRN for this seller" code. Not a failure — just the wrong
+#: identity to have asked, so a multi-GSTIN search treats it as "keep looking".
+_NOT_FOUND_CODES = {"2154"}
+
+
+def _candidate_gstins(preferred=None):
+    """Seller GSTINs to try, best guess first.
+
+    A NIC lookup is scoped to the GSTIN you authenticate as, so asking as the
+    wrong one returns 2154 "IRN details are not found" even when the IRN
+    exists. Jivo issues under several GSTINs per company — Oil and Beverages
+    both bill from 06AACCJ4223F1Z0 *and* 07AACCJ4223F1ZY, Mart from its own
+    pair — so a single default identity is blind to most of them.
+    """
+    out = []
+    for g in (preferred, (settings.EINV or {}).get("GSTIN")):
+        if g and g not in out:
+            out.append(g)
+    for g in (getattr(settings, "EINV_CREDENTIALS", {}) or {}):
+        if g and g not in out:
+            out.append(g)
+    return out
+
+
+def _lookup_across_gstins(call, *args, preferred=None):
+    """Run a NIC lookup against each configured seller GSTIN until one answers.
+
+    Returns the first real hit, tagged with the GSTIN that produced it. Only
+    "not found" moves on to the next identity — an auth or transport failure is
+    returned as-is, because retrying it under another GSTIN would just bury the
+    real problem behind a misleading 2154.
+    """
+    tried, last = [], None
+    for gstin in _candidate_gstins(preferred):
+        client = EInvoiceClient(gstin=gstin)
+        try:
+            data = getattr(client, call)(*args)
+        except EInvoiceError as exc:
+            codes = {str((d or {}).get("code") or (d or {}).get("ErrorCode") or "")
+                     for d in (normalize_error_details(getattr(exc, "error_details", None)) or [])
+                     if isinstance(d, dict)}
+            tried.append(gstin)
+            last = exc
+            if codes & _NOT_FOUND_CODES:
+                continue                       # wrong seller — try the next
+            return Response(build_error_response(exc), status=exc.status_code or 502)
+        except FileNotFoundError:
+            return Response(_KEY_MISSING, status=500)
+        if isinstance(data, dict):
+            data = {**data, "_gstin": gstin}
+        return Response(data)
+
+    body = build_error_response(last) if last else {"error": "No GSTIN configured."}
+    body["searched_gstins"] = tried
+    return Response(body, status=(last.status_code if last else 502) or 502)
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_irn_details(request, irn):
-    """GET the details of a previously generated IRN."""
-    return _run(EInvoiceClient().get_irn_details, irn)
+    """GET the details of a previously generated IRN.
+
+    Optional ?gstin= to go straight to the issuing seller; otherwise every
+    configured GSTIN is tried (see _lookup_across_gstins).
+    """
+    return _lookup_across_gstins("get_irn_details", irn,
+                                 preferred=request.query_params.get("gstin"))
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_irn_by_doc(request):
-    """Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy"""
+    """Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy[&gstin=...]"""
     q = request.query_params
     missing = [k for k in ("doctype", "docnum", "docdate") if not q.get(k)]
     if missing:
         return Response({"error": f"Missing query params: {', '.join(missing)}"}, status=400)
-    return _run(EInvoiceClient().get_irn_by_doc, q["doctype"], q["docnum"], q["docdate"])
+    return _lookup_across_gstins("get_irn_by_doc", q["doctype"], q["docnum"], q["docdate"],
+                                 preferred=q.get("gstin"))
 
 
 @api_view(["GET"])
