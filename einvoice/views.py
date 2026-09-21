@@ -211,8 +211,11 @@ def irn_from_invoice(request, docentry):
             status=422,
         )
     except EInvoiceError as exc:
+        # describe_nic_error, not str(exc): the latter is only the generic
+        # banner, and NIC's actual error codes would be lost to the log.
         services.log_failure_to_hana(docentry=docentry, invoice=invoice,
-                                     error=str(exc), company_db=company_db)
+                                     error=services.describe_nic_error(exc),
+                                     company_db=company_db)
         resp = build_error_response(exc)
         resp["invoice"] = invoice
         return Response(resp, status=exc.status_code or 502)
