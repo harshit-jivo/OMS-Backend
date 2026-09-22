@@ -85,6 +85,8 @@ api_urlpatterns = [
     path('backdate/', include('backdate.urls')),
     # PRDO — Production Order approval (own `production` schema).
     path('production/', include('production.urls')),
+    # Advance Payment — SAP lookups only for now (no models, no migration).
+    path('advance-payments/', include('advance_payment.urls')),
 ]
 
 urlpatterns = [
