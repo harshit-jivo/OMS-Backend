@@ -138,6 +138,48 @@ class RequestHistoryView(_Base):
         return ok(ActionLogSerializer(logs, many=True).data)
 
 
+class RequestStockView(_Base):
+    """Where the item actually is — the stock panel on the detail dialog.
+
+    Read LIVE from SAP each time the dialog opens, and deliberately not
+    snapshotted onto the order. A stock figure is only useful while it is
+    current, and a stale one is worse than none because nothing on screen tells
+    the reader which it is looking at. The order's own `planned_qty` is a
+    snapshot for a different reason: it is what was approved, so it must not
+    move underneath the approval.
+
+    Answers for the whole SITE, not just the order's warehouse — see
+    `sap.ITEM_LOCATION_STOCK_SQL`. An approver deciding whether to release a
+    production order wants to know whether the material is already standing in
+    the next shed, and that is the question SAP's own
+    `Get_Item_Location_Stock` was written to answer.
+
+    503, not 200-with-an-empty-list, when SAP cannot be reached: an empty list
+    here means the site genuinely holds none.
+    """
+
+    def get(self, request, pk):
+        order = ProductionOrder.objects.filter(pk=pk).first()
+        if not order:
+            return fail('Production order not found.',
+                        status=http_status.HTTP_404_NOT_FOUND)
+        try:
+            rows, meta = sap_service.item_location_stock(
+                order.company, order.item_code, order.warehouse)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc),
+                        status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        # `item_name` is not repeated here — the dialog's own header already
+        # carries it, and the panel sits directly beneath.
+        return ok({
+            'warehouse': order.warehouse,
+            # `location` is null only when the order's warehouse is not in OWHS
+            # at all, which is the one case that legitimately has no rows.
+            **meta,
+            'results': rows,
+        })
+
+
 class _DecisionView(APIView):
     """Shared loading and authorisation for approve / reject."""
 
