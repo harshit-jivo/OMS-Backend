@@ -356,16 +356,42 @@ def status_q(status, prefix=''):
 def decided_backdate_ids(user, status=None):
     """Requests this user has approved or rejected, optionally by outcome.
 
-    A user decides one STAGE, not the request: approving stage 1 of three
-    leaves the flow pending. So the set is "requests I acted on", narrowed by
-    the flow's CURRENT status.
+    THE OUTCOME IS THEIRS, NOT THE FLOW'S. A user decides one STAGE, not the
+    request: approving stage 1 of three leaves the flow PENDING. This used to
+    narrow by the flow's current status, so a stage-1 approver asking for what
+    they had approved was answered with "requests that are fully approved" —
+    and everything they had approved that was still moving through the stages
+    above them appeared in NO view at all. Not in Approved, because the flow
+    was not; not in the pending queue, because it was no longer awaiting them.
+    A person who had just approved something could not find it again.
+
+    So APPROVED and REJECTED read the user's own log entry. `COMPLETED` stays
+    a question about the flow — it means the grant actually reached SAP, which
+    is not something one approver's decision can settle — and so does a bare
+    `PENDING`, which asks where the request is now.
+
+    A request can legitimately land in both sets: one user holding two stages
+    may approve at one and reject at the other. Both answers are true, and the
+    row's own status shows where it ended up.
     """
-    ids = (BackDateActionLog.objects
-           .filter(acted_by=user,
-                   action__in=[LogAction.APPROVE, LogAction.REJECT])
-           .values_list('backdate_id', flat=True))
-    qs = BackDateFlow.objects.filter(backdate_id__in=set(ids))
-    condition = status_q(status)
-    if condition is not None:
-        qs = qs.filter(condition)
-    return set(qs.values_list('backdate_id', flat=True))
+    logs = (BackDateActionLog.objects
+            .filter(acted_by=user,
+                    action__in=[LogAction.APPROVE, LogAction.REJECT]))
+
+    wanted = (status or '').upper()
+    own_action = {
+        FlowStatus.APPROVED: LogAction.APPROVE,
+        FlowStatus.REJECTED: LogAction.REJECT,
+    }.get(wanted)
+    if own_action is not None:
+        return set(logs.filter(action=own_action)
+                   .values_list('backdate_id', flat=True))
+
+    ids = set(logs.values_list('backdate_id', flat=True))
+    condition = status_q(wanted)
+    if condition is None:
+        return ids
+    return set(BackDateFlow.objects
+               .filter(backdate_id__in=ids)
+               .filter(condition)
+               .values_list('backdate_id', flat=True))

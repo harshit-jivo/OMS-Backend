@@ -124,8 +124,11 @@ class BackDateSerializer(serializers.ModelSerializer):
     #: See `BackDate`.
     action_label = serializers.CharField(read_only=True)
     company_label = serializers.CharField(read_only=True)
-    #: The company as a one-element list, so a client that renders badges does
-    #: not need a second code path.
+    #: The companies as a list, so a client renders one badge each without
+    #: splitting the string itself. `company` remains the canonical stored
+    #: value (`"OIL,MART"`) and `company_label` its readable form
+    #: (`"Oil, Mart"`) — three views of one fact, so no client has to invent
+    #: a fourth.
     companies = serializers.ListField(
         child=serializers.CharField(), read_only=True)
     flow = BackDateFlowSerializer(read_only=True)
@@ -238,11 +241,16 @@ class _BackDateWriteSerializer(serializers.ModelSerializer):
         return matched[0]
 
     def validate_company(self, value):
-        """Exactly ONE company. A list is accepted, with one entry in it.
+        """One or more companies, normalised to their canonical spelling.
 
-        Refusing a two-entry list here rather than quietly taking the first is
-        deliberate: a form that sent two and got one request back would grant
-        rights in one company and silently drop the other.
+        A list is accepted — a form sends the ticked boxes — and so is an
+        already-joined string, so a client may send `["OIL","MART"]` or
+        `"OIL,MART"` and get the same request either way. Order and case are
+        forgiven and duplicates collapse; an unknown code is refused.
+
+        ONE POST, ONE REQUEST. A multi-company selection must never become
+        several POSTs or several rows: the approval is one decision, and the
+        companies only separate at the SAP call.
         """
         code, error = normalise_company(value)
         if error:

@@ -1,10 +1,11 @@
 # BKDT — BackDate
 
 **BKDT = the BackDate module.** A user asks for permission to post SAP documents
-of one type, in one company, with a posting date inside a bounded past
-window. The request is approved through a configured chain, and the final
-approval writes the grant into SAP's HANA database — SAP first, and the request
-is only marked approved if SAP accepted it.
+of one type, in one or more companies, with a posting date inside a bounded
+past window. The request is approved through a configured chain — ONE chain,
+however many companies it names — and the final approval writes the grant into
+SAP's HANA database, one call per company (§9). SAP first, and the request is
+only marked approved if SAP accepted it.
 
 This document is the technical source of truth for:
 
@@ -344,7 +345,8 @@ request** (UNIQUE `backdate_id`).
 `bkdt_flow_stage_idx (current_stage)`, `bkdt_flow_workflow_idx (workflow)`.
 
 `hana_status` has **two** values plus NULL. There is no `PARTIAL`: one request
-is one company and one call, so the call either landed or it did not.
+may be several companies and therefore several calls, so each one's
+outcome is recorded separately (§9).
 
 **`COMPLETED` is a filter, not a status.** `status = APPROVED` **and**
 `hana_status = SUCCESS` — "a person said yes AND the rights are actually in
@@ -550,7 +552,7 @@ One call, from `backdate/services/flow.py`:
 selection.select_for_module(
     module_code='BKDT',
     document_id=backdate.pk,
-    company=backdate.company,     # the request's one company (§9)
+    company=company,              # one call per company (§9)
 )
 ```
 
@@ -731,38 +733,120 @@ The single resolution point for all of this is
 
 ---
 
-## 9. One company per request
+## 9. Multi-Company BackDate Behavior
 
-**A BackDate request covers exactly ONE company.** `company` holds one code —
-`OIL`, `BEVERAGES` or `MART` — and a CHECK constraint holds that list.
+**A BackDate request covers ONE OR MORE companies, and is always ONE request.**
+`company` holds a canonical set — `OIL`, `OIL,MART`, `OIL,BEVERAGES,MART` — and
+a CHECK constraint enumerates the seven legal sets.
 
 ```
-ONE OMS request → ONE company → ONE flow → ONE workflow selection
-                                              ↓
-                                       final approval
-                                              ↓
-                                     ONE OPEN_BKDT call
+                       BACKDATE #500
+                            │
+                    company = OIL,MART
+                            │
+                       ONE WORKFLOW
+                            │
+                   ONE APPROVAL CHAIN
+                            │
+                     FINAL APPROVAL
+                            │
+                 ┌──────────┴──────────┐
+               OIL                   MART
+                 │                     │
+            OPEN_BKDT             OPEN_BKDT
+             branch 1              branch 3
+                 │                     │
+          JIVO_OIL_HANADB      JIVO_MART_HANADB
 ```
 
-The API accepts either a bare string or a **one-element list** (the form sends
-its ticked boxes). Two companies is a **400 that says so** — never a silent
-drop of the second:
+Everything above the final approval is singular: one row in
+`backdate.backdate`, one row in `backdate.backdate_flow`, one workflow
+selection, one stage chain, one action-log history, one notification per stage.
+**Only the SAP write fans out.**
 
-> A BackDate request covers ONE company. Raise one request per company.
+### Why this is one request and not several
 
-The page ticks companies in one form and raises one request per ticked company,
-reporting how many were raised. Each is approved on its own and written to its
-own SAP schema, so a refusal in one cannot half-grant another.
+The rights being asked for are the *same* rights in each named database, so
+they are one business decision. Raising one request per company made a single
+decision into two or three approval chains that could be decided differently,
+approved at different times, or left half-finished — and gave the requester
+several request numbers to chase for one question.
 
-| Input | Requests | Flows | HANA calls | HANA rows |
-|---|---|---|---|---|
-| `OIL` + `A` | 1 | 1 | 1 | 1 |
-| `OIL` + `A,U` | 1 | 1 | **1** | 1 |
-| `OIL`, `BEVERAGES` ticked + `A,U` | **2** | 2 | 2 | 2 |
+### Why this used to be forbidden, and what changed
 
-**Action never multiplies anything.** `A,U` is one request with a wider recorded
-scope, because `OPEN_BKDT` has no ACTION parameter — so splitting it would write
-SAP rows identical in every column SAP reads.
+This was deliberately restricted to one company per request, for a real
+reason: **JSAP** also accepted a comma-separated branch list and looped the SAP
+writes, but kept *no per-branch record*. When one company landed and another
+failed there was no way to tell which, and the request reported success.
+
+The answer is to record every call and every answer, which
+`services/hana.apply_grant` already did. A partial outcome is now **visible**
+rather than prevented:
+
+* `hana_status` is `SUCCESS` only when **every** company's call succeeded.
+* One failure makes it `FAILED` — the requester does not have what they asked
+  for until all of them do.
+* `hana_status_text` keeps **each** company's exact answer, so the successful
+  one is not lost because another failed.
+* `sap_payload.calls` keeps **each** company's actual payload.
+
+SAP gives no cross-schema transaction, so a partial outcome is possible and is
+stated plainly instead of being smoothed over.
+
+### Canonical storage
+
+One set has exactly one spelling. `core.companies.canonical_company_set` is the
+only writer: it deduplicates and orders by `COMPANY_CHOICES`
+(`OIL` → `BEVERAGES` → `MART`), so `MART,OIL`, `OIL,MART` and
+`["oil","mart"]` all store `OIL,MART`. The database CHECK enumerates the legal
+sets rather than matching a pattern, so `MART,OIL` and `OIL,OIL` are refused
+by the database as well as the application — a bug cannot write a spelling the
+application would never produce.
+
+The API offers the same fact three ways so no screen splits the string itself:
+
+| Field | Value | Use |
+|---|---|---|
+| `company` | `"OIL,MART"` | the canonical stored value |
+| `companies` | `["OIL","MART"]` | one badge per company |
+| `company_label` | `"Oil, Mart"` | readable, for a detail row or a notification |
+
+### One call per company, same details
+
+Each `OPEN_BKDT` call is built by `build_payload(backdate, company)` from the
+**request**, never from the approval. Only the company's SAP context differs —
+verified by asserting that of the eleven parameters exactly one, `BRANCH`,
+varies between the calls of a multi-company request.
+
+| Company | `BRANCH` | Schema |
+|---|---|---|
+| `OIL` | 1 | `JIVO_OIL_HANADB` |
+| `BEVERAGES` | 2 | `JIVO_BEVERAGES_HANADB` |
+| `MART` | 3 | `JIVO_MART_HANADB` |
+
+`USERID`, `TRANSTYPE`, `FROMDATE`, `TODATE`, `TIMELIMIT`, `RIGHTS`,
+`CREATEDBY`, `CREATEDON`, `DELETEDBY` and `DELETEDON` are identical across the
+calls. The mapping lives in `services/hana._BRANCH_NAME` and the schema
+resolution in `Queries._schema_for_branch`; neither is duplicated here.
+
+**One thing a multi-company request cannot check for you.** The SAP user and
+document type are picked from *one* company's masters (the first selected).
+Document types are safe — the same 75 objects with the same names exist in all
+three schemas — but a SAP *login* that exists in OIL need not exist in MART.
+Both create forms say so when more than one company is ticked. An unknown
+login fails only its own company's call, with SAP's own message recorded
+against it.
+
+| Input | Requests | Flows | Workflows | Approval chains | `OPEN_BKDT` calls |
+|---|---|---|---|---|---|
+| `OIL` + `A` | 1 | 1 | 1 | 1 | 1 |
+| `OIL` + `A,U` | 1 | 1 | 1 | 1 | **1** |
+| `OIL,MART` + `A,U` | **1** | **1** | **1** | **1** | **2** |
+| `OIL,BEVERAGES,MART` + `A,U` | **1** | **1** | **1** | **1** | **3** |
+
+**Action never multiplies anything.** `A,U` is one request with a wider
+recorded scope, because `OPEN_BKDT` has no ACTION parameter — so splitting it
+would write SAP rows identical in every column SAP reads.
 
 Confirmed against live JSAP data rather than assumed: 12 recent JSAP entries
 were correlated to their live HANA rows, and every `A,U` entry produced
@@ -772,9 +856,34 @@ other way round); none of them doubles up. **[JSAP]** OMS normalises to `A,U`,
 so one choice has one spelling and a diff never reports a reordering as a
 change.
 
-**Routing consequence.** `company = 'OIL'` is an exact match and matches every
-OIL request, because no request ever names more than one company. There is no
-multi-company workflow to configure and none should be created.
+### Routing consequence
+
+`company = 'OIL'` is an exact match and therefore matches **only**
+single-company OIL requests. A request naming several companies needs a query
+that recognises a set — the established pattern is:
+
+```sql
+SELECT id FROM backdate.backdate WHERE company LIKE '%,%'
+```
+
+Two such workflows already exist (`BKDT_MULTI`, `BACKDATE_MULTI_COMPANY`).
+
+> **Configuration warning.** A multi-company workflow only takes effect once
+> its workflow is active, and the engine **refuses ambiguity**: if two
+> workflows match one request it raises `AmbiguousWorkflowSelection` and the
+> submission fails. `BKDT_OIL_BEFORE` and `BKDT_OIL_AFTER` currently have no
+> `WHERE` clause at all, so they match *every* request — activating a
+> multi-company workflow alongside them would make every multi-company submit
+> fail until their queries filter by company. Fix the queries first, then
+> activate.
+
+### Editing the company set
+
+`company` is **not** editable after submission, and that is deliberate: it
+decides which workflow applies and the request has already been routed by it.
+Changing it would either leave the flow pointing at a workflow chosen for a
+different set, or move the request to different approvers mid-decision.
+Raising a new request is the honest way to ask for a different set.
 
 ---
 
@@ -836,7 +945,7 @@ raise"**. That is a property of the procedure, not an omission.
 
 | Parameter | Source | Note |
 |---|---|---|
-| `BRANCH` | the company NAME (`OIL`/`BEVERAGES`/`MART`) | the request's one company |
+| `BRANCH` | the company NAME (`OIL`/`BEVERAGES`/`MART`) | the company of THIS call (§9) |
 | `USERID` | `backdate.sap_username` | truncated to 20 |
 | `TRANSTYPE` | resolved from `document_type_name` via `MOBJ` at call time | real int; never stored |
 | `FROMDATE` / `TODATE` | `from_date` / `to_date` | real `date` objects |
@@ -1128,7 +1237,8 @@ WHERE company = 'OIL'
 
 ### 12.4 Matching a company
 
-One request names one company (§9), so the match is plain equality:
+A request may name a SET of companies (§9), so equality matches only the
+single-company case:
 
 ```sql
 WHERE company = 'OIL'

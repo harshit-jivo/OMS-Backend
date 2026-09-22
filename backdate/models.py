@@ -41,7 +41,14 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
-from core.companies import COMPANY_CHOICES, COMPANY_CODES
+from core.companies import (
+    COMPANY_CHOICES,
+    COMPANY_CODES,
+    COMPANY_SET_SEPARATOR,
+    canonical_company_set,
+    company_set_labels,
+    company_set_values,
+)
 
 
 def _t(table):
@@ -103,28 +110,25 @@ def normalise_action(value):
 
 
 def normalise_company(value):
-    """One company code, however the caller spelled it.
+    """The chosen companies, as one canonical value.
 
-    Returns `(code, error)`. A LIST is accepted and must hold exactly one
-    entry: the form sends the ticked boxes, and rejecting a two-element list
-    here is what stops two companies quietly becoming one request again.
+    Returns `(canonical, error)`. A list is accepted — a form sends the ticked
+    boxes — and so is an already-joined string. `OIL,MART` and `MART,OIL` are
+    the same request, so both normalise to `OIL,MART`: one set, one spelling,
+    or the column would hold two values meaning the same thing.
+
+    ONE REQUEST MAY NAME SEVERAL COMPANIES, and that is the point. The rights
+    asked for are the same rights in two or three SAP databases, decided once
+    by the same approvers; making that two requests made one decision into two
+    approval chains that could disagree. The SAP write still happens once per
+    company — see `services/hana.apply_grant`, which has always fanned out —
+    so the failure JSAP had (a branch loop with no per-branch record) is
+    answered by recording every call, not by forbidding the request.
+
+    Thin on purpose: `core.companies.canonical_company_set` is the shared
+    definition, and this stays as the name the rest of this app already calls.
     """
-    if isinstance(value, (list, tuple, set)):
-        picked = [str(v).strip().upper() for v in value if str(v).strip()]
-    else:
-        picked = [str(value or '').strip().upper()] if str(value or '').strip() \
-            else []
-
-    if not picked:
-        return '', 'A company is required.'
-    if len(set(picked)) > 1:
-        return '', ('A BackDate request covers ONE company. Raise one request '
-                    'per company.')
-    code = picked[0]
-    if code not in COMPANY_CODES:
-        return '', (f'"{code}" is not a company. Use one of: '
-                    f'{", ".join(COMPANY_CODES)}.')
-    return code, None
+    return canonical_company_set(value)
 
 
 class FlowStatus(models.TextChoices):
@@ -161,28 +165,53 @@ class LogAction(models.TextChoices):
 
 
 class BackDate(models.Model):
-    """One request for back-posting rights: one company, one document type.
+    """One request for back-posting rights: one or more companies, one
+    document type.
 
-    ONE COMPANY PER REQUEST. Each company's grant is approved on its own and
-    written to its own SAP schema, so a refusal or a SAP error in one cannot
-    half-grant another. JSAP accepted a comma-separated branch list and looped
-    the SAP writes with no transaction, which is exactly that failure.
+    ONE REQUEST, ONE APPROVAL CHAIN, ONE SAP CALL PER COMPANY. A person asking
+    for the same rights in OIL and MART is making one request and one
+    decision, so there is one row here, one flow, one workflow and one
+    history. Only the SAP write fans out, in `services/hana.apply_grant`.
 
-    The ACTION is the exception: `A`, `U`, or both on one request, because
-    `OPEN_BKDT` has no action parameter, so splitting it would write SAP rows
-    identical in every column SAP reads.
+    A SET IS NOT A TRANSACTION, and nothing here pretends otherwise. SAP gives
+    no cross-schema transaction, so OIL can land while MART fails. That is
+    recorded rather than hidden: `hana_status` is FAILED unless every company
+    succeeded, and `hana_status_text` keeps each company's exact answer. JSAP
+    looped branches the same way but kept no per-branch record, so a partial
+    failure reported success and nobody could tell which company was missing.
+
+    The ACTION is singular for a different reason: `A`, `U`, or both on one
+    request, because `OPEN_BKDT` has no action parameter, so splitting it
+    would write SAP rows identical in every column SAP reads.
     """
 
-    #: ONE company per request. Asking for rights in two companies is two
-    #: requests: each is approved on its own and writes to its own SAP schema,
-    #: so a refusal in one cannot half-grant the other. JSAP's own bug was a
-    #: branch loop inside a single untransacted request.
+    #: THE COMPANIES the rights are granted in, as one canonical value —
+    #: `OIL`, or `OIL,MART`, or `OIL,BEVERAGES,MART`. Canonical means
+    #: deduplicated and in `COMPANY_CHOICES` order, so one set has one
+    #: spelling; `core.companies.canonical_company_set` is the only writer.
     #:
-    #: The ACTION is different — see `action`. Both actions live on one request
-    #: because SAP is never told the action at all.
+    #: ONE REQUEST, ONE APPROVAL, ONE CALL PER COMPANY. The rights asked for
+    #: are the same rights in each named database, so they are decided once:
+    #: one flow, one workflow, one stage chain, one history. The SAP write is
+    #: where the companies separate — `services/hana.apply_grant` makes one
+    #: `OPEN_BKDT` call per company, into that company's own schema, and
+    #: records each call's payload and each call's answer.
+    #:
+    #: That recording is what makes this safe. JSAP also accepted a
+    #: comma-separated branch list, but its loop kept no per-branch result, so
+    #: when one company landed and another failed there was no way to tell
+    #: which — and the request claimed success. Here a partial failure is
+    #: `hana_status = FAILED` with every company's outcome preserved in
+    #: `hana_status_text`, because the requester does not have what they asked
+    #: for until all of them do.
+    #:
+    #: NO `choices`, like `action`: a set is not one of the atoms, and Django
+    #: would validate `OIL,MART` as invalid and render it unlabelled. The
+    #: database CHECK below enumerates the legal sets instead.
     company = models.CharField(
-        max_length=20, choices=COMPANY_CHOICES, db_index=True,
-        help_text='The company whose SAP database the rights are granted in.',
+        max_length=20, db_index=True,
+        help_text='Companies whose SAP databases the rights are granted in, '
+                  'canonical and comma-separated (e.g. "OIL,MART").',
     )
     #: The SAP login (`OUSR.USER_CODE`) the rights are for — NOT the OMS user
     #: raising the request. They are frequently different people.
@@ -253,8 +282,12 @@ class BackDate(models.Model):
         verbose_name = 'BackDate'
         verbose_name_plural = 'BackDate requests'
         constraints = [
+            # EVERY LEGAL SET, enumerated — seven of them for three
+            # companies. A regex would also accept `MART,OIL` and `OIL,OIL`,
+            # spellings the application never writes, so the database would be
+            # agreeing to values that can only arrive through a bug.
             models.CheckConstraint(
-                condition=Q(company__in=list(COMPANY_CODES)),
+                condition=Q(company__in=company_set_values()),
                 name='backdate_company_valid',
             ),
             # The window must be a window. JSAP enforced this in the stored
@@ -278,16 +311,24 @@ class BackDate(models.Model):
 
     @property
     def companies(self):
-        """The request's company as a one-element list.
+        """The companies this request covers, in canonical order.
 
-        Kept so a caller that iterates does not have to care, and so the SAP
-        layer reads the same whether a request ever covers more than one.
+        THE FAN-OUT POINT. `services/hana.apply_grant` iterates this to make
+        one `OPEN_BKDT` call per company, each into that company's own schema.
+        Everything above it — the request, the flow, the workflow, the approval
+        chain, the action log — stays singular.
         """
-        return [self.company] if self.company else []
+        return [c for c in self.company.split(COMPANY_SET_SEPARATOR) if c]
 
     @property
     def company_label(self):
-        return self.get_company_display()
+        """`"OIL,MART"` -> `"Oil, Mart"`.
+
+        Not `get_company_display()`: the column no longer declares `choices`,
+        because a SET is not one of the atoms — the same reason `action` does
+        not declare them for `A,U`. Django would return the raw value.
+        """
+        return company_set_labels(self.company)
 
     @property
     def action_label(self):

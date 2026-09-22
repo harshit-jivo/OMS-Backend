@@ -139,4 +139,53 @@ REST_FRAMEWORK = {**REST_FRAMEWORK, 'DEFAULT_THROTTLE_RATES': {
 # and the security headers are all still exercised with DEBUG false. Only the
 # transport redirect, which no test can satisfy and no test asserts on, is
 # disabled.
+
+# --- Postgres regex escapes taught to SQLite ------------------------------
+# `workflow.WorkflowQuery` guards its stored SQL with
+#
+#     CheckConstraint(condition=Q(query_text__iregex=r'^\s*(select|with)\y'))
+#
+# `\y` is Postgres's word boundary. Django implements `iregex` on SQLite by
+# registering a Python `regexp` function and calling `re.search`, where `\y`
+# is not an escape at all — so the UDF raises and SQLite reports only
+#
+#     OperationalError: user-defined function raised exception
+#
+# on every INSERT into that table. Nothing can be inserted, so `setUpTestData`
+# dies and the ENTIRE backdate, production and workflow test surface errors out
+# before a single assertion runs.
+#
+# Python spells the same boundary with a different letter, so the pattern
+# is translated on its way into `re`. The constraint keeps doing its job —
+# only the dialect changes — and Postgres never sees this: the file is
+# loaded by the test runner alone.
+from django.db.backends.signals import connection_created  # noqa: E402
+
+#: Postgres's word boundary, and Python's. Written from `chr` so that no
+#: tool rewriting this file can quietly eat a backslash.
+SAP_WORD_BOUNDARY = chr(92) + 'y'
+PY_WORD_BOUNDARY = chr(92) + 'b'
+
+
+@_receiver(connection_created)
+def _teach_sqlite_postgres_regex(sender, connection, **kwargs):
+    if connection.vendor != 'sqlite':
+        return
+    import re
+
+    def regexp(pattern, value):
+        # Django's own `_sqlite_regexp`, with the escape translated. Same
+        # None-handling and same str() coercion, so behaviour is unchanged for
+        # every pattern that did not use `\y`.
+        if pattern is None or value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        return bool(re.search(
+            pattern.replace(SAP_WORD_BOUNDARY, PY_WORD_BOUNDARY), value))
+
+    connection.connection.create_function('regexp', 2, regexp,
+                                          deterministic=True)
+
+
 SECURE_SSL_REDIRECT = False

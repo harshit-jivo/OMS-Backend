@@ -928,49 +928,143 @@ class TimeLimitTests(_Base):
         self.assertEqual(response.status_code, 400, response.data)
 
 
-class OneCompanyTests(_Base):
-    """One company per request. Both actions still ride on one.
+class CompanySetTests(_Base):
+    """A request may name several companies. It is still ONE request.
 
-    JSAP accepted a comma-separated branch list and looped the SAP writes with
-    no transaction, so a mid-loop failure granted rights in one company and not
-    another. One company per request is what makes that impossible.
+    The rights asked for are the same rights in each named SAP database,
+    decided once by the same approvers — so one row, one flow, one workflow,
+    one stage chain, one history. Only the SAP write fans out.
 
-    `action` is the exception and stays combined: `OPEN_BKDT` has no action
+    This replaces `OneCompanyTests`, which asserted the opposite. The reason
+    that rule existed was real: JSAP accepted a comma-separated branch list
+    and looped the SAP writes keeping no per-branch record, so a mid-loop
+    failure granted rights in one company, not another, and reported success.
+    The answer here is to record every call and every answer — see
+    `PartialSapFailureTests` — rather than to forbid the request.
+
+    `action` stays combined for a different reason: `OPEN_BKDT` has no action
     parameter, so splitting `A,U` would write SAP rows identical in every
     column SAP reads.
     """
 
-    def test_a_second_company_is_refused_not_silently_dropped(self):
-        response = self.client_for(self.requester).post(
+    def _create(self, company, action='A'):
+        return self.client_for(self.requester).post(
             reverse('backdate-request-list'), {
-                'company': [OIL, BEVERAGES], 'sap_username': 'USER12',
+                'company': company, 'sap_username': 'USER12',
                 'document_type_name': 'A/R Invoice', 'from_date': '2026-05-01',
-                'to_date': '2026-05-20', 'action': 'A',
+                'to_date': '2026-05-20', 'action': action,
                 'time_limit': '2026-12-31T18:30:00Z',
             }, format='json')
-        # Taking the first would grant OIL and silently drop BEVERAGES.
-        self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('ONE company', str(response.data))
 
-    def test_a_one_element_list_is_accepted(self):
-        """The form sends its ticked boxes; one ticked box is one request."""
-        response = self.client_for(self.requester).post(
-            reverse('backdate-request-list'), {
-                'company': [OIL], 'sap_username': 'USER12',
-                'document_type_name': 'A/R Invoice', 'from_date': '2026-05-01',
-                'to_date': '2026-05-20', 'action': 'U,A',
-                'time_limit': '2026-12-31T18:30:00Z',
-            }, format='json')
+    # --- TEST 1 / 2 / 3: one, two and three companies ------------------
+
+    def test_one_company_still_works_exactly_as_before(self):
+        response = self._create([OIL])
         self.assertEqual(response.status_code, 201, response.data)
         obj = BackDate.objects.get(pk=response.data['data']['id'])
         self.assertEqual(obj.company, OIL)
+        self.assertEqual(obj.companies, [OIL])
+
+    def test_two_companies_make_one_request(self):
+        response = self._create([OIL, MART], action='U,A')
+        self.assertEqual(response.status_code, 201, response.data)
+        obj = BackDate.objects.get(pk=response.data['data']['id'])
+        self.assertEqual(obj.company, 'OIL,MART')
+        self.assertEqual(obj.companies, [OIL, MART])
         # Both actions on the ONE request, normalised.
         self.assertEqual(obj.action, 'A,U')
+        # ONE row, not one per company.
+        self.assertEqual(
+            BackDate.objects.filter(sap_username='USER12',
+                                    from_date='2026-05-01').count(), 1)
 
-    def test_the_company_column_holds_no_commas(self):
+    def test_three_companies_make_one_request(self):
+        response = self._create([MART, OIL, BEVERAGES])
+        self.assertEqual(response.status_code, 201, response.data)
+        obj = BackDate.objects.get(pk=response.data['data']['id'])
+        self.assertEqual(obj.company, 'OIL,BEVERAGES,MART')
+        self.assertEqual(obj.companies, [OIL, BEVERAGES, MART])
+
+    # --- canonical form ------------------------------------------------
+
+    def test_the_stored_set_is_canonical_however_it_was_sent(self):
+        """One set, one spelling. `MART,OIL` and `OIL,MART` are one request."""
+        for sent in ([MART, OIL], 'MART,OIL', 'mart, oil', [OIL, MART, OIL]):
+            with self.subTest(sent=sent):
+                response = self._create(sent)
+                self.assertEqual(response.status_code, 201, response.data)
+                obj = BackDate.objects.get(pk=response.data['data']['id'])
+                self.assertEqual(obj.company, 'OIL,MART')
+
+    def test_no_company_is_refused(self):
+        for empty in ([], '', '   '):
+            with self.subTest(empty=empty):
+                self.assertEqual(self._create(empty).status_code, 400)
+
+    def test_an_unknown_company_is_refused_not_dropped(self):
+        response = self._create([OIL, 'ATLANTIS'])
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('ATLANTIS', str(response.data))
+
+    def test_the_label_reads_as_a_list_of_names(self):
         req = make_request(self.requester)
-        self.assertNotIn(',', req.company)
-        self.assertEqual(req.companies, [OIL])
+        req.company = 'OIL,MART'
+        req.save(update_fields=['company'])
+        self.assertEqual(req.company_label, 'Oil, Mart')
+
+    # --- TEST 5: the API shape a screen renders ------------------------
+
+    def test_the_api_offers_the_set_three_ways_so_no_screen_splits_it(self):
+        response = self._create([OIL, MART])
+        data = response.data['data']
+        self.assertEqual(data['company'], 'OIL,MART')
+        self.assertEqual(data['companies'], [OIL, MART])
+        self.assertEqual(data['company_label'], 'Oil, Mart')
+
+    # --- TEST 9: one history, not one per company ----------------------
+
+    def test_one_create_log_however_many_companies(self):
+        response = self._create([OIL, BEVERAGES, MART])
+        obj = BackDate.objects.get(pk=response.data['data']['id'])
+        self.assertEqual(
+            list(obj.action_logs.values_list('action', flat=True)),
+            [LogAction.CREATE])
+
+    # --- TEST 4: one flow, one workflow, one approval per stage -------
+
+    def test_one_flow_and_one_approval_per_stage(self):
+        req = make_request(self.requester)
+        req.company = 'OIL,MART'
+        req.save(update_fields=['company'])
+        flow = flow_service.submit(req, user=self.requester)
+
+        self.assertEqual(BackDateFlow.objects.filter(backdate=req).count(), 1)
+        self.assertIsNotNone(flow.workflow_id)
+
+        flow_service.approve(flow, user=self.approver1)
+        stages = list(req.action_logs.filter(action=LogAction.APPROVE)
+                      .values_list('stage_id', flat=True))
+        self.assertEqual(stages, [self.stage1.pk], stages)
+
+    # --- the database's own opinion ------------------------------------
+
+    def test_the_database_refuses_a_non_canonical_set(self):
+        """The CHECK enumerates the legal sets, so a bug cannot write a
+        spelling the application would never produce."""
+        from django.db import IntegrityError, transaction
+
+        for illegal in ['MART,OIL', 'OIL,OIL', 'OIL,ATLANTIS', 'OIL,']:
+            with self.subTest(illegal=illegal), self.assertRaises(IntegrityError):
+                with transaction.atomic():
+                    BackDate.objects.create(
+                        company=illegal, sap_username='USER12',
+                        document_type_name='A/R Invoice',
+                        from_date=datetime.date(2026, 5, 1),
+                        to_date=datetime.date(2026, 5, 20),
+                        time_limit=TIME_LIMIT, action=RequestAction.ADD,
+                        created_by=self.requester)
+
+    # --- TEST 7: one SAP call per company, same details ---------------
 
     def test_the_action_never_reaches_the_sap_payload(self):
         """`OPEN_BKDT` has no action parameter; neither may the payload."""
@@ -983,19 +1077,110 @@ class OneCompanyTests(_Base):
 
         self.assertEqual(build_payload(add), build_payload(upd))
 
-    def test_one_request_makes_exactly_one_sap_call(self):
+    def test_the_sap_call_count_follows_the_companies(self):
         from backdate.services import hana
 
-        req = make_request(self.requester)
-        req.action = 'A,U'
-        req.save(update_fields=['action'])
-        flow = flow_service.submit(req, user=self.requester)
+        for companies, expected in [('OIL', 1), ('OIL,MART', 2),
+                                    ('OIL,BEVERAGES,MART', 3)]:
+            with self.subTest(companies=companies):
+                req = make_request(self.requester)
+                req.company = companies
+                req.save(update_fields=['company'])
+                flow = flow_service.submit(req, user=self.requester)
+                self.assertEqual(self._sap_calls(hana, flow), expected)
 
-        with mock.patch.object(hana, 'HANAConnection') as conn,                 mock.patch.object(hana, 'Queries') as queries:
+    def test_every_sap_call_carries_the_same_details_but_its_own_branch(self):
+        """Only the company's SAP context changes — §10 of the requirement."""
+        from backdate.services.hana import build_payload
+
+        req = make_request(self.requester)
+        req.company = 'OIL,MART'
+        req.save(update_fields=['company'])
+
+        payloads = {c: build_payload(req, c) for c in req.companies}
+        self.assertEqual(len(payloads), 2)
+        # BRANCH (parameter 1) differs; the other ten are identical.
+        differing = {i for i in range(11)
+                     if len({p[i] for p in payloads.values()}) > 1}
+        self.assertEqual(differing, {0}, differing)
+
+    def test_a_company_not_on_the_request_cannot_be_written_to(self):
+        from backdate.services.hana import HanaWriteError, build_payload
+
+        req = make_request(self.requester)
+        req.company = 'OIL'
+        req.save(update_fields=['company'])
+        with self.assertRaises(HanaWriteError):
+            build_payload(req, MART)
+
+    def _sap_calls(self, hana, flow):
+        with mock.patch.object(hana, 'HANAConnection') as conn, \
+                mock.patch.object(hana, 'Queries') as queries:
             queries._schema_for_branch.side_effect = lambda c: f'TEST_{c}'
             hana.apply_grant(flow)
-            calls = conn.return_value.__enter__.return_value.execute.call_count
-        self.assertEqual(calls, 1)
+            # One connection per company — `_stamp_request_id` reuses it.
+            return conn.return_value.__enter__.call_count
+
+
+class PartialSapFailureTests(_Base):
+    """TEST 8 — one company lands, another does not.
+
+    THIS IS THE CASE THE OLD ONE-COMPANY RULE EXISTED TO PREVENT, and the
+    reason it can be allowed now. SAP gives no cross-schema transaction, so a
+    partial outcome is possible and must be RECORDED rather than smoothed
+    over: the requester does not have what they asked for until every company
+    has it, and an administrator needs to know exactly which one is missing.
+    """
+
+    def _apply(self, flow, failing):
+        from backdate.services import hana
+
+        def schema_for(company):
+            if company == failing:
+                raise hana.HanaSchemaError(f'no schema for {company}')
+            return f'TEST_{company}'
+
+        with mock.patch.object(hana, 'HANAConnection'), \
+                mock.patch.object(hana, 'Queries') as queries:
+            queries._schema_for_branch.side_effect = schema_for
+            try:
+                hana.apply_grant(flow)
+            except hana.HanaWriteError:
+                pass
+        flow.refresh_from_db()
+        return flow
+
+    def _multi_flow(self):
+        req = make_request(self.requester)
+        req.company = 'OIL,MART'
+        req.save(update_fields=['company'])
+        return flow_service.submit(req, user=self.requester)
+
+    def test_one_failure_makes_the_whole_request_failed(self):
+        flow = self._apply(self._multi_flow(), failing=MART)
+        self.assertEqual(flow.hana_status, HanaStatus.FAILED)
+
+    def test_both_companies_answers_are_kept(self):
+        """The success must not be lost because the other one failed."""
+        flow = self._apply(self._multi_flow(), failing=MART)
+        results = json.loads(flow.hana_status_text)
+        by_branch = {r['branch']: r['status'] for r in results}
+        self.assertEqual(len(by_branch), 2, results)
+        self.assertEqual(by_branch[OIL], 'SUCCESS', results)
+        self.assertEqual(by_branch[MART], 'FAILED', results)
+
+    def test_the_payload_of_every_company_is_kept(self):
+        flow = self._apply(self._multi_flow(), failing=MART)
+        branches = [c['branch'] for c in flow.sap_payload['calls']]
+        self.assertEqual(sorted(branches), sorted([OIL, MART]), branches)
+
+    def test_a_partial_failure_creates_no_second_request_or_flow(self):
+        flow = self._apply(self._multi_flow(), failing=MART)
+        self.assertEqual(
+            BackDate.objects.filter(pk=flow.backdate_id).count(), 1)
+        self.assertEqual(
+            BackDateFlow.objects.filter(backdate_id=flow.backdate_id).count(),
+            1)
 
 
 class SapPayloadTests(_Base):
@@ -1703,6 +1888,154 @@ class ApprovalInsightsTests(_Base):
         response = self.client_for(self.requester).get(
             reverse('backdate-approval-insights'))
         self.assertEqual(response.status_code, 403)
+
+
+class StageApproverSeesOwnDecisionTests(_Base):
+    """"I approved it, where did it go?"
+
+    A stage-1 approver approves; the request moves to stage 2 and stays
+    PENDING. The approval desk used to narrow its Approved view by the FLOW's
+    status, so that request was:
+
+      * not in Approved   — the flow is not approved, stage 2 has not decided
+      * not in the queue  — it is no longer awaiting this user
+
+    which is nowhere. The person who had just approved it could not find it
+    again, and had no way to confirm their own decision had registered.
+    """
+
+    def _history(self, user, status=None):
+        url = reverse('backdate-approval-history')
+        response = self.client_for(user).get(
+            url, {'status': status} if status else {})
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        return [row['id'] for row in response.json()['data']]
+
+    def _queue(self, user):
+        response = self.client_for(user).get(
+            reverse('backdate-approval-queue'))
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        return [row['id'] for row in response.json()['data']]
+
+    def _insights(self, user):
+        response = self.client_for(user).get(
+            reverse('backdate-approval-insights'))
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        return response.json()['data']
+
+    def test_a_stage_one_approval_is_visible_to_its_approver_immediately(self):
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow = flow_service.approve(flow, user=self.approver1)
+
+        # Still moving: stage 2 has not decided.
+        self.assertEqual(flow.status, FlowStatus.PENDING)
+        # THE BUG. It must be findable under what THIS user approved.
+        self.assertIn(req.pk, self._history(self.approver1, 'APPROVED'))
+        # And it has correctly left their queue.
+        self.assertNotIn(req.pk, self._queue(self.approver1))
+
+    def test_it_is_not_claimed_by_an_approver_who_has_not_decided(self):
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow_service.approve(flow, user=self.approver1)
+
+        # Stage 2 holds it now — awaiting, not approved by them.
+        self.assertNotIn(req.pk, self._history(self.approver2, 'APPROVED'))
+        self.assertIn(req.pk, self._queue(self.approver2))
+
+    def test_both_approvers_keep_it_once_the_flow_is_approved(self):
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow = flow_service.approve(flow, user=self.approver1)
+        flow_service.approve(flow, user=self.approver2)
+
+        self.assertIn(req.pk, self._history(self.approver1, 'APPROVED'))
+        self.assertIn(req.pk, self._history(self.approver2, 'APPROVED'))
+
+    def test_an_approval_later_rejected_stays_under_what_I_approved(self):
+        """Each answer is about its own decision, and both are true."""
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow = flow_service.approve(flow, user=self.approver1)
+        flow_service.reject(flow, user=self.approver2, remarks='too far back')
+
+        # approver1 approved it. That happened, whatever came after.
+        self.assertIn(req.pk, self._history(self.approver1, 'APPROVED'))
+        self.assertNotIn(req.pk, self._history(self.approver1, 'REJECTED'))
+        # approver2 rejected it.
+        self.assertIn(req.pk, self._history(self.approver2, 'REJECTED'))
+        self.assertNotIn(req.pk, self._history(self.approver2, 'APPROVED'))
+
+    def test_rejecting_at_stage_one_shows_under_what_I_rejected(self):
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow_service.reject(flow, user=self.approver1, remarks='no')
+
+        self.assertIn(req.pk, self._history(self.approver1, 'REJECTED'))
+        self.assertNotIn(req.pk, self._history(self.approver1, 'APPROVED'))
+
+    def test_the_All_view_holds_everything_this_user_acted_on(self):
+        approved = make_request(self.requester)
+        rejected = make_request(self.requester)
+        flow_service.approve(
+            flow_service.submit(approved, user=self.requester),
+            user=self.approver1)
+        flow_service.reject(
+            flow_service.submit(rejected, user=self.requester),
+            user=self.approver1, remarks='no')
+
+        everything = self._history(self.approver1)
+        self.assertIn(approved.pk, everything)
+        self.assertIn(rejected.pk, everything)
+
+    def test_completed_still_asks_whether_SAP_took_it(self):
+        """One approver's decision cannot settle whether the grant landed."""
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow = flow_service.approve(flow, user=self.approver1)
+        flow = flow_service.approve(flow, user=self.approver2)
+        flow.hana_status = HanaStatus.FAILED
+        flow.save(update_fields=['hana_status'])
+
+        # Approved by this user, but the rights never reached SAP.
+        self.assertIn(req.pk, self._history(self.approver1, 'APPROVED'))
+        self.assertNotIn(req.pk, self._history(self.approver1, 'COMPLETED'))
+
+        flow.hana_status = HanaStatus.SUCCESS
+        flow.save(update_fields=['hana_status'])
+        self.assertIn(req.pk, self._history(self.approver1, 'COMPLETED'))
+
+    def test_the_counts_agree_with_the_lists(self):
+        approved = make_request(self.requester)
+        flow_service.approve(
+            flow_service.submit(approved, user=self.requester),
+            user=self.approver1)
+        awaiting = make_request(self.requester)
+        flow_service.submit(awaiting, user=self.requester)
+
+        counts = self._insights(self.approver1)
+        self.assertEqual(
+            counts['approved'], len(self._history(self.approver1, 'APPROVED')))
+        self.assertEqual(counts['pending'], len(self._queue(self.approver1)))
+
+    def test_total_is_the_union_when_one_user_holds_two_stages(self):
+        """Approve at stage 1 and it comes straight back to you at stage 2.
+
+        `total` used to be pending + approved + rejected, which counted that
+        request twice and made the Total card larger than the list it opens.
+        """
+        self.stage2.user = self.approver1
+        self.stage2.save(update_fields=['user'])
+
+        req = make_request(self.requester)
+        flow = flow_service.submit(req, user=self.requester)
+        flow_service.approve(flow, user=self.approver1)
+
+        counts = self._insights(self.approver1)
+        self.assertEqual(counts['pending'], 1, 'awaiting them at stage 2')
+        self.assertEqual(counts['approved'], 1, 'they approved stage 1')
+        self.assertEqual(counts['total'], 1, 'it is ONE request, not two')
 
 
 class RemovedEndpointTests(_Base):

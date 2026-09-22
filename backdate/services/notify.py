@@ -49,7 +49,14 @@ def _users(ids):
 
 
 def _describe(request_obj):
-    return (f'{request_obj.sap_username} · {request_obj.company} · '
+    """One line naming the request, for a notification's subtitle.
+
+    `company_label`, not `company`: a request covering two companies stores
+    `OIL,MART` and reads `Oil, Mart`. ONE notification either way — the
+    approval is one decision on one request, and the SAP fan-out after final
+    approval is not something an approver is notified about twice.
+    """
+    return (f'{request_obj.sap_username} · {request_obj.company_label} · '
             f'{request_obj.from_date} to {request_obj.to_date}')
 
 
