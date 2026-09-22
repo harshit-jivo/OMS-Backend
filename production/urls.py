@@ -4,6 +4,7 @@ Viewer (`Production_Order`):
   GET   /api/production/requests/             ?status=&company=&item_code=
   GET   /api/production/requests/<pk>/
   GET   /api/production/requests/<pk>/history/
+  GET   /api/production/requests/<pk>/stock/   (live from SAP, per site)
   GET   /api/production/insights/             ?company=
   GET   /api/production/health/
 
@@ -35,6 +36,9 @@ urlpatterns = [
          name='production-request-detail'),
     path('requests/<int:pk>/history/', views.RequestHistoryView.as_view(),
          name='production-request-history'),
+    # Live SAP read, not a stored column — see `views.RequestStockView`.
+    path('requests/<int:pk>/stock/', views.RequestStockView.as_view(),
+         name='production-request-stock'),
     path('requests/<int:pk>/approve/', views.RequestApproveView.as_view(),
          name='production-request-approve'),
     path('requests/<int:pk>/reject/', views.RequestRejectView.as_view(),
