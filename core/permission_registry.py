@@ -139,6 +139,16 @@ REGISTRY: dict[str, dict[str, str]] = {
         # workflow.
         'Production_Order':          'Production Order — view requests',
         'Production_Order_Approval': 'Production Order — approve/reject',
+
+        # Advance Payment — currently the READ half only: the pickers an
+        # advance is raised from (open POs, open invoices, vendors, customers,
+        # employee advance accounts), all read live from SAP.
+        #
+        # One key, and no per-company scoping, for the same reason as above:
+        # there is no user->company map that scopes documents. When the advance
+        # REQUEST lands it gets a second key and stage-based scoping, exactly
+        # as PRDO has.
+        'Advance_Payment':           'Advance Payment — view SAP lookups',
     },
 
     # --- Payments actions (legacy keys, verbatim from

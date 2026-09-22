@@ -169,6 +169,11 @@ INSTALLED_APPS = [
     # SAP is the point of origin: orders arrive via
     # `manage.py sync_production_orders`, never from a user.
     'production',
+    # Advance Payment. No models yet and therefore no migration: every
+    # endpoint reads SAP live (open POs, open invoices, business partners,
+    # employee advance accounts). It gains a model when it has an OMS fact of
+    # its own to store — the request, who approved it, what it produced.
+    'advance_payment',
 ]
 
 MIDDLEWARE = [
