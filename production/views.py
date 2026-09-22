@@ -17,7 +17,7 @@ Responses use the project's `{success, message, data}` envelope.
 """
 import logging
 
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 from rest_framework import status as http_status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -388,7 +388,23 @@ class ApprovalHistoryView(APIView):
             return fail(error, status=http_status.HTTP_400_BAD_REQUEST)
 
         ids = flow_service.decided_order_ids(request.user)
-        qs = _queryset().filter(company).filter(state).filter(pk__in=ids)
+        # NEWEST DECISION FIRST, and specifically THIS user's decision — not
+        # the order's own `created_at`, which is when SAP raised it and puts a
+        # decision taken this morning below one taken last week purely because
+        # the planner happened to raise them in that order.
+        #
+        # An order can carry several decisions (a rejection, a re-raise, an
+        # approval), so this is the MAX of the ones belonging to this user.
+        qs = (_queryset().filter(company).filter(state).filter(pk__in=ids)
+              .annotate(decided_at=Max(
+                  'action_logs__acted_at',
+                  filter=Q(action_logs__acted_by=request.user,
+                           action_logs__action__in=[LogAction.APPROVE,
+                                                    LogAction.REJECT])))
+              # `-id` breaks a tie deterministically: a bulk decision stamps
+              # several rows in the same transaction, and without a second key
+              # their order is whatever the database returns that day.
+              .order_by('-decided_at', '-id'))
         return ok(ProductionOrderSerializer(qs[:500], many=True).data)
 
 
