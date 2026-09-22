@@ -23,7 +23,7 @@ from . import workflow_flow
 from attachments import services as attachment_services
 from attachments.models import AttachmentType
 from attachments.serializers import AttachmentSerializer
-from core.pagination import StandardPagination
+from core.pagination import StandardPagination, ordering_from
 from core.responses import created, fail, ok
 from sap_sync.models import Party as SapParty
 
@@ -602,6 +602,30 @@ class PaymentReceiptListCreateView(APIView):
                 )
             ).order_by('_rank', '-payment_date', '-id')
 
+        # EXPLICIT ORDERING, opt-in.
+        #
+        # The model's own default is `-payment_date, -id` — the date the
+        # receipt says it happened, which a user TYPES. So an entry raised
+        # today for a payment_date of last week sorts below one raised a week
+        # ago, and a list nobody has filtered does not read newest-first. The
+        # grouping above makes it jump further still: under "All" the rows are
+        # ordered by what must be DONE about them, so they appear to move up
+        # and down as their statuses change.
+        #
+        # `-id` is the serial the receipt was created with, so it is the one
+        # ordering that always means "latest first". Requested per call rather
+        # than changed in the model, because the default is what the web app
+        # and the reports already read, and because the list is PAGINATED:
+        # sorting on the client would reorder one page of 25 while the server
+        # decided which 25 those were.
+        #
+        # Allow-listed via `ordering_from` — never interpolate a query param
+        # into order_by().
+        ordering = ordering_from(
+            request, {'id', 'payment_date', 'created_at'}, '')
+        if ordering:
+            qs = qs.order_by(ordering)
+
         paginator = StandardPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         return paginator.get_paginated_response(
@@ -1071,6 +1095,30 @@ class BankDepositListCreateView(APIView):
                     output_field=IntegerField(),
                 )
             ).order_by('_rank', '-deposit_date', '-id')
+
+        # EXPLICIT ORDERING, opt-in.
+        #
+        # The model's own default is `-deposit_date, -id` — the date the
+        # deposit says it happened, which a user TYPES. So an entry raised
+        # today for a deposit_date of last week sorts below one raised a week
+        # ago, and a list nobody has filtered does not read newest-first. The
+        # grouping above makes it jump further still: under "All" the rows are
+        # ordered by what must be DONE about them, so they appear to move up
+        # and down as their statuses change.
+        #
+        # `-id` is the serial the deposit was created with, so it is the one
+        # ordering that always means "latest first". Requested per call rather
+        # than changed in the model, because the default is what the web app
+        # and the reports already read, and because the list is PAGINATED:
+        # sorting on the client would reorder one page of 25 while the server
+        # decided which 25 those were.
+        #
+        # Allow-listed via `ordering_from` — never interpolate a query param
+        # into order_by().
+        ordering = ordering_from(
+            request, {'id', 'deposit_date', 'created_at'}, '')
+        if ordering:
+            qs = qs.order_by(ordering)
 
         paginator = StandardPagination()
         page = paginator.paginate_queryset(qs, request, view=self)

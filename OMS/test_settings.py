@@ -73,6 +73,42 @@ def _flatten_schema_qualified_tables(sender, **kwargs):
     table = sender._meta.db_table
     if '"."' in table:
         sender._meta.db_table = table.replace('"."', '_')
+
+
+# --- Postgres-only constraints dropped for SQLite -------------------------
+# `workflow.StageReplacement` guards overlapping cover periods with an
+# ExclusionConstraint — `EXCLUDE USING gist (old_user WITH =, daterange(...)
+# WITH &&)`. It is the right tool on Postgres and has no SQLite equivalent, so
+# the schema editor emits `EXCLUDE` verbatim and SQLite answers
+#
+#     OperationalError: near "EXCLUDE": syntax error
+#
+# during CREATE TABLE. That kills the WHOLE suite, not just the workflow
+# tests: Django builds every app's schema up front, so no test in any app can
+# run while one model carries a constraint SQLite cannot express.
+#
+# Dropped here, the same way and for the same reason the table names above are
+# flattened. The consequence worth knowing: the database-level overlap guard
+# is NOT exercised by this suite. The application-level check in
+# `workflow/services` still is, and Postgres is untouched — this file is only
+# ever loaded by the test runner.
+from django.contrib.postgres.constraints import (  # noqa: E402
+    ExclusionConstraint,
+)
+
+
+@_receiver(class_prepared)
+def _drop_postgres_only_constraints(sender, **kwargs):
+    constraints = getattr(sender._meta, 'constraints', None)
+    if not constraints:
+        return
+    kept = [c for c in constraints if not isinstance(c, ExclusionConstraint)]
+    if len(kept) != len(constraints):
+        sender._meta.constraints = kept
+        # `original_attrs` is what Django's schema editor reads when it builds
+        # the table, so trimming only `constraints` leaves the EXCLUDE in
+        # place and changes nothing.
+        sender._meta.original_attrs['constraints'] = kept
 MIGRATION_MODULES = _SkipMigrations()
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 
