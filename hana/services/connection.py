@@ -935,9 +935,29 @@ class Queries():
 
     @staticmethod
     def get_batch_details(item_code, whs_code,branch):
+        """Batches of one item in one warehouse that may actually be sold.
+
+        Stock on hand is not the same as sellable stock. OIBT answers "how
+        much is in this warehouse", but whether a batch may leave it lives in
+        the batch master, OBTN."Status": 0 released, 1 not accessible,
+        2 locked. Quality holds and blocked lots sit in OIBT with a positive
+        quantity like anything else.
+
+        Without the join this query offered them to the FEFO picker, which
+        takes the nearest expiry and does not know the difference, and SAP
+        refused the post at the very end -- "batch ... is locked or not
+        accessible" (10001133), and on a second attempt the blanker "No
+        matching records found" (ODBC -2028). Measured on FG0000386 in BH-SC,
+        two of seven batches carried Status 2, and one of them, 160426, held
+        41,890 units with no expiry date, so it sorted first on its in-date
+        and swallowed every allocation the invoice asked for.
+
+        The join is INNER on purpose: a batch row with no master is not one
+        this app may pick either.
+        """
         s = Queries._schema_for_branch(branch)
         return f"""
-        SELECT 
+        SELECT
             T0."SysNumber",
             T0."BatchNum",
             T0."ItemCode",
@@ -949,12 +969,16 @@ class Queries():
             T0."Quantity",
             T0."BaseType",
             T0."BaseNum",
-            T0."BaseEntry" 
-            
+            T0."BaseEntry"
+
         FROM "{s}"."OIBT" AS T0
+        INNER JOIN "{s}"."OBTN" AS T1
+                ON T1."ItemCode" = T0."ItemCode"
+               AND T1."SysNumber" = T0."SysNumber"
         WHERE T0."ItemCode" = ?
           AND T0."WhsCode" = ?
           AND T0."Quantity" > 0
+          AND T1."Status" = '0'
         """, [item_code, whs_code]
         
     @staticmethod

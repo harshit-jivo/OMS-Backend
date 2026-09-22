@@ -183,6 +183,43 @@ class SchemaResolutionTests(TestCase):
             Queries.get_customer_details('C001', '"; DROP TABLE OITM; --')
 
 
+class SellableBatchTests(TestCase):
+    """A batch on hand is not the same as a batch that may be sold.
+
+    SAP holds the answer in the batch master, OBTN."Status" -- 0 released,
+    1 not accessible, 2 locked -- while OIBT reports only how much sits in
+    the warehouse. Offering a locked batch to the FEFO picker produced an
+    invoice SAP would not accept ("batch ... is locked or not accessible",
+    10001133), and the refusal arrived at the very end, after the reviewer
+    had approved and posted it.
+    """
+
+    def test_batch_details_asks_the_batch_master_for_the_status(self):
+        sql, _params = Queries.get_batch_details('FG1', 'WH1', 'OIL')
+        self.assertIn('OBTN', sql, 'the batch master is not consulted at all')
+        self.assertIn('"Status" = \'0\'', sql,
+                      'released is the only status whose stock may be sold')
+
+    def test_the_join_is_on_the_batch_key_and_cannot_fan_out(self):
+        """SysNumber is unique per item in OBTN; BatchNum is not a safe key.
+
+        `160426` and `160426.` are two real, distinct batches of FG0000386.
+        Matching on the printed number would conflate them, and a join that
+        multiplies rows would hand the allocator the same stock twice.
+        """
+        sql, _params = Queries.get_batch_details('FG1', 'WH1', 'OIL')
+        self.assertIn('T1."SysNumber" = T0."SysNumber"', sql)
+        self.assertIn('T1."ItemCode" = T0."ItemCode"', sql)
+
+    def test_the_status_filter_is_not_a_bindable_value(self):
+        """Guards the params list: the builder still binds only item and
+        warehouse, in that order. A third placeholder added here without a
+        third value would bind the warehouse into the status column."""
+        sql, params = Queries.get_batch_details('FG1', 'WH1', 'OIL')
+        self.assertEqual(params, ['FG1', 'WH1'])
+        self.assertEqual(sql.count('?'), 2)
+
+
 class ExecuteContractTests(TestCase):
     """`execute` accepts the `(sql, params)` pair, which is what let the
     builders convert without touching all 29 callers in `services.py`."""
