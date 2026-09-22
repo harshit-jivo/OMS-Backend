@@ -27,6 +27,7 @@ JSAP's NVARCHAR one. See `docs/Approvals/PRDO_DESIGN.md` §7 and
 """
 import json
 import logging
+from decimal import Decimal
 
 from django.conf import settings
 from django.utils import timezone
@@ -219,6 +220,120 @@ def statuses_for(company, doc_entries):
         raise SapUnavailable(f'Could not read order statuses for {company}: '
                              f'{type(exc).__name__}: {exc}') from exc
     return found
+
+
+# ---------------------------------------------------------------------------
+# Item stock across the order's site
+# ---------------------------------------------------------------------------
+#: This is SAP's `Get_Item_Location_Stock`, rewritten rather than called.
+#:
+#: The question is the procedure's: given an item and a warehouse, how much of
+#: that item is in EVERY warehouse at the same site? `OWHS."Location"` is SAP's
+#: grouping of warehouses into a physical site (Oil: 5 sites, 58 warehouses),
+#: so the order's own warehouse is only a way of naming the site.
+#:
+#: OMS does not CALL the procedure, and the reasons would both show as an empty
+#: panel rather than as an error:
+#:
+#:   1. It derives the site from OINM —
+#:        WHERE W."Location" = (SELECT TOP 1 H."Location" FROM "OINM" O ...
+#:                              WHERE O."ItemCode" = ? AND O."Warehouse" = ?)
+#:      An item that has never moved in the order's warehouse makes that scalar
+#:      NULL, and `Location = NULL` matches nothing. In Oil that is 90,264 of
+#:      98,890 item/warehouse pairs — 91% of possible calls return zero rows,
+#:      indistinguishable from "no stock".
+#:   2. It INNER JOINs the OINM aggregate, so a warehouse holding none of the
+#:      item is ABSENT rather than zero. For PM0000075 at BH-PP it returns 13
+#:      rows where the site has 35 warehouses.
+#:
+#: It also does not exist in `JIVO_MART_HANADB`, and is not declared
+#: `READS SQL DATA`, so it cannot be called on a read-only connection.
+#:
+#: Here the site comes from OWHS, where it is a property of the warehouse and
+#: not of its transactions, and the quantity from `OITW."OnHand"` — the figure
+#: SAP itself displays, 3,030 non-zero rows against OINM's 378,634 scanned
+#: twice per call. Verified equal to the OINM sum for every non-zero row in
+#: Oil, so this is cheaper without being a different number.
+#:
+#: ONLY THE WAREHOUSES THAT HOLD SOME, plus the order's own.
+#:
+#: The site has 35 warehouses at Oil's largest location and a given item is
+#: typically in two or three of them, so returning all of them was 30-odd rows
+#: of zeros around the handful that answer the question. The order's own
+#: warehouse is kept whatever it holds — nil there is a fact the approver needs,
+#: not an absence.
+#:
+#: The counts that get dropped by this filter are still reported, so "3 of 35"
+#: can be said without shipping the other 32 rows.
+ITEM_LOCATION_STOCK_SQL = '''
+    SELECT
+        W."WhsCode"               AS "warehouse",
+        W."WhsName"               AS "warehouse_name",
+        W."Location"              AS "location",
+        IFNULL(W."Inactive", 'N') AS "inactive",
+        IFNULL(T."OnHand", 0)     AS "on_hand",
+        (SELECT COUNT(*) FROM "{schema}"."OWHS" S
+          WHERE S."Location" = W."Location")  AS "site_warehouses"
+    FROM "{schema}"."OWHS" W
+    LEFT JOIN "{schema}"."OITW" T
+           ON T."WhsCode" = W."WhsCode"
+          AND T."ItemCode" = ?
+    WHERE W."Location" = (
+        SELECT "Location" FROM "{schema}"."OWHS" WHERE "WhsCode" = ?
+    )
+      AND (IFNULL(T."OnHand", 0) <> 0 OR W."WhsCode" = ?)
+    ORDER BY IFNULL(T."OnHand", 0) DESC, W."WhsCode"
+'''
+
+
+def item_location_stock(company, item_code, warehouse):
+    """Where `item_code` actually is, across `warehouse`'s site.
+
+    Returns `(rows, meta)`. `rows` is only the warehouses holding some, plus
+    the order's own; `meta` carries the site and the counts the filter drops,
+    so the caller can say "3 of 35" without the other 32.
+
+    Quantities are STRINGS. They are `numeric(19,6)` in HANA and the rest of
+    this module sends quantities the same way — a JSON number would lose
+    precision, which `planned_qty` already had to be fixed for.
+
+    Raises `SapUnavailable` when the read fails, so "SAP is down" and "nothing
+    in stock" stay distinguishable.
+    """
+    item_code = (item_code or '').strip()
+    warehouse = (warehouse or '').strip()
+    if not item_code or not warehouse:
+        return [], {'location': None, 'site_warehouses': 0, 'holding': 0}
+
+    schema = _schema(company)
+    sql = ITEM_LOCATION_STOCK_SQL.format(schema=schema)
+    try:
+        with HANAConnection() as conn:
+            rows = conn.execute(sql, [item_code, warehouse, warehouse])
+    except Exception as exc:  # noqa: BLE001 — hdbcli raises a broad family
+        logger.warning('PRDO: stock lookup for %s %s@%s failed: %s',
+                       company, item_code, warehouse, exc, exc_info=True)
+        raise SapUnavailable(
+            f'Could not read stock for {item_code} in {company}: '
+            f'{type(exc).__name__}: {exc}') from exc
+
+    out = [{
+        'warehouse': (r.get('warehouse') or '').strip(),
+        'warehouse_name': (r.get('warehouse_name') or '').strip(),
+        'inactive': (r.get('inactive') or 'N').strip() == 'Y',
+        'on_hand': str(r.get('on_hand') or 0),
+        # So the caller can mark the order's own row rather than making the
+        # reader match codes by eye.
+        'is_order_warehouse': (r.get('warehouse') or '').strip() == warehouse,
+    } for r in rows]
+
+    first = rows[0] if rows else {}
+    meta = {
+        'location': int(first['location']) if first.get('location') is not None else None,
+        'site_warehouses': int(first.get('site_warehouses') or 0),
+        'holding': sum(1 for r in out if Decimal(r['on_hand']) != 0),
+    }
+    return out, meta
 
 
 #: OMS decision -> the `Status` SAP's gate reads.
