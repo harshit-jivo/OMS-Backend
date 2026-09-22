@@ -226,3 +226,55 @@ class ExecuteContractTests(TestCase):
         conn = self._conn()
         with self.assertRaises(TypeError):
             conn.execute(('SELECT ?', ['a']), ['b'])
+
+
+class GroupSalesOrdersTests(TestCase):
+    """`/api/hana/so/` lines carry U_SchemeAgst for the invoice payload.
+
+    SAP rejects an A/R invoice line whose U_SchemeAgst is blank, so the query
+    resolves it (order line value, else item sub-group) and the grouper must
+    hand it to the frontend under the name the payload uses.
+    """
+
+    def _row(self, **overrides):
+        row = {
+            'DocEntry': 10985, 'DocNum': 1, 'DocDate': '2026-09-21', 'DocDueDate': '2026-09-21',
+            'CardCode': 'C001', 'CardName': 'Sabri', 'NumAtCard': '', 'DocStatus': 'O',
+            'DocTotal': 0, 'VatSum': 0, 'DiscSum': 0, 'Comments': None,
+            'SlpCode': 20, 'ShipToCode': 'S', 'PayToCode': 'B', 'BPLId': 2,
+            'LineNum': 0, 'ItemCode': 'FG0000324', 'Dscription': 'Water', 'Quantity': 1800,
+            'OpenQty': 1800, 'Price': 0, 'PriceBefDi': 0, 'DiscPrcnt': 0, 'LineTotal': 0,
+            'VatPrcnt': 5, 'VatGroup': 'IGST@5', 'WhsCode': 'BH-FG', 'TaxCode': 'IGST@5',
+            'ShipDate': '2026-09-21', 'AcctCode': None, 'Project': None, 'OcrCode': None,
+            'LineStatus': 'O', 'SchemeAgst': 'WATER',
+        }
+        row.update(overrides)
+        return row
+
+    def test_scheme_against_is_passed_through_per_line(self):
+        from hana.utils import group_sales_orders
+
+        orders = group_sales_orders([self._row(), self._row(LineNum=1, SchemeAgst='DRINKS')])
+        lines = orders[0]['lines']
+        self.assertEqual([line['U_SchemeAgst'] for line in lines], ['WATER', 'DRINKS'])
+
+    def test_missing_scheme_against_is_an_empty_string(self):
+        """None would serialise as null; the frontend treats "" as "not set"."""
+        from hana.utils import group_sales_orders
+
+        orders = group_sales_orders([self._row(SchemeAgst=None)])
+        self.assertEqual(orders[0]['lines'][0]['U_SchemeAgst'], '')
+
+    def test_query_resolves_scheme_against_as_a_profit_centre_code(self):
+        """Order line value, else its costing code, else OPRC code for the item's sub-group."""
+        sql, _ = Queries.get_sales_orders_for_party('C001', 'OIL')
+        self.assertIn("COALESCE(NULLIF(T1.\"U_SchemeAgst\", ''), NULLIF(T1.\"OcrCode\", ''), ", sql)
+        self.assertIn(".\"OPRC\" AS P WHERE P.\"DimCode\" = 1 AND P.\"Active\" = 'Y'", sql)
+        self.assertIn('(P."PrcCode" = T2."U_Sub_Group" OR P."PrcName" = T2."U_Sub_Group")', sql)
+        self.assertIn('."OITM" AS T2', sql)
+        self.assertIn('ON T2."ItemCode" = T1."ItemCode"', sql)
+
+    def test_fg_items_carry_the_same_profit_centre_code(self):
+        sql = Queries.get_fg_items('BEVERAGE')
+        self.assertIn('(P."PrcCode" = T0."U_Sub_Group" OR P."PrcName" = T0."U_Sub_Group")', sql)
+        self.assertIn('AS "SchemeAgst"', sql)

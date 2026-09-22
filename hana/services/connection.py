@@ -341,7 +341,44 @@ class Queries():
         """, entries
 
     @staticmethod
+    def _scheme_from_sub_group(schema, sub_group_expr):
+        """SQL for the profit-centre CODE that stands for an item sub-group.
+
+        U_SchemeAgst holds an OPRC "PrcCode" (SUNFLOWR, GROUNDNT, RICEBRAN),
+        never the sub-group name (SUNFLOWER, GROUNDNUT, RICE BRAN) -- on every
+        posted invoice line it equals the line's costing code. Sub-groups are
+        keyed sometimes by code and sometimes by name, so match either, in
+        dimension 1 (product varieties) and active only, like
+        `get_costing_code`. MIN() keeps this a scalar even if a sub-group
+        matched two rows.
+        """
+        return (
+            f'(SELECT MIN(P."PrcCode") FROM "{schema}"."OPRC" AS P'
+            f' WHERE P."DimCode" = 1 AND P."Active" = \'Y\''
+            f' AND (P."PrcCode" = {sub_group_expr} OR P."PrcName" = {sub_group_expr}))'
+        )
+
+    @staticmethod
+    def _order_line_scheme(schema):
+        """The U_SchemeAgst an invoice line drawn from this order line must carry.
+
+        SAP's transaction validation rejects an A/R invoice line with it blank
+        ("(1310325) Please Select the SchemeAgst Column"). In order: the order
+        line's own value; the order line's costing code, which is already a
+        PrcCode; the profit-centre code for the item's sub-group.
+        """
+        return (
+            'COALESCE(NULLIF(T1."U_SchemeAgst", \'\'), NULLIF(T1."OcrCode", \'\'), '
+            + Queries._scheme_from_sub_group(schema, 'T2."U_Sub_Group"')
+            + ') AS "SchemeAgst"'
+        )
+
+    @staticmethod
     def get_sales_orders_for_party(party_code , branch):
+        """Open sales-order lines for one customer, in the branch's company DB.
+
+        "SchemeAgst" -- see `_order_line_scheme`.
+        """
         s = Queries._schema_for_branch(branch)
         branches = [
             f"""
@@ -354,10 +391,13 @@ class Queries():
                 T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
                 T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
                 T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
-                T1."OcrCode", T1."LineStatus"
+                T1."OcrCode", T1."LineStatus",
+                {Queries._order_line_scheme(s)}
             FROM "{s}"."ORDR" AS T0
             INNER JOIN "{s}"."RDR1" AS T1
                 ON T0."DocEntry" = T1."DocEntry"
+            LEFT JOIN "{s}"."OITM" AS T2
+                ON T2."ItemCode" = T1."ItemCode"
             WHERE T0."CardCode" = ?
               AND T0."CANCELED" = 'N'
               AND T0."DocStatus" = 'O'
@@ -399,10 +439,13 @@ class Queries():
                 T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
                 T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
                 T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
-                T1."OcrCode", T1."LineStatus"
+                T1."OcrCode", T1."LineStatus",
+                {Queries._order_line_scheme(s)}
             FROM "{s}"."ORDR" AS T0
             INNER JOIN "{s}"."RDR1" AS T1
                 ON T0."DocEntry" = T1."DocEntry"
+            LEFT JOIN "{s}"."OITM" AS T2
+                ON T2."ItemCode" = T1."ItemCode"
             WHERE T1."ItemCode" = ?
               AND T0."CANCELED" = 'N'
               AND T0."DocStatus" = 'O'
@@ -584,7 +627,8 @@ class Queries():
         	T0."U_Variety",
         	T0."U_Sub_Group",
         	T0."U_SKU",
-        	SUM(T1."Quantity") AS "TotalQty"
+        	SUM(T1."Quantity") AS "TotalQty",
+        	{Queries._scheme_from_sub_group(s, 'T0."U_Sub_Group"')} AS "SchemeAgst"
         FROM "{s}"."OITM" AS T0 
         LEFT JOIN "{s}"."OIBT" AS T1
         ON	T0."ItemCode" = T1."ItemCode"
