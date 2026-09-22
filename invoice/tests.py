@@ -120,3 +120,53 @@ class StatusChangeIsAttributedTests(TestCase):
         # in the timeline as an account that made a decision.
         self.assertEqual(self._patch({'status': 'APPROVED'}).status_code, 200)
         self.assertIsNone(self._last_actor())
+
+
+class ReservedBatchesExcludeLogTests(TestCase):
+    """`?exclude_log=` drops one log's own holds.
+
+    A failed invoice sits in ERROR, which is a holding status, so its batches
+    are reserved — by itself. Asked to re-allocate that same invoice against
+    current stock (the "Re-check batches & repost" action), it would find its
+    own pieces taken and report a shortage that does not exist.
+    """
+
+    def _log(self, so_number, status, batch, quantity):
+        return InvoiceLog.objects.create(
+            so_number=so_number, party_name='ACME', total_amount=100,
+            status=status, warehouse='DL-MP', branch='OIL',
+            created_by=self.user,
+            invoice_payload={
+                'DocumentLines': [{
+                    'ItemCode': 'FG001',
+                    'WarehouseCode': 'DL-MP',
+                    'BatchNumbers': [{'BatchNumber': batch, 'Quantity': quantity}],
+                }],
+            },
+        )
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='batch-reader', password='x')
+        # Created after the user: the log requires an author.
+        self.failed = self._log('SO-FAILED', 'ERROR', 'B-1', 40)
+        self.other = self._log('SO-OTHER', 'PENDING', 'B-1', 10)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _get(self, query=''):
+        response = self.client.get(f'/api/invoice/reserved-batches/{query}')
+        self.assertEqual(response.status_code, 200)
+        return {entry['batch_number']: entry['quantity'] for entry in response.json()['data']}
+
+    def test_without_the_parameter_both_logs_hold_their_share(self):
+        self.assertEqual(self._get(), {'B-1': 50})
+
+    def test_excluding_a_log_frees_exactly_its_own_pieces(self):
+        # The other draft's 10 stay held; only the failed log's 40 come back.
+        self.assertEqual(self._get(f'?exclude_log={self.failed.pk}'), {'B-1': 10})
+
+    def test_a_non_numeric_exclude_log_is_ignored_rather_than_erroring(self):
+        # A malformed parameter must not blank the holds and let two invoices
+        # allocate the same pieces.
+        self.assertEqual(self._get('?exclude_log=abc'), {'B-1': 50})

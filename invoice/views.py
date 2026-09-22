@@ -927,6 +927,17 @@ class ReservedBatchesView(APIView):
         if branch:
             logs = logs.filter(branch=branch)
 
+        # `exclude_log` drops ONE log's own holds from the answer.
+        #
+        # For the re-check-batches repost: a failed log is ERROR, which is a
+        # holding status, so its own batches are reserved -- by itself. Asked to
+        # allocate that same invoice again it would find its own stock taken and
+        # report a shortage that does not exist. Excluding it frees exactly the
+        # pieces this invoice already claims and nobody else's.
+        exclude_log = str(request.query_params.get('exclude_log') or '').strip()
+        if exclude_log.isdigit():
+            logs = logs.exclude(pk=int(exclude_log))
+
         # Scoped like the review screens, so a beverage user is not blocked by
         # an oil draft they cannot even see.
         logs = scope_logs_to_user(logs, request)
