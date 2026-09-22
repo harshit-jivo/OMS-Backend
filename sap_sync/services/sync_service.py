@@ -397,6 +397,25 @@ def serialized_sync(sync_type):
     return decorator
 
 
+def default_warehouse_code_for_category(category):
+    """The warehouse an order of this category ships from unless it says
+    otherwise — `HANA_WAREHOUSE_CODE` from the environment, or the beverages
+    variant. Module-level so the order form can offer the same default the
+    SAP push would apply (`orders/defaults/`), without standing up a SAP
+    connection to ask.
+    """
+    normalized_category = str(category or "").strip().upper()
+    default_warehouse_code = str(
+        getattr(settings, "HANA_WAREHOUSE_CODE", "GP-FG") or ""
+    ).strip()
+    beverages_warehouse_code = str(
+        getattr(settings, "HANA_WAREHOUSE_CODE_BEVERAGES", "") or ""
+    ).strip()
+    if normalized_category == "BEVERAGES":
+        return beverages_warehouse_code
+    return default_warehouse_code
+
+
 class SyncService:
     # Namespace for this app's Postgres advisory locks, so the ids below can't
     # collide with a lock taken anywhere else in the project.
@@ -654,18 +673,7 @@ class SyncService:
         return self.resolve_warehouse_code_for_category(category)
 
     def resolve_warehouse_code_for_category(self, category):
-        normalized_category = self._normalize_order_category(category)
-        default_warehouse_code = str(
-            getattr(settings, "HANA_WAREHOUSE_CODE", "GP-FG") or ""
-        ).strip()
-        beverages_warehouse_code = str(
-            getattr(settings, "HANA_WAREHOUSE_CODE_BEVERAGES", "") or ""
-        ).strip()
-
-        if normalized_category == "BEVERAGES":
-            return beverages_warehouse_code
-
-        return default_warehouse_code
+        return default_warehouse_code_for_category(category)
    
     @serialized_sync('ALL')
     def sync_all(self):

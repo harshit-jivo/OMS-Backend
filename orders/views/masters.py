@@ -632,24 +632,49 @@ class ProductListView(APIView):
                 'BranchSerializer` for why that is deliberate.',
 )
 class BranchView(APIView):
-    """Factory dispatch locations, for the "dispatch from" selector.
+    """Every active dispatch location, for the "dispatch from" selector.
 
     Reads `sap_sync.Branch` — the model the SAP sync writes and the one that
     matches the table. It used to read `orders.Branches`, a second unmanaged
     model on the same table that declared every column wrongly.
 
+    It used to return only branches named FACTORY. The form now lists them
+    all and picks the factory as the default itself, so a depot or a second
+    plant can be chosen when an order really ships from there.
+
     `distinct('bpl_name')` is deliberate and Postgres-specific (DISTINCT ON):
-    the table is unique on (bpl_id, category), so one physical factory appears
+    the table is unique on (bpl_id, category), so one physical branch appears
     once per company DB it exists in, and the selector wants it once.
     """
 
     def get(self, request):
         branches = (Branch.objects
-                    .filter(bpl_name__icontains='FACTORY')
+                    .filter(is_active=True)
                     .order_by("bpl_name")
                     .distinct('bpl_name'))
         serializer = BranchSerializer(branches, many=True)
         return Response(serializer.data)
+
+
+class OrderDefaultsView(APIView):
+    """What a new order starts with, read from the environment.
+
+    The warehouse default lives in `HANA_WAREHOUSE_CODE` (and the beverages
+    variant) and is applied by the SAP push when an order carries none. The
+    order form used to hardcode its own idea of the default, which is how an
+    order could show one warehouse on screen and ship from another. This
+    hands the form the same answer the push would give, per category.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from sap_sync.services.sync_service import default_warehouse_code_for_category
+        return Response({
+            'warehouse_code': {
+                category: default_warehouse_code_for_category(category)
+                for category in ('OIL', 'BEVERAGES', 'MART')
+            },
+        })
 
 class StaffProductsAPIView(APIView):
     """The staff product catalogue, and the rates attached to it.
