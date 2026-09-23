@@ -163,16 +163,31 @@ Eight desks (as of the 2026-07-29 SAP/JSAP split):
 | 1 | `entry` | Head Office In | — | no | 2 d |
 | 2 | `bilty_grpo` | Bilty / GRPO | — | yes | 3 d |
 | 3 | `pre_audit` | Pre-Audit | OK · HOLD · DEBIT · RETURN | yes | 3 d |
-| 4 | `data_entry` | Data Entry | — | yes | 2 d |
-| 5 | `sap_approval` | SAP Approval | APPROVED · REJECTED | yes | 3 d |
-| 6 | `jsap_approval` | JSAP Approval | APPROVED · REJECTED | yes | 3 d |
-| 7 | `save_in_sap` | Save in SAP | — | yes | 2 d |
-| 8 | `payment` | Payment | — | no | 5 d (terminal) |
+| 4 | `transport_approval` | Transport Approval | APPROVED · REJECTED | yes | 2 d |
+| 5 | `data_entry` | Data Entry | — | yes | 2 d |
+| 6 | `sap_approval` | SAP Approval | APPROVED · REJECTED | yes | 3 d |
+| 7 | `jsap_approval` | JSAP Approval | APPROVED · REJECTED | yes | 3 d |
+| 8 | `save_in_sap` | Save in SAP | — | yes | 2 d |
+| 9 | `payment` | Payment | — | no | 5 d (terminal) |
 
 ### Conditional routing
 
 **Bilty/GRPO is Transport-only.** `TRANSPORT_ONLY_STAGE_CODES` in
 `services.py`; a non-Transport invoice goes Entry → Pre-Audit directly.
+
+**Transport Approval is a DETOUR, not a step in the line** (`DETOUR_STAGE_CODES`,
+`services._detour_target()`; migration 0023). `order = 4` places it in the flow
+display only — `stage_route()` deliberately excludes it, so Pre-Audit's linear
+neighbour stays Data Entry:
+
+    Pre-Audit --(1st advance, Transport only)--> Transport Approval
+    Transport Approval --APPROVED or REJECTED--> Pre-Audit
+    Pre-Audit --(advance, once approved)-------> Data Entry
+
+A Transport invoice therefore passes Pre-Audit **twice**, and the desk hands it
+straight back either way. The gate is APPROVED specifically, not "has visited":
+a rejected invoice goes round again, because "has been there" would let one
+rejection carry it past the approval it was just denied.
 
 Routing is computed per invoice by `stage_route(invoice)`, and advance/return
 move along **that** route — so "previous stage" for a non-Transport invoice at
@@ -213,6 +228,47 @@ actions (`apply_bulk`) call it per invoice, so no rule can be bypassed in bulk.
 - An explicit `action: "RETURN"` overrides an advance-looking status.
 
 Amounts **accumulate**: an invoice debited twice carries the sum.
+
+### The one exception: restating a debit at Transport Approval
+
+`apply_action(..., debit_amount=…)` **sets** `Invoice.debit_amount` instead of
+adding to it, and is accepted only at the desks in
+`services.DEBIT_EDIT_STAGE_CODES` — today just `transport_approval`.
+
+Transport Approval is the desk that knows what the transporter actually owes
+(short delivery, damage, detention) and it sees the invoice *after* Pre-Audit
+has already put a figure on it. Without an edit, correcting that figure meant
+raising a second debit, so the invoice carried the sum of a guess and its own
+correction and no desk could state the real deduction.
+
+| Detail | Behaviour |
+|---|---|
+| Who | Transport Approval only; every other desk gets a validation error |
+| How many | **One invoice at a time** — an absolute figure applied across a selection would give every invoice the same deduction, so `apply_bulk` refuses it |
+| Bounds | `0 ≤ debit_amount ≤ invoice_value` (a larger debit makes `net_invoice_value` negative, which the payment desk has no meaning for) |
+| Verdict | Rides along with `APPROVED` / `REJECTED`, so the approver corrects and decides in one action |
+| Parked rejections | Applied **before** the `REJECT_PENDING` early return — that is the path where the figure is most likely being disputed |
+| No-op | Re-sending the figure the invoice already has writes nothing |
+| Audit | An immutable `NOTE` StageEvent (`stage_status='DEBIT'`, `amount` = the new total) whose remarks carry the **old** value — nothing else keeps it, since the invoice holds one running total |
+
+The note makes the desk's Debit tab (§11) and the invoice timeline show the
+change. At this desk the tab reads "changed to", not "debited by".
+
+**Pre-Audit keeps its own authority to debit.** A Transport invoice comes back
+to Pre-Audit after the detour, and its second advance may still carry a
+`DEBIT` — which **adds** to whatever Transport Approval settled on. The two
+halves of the rule:
+
+| Pre-Audit, after the detour | Allowed? |
+|---|---|
+| `stage_status='DEBIT'` + `amount` — raise a *further* deduction | **Yes**, added on top |
+| `debit_amount` — rewrite the figure Transport Approval set | **No**, validation error |
+
+The invoice's debit is one field but not one concern: a rate difference found
+after the transporter's deduction was settled is still Pre-Audit's to raise,
+while the transport figure itself belongs to the desk that set it. The split is
+recoverable after the fact — the Transport Approval note carries the total it
+was changed *to*, and each Pre-Audit `DEBIT` event carries the amount it added.
 
 ---
 
@@ -474,7 +530,7 @@ All under `/api/tracker/`.
 | GET | `stage-advanced/?stage=` | user | Read-only history of what left a desk |
 | GET | `stage-decisions/?stage=&decision=` | user | A desk's decision log — `OK` · `HOLD` · `DEBIT` · `APPROVED` · `REJECTED` · `RETURN` (comma-separated; omit for all). `&include_resolved=1` keeps send-backs the invoice has since come back from |
 | GET | `stage-export/?stage=&tab=&ids=` | user | One queue tab as Excel, in the All-Invoices register layout |
-| POST | `actions/bulk/` | user | Apply one action to many invoices |
+| POST | `actions/bulk/` | user | Apply one action to many invoices. Body: `ids`, `action`, `stage_status`, `remarks`, `hold_type`, `amount` (adds a hold/debit), `debit_amount` (**restates** the total — Transport Approval, one invoice; §3) |
 | GET | `reports/` | reports | Turnaround analytics |
 | GET | `alerts/` | alerts | Stuck invoices, derived live (see §9) |
 | GET | `all-invoices/` | admin | Master list |

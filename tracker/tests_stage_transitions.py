@@ -579,6 +579,142 @@ class TransportApprovalDetourTests(TrackerFlowTestCase):
         self.assertEqual(invoice.current_stage.code, 'bilty_grpo')
 
 
+class TransportApprovalDebitEditTests(TrackerFlowTestCase):
+    """The Transport Approval desk may RESTATE the invoice's debit.
+
+    Pre-Audit's DEBIT disposition adds (an invoice can be debited more than
+    once for different reasons). This is a correction of a figure that already
+    exists — the transport approver is the one who knows what the transporter
+    actually owes — so it SETS instead. If it added, the invoice would carry
+    the sum of a guess and its own correction.
+    """
+
+    def _at_the_desk(self, debit='0.00', number='TA-DEBIT'):
+        invoice = self.move_to(
+            self.make_invoice(self.transport, number=number), 'pre_audit')
+        self.grant(self.clerk, 'pre_audit', 'transport_approval')
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='DEBIT',
+            amount=Decimal(debit), remarks='short delivery')
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+        return invoice
+
+    def test_it_replaces_the_pre_audit_figure_rather_than_adding_to_it(self):
+        invoice = self._at_the_desk('100.00')
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='APPROVED',
+            debit_amount='250.00')
+        self.assertEqual(invoice.debit_amount, Decimal('250.00'))
+        # 1180.00 invoice value, so the net follows the corrected figure.
+        self.assertEqual(invoice.net_invoice_value, Decimal('930.00'))
+
+    def test_the_verdict_still_applies(self):
+        """The edit rides along with the decision; it does not replace it."""
+        invoice = self._at_the_desk('100.00')
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='APPROVED',
+            debit_amount='250.00')
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+
+    def test_the_old_value_is_recorded(self):
+        invoice = self._at_the_desk('100.00')
+        apply_action(invoice=invoice, user=self.clerk, stage_status='APPROVED',
+                     debit_amount='250.00')
+        note = StageEvent.objects.get(
+            invoice=invoice, stage__code='transport_approval',
+            event_type=StageEvent.EventType.NOTE, stage_status='DEBIT')
+        self.assertEqual(note.amount, Decimal('250.00'))
+        self.assertIn('from 100.00 to 250.00', note.remarks)
+        self.assertEqual(note.acted_by, self.clerk)
+
+    def test_it_survives_a_rejection_parked_for_remarks(self):
+        """A REJECTED with no remarks returns early — the edit must still
+        stick, because that is exactly the path where the approver is most
+        likely to be disputing the figure."""
+        invoice = self._at_the_desk('100.00')
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='REJECTED',
+            debit_amount='400.00')
+        self.assertTrue(invoice.rejection_pending)
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.debit_amount, Decimal('400.00'))
+
+    def test_zero_clears_a_debit_that_should_not_have_been_raised(self):
+        invoice = self._at_the_desk('100.00')
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='APPROVED',
+            debit_amount='0')
+        self.assertEqual(invoice.debit_amount, Decimal('0.00'))
+        self.assertEqual(invoice.net_invoice_value, Decimal('1180.00'))
+
+    def test_resending_the_same_figure_writes_no_note(self):
+        invoice = self._at_the_desk('100.00')
+        apply_action(invoice=invoice, user=self.clerk, stage_status='APPROVED',
+                     debit_amount='100.00')
+        self.assertFalse(StageEvent.objects.filter(
+            invoice=invoice, stage__code='transport_approval',
+            event_type=StageEvent.EventType.NOTE, stage_status='DEBIT').exists())
+
+    def test_it_cannot_exceed_the_invoice_value(self):
+        """A debit past the invoice value makes `net_invoice_value` negative,
+        which the payment stage has no meaning for."""
+        invoice = self._at_the_desk('100.00')
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk,
+                         stage_status='APPROVED', debit_amount='2000.00')
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.debit_amount, Decimal('100.00'))
+        self.assertEqual(invoice.current_stage.code, 'transport_approval')
+
+    def test_it_cannot_be_negative(self):
+        invoice = self._at_the_desk('100.00')
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk,
+                         stage_status='APPROVED', debit_amount='-1')
+
+    def test_no_other_desk_may_edit_it(self):
+        """Pre-Audit debits by disposition, which accumulates. Letting it also
+        set the total outright would give one desk two contradictory ways to
+        change the same number."""
+        invoice = self.move_to(self.make_invoice(self.transport), 'pre_audit')
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk, stage_status='OK',
+                         debit_amount='250.00')
+
+    def test_pre_audit_may_still_debit_afterwards_just_not_restate(self):
+        """The two halves of the rule, together, on one invoice.
+
+        Pre-Audit keeps its own authority to debit — the invoice's debit is one
+        field but not one concern, and a rate difference found after the
+        transporter's deduction was settled is still Pre-Audit's to raise. What
+        it must not do is touch the figure Transport Approval put there: that
+        one is the transport approver's, so Pre-Audit ADDS to it and cannot
+        overwrite it.
+        """
+        invoice = self._at_the_desk('100.00')
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='APPROVED',
+            debit_amount='250.00')
+        self.assertEqual(invoice.current_stage.code, 'pre_audit')
+
+        # Can debit: a further 50 lands ON TOP of the approved 250.
+        invoice = apply_action(
+            invoice=invoice, user=self.clerk, stage_status='DEBIT',
+            amount=Decimal('50.00'), remarks='rate difference')
+        self.assertEqual(invoice.debit_amount, Decimal('300.00'))
+        self.assertEqual(invoice.current_stage.code, 'data_entry')
+
+        # Cannot restate: the transport approver's figure is not Pre-Audit's
+        # to rewrite, at this desk or any other.
+        invoice = self.move_to(
+            self.make_invoice(self.transport, number='TA-BOTH'), 'pre_audit')
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk,
+                         stage_status='DEBIT', amount=Decimal('50.00'),
+                         remarks='rate difference', debit_amount='250.00')
+
+
 class FastTrackTests(TrackerFlowTestCase):
     """`fast_track` — Invoice Entry straight to SAP Approval.
 

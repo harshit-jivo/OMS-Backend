@@ -17,7 +17,7 @@ Responses use the project's `{success, message, data}` envelope.
 """
 import logging
 
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 from rest_framework import status as http_status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -136,6 +136,48 @@ class RequestHistoryView(_Base):
                 .select_related('acted_by', 'stage')
                 .order_by('acted_at', 'id'))
         return ok(ActionLogSerializer(logs, many=True).data)
+
+
+class RequestStockView(_Base):
+    """Where the item actually is — the stock panel on the detail dialog.
+
+    Read LIVE from SAP each time the dialog opens, and deliberately not
+    snapshotted onto the order. A stock figure is only useful while it is
+    current, and a stale one is worse than none because nothing on screen tells
+    the reader which it is looking at. The order's own `planned_qty` is a
+    snapshot for a different reason: it is what was approved, so it must not
+    move underneath the approval.
+
+    Answers for the whole SITE, not just the order's warehouse — see
+    `sap.ITEM_LOCATION_STOCK_SQL`. An approver deciding whether to release a
+    production order wants to know whether the material is already standing in
+    the next shed, and that is the question SAP's own
+    `Get_Item_Location_Stock` was written to answer.
+
+    503, not 200-with-an-empty-list, when SAP cannot be reached: an empty list
+    here means the site genuinely holds none.
+    """
+
+    def get(self, request, pk):
+        order = ProductionOrder.objects.filter(pk=pk).first()
+        if not order:
+            return fail('Production order not found.',
+                        status=http_status.HTTP_404_NOT_FOUND)
+        try:
+            rows, meta = sap_service.item_location_stock(
+                order.company, order.item_code, order.warehouse)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc),
+                        status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        # `item_name` is not repeated here — the dialog's own header already
+        # carries it, and the panel sits directly beneath.
+        return ok({
+            'warehouse': order.warehouse,
+            # `location` is null only when the order's warehouse is not in OWHS
+            # at all, which is the one case that legitimately has no rows.
+            **meta,
+            'results': rows,
+        })
 
 
 class _DecisionView(APIView):
@@ -346,7 +388,23 @@ class ApprovalHistoryView(APIView):
             return fail(error, status=http_status.HTTP_400_BAD_REQUEST)
 
         ids = flow_service.decided_order_ids(request.user)
-        qs = _queryset().filter(company).filter(state).filter(pk__in=ids)
+        # NEWEST DECISION FIRST, and specifically THIS user's decision — not
+        # the order's own `created_at`, which is when SAP raised it and puts a
+        # decision taken this morning below one taken last week purely because
+        # the planner happened to raise them in that order.
+        #
+        # An order can carry several decisions (a rejection, a re-raise, an
+        # approval), so this is the MAX of the ones belonging to this user.
+        qs = (_queryset().filter(company).filter(state).filter(pk__in=ids)
+              .annotate(decided_at=Max(
+                  'action_logs__acted_at',
+                  filter=Q(action_logs__acted_by=request.user,
+                           action_logs__action__in=[LogAction.APPROVE,
+                                                    LogAction.REJECT])))
+              # `-id` breaks a tie deterministically: a bulk decision stamps
+              # several rows in the same transaction, and without a second key
+              # their order is whatever the database returns that day.
+              .order_by('-decided_at', '-id'))
         return ok(ProductionOrderSerializer(qs[:500], many=True).data)
 
 
