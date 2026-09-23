@@ -195,6 +195,39 @@ def _guard_not_expired(flow):
             f'expiry, then approve it.')
 
 
+def following_stages(flow):
+    """The active stages still ahead of this flow's current one.
+
+    Re-read from the workflow as configured RIGHT NOW rather than remembered,
+    so a stage deactivated mid-flight is skipped rather than deadlocking the
+    request. Empty means the current stage is the LAST — the one whose
+    approval calls SAP.
+
+    ONE DEFINITION, used by `approve` to decide whether to call SAP and by
+    `is_final_stage` to tell the screen so. Two copies of this rule would be
+    how a page says "moves to the next approver" over an approval that is in
+    fact writing to SAP. Comparing `current_stage_sequence` with
+    `total_stage` on the client is exactly such a copy, and a wrong one:
+    `total_stage` is the count at SUBMISSION, and sequences need not run 1..N.
+    """
+    stages = stages_for(flow)
+    current = next((s for s in stages if s.id == flow.current_stage_id), None)
+    if current is None:
+        return []
+    return [s for s in stages if s.sequence > current.sequence]
+
+
+def is_final_stage(flow):
+    """Whether approving the CURRENT stage is the one that writes to SAP.
+
+    False for a flow that is not pending — there is no current stage to
+    approve, so there is nothing about to call SAP.
+    """
+    if flow.status != FlowStatus.PENDING or not flow.current_stage_id:
+        return False
+    return not following_stages(flow)
+
+
 @transaction.atomic
 def approve(flow, *, user, remarks=''):
     """Approve the current stage. Advances, or completes the flow.
@@ -227,14 +260,7 @@ def approve(flow, *, user, remarks=''):
     _guard_not_expired(flow)
 
     decided_stage_id = flow.current_stage_id
-
-    # The NEXT active stage as configured right now. Re-read rather than
-    # remembered, so a stage deactivated mid-flight is skipped rather than
-    # deadlocking the request.
-    stages = stages_for(flow)
-    current = next((s for s in stages if s.id == decided_stage_id), None)
-    following = ([s for s in stages if s.sequence > current.sequence]
-                 if current else [])
+    following = following_stages(flow)
 
     if not following:
         # Last stage: SAP first. A refusal raises, and this transaction —

@@ -87,6 +87,18 @@ class BackDateFlowSerializer(serializers.ModelSerializer):
     #: chasing an approval needs to be told the truth.
     effective_user_username = serializers.SerializerMethodField()
     has_active_replacement = serializers.SerializerMethodField()
+    #: Whether approving the CURRENT stage is the one that calls SAP.
+    #:
+    #: Decided here, by the same rule `flow.approve` uses, so the approval
+    #: dialog can say "calling SAP" to the last approver and to nobody else.
+    #: A client comparing `current_stage_sequence` with `total_stage` would be
+    #: guessing: `total_stage` is the count at SUBMISSION, and a stage
+    #: deactivated since then moves where the SAP call happens.
+    is_final_stage = serializers.SerializerMethodField()
+
+    def get_is_final_stage(self, obj):
+        from backdate.services import flow as flow_service
+        return flow_service.is_final_stage(obj)
 
     class Meta:
         model = BackDateFlow
@@ -96,7 +108,7 @@ class BackDateFlowSerializer(serializers.ModelSerializer):
                   'effective_user_username', 'has_active_replacement',
                   'current_stage', 'current_stage_name',
                   'current_stage_sequence', 'total_stage',
-                  'created_at', 'updated_at']
+                  'is_final_stage', 'created_at', 'updated_at']
         read_only_fields = fields
 
     def _assignment(self, obj):
