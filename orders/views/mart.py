@@ -419,13 +419,30 @@ class DistributorReportView(APIView):
         from_date = _report_date(request.query_params.get('from_date'))
         to_date = _report_date(request.query_params.get('to_date'))
 
+        # Orders whose SAP Sales Order was cancelled must never count. Normally
+        # cancelling flips the order to 'SO_CANCELLED' (so the status filter
+        # below already drops it), but if the SAP cancel succeeded and the OMS
+        # status-save then failed/raced (see cancel_mart_order), the order can
+        # linger at 'Completed' while carrying a SUCCESS cancellation log. Read
+        # those ids and exclude them explicitly, so a cancelled SO is out of the
+        # report by either path.
+        from sap_sync.models import SalesCancelledLog
+        cancelled_order_ids = [
+            int(oid)
+            for oid in SalesCancelledLog.objects
+            .filter(status='SUCCESS')
+            .values_list('order_id', flat=True)
+            .distinct()
+            if str(oid).isdigit()
+        ]
+
         # One base queryset of the line items on completed distributor orders;
         # both aggregations and the grand totals derive from it, so they can
         # never disagree about which orders are in scope.
         items = OrderItem.objects.filter(
             order__order_type='DISTRIBUTOR',
             order__status_id=MART_STATUS_COMPLETED_ID,
-        )
+        ).exclude(order_id__in=cancelled_order_ids)
         if from_date:
             items = items.filter(order__created_at__date__gte=from_date)
         if to_date:
