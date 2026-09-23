@@ -11,6 +11,7 @@ that default explicit per view rather than invent a role restriction that
 would tighten access nothing here has ever had.
 """
 from django.conf import settings
+from django.db.models import Count
 from django.http import HttpResponse
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -19,7 +20,7 @@ from rest_framework.response import Response
 from . import mapping, qr as qrgen, sap
 from . import services, validation
 from .client import EInvoiceClient, EInvoiceError
-from .errors import build_error_response
+from .errors import build_error_response, normalize_error_details
 from .models import IrnRecord, IrnGenerationLog
 from .sample import sample_invoice
 
@@ -78,7 +79,8 @@ def get_token(request):
     Send with an empty body. The AuthToken is masked in the response.
     """
     try:
-        session = EInvoiceClient()._get_session(force=True)
+        session = _client_for(request.query_params.get("entity"),
+                              request.query_params.get("gstin"))._get_session(force=True)
     except EInvoiceError as exc:
         return Response(
             {"ok": False, "error": str(exc), "details": exc.error_details},
@@ -178,11 +180,11 @@ def irn_from_invoice(request, docentry):
     try:
         docentry, company_db = sap.resolve_invoice_ref(docentry, id_type, company_db)
         session = sap.get_session(company_db)
-        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db, session=session)
+        sap_invoice, hsn_map, sac_map = sap.fetch_invoice_for_irn(docentry, company_db, session=session)
     except sap.SapFetchError as exc:
         return Response({"error": str(exc)}, status=502)
 
-    invoice = mapping.build_irn(sap_invoice, hsn_map)
+    invoice = mapping.build_irn(sap_invoice, hsn_map, sac_map)
     errs = validation.validate_invoice(invoice)
 
     if request.method == "GET":
@@ -200,24 +202,41 @@ def irn_from_invoice(request, docentry):
     order_id = request.query_params.get("order_id")
     order_id = int(order_id) if order_id and order_id.isdigit() else None
     source = request.query_params.get("source") or f"OINV:{docentry}"
+    doc_no = (invoice.get("DocDtls") or {}).get("No")
     try:
         record, result = services.generate_and_store(invoice, order_id=order_id, source=source)
     except services.PayloadInvalid as exc:
         services.log_failure_to_hana(docentry=docentry, invoice=invoice,
                                      error="Pre-submit validation failed.", company_db=company_db)
+        services.log_generation_attempt(
+            docentry=docentry, company_db=company_db, outcome="FAILED", trigger="manual",
+            doc_no=doc_no, error_code="VALIDATION",
+            error_message="Pre-submit validation failed.", validation_errors=exc.errors)
         return Response(
             {"error": "Mapped invoice failed pre-submit validation; fix these before submitting to NIC.",
              "docentry": int(docentry), "invoice": invoice, "validation_errors": exc.errors},
             status=422,
         )
     except EInvoiceError as exc:
+        # describe_nic_error, not str(exc): the latter is only the generic
+        # banner, and NIC's actual error codes would be lost to the log.
+        detail = services.describe_nic_error(exc)
         services.log_failure_to_hana(docentry=docentry, invoice=invoice,
-                                     error=str(exc), company_db=company_db)
+                                     error=detail, company_db=company_db)
+        code, msg = services._first_error(exc)
+        services.log_generation_attempt(
+            docentry=docentry, company_db=company_db, outcome="FAILED", trigger="manual",
+            doc_no=doc_no, error_code=code or "NIC", error_message=msg or detail)
         resp = build_error_response(exc)
         resp["invoice"] = invoice
         return Response(resp, status=exc.status_code or 502)
     except FileNotFoundError:
         return Response(_KEY_MISSING, status=500)
+
+    services.log_generation_attempt(
+        docentry=docentry, company_db=company_db, outcome="SUCCESS", trigger="manual",
+        doc_no=doc_no, irn=(result or {}).get("Irn"), ack_no=str((result or {}).get("AckNo") or "") or None,
+        irn_record=record)
 
     # Best-effort HANA mirror (+ QR PNG) and SAP write-back, if enabled.
     services.post_generate_hooks(record, result, company_db=company_db, docentry=int(docentry))
@@ -321,17 +340,84 @@ def list_invoices(request):
     })
 
 
+def _company_label(schema: str) -> str:
+    """A company DB schema rendered as the name people use for it.
+
+    Derived from the schema itself rather than from `sap.company_choices()`,
+    which returns whatever the environment happens to point at — so a box whose
+    OIL is configured as `TEST_JIVO_OIL_HANADB` used to show an empty `OIL` tab
+    beside a raw `JIVO_OIL_HANADB` one holding all the rows, for the same
+    company. A TEST schema keeps its suffix so it can never be mistaken for
+    live data.
+    """
+    name = (schema or '').upper()
+    is_test = name.startswith('TEST_')
+    core = name.removeprefix('TEST_').removesuffix('_HANADB').removeprefix('JIVO_')
+    label = {'OIL': 'OIL', 'BEVERAGES': 'BEVERAGE', 'BEVERAGE': 'BEVERAGE',
+             'MART': 'MART'}.get(core, core or schema)
+    return f'{label} (TEST)' if is_test else label
+
+
+def _log_companies():
+    """Companies to offer as tabs.
+
+    Included:
+      * every schema that actually has log rows, and
+      * every configured LIVE company, even at zero rows — a real company with
+        no activity should read as "0", not vanish from the switcher.
+
+    Excluded:
+      * rows with no `company_db` — an artefact of callers that did not pass
+        one (see the approved-draft path), not a company anyone can filter by.
+        They are still reachable under "All companies".
+      * a TEST schema with no rows. A box whose OIL is configured as
+        `TEST_JIVO_OIL_HANADB` would otherwise show an empty `OIL (TEST)` tab
+        next to the live `OIL` one that holds all the data. A TEST schema that
+        HAS rows is still listed, clearly marked, because then it is telling
+        you something.
+    """
+    counts = {r['company_db']: r['n'] for r in
+              (IrnGenerationLog.objects.exclude(company_db__isnull=True)
+               .exclude(company_db='')
+               .values('company_db').annotate(n=Count('id')))}
+
+    schemas = set(counts)
+    for choice in sap.company_choices():
+        db = choice.get('company_db') or ''
+        if db and not db.upper().startswith('TEST_'):
+            schemas.add(db)
+
+    out = [{'company_db': db, 'label': _company_label(db), 'rows': counts.get(db, 0)}
+           for db in schemas]
+    out.sort(key=lambda c: (-c['rows'], c['label']))
+    return out
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def generation_logs(request):
     """
-    List IRN auto-generation attempts (einvoice_irn_generation_log).
-    Query params: ?outcome=FAILED|SUCCESS|SKIPPED · ?docentry=<n> · ?trigger=<t> · ?limit=<n>
+    List IRN generation attempts (einvoice_irn_generation_log).
+
+    Query params:
+      ?company_db=JIVO_BEVERAGES_HANADB   one company (omit for all)
+      ?outcome=FAILED|SUCCESS|SKIPPED · ?docentry=<n> · ?trigger=<t>
+      ?limit=<n>&offset=<n>               page window (limit caps at 500)
+
+    `companies` lists the company DBs that actually have rows, so the UI can build
+    a switcher from the data rather than a hardcoded list. Labels come from the
+    schema name, not from the environment — see _company_label.
+
+    `total` is the size of the FILTERED set, not of the page, so the caller can
+    paginate. `count` remains the number of rows in this response.
     """
     qs = IrnGenerationLog.objects.all()
+    company_db = request.query_params.get("company_db")
     outcome = request.query_params.get("outcome")
     docentry = request.query_params.get("docentry")
     trigger = request.query_params.get("trigger")
+    if company_db:
+        qs = qs.filter(company_db=company_db)
     if outcome:
         qs = qs.filter(outcome=outcome.upper())
     if trigger:
@@ -339,21 +425,48 @@ def generation_logs(request):
     if docentry and docentry.isdigit():
         qs = qs.filter(docentry=int(docentry))
     try:
-        limit = min(int(request.query_params.get("limit", 100)), 500)
+        limit = min(max(int(request.query_params.get("limit", 100)), 1), 500)
     except ValueError:
         limit = 100
+    try:
+        offset = max(int(request.query_params.get("offset", 0)), 0)
+    except ValueError:
+        offset = 0
 
+    total = qs.count()
     rows = list(qs.values(
         "id", "docentry", "company_db", "environment", "trigger", "attempt_no",
         "outcome", "doc_no", "irn", "ack_no", "error_code", "error_message",
         "validation_errors", "duration_ms", "created_at",
-    )[:limit])
-    counts = {
-        "SUCCESS": IrnGenerationLog.objects.filter(outcome="SUCCESS").count(),
-        "FAILED": IrnGenerationLog.objects.filter(outcome="FAILED").count(),
-        "SKIPPED": IrnGenerationLog.objects.filter(outcome="SKIPPED").count(),
-    }
-    return Response({"count": len(rows), "totals": counts, "results": rows})
+    )[offset:offset + limit])
+
+    # Totals for the CURRENT filters, minus `outcome` itself — otherwise
+    # filtering to FAILED would report zero successes, which reads as "there
+    # are none" rather than "you are not looking at them".
+    scoped = IrnGenerationLog.objects.all()
+    if company_db:
+        scoped = scoped.filter(company_db=company_db)
+    if trigger:
+        scoped = scoped.filter(trigger=trigger)
+    if docentry and docentry.isdigit():
+        scoped = scoped.filter(docentry=int(docentry))
+    counts = {o: scoped.filter(outcome=o).count()
+              for o in ("SUCCESS", "FAILED", "SKIPPED")}
+
+    companies = _log_companies()
+
+    return Response({
+        "count": len(rows),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(rows) < total,
+        "totals": counts,
+        "companies": companies,
+        "filters": {"company_db": company_db, "outcome": outcome,
+                    "trigger": trigger, "docentry": docentry},
+        "results": rows,
+    })
 
 
 @api_view(["POST"])
@@ -410,34 +523,239 @@ def cancel_irn(request):
     irn = d.get("irn")
     if not irn:
         return Response({"error": "'irn' is required."}, status=400)
-    try:
-        record, result = services.cancel_and_store(irn, d.get("reason_code", "2"), d.get("remarks", "Cancelled"))
-    except EInvoiceError as exc:
-        return Response(build_error_response(exc), status=exc.status_code or 502)
-    except FileNotFoundError:
-        return Response(_KEY_MISSING, status=500)
-    resp = {"result": result}
-    if record is not None:
-        resp["record_id"] = record.id
-    return Response(resp)
+    reason, remarks = d.get("reason_code", "2"), d.get("remarks", "Cancelled")
+
+    # Only the GSTIN that OWNS the IRN can cancel it, and one PAN has a
+    # separate GSTIN — with its own NIC API user — per state. So:
+    #
+    #   explicit gstin            -> use exactly that
+    #   the IRN is ours           -> cancel_and_store reads the seller off the
+    #                                stored record (pass None and let it)
+    #   entity with one GSTIN     -> that one
+    #   entity with several       -> try each; only the owner can succeed, the
+    #                                rest fail harmlessly without cancelling
+    #                                anything, so this cannot cancel the wrong
+    #                                document.
+    known_locally = IrnRecord.objects.filter(irn=irn).exclude(
+        supplier_gstin="").exists()
+    if d.get("gstin"):
+        candidates = [d["gstin"]]
+    elif known_locally:
+        candidates = [None]
+    else:
+        candidates = _gstins_for(d.get("entity")) or [None]
+
+    attempts, last = [], None
+    for gstin in candidates:
+        try:
+            record, result = services.cancel_and_store(irn, reason, remarks, gstin=gstin)
+        except EInvoiceError as exc:
+            attempts.append({"gstin": gstin, "error": services.describe_nic_error(exc)})
+            last = exc
+            continue
+        except FileNotFoundError:
+            return Response(_KEY_MISSING, status=500)
+        resp = {"result": result}
+        if record is not None:
+            resp["record_id"] = record.id
+        if gstin:
+            resp["cancelled_as"] = gstin
+        return Response(resp)
+
+    body = build_error_response(last) if last else {"error": "No NIC identity to cancel as."}
+    if len(attempts) > 1:
+        body["attempts"] = attempts
+    return Response(body, status=(last.status_code if last else 502) or 502)
+
+
+#: Codes that mean "this identity cannot answer" rather than "the lookup is
+#: broken", so the search moves to the next GSTIN instead of giving up.
+#:
+#:   2154  no such IRN for THIS seller — the whole point of searching onward
+#:   1017  incorrect user id / user does not exist — a GSTIN listed in
+#:         EINV_CREDENTIALS with no usable NIC login. Expected: not every
+#:         registration Jivo bills under has API credentials provisioned, and
+#:         one that does not must not block the ones that do.
+_SKIP_CODES = {"2154", "1017"}
+
+
+def _pan_of(gstin: str) -> str:
+    """The PAN inside a GSTIN — characters 3-12. '' if it isn't one."""
+    g = (gstin or "").strip().upper()
+    return g[2:12] if len(g) == 15 else ""
+
+
+#: PAN -> the name people use for that legal entity. Everything NIC-facing is
+#: keyed by GSTIN, but a user thinks "Wellness or Mart", and the two are
+#: separate PANs with separate NIC credentials — so the toggle is per PAN and
+#: each entity's GSTINs come from the configured credentials, not a hardcoded
+#: list. An unrecognised PAN still appears, under its own PAN, rather than
+#: being silently dropped.
+_ENTITY_NAMES = {
+    "AACCJ4223F": "Jivo Wellness",
+    "AAFCJ4102J": "Jivo Mart",
+}
+
+
+def _entities():
+    """The selectable NIC identities: one per PAN, with its GSTINs."""
+    gstins = []
+    for g in ([(settings.EINV or {}).get("GSTIN")]
+              + list(getattr(settings, "EINV_CREDENTIALS", {}) or {})):
+        if g and g not in gstins:
+            gstins.append(g)
+
+    by_pan = {}
+    for g in gstins:
+        pan = _pan_of(g)
+        if not pan:
+            continue
+        by_pan.setdefault(pan, []).append(g)
+
+    default_pan = _pan_of((settings.EINV or {}).get("GSTIN"))
+    return [{
+        "key": pan,
+        "label": _ENTITY_NAMES.get(pan, pan),
+        "pan": pan,
+        "gstins": sorted(gs),
+        "is_default": pan == default_pan,
+    } for pan, gs in sorted(by_pan.items(),
+                            key=lambda kv: (kv[0] != default_pan, kv[0]))]
+
+
+def _gstins_for(entity=None, gstin=None):
+    """GSTINs to act as, narrowed by an explicit GSTIN or an entity/PAN.
+
+    Returns None for "no restriction", so callers keep their existing
+    behaviour when the UI sends nothing.
+    """
+    if gstin:
+        return [gstin]
+    key = (entity or "").strip().upper()
+    if not key:
+        return None
+    for ent in _entities():
+        if key in (ent["key"], ent["label"].upper()):
+            return ent["gstins"]
+    # A PAN we do not know: match on the PAN embedded in each GSTIN anyway.
+    matched = [g for g in ((getattr(settings, "EINV_CREDENTIALS", {}) or {}) or {})
+               if _pan_of(g) == key]
+    return matched or None
+
+
+def _client_for(entity=None, gstin=None):
+    """One client for the selected identity (first GSTIN of the entity)."""
+    chosen = _gstins_for(entity, gstin)
+    return EInvoiceClient(gstin=chosen[0] if chosen else None)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def list_entities(request):
+    """NIC identities the UI can switch between — one per PAN.
+
+    Cancel / lookup / GSTIN-master calls are authenticated as a seller GSTIN,
+    and Jivo Wellness and Jivo Mart are different PANs with different NIC
+    credentials. Without a selector, every one of those screens silently used
+    the default identity and could not see or act on the other entity at all.
+    """
+    return Response({"results": _entities()})
+
+
+def _candidate_gstins(preferred=None, entity=None):
+    """Seller GSTINs to try, best guess first.
+
+    With `entity` set the search is confined to that PAN's GSTINs — asking Mart
+    about a Wellness invoice can only ever return 2154, and vice versa.
+
+    A NIC lookup is scoped to the GSTIN you authenticate as, so asking as the
+    wrong one returns 2154 "IRN details are not found" even when the IRN
+    exists. Jivo issues under several GSTINs per company — Oil and Beverages
+    both bill from 06AACCJ4223F1Z0 *and* 07AACCJ4223F1ZY, Mart from its own
+    pair — so a single default identity is blind to most of them.
+    """
+    allowed = _gstins_for(entity)
+    out = []
+    for g in (preferred, (settings.EINV or {}).get("GSTIN")):
+        if g and g not in out and (allowed is None or g in allowed):
+            out.append(g)
+    for g in (allowed if allowed is not None
+              else (getattr(settings, "EINV_CREDENTIALS", {}) or {})):
+        if g and g not in out:
+            out.append(g)
+    return out
+
+
+def _lookup_across_gstins(call, *args, preferred=None, entity=None):
+    """Run a NIC lookup against each configured seller GSTIN until one answers.
+
+    Returns the first real hit, tagged with the GSTIN that produced it.
+
+    A per-identity failure (unknown IRN, or a GSTIN with no working NIC login)
+    only disqualifies that identity — it must not end the search, or a single
+    unprovisioned registration makes every lookup fail. Anything else is
+    systemic and is returned straight away rather than repeated once per GSTIN.
+
+    When nothing is found, the response says what each identity answered, so
+    "genuinely not registered" is distinguishable from "we never got to ask".
+    """
+    attempts, systemic = [], None
+    for gstin in _candidate_gstins(preferred, entity):
+        try:
+            data = getattr(EInvoiceClient(gstin=gstin), call)(*args)
+        except EInvoiceError as exc:
+            details = normalize_error_details(getattr(exc, "error_details", None)) or []
+            codes = {str((d or {}).get("code") or (d or {}).get("ErrorCode") or "")
+                     for d in details if isinstance(d, dict)}
+            msg = '; '.join(filter(None, (str((d or {}).get("message") or "")
+                                          for d in details if isinstance(d, dict)))) or str(exc)
+            attempts.append({"gstin": gstin, "codes": sorted(c for c in codes if c),
+                             "message": msg})
+            if codes & _SKIP_CODES:
+                continue                       # this identity cannot answer
+            systemic = exc
+            break                              # e.g. NIC down — asking again won't help
+        except FileNotFoundError:
+            return Response(_KEY_MISSING, status=500)
+        if isinstance(data, dict):
+            data = {**data, "_gstin": gstin}
+        return Response(data)
+
+    if systemic is not None:
+        body = build_error_response(systemic)
+        body["attempts"] = attempts
+        return Response(body, status=systemic.status_code or 502)
+
+    return Response({
+        "error": "Not found under any configured seller GSTIN.",
+        "errors": [],
+        "attempts": attempts,
+    }, status=404 if attempts else 502)
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_irn_details(request, irn):
-    """GET the details of a previously generated IRN."""
-    return _run(EInvoiceClient().get_irn_details, irn)
+    """GET the details of a previously generated IRN.
+
+    Optional ?gstin= to go straight to the issuing seller; otherwise every
+    configured GSTIN is tried (see _lookup_across_gstins).
+    """
+    return _lookup_across_gstins("get_irn_details", irn,
+                                 preferred=request.query_params.get("gstin"),
+                                 entity=request.query_params.get("entity"))
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_irn_by_doc(request):
-    """Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy"""
+    """Query params: ?doctype=INV&docnum=...&docdate=dd/mm/yyyy[&gstin=...]"""
     q = request.query_params
     missing = [k for k in ("doctype", "docnum", "docdate") if not q.get(k)]
     if missing:
         return Response({"error": f"Missing query params: {', '.join(missing)}"}, status=400)
-    return _run(EInvoiceClient().get_irn_by_doc, q["doctype"], q["docnum"], q["docdate"])
+    return _lookup_across_gstins("get_irn_by_doc", q["doctype"], q["docnum"], q["docdate"],
+                                 preferred=q.get("gstin"), entity=q.get("entity"))
 
 
 @api_view(["GET"])
@@ -447,21 +765,24 @@ def get_rejected_irns(request):
     date = request.query_params.get("date")
     if not date:
         return Response({"error": "Query param 'date' (dd/mm/yyyy) is required."}, status=400)
-    return _run(EInvoiceClient().get_rejected_irns, date)
+    return _run(_client_for(request.query_params.get("entity"),
+                            request.query_params.get("gstin")).get_rejected_irns, date)
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_gstin_details(request, gstin):
     """GET GSTIN master details."""
-    return _run(EInvoiceClient().get_gstin_details, gstin)
+    return _run(_client_for(request.query_params.get("entity"),
+                            request.query_params.get("gstin")).get_gstin_details, gstin)
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def sync_gstin(request, gstin):
     """Force a fresh sync of a GSTIN from the GST common portal."""
-    return _run(EInvoiceClient().sync_gstin, gstin)
+    return _run(_client_for(request.query_params.get("entity"),
+                            request.query_params.get("gstin")).sync_gstin, gstin)
 
 
 @api_view(["POST"])
@@ -505,7 +826,8 @@ def get_ewb_by_irn(request, irn):
 @permission_classes([IsAuthenticated])
 def heartbeat(request):
     """Unencrypted NIC heartbeat/ping (no auth)."""
-    return _run(EInvoiceClient().health_ping)
+    return _run(_client_for(request.query_params.get("entity"),
+                            request.query_params.get("gstin")).health_ping)
 
 
 # ---- Signed QR code -> printable image ------------------------------------

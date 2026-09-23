@@ -91,11 +91,11 @@ def ewb_from_invoice(request, docentry):
     exp_ship = body.get("expShip") or body.get("ExpShipDtls")
 
     try:
-        sap_invoice, hsn_map = sap.fetch_invoice_for_irn(docentry, company_db)
+        sap_invoice, hsn_map, sac_map = sap.fetch_invoice_for_irn(docentry, company_db)
     except sap.SapFetchError as exc:
         return Response({"error": str(exc)}, status=502)
 
-    irn_payload = irn_mapping.build_irn(sap_invoice, hsn_map)
+    irn_payload = irn_mapping.build_irn(sap_invoice, hsn_map, sac_map)
     irn = _lookup_irn(irn_payload)
 
     use_irn = (mode == "irn") or (mode == "auto" and bool(irn))

@@ -181,8 +181,14 @@ class DraftActionView(APIView):
                          inv_resp = session.get(inv_url, timeout=20)
                          invoice = (inv_resp.json().get("value") or [None])[0] if inv_resp.status_code == 200 else None
                          if invoice:
+                             # `branch` must be carried through: without it the
+                             # company falls back to OIL, so a Beverage or Mart
+                             # invoice approved here was read from — and logged
+                             # against — the wrong company DB.
                              _maybe_auto_irn(invoice.get("DocEntry"), trigger="invoice_create",
-                                             context=f"approved draft {draft_id} -> DocNum {invoice.get('DocNum')}")
+                                             company_db=SAPServiceLayerManager.schema_for(branch),
+                                             context=f"approved draft {draft_id} -> DocNum "
+                                                     f"{invoice.get('DocNum')} (branch={branch or 'OIL'})")
                          else:
                              logger.warning("Approved draft %s: no invoice found yet (DraftKey lookup empty); "
                                             "the polling sweep will pick it up.", draft_id)

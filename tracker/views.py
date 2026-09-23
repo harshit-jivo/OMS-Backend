@@ -885,11 +885,15 @@ class BulkActionView(APIView):
         remarks = request.data.get('remarks', '')
         hold_type = request.data.get('hold_type', '')  # FULL | PARTIAL (HOLD only)
         amount = request.data.get('amount')            # hold / debit amount
+        # Restates the invoice's total debit (Transport Approval only, one
+        # invoice at a time) — NOT the same as `amount`, which adds a debit.
+        debit_amount = request.data.get('debit_amount')
         try:
             processed, errors = services.apply_bulk(
                 invoice_ids=ids, user=request.user, action=action,
                 stage_status=stage_status, remarks=remarks,
                 hold_type=hold_type, amount=amount,
+                debit_amount=debit_amount,
             )
         except (ValidationError, PermissionDenied) as exc:
             return Response(

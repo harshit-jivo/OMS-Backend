@@ -1046,7 +1046,12 @@ FROM
 
     LEFT JOIN "CRD7" ON "OCRD"."CardCode" = "CRD7"."CardCode" AND "CRD7"."AddrType" = 'S' AND "CRD7"."Address" = "OINV"."ShipToCode"  
 
-    INNER JOIN "OITM" ON "OITM"."ItemCode" = "INV1"."ItemCode"
+    -- LEFT, not INNER: a SERVICE invoice (OINV.DocType = 'S') has no ItemCode on
+    -- any line, so an inner join dropped every row and the Crystal bill rendered
+    -- blank — IRN and QR included, because they are correlated subqueries that
+    -- never got evaluated. OITM.ItemCode is unique, so this cannot multiply rows;
+    -- the only lines it changes are the ones that were being dropped.
+    LEFT JOIN "OITM" ON "OITM"."ItemCode" = "INV1"."ItemCode"
 
     LEFT JOIN "OWTR" ON "OWTR"."DocEntry" = "OINV"."BaseEntry" AND "OINV"."BaseType" = 67 
 

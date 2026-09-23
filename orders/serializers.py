@@ -5,6 +5,7 @@ from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
 from sap_sync.models import Party as SapParty
+from sap_sync import product_lookup
 from decimal import Decimal
 
 def get_scheme_item_code_raw(scheme_id):
@@ -267,29 +268,24 @@ class OrderItemSchemeSerializer(serializers.ModelSerializer):
         return (getattr(obj, 'benefit_item_code', '') or '').strip() or None
 
     def get_scheme_item_name(self, obj):
-        """The giveaway item's NAME.
+        """The giveaway item's NAME, read in the category of the line that earned it.
 
         The approval table showed a code where every other line showed a name.
         A STATE- or VENDOR-scoped scheme gives away items the party holds no
         assignment for, so the client's own catalogues cannot name them — which
         is why this is resolved here.
+
+        The category is not decoration: one code is a different product in each
+        (`sap_sync.product_lookup`), so resolving on the code alone labelled an
+        OIL order's free YELLOW MUSTARD OIL as GLASS BOTTLE 200 MLS BLUEBERRY.
+        The earning line carries the category, and prefetching `items__schemes`
+        caches it on the row, so reading it costs nothing on the order views.
         """
         item_code = self.get_scheme_item_code(obj)
         if not item_code:
             return None
-        from django.apps import apps
-
-        try:
-            Product = apps.get_model('sap_sync', 'Product')
-        except LookupError:
-            return None
-        name = (
-            Product.objects
-            .filter(item_code__iexact=item_code)
-            .values_list('item_name', flat=True)
-            .first()
-        )
-        return (name or '').strip() or None
+        category = getattr(getattr(obj, 'order_item', None), 'category', '')
+        return product_lookup.name(item_code, category) or None
 
     class Meta:
         model = OrderItemScheme

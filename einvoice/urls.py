@@ -6,6 +6,7 @@ urlpatterns = [
     # config + auth
     path("health/", views.health, name="einvoice-health"),
     path("companies/", views.list_companies, name="einvoice-companies"),
+    path("entities/", views.list_entities, name="einvoice-entities"),
     path("token/", views.get_token, name="einvoice-get-token"),
     path("heartbeat/", views.heartbeat, name="einvoice-heartbeat"),
 

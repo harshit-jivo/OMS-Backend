@@ -6,7 +6,23 @@ QR (or the whole PDF) fails. Complements the API-level
 [NIC e-Invoice + e-Way Bill reference](./NIC_EINVOICE_EWAYBILL_REFERENCE.md)
 (IRN generation, schema, error codes, crypto).
 
-> Last verified: 2026-07-29. Server/paths/credentials can drift — verify before acting.
+> Last verified: 2026-09-19. Server/paths/credentials can drift — verify before acting.
+>
+> **⚠️ 2026-09-19 — THE HOSTS IN THIS DOCUMENT MOVED.** Every `\\JIVO-APP`,
+> `20.20.45.25` and `.75` below is the *old* addressing and is kept only so older
+> stored paths and log lines still make sense. Current, verified on the app host:
+>
+> | Role | Old (as written below) | **Current** |
+> |---|---|---|
+> | App host (Django, IIS/Crystal) | `103.89.45.75` / `20.20.45.75` | **`10.10.101.118`**, hostname still `Jivo` |
+> | File server (QR bitmaps) | `JIVO-APP` = `20.20.45.25` | **`10.10.101.52`** |
+> | HANA | `103.89.45.192:30015` | `10.10.101.x` — confirm before use |
+>
+> `JIVO-APP` no longer resolves. This matters in two places: the §3 path rewrite
+> `REPLACE(…,'C:\SAP Attachments\','\\JIVO-APP\')` would produce a dead path — it is
+> harmless today **only because** both the add-on and OMS now store full
+> `\\10.10.101.52\…` UNCs, so the REPLACE never matches (verified: 16,537/16,539 Oil
+> rows). And "run it on .75" throughout §3/§6/§7 now means **run it on .118**.
 >
 > **2026-07-29 changes:** the flow is now **multi-company** (OIL / BEVERAGE / MART) —
 > see [§4](#4-multi-company-routing-oil--beverage--mart). The SP no longer requires a
@@ -44,8 +60,8 @@ the QR is blank (or the render 500s) — even though every other field is correc
 
 | Thing | Where | Notes |
 |---|---|---|
-| SAP B1 server / app host | **103.89.45.75** (internal `20.20.45.75`, host `Jivo`) | SSH `Admin` / `English@jivo`. Runs SAP B1 + IIS + many apps under `C:\LiveProjects`. |
-| File server (QR bitmaps) | **JIVO-APP = 20.20.45.25** | Only reachable from inside (from .75). Shares need login `OMS` / `Jivo@2026`. |
+| SAP B1 server / app host | **10.10.101.118** (host `Jivo`; was `103.89.45.75` / `20.20.45.75`) | SSH `Admin` / `English@jivo`. Runs SAP B1 + IIS + many apps under `C:\LiveProjects`. |
+| File server (QR bitmaps) | **10.10.101.52** (was `JIVO-APP` = `20.20.45.25`) | Only reachable from inside. Shares reached with the `EINV_QR_SMB_*` account (currently `B1i`), not `OMS`. |
 | HANA DB | **103.89.45.192:30015** | Schemas incl. `JIVO_OIL_HANADB` (= "hana_live_oil"). User `DSR` / `Jivo@2025`. |
 | Crystal render service | IIS site **CrystalReportService**, `C:\inetpub\CrystalReportService`, port **8008** | .NET Framework 4.8 Web API 2 + Crystal runtime 13.0.x. Source: `C:\LiveProjects\Crystal Report Utility`. |
 | OMS backend (Django) | `C:\LiveProjects\OMS\Backend` (dev) / deployed sites on .75 | Generates IRNs, writes QR PNGs to the share. |
@@ -77,6 +93,23 @@ Per-company destinations (verified reachable + writable from .75 as user `OMS`):
 
 > ⚠️ The folder is `MART_**ATTACHMENTS**` (two T's). A single-T spelling silently
 > breaks Mart QR saves — the hook is best-effort and only logs.
+
+> ⚠️ **2026-09-19 — two Oil rows carry a mangled server name.** A find/replace during
+> the file-server migration concatenated the new and old addresses, producing
+> `\\10.10.101.5220.20.45.247\SAP Attachments\…`. Both are add-on rows
+> (`Creator = 'USER13'`) in `@UTL_MDEXTH`: **DocEntry 16844** (invoice 726060102) and
+> **DocEntry 16848** (invoice 626060389). They print with a blank QR box. Oil has
+> `UPDATE`, so both are fixable:
+>
+> ```sql
+> UPDATE "JIVO_OIL_HANADB"."@UTL_MDEXTH"
+>    SET "U_UTL_QRPT" = '\\10.10.101.52\SAP Attachments\Jivo Oil\Bitmaps\'
+>                       || "U_UTL_IRN" || '.png'
+>  WHERE "U_UTL_QRPT" LIKE '%10.10.101.5220%';
+> ```
+>
+> Worth re-running that `LIKE` after any future address change — it is the signature
+> of a half-applied path rewrite, and nothing else detects it.
 
 - Both tables store the **same** signed-QR image content per invoice, just under
   different shares. OMS names its file `{irn}.png` (`EINV_QR_FILENAME`).
@@ -139,6 +172,157 @@ not the QR. Effect: an invoice prints as a full tax invoice as soon as an IRN
 exists, even before its QR is written.
 
 > Still QR-gated (correctly): the `"UNE QR Code"` subquery itself — an image needs a path.
+
+### The consignee (ship-to) name — three columns, only one of them usable
+
+On a **bill-to/ship-to** invoice the goods go to a party that is not the buyer.
+`OINV."Address2"` (which feeds the printed ship-to address block) holds **street
+lines only — no name**. The consignee's name lives in `OINV."ShipToCode"`. The
+proc therefore offers the report three candidate name columns, and they are not
+equivalent:
+
+| Column | Source | Usable? |
+|---|---|---|
+| `ShipToName` | ship-to address name, **gated on `OCRD."U_AddressIdPrint"='Y'`** | **No** — the flag is NULL for every customer in all three companies (Oil 1,186 / Mart 944 / Bev 1,272), so it always falls back to `OINV."CardName"`, i.e. the BUYER |
+| `CARD_CODE_SHIP` | `CRD1."Address"` when the invoice matches a **hardcoded whitelist** of CardCodes + name patterns, else `CardName` | **Yes**, for whitelisted parties — this is what the report should bind |
+| `ADD1` | `CRD1."Address"` from the main join (already keyed on `ShipToCode`) | Always the real ship-to name, but **unfiltered** — see the warning below |
+
+> ⚠️ **Do not bind the name to `ADD1`, or make `ShipToName` unconditional,
+> without cleaning master data first.** CRD1 address records here are named as
+> *labels*, not legal names. Printing them verbatim was measured across FY26-27
+> and changed **3,191 of 3,213** Oil invoices — `JIVO MART PVT LTD` →
+> `JIVO MART PVT LTD SONIPAT BHAKARPUR`, `PURE AGROCHEM CORPORATION` →
+> `PURE AGROCHEM CORPORATION DELIVERY`, and on 13 bills the name was lost
+> entirely, printing just `HARYANA`. The whitelist exists precisely because of
+> this. The clean long-term fix is to populate `CRD1."U_UTL_ST_ThLegName"`
+> (a UDF that exists for exactly this and is currently NULL everywhere) and read
+> that instead — it would end the DDL-per-customer treadmill.
+
+### 2026-09-10 — consignee name wrong on third-party bills (drift + a latent bug)
+
+**Symptom:** invoice **626090321** (Oil, DocEntry 80067) printed the ship-to
+address correctly (Gurgaon) but under the **buyer's** name, `SHRAY FOOD &
+BEVERAGES PRIVATE LIMITED`, instead of the consignee `RISHABGLOBAL INDUSTRIES
+PRIVATE LIMITED HARYANA`. Tax was correct throughout (`IGST@5`; place of supply
+follows the buyer under IGST Act s.10(1)(b)), as were the address lines,
+`ShipToCode`, and the base sales order — this was a **naming** defect only.
+
+**Root cause — procedure drift.** There are three copies of this logic in each
+schema: `CRYSTAL_AR_INVOICE_ITEMS` (SAP's own print), `OMS_SP_GST_INVOICE` (OMS
+print) and `OMS_SP_GST_INVOICE_SAP`. Someone had already fixed the base proc for
+this customer, adding `'CUSTA000993'` to the whitelist's CardCode list and
+`'RISHABGLOBAL INDUSTRIES PRIVATE LIMITED HARYANA%'` to its patterns. **The two
+OMS copies never picked it up**, so SAP printed the right name and OMS did not.
+Proof, by calling all three on the same DocEntry:
+
+```
+CRYSTAL_AR_INVOICE_ITEMS   CARD_CODE_SHIP = 'RISHABGLOBAL INDUSTRIES PRIVATE LIMITED HARYANA'
+OMS_SP_GST_INVOICE         CARD_CODE_SHIP = 'SHRAY FOOD & BEVERAGES PRIVATE LIMITED'
+OMS_SP_GST_INVOICE_SAP     CARD_CODE_SHIP = 'SHRAY FOOD & BEVERAGES PRIVATE LIMITED'
+```
+
+**Fixed in Oil** (both OMS procs, `CREATE OR REPLACE`, `IS_VALID` re-checked):
+the two whitelist entries were synced in, and all three procs now agree — a
+13-invoice regression comparison against the base proc returned **0 mismatches**,
+so ordinary (non-whitelisted) bills are untouched.
+
+**Also fixed in the same pass — a latent `BillToName` bug.** It matched
+`AdresType='B'` against `OINV."ShipToCode"`; a ship-to address name can never
+match a bill-to row, so the subquery returned NULL whenever it ran. It was
+harmless *only* because the `U_AddressIdPrint` gate never opens — anyone ticking
+that flag would have fixed the ship-to name and **blanked the bill-to name** in
+the same stroke. Now matched on `OINV."PayToCode"`. Printed output is unchanged
+today (flag NULL → `CardName`); the trap is simply defused.
+
+> **Still outstanding:** `CRYSTAL_AR_INVOICE_ITEMS` itself still carries the
+> `BillToName` bug (its line 10), and **Mart and Beverages have had neither fix**
+> — neither the whitelist sync nor the `PayToCode` correction.
+
+**Whenever you edit any one of these three procs, check the other two**, and in
+all three schemas. That is 9 copies of the same logic, and drift between them is
+invisible until a bill prints wrong. Diff before assuming they match.
+
+#### 2026-09-19 — it is not 9 copies. Four of them do not exist.
+
+Queried `SYS.PROCEDURES` in all three live schemas:
+
+| Schema | `CRYSTAL_AR_INVOICE_ITEMS` | `CRYSTAL_AR_INVOICE_SERVICES` | `OMS_SP_GST_INVOICE` | `OMS_SP_GST_INVOICE_SAP` |
+|---|:--:|:--:|:--:|:--:|
+| `JIVO_OIL_HANADB` | ✅ | ✅ | ✅ | ✅ |
+| `JIVO_BEVERAGES_HANADB` | ✅ | **❌** | ✅ | **❌** |
+| `JIVO_MART_HANADB` | ✅ | ✅ | ✅ | **❌** |
+
+- **`OMS_SP_GST_INVOICE_SAP` exists only in Oil.** Beverages and Mart have no
+  SAP-side OMS print proc at all.
+- **Beverages has no `CRYSTAL_AR_INVOICE_SERVICES`.** Calling it there returns
+  HANA **error 328** (`no procedure with name …`), not an empty result. Low impact
+  today only because Beverages raises no service invoices (the 2026-09-18 measurement
+  below found Oil 11,503, Mart 77, Beverages 0) — but it is a hard failure the moment
+  one is raised.
+
+So "check the other two in all three schemas" is the right instinct, but the first
+question is whether the proc is even deployed there. Check existence before diffing:
+
+```sql
+SELECT SCHEMA_NAME, PROCEDURE_NAME FROM SYS.PROCEDURES
+ WHERE PROCEDURE_NAME LIKE 'CRYSTAL_AR_INVOICE%' OR PROCEDURE_NAME LIKE 'OMS_SP_GST%'
+ ORDER BY SCHEMA_NAME, PROCEDURE_NAME;
+```
+
+### 2026-09-18 — service invoices printed completely blank (fixed)
+
+An invoice raised as a **service** document (`OINV."DocType" = 'S'` — no item,
+`Quantity` 0, the description carried on the line) printed with nothing on it at
+all. Not just a missing QR: no party, no amounts, no lines.
+
+`OMS_SP_GST_INVOICE` ended with
+
+```sql
+INNER JOIN "OITM" ON "OITM"."ItemCode" = "INV1"."ItemCode"
+```
+
+and a service line has **no `ItemCode`**, so every row was dropped and the proc
+returned zero rows. The IRN and QR vanished with them, because they are
+correlated subqueries in the SELECT list — with no rows they are never
+evaluated, which is why `OMS_IRN_LOG` could look perfectly correct while the
+bill showed nothing. Reported against 726090103 / 726090104 (DocEntry
+80465/80466), whose `OMS_IRN_LOG` rows were fine all along.
+
+Fixed by making that one join a `LEFT JOIN`. `OITM."ItemCode"` is unique, so it
+cannot multiply rows; the only lines whose behaviour changes are the ones that
+were being dropped. Measured on live Oil before deploying: **11,508 lines across
+11,503 invoices, every one of them `DocType = 'S'`** — and **zero** goods
+invoices affected (no goods line anywhere has an ItemCode missing from OITM).
+
+Deployed 2026-09-18 to `JIVO_OIL_HANADB` (both `OMS_SP_GST_INVOICE` and
+`OMS_SP_GST_INVOICE_SAP`), `JIVO_MART_HANADB`, `JIVO_BEVERAGES_HANADB` and the
+three `TEST_*` copies. Mart had 77 affected invoices, Beverages none — but the
+latent bug was there too.
+
+> **Still open — the SAP-side service report.** SAP's own service-invoice
+> layout runs `CRYSTAL_AR_INVOICE_SERVICES`, and that proc reads QR/IRN from
+> `"@UTL_MDEXTH"` **only**. It never got the `OMS_IRN_LOG` UNION that
+> `OMS_SP_GST_INVOICE` has, so an OMS-generated IRN still prints blank there.
+> It returns rows (it does not join `OITM`), so the bill looks fine apart from
+> the missing IRN/QR — easy to miss. Same gap applies to the other `CRYSTAL_*`
+> procs.
+
+### The e-invoice path does NOT share this logic
+
+The IRN is built in [`einvoice/mapping.py`](../mapping.py), not by this proc, and
+it has a separate defect on the same invoices: `ShipDtls` is emitted only when a
+ship-to **GSTIN** is found (`mapping.py` ~line 313), and it is populated from
+`EWayBillDetails.ShipToGSTIN` — a property this Service Layer version does not
+expose — falling back to the BP address master. Where the ship-to address has no
+GSTIN recorded, **no `ShipDtls` block is sent at all**, so a genuine
+bill-to/ship-to supply is filed with NIC as a plain B2B sale to the buyer. That
+is the case for 626090321. Separately, where `ShipDtls` *is* emitted, its
+`LglNm` is taken from `BillToName` — the buyer, not the consignee.
+
+Measured on Oil, FY26-27 to date: **23** invoices with `ShipDtls` carrying the
+wrong name, **~76** third-party consignments with no `ShipDtls` at all. Not yet
+fixed — it changes what is filed with the GST portal, so it needs a compliance
+decision, not just a code change.
 
 ### Deploy / redeploy the SP
 The proc must exist in **every** company schema that prints invoices — it is

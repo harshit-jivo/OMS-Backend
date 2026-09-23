@@ -19,11 +19,14 @@ from orders.serializers import OrderDetailSerializer, OrderItemSchemeSerializer,
 from orders.models import OrdersLog, Order, OrderItem, OrderStatus, OrderRateApproval
 from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
+from core.pagination import StandardPagination, ordering_from
+from core.permissions import HasKey
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import OuterRef, Subquery
+from django.db.models import OuterRef, Prefetch, Q, Subquery
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_date
 from sap_sync.models import SalesQuotationLog
 from ._shared import (
     APPROVER_ACTIVE_CODES,
@@ -35,6 +38,8 @@ from ._shared import (
     BILLING_DECISION_ACTION_IDS,
     BILLING_REJECTED_ACTION_ID,
     _get_base_orders,
+    _get_user_category_names,
+    sees_all_orders,
 )
 
 
@@ -846,3 +851,264 @@ class GetOrdersByItemView(APIView):
 
         serializer = OrdersByItemSerializer(orders, many=True)
         return Response(serializer.data)
+
+
+def _parse_date(value):
+    """An ISO `YYYY-MM-DD` query param, or None.
+
+    A malformed date is ignored rather than raising: these arrive from a date
+    input whose value is empty until a full date is picked, and a half-typed
+    one must not 400 the page the user is looking at.
+    """
+    value = (value or '').strip()
+    if not value:
+        return None
+    return parse_date(value)
+
+
+def _master_orders_for(user):
+    """Every order the master page may show `user`, across all creators.
+
+    NOT `_get_base_orders`. That answers "which orders is this user working
+    on" — a billing user gets the billing stages, an approver gets what is
+    pending on them — which is a queue, not an overview. The master page is
+    the overview, so it starts from every order and narrows only by WHO the
+    user is allowed to see, never by what stage the order is at.
+
+    The narrowing is the holder's own categories. That is the fix for the bug
+    this page shipped with: it was gated on `orders.sales.view_all`, and
+    because `_get_base_orders` reads that same key, granting it so somebody
+    could open this page also unscoped their queue and tracker. A BEVERAGES
+    billing user went from 705 orders to all 3,060 — OIL included — everywhere
+    in the app, not just here.
+
+    Holders of `orders.sales.view_all` still see everything: that key means
+    "no scoping" and this is the one place it should still say so.
+
+    Category, and NOT main group. `_apply_billing_order_scope` narrows by both,
+    which is right for a queue and wrong for an overview: an OIL user assigned
+    the single main group ROI would see 137 of the 1,675 OIL orders, a page
+    that hides 92% of its own subject. The complaint this fixes is about
+    categories — a BEVERAGES user seeing OIL — so categories are what it
+    filters on. It is read-only, and wider than that user's billing queue by
+    design.
+
+    A user with no category at all is unscoped here, which is
+    `_apply_billing_order_scope`'s own rule too: no scope configured means no
+    scope applied.
+    """
+    orders = Order.objects.all()
+    if sees_all_orders(user):
+        return orders
+    categories = _get_user_category_names(user)
+    if not categories:
+        return orders
+    return orders.filter(items__category__in=categories).distinct()
+
+
+class MasterOrderListView(APIView):
+    """The order master view: every order, who raised it, and its stage history.
+
+    One row per order, carrying the whole `orders_log` trail inline, so the
+    page can show where an order stands AND how it got there without an
+    N+1 of `/orderlogs/` calls behind it.
+
+    Gated on `orders.sales.view_all` — the key that already means "see every
+    order, company-wide" and that `_shared.sees_all_orders` already reads. A
+    second key meaning the same thing would be a second authority source,
+    which is the failure PERMISSIONS.md exists to prevent. `_get_base_orders`
+    is still what builds the queryset, so a non-holder who somehow reaches
+    this view gets their own scope, never a leak.
+
+    Reads `OrdersLog` directly rather than reusing `OrderLogsByOrderView`:
+    that view CREATES a log row when it serves a rate-approval order
+    (`queries.py`, the `latest_rate_log` branch), and a list endpoint must not
+    write one row per page view.
+
+    Unlike that view, action_id=1 (`Order Created`) is kept — "which stages
+    has this been through" starts at creation.
+    """
+
+    ORDERING = {'created_at', 'updated_at', 'order_number', 'total_amount'}
+
+    # No order carries a per-order assignee for these desks, so the stage's
+    # responsible desk is the honest answer. Rate approval is the exception:
+    # `order_rate_approvals` names actual people, so those are returned.
+    #
+    # Keyed in lowercase and looked up that way because `order_statuses.code`
+    # is not consistently cased — every seeded row is upper, but `mart_approval`
+    # (id 12, added in the DB rather than by migration) is lower.
+    #
+    # A code absent here yields no desk rather than a guess. `APPROVED` is the
+    # deliberate one: it means rate-approved and moving on, but which desk it
+    # moves to depends on the order's flow config (billing/auditor are
+    # per-party toggles), so naming one here would be a guess.
+    DESK_FOR_STAGE = {
+        'billing': 'Billing',
+        'billing_pending': 'Billing',
+        'auditor_approval': 'Auditor',
+        'need_approval': 'Rate approver',
+        'rate_approval': 'Rate approver',
+        'mart_approval': 'Mart approver',
+        'created': 'Order creator',
+        'draft': 'Order creator',
+    }
+    # A rejected or cancelled order sits in nobody's queue until its creator
+    # reworks it, which is a new transition — not a pending stage.
+    TERMINAL_CODES = {
+        'completed', 'rejected', 'billing_rejected', 'so_cancelled',
+    }
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasKey('orders.master.view')]
+
+    def get(self, request):
+        orders = (
+            _master_orders_for(request.user)
+            .select_related('status', 'created_by')
+            .prefetch_related(
+                Prefetch(
+                    'logs',
+                    queryset=OrdersLog.objects
+                    .select_related('action', 'performed_by')
+                    .order_by('created_at', 'id'),
+                ),
+                Prefetch(
+                    'rate_approvals',
+                    queryset=OrderRateApproval.objects
+                    .filter(status='PENDING')
+                    .select_related('approver'),
+                    to_attr='pending_rate_approvals',
+                ),
+            )
+        )
+
+        # Either spelling: `/orders/status/` — the only status master the
+        # frontend has — returns `{id, name}` and has never exposed `code`, so
+        # a page built on it can only filter by id. Codes are accepted too
+        # because they are what the rest of this module reasons in.
+        status_filter = (request.query_params.get('status') or '').strip()
+        if status_filter.isdigit():
+            orders = orders.filter(status_id=int(status_filter))
+        elif status_filter:
+            orders = orders.filter(status__code__iexact=status_filter)
+
+        created_by = (request.query_params.get('created_by') or '').strip()
+        if created_by.isdigit():
+            orders = orders.filter(created_by_id=int(created_by))
+
+        # Inclusive on both ends, and on the DATE rather than the instant: a
+        # user picking 17 Sep to 17 Sep means that whole day, not midnight to
+        # midnight. `__date` resolves in the active timezone, so the day
+        # boundary is the one the reader is actually in.
+        date_from = _parse_date(request.query_params.get('date_from'))
+        if date_from:
+            orders = orders.filter(created_at__date__gte=date_from)
+
+        date_to = _parse_date(request.query_params.get('date_to'))
+        if date_to:
+            orders = orders.filter(created_at__date__lte=date_to)
+
+        search = (request.query_params.get('q') or '').strip()
+        if search:
+            orders = orders.filter(
+                Q(order_number__icontains=search)
+                | Q(card_name__icontains=search)
+                | Q(card_code__icontains=search)
+            )
+
+        orders = orders.order_by(
+            ordering_from(request, self.ORDERING, '-created_at'), '-id'
+        )
+
+        paginator = StandardPagination()
+        page = paginator.paginate_queryset(orders, request, view=self)
+        return paginator.get_paginated_response(
+            [self._row(order) for order in page]
+        )
+
+    def _row(self, order):
+        stages = [
+            {
+                'status_id': log.action_id,
+                'status_code': getattr(log.action, 'code', None),
+                'status_name': getattr(log.action, 'name', '') or '',
+                'performed_by_name': getattr(log.performed_by, 'username', None),
+                'remarks': (log.remarks or '').strip(),
+                'at': log.created_at,
+            }
+            for log in order.logs.all()
+        ]
+        status_code = getattr(order.status, 'code', '') or ''
+
+        return {
+            'id': order.id,
+            'order_number': order.order_number,
+            'card_code': order.card_code,
+            'card_name': order.card_name,
+            'order_type': order.order_type,
+            'is_foc': order.is_foc,
+            'total_amount': order.total_amount,
+            'created_at': order.created_at,
+            'delivery_date': order.delivery_date,
+            'created_by_id': order.created_by_id,
+            'created_by_name': getattr(order.created_by, 'username', None),
+            'status_code': status_code,
+            'status_name': getattr(order.status, 'name', '') or '',
+            # `orders` has no `stage_entered_at`, so the newest log IS the best
+            # available answer to "since when". Falls back to order creation
+            # for an order that has not moved yet.
+            'stage_since': stages[-1]['at'] if stages else order.created_at,
+            'pending_with': self._pending_with(order, status_code),
+            'stages': stages,
+            'sap_doc_number': order.sap_doc_number,
+        }
+
+    def _pending_with(self, order, status_code):
+        code = status_code.strip().lower()
+        if code in self.TERMINAL_CODES:
+            return []
+        if code == 'rate_approval':
+            named = [
+                approval.approver.username
+                for approval in order.pending_rate_approvals
+                if approval.approver_id
+            ]
+            if named:
+                return named
+        desk = self.DESK_FOR_STAGE.get(code)
+        return [desk] if desk else []
+
+
+class MasterOrderCreatorsView(APIView):
+    """Who has raised orders the caller can see — the master page's creator filter.
+
+    Derived from the orders in scope rather than read off the user roster.
+    `users/list/` would have served a name list, but it answers a different
+    question: it is every active account, most of which have never raised an
+    order, and it serialises role/company/state/main-group per row for a
+    dropdown that needs two fields.
+
+    Scoping it through `_get_base_orders` also keeps the filter honest — the
+    list can never name someone whose orders the caller is not allowed to see,
+    so picking any entry returns rows.
+
+    Not narrowed by the page's other filters: a facet list that shrinks as you
+    filter cannot be used to change your mind.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasKey('orders.master.view')]
+
+    def get(self, request):
+        creators = (
+            _master_orders_for(request.user)
+            .exclude(created_by=None)
+            .values('created_by_id', 'created_by__username')
+            .distinct()
+            .order_by('created_by__username')
+        )
+        return Response([
+            {'id': row['created_by_id'], 'username': row['created_by__username']}
+            for row in creators
+        ])

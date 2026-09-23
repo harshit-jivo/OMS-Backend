@@ -54,6 +54,15 @@ TRANSPORT_APPROVAL_STAGE_CODE = 'transport_approval'
 # one of these ever appeared in the route, `_route_neighbour` would walk into it
 # for every invoice, Transport or not.
 DETOUR_STAGE_CODES = {TRANSPORT_APPROVAL_STAGE_CODE}
+# Desks that may EDIT `Invoice.debit_amount` outright, as opposed to adding to
+# it with a DEBIT disposition (which is Pre-Audit's, and accumulates).
+#
+# Transport Approval is the desk that actually knows what the transporter owes
+# — short delivery, damage, detention — and it sees the invoice AFTER Pre-Audit
+# has already put a figure on it. Without this, correcting that figure meant
+# adding a second debit, so the invoice carried the sum of a guess and a
+# correction and no desk could state the real deduction.
+DEBIT_EDIT_STAGE_CODES = {TRANSPORT_APPROVAL_STAGE_CODE}
 # The JSAP desk mirrors a decision taken in the JSAP system. Mart invoices are
 # not budget-approved there at all, so they skip the desk entirely.
 JSAP_STAGE_CODE = 'jsap_approval'
@@ -828,6 +837,68 @@ def _parse_amount(value):
         raise ValidationError('Amount must be a number.')
 
 
+def _parse_debit_edit(invoice, stage, raw):
+    """Validate a request to OVERWRITE the invoice's debit amount.
+
+    Deliberately not the DEBIT disposition: that one ADDS (`debit_amount +=
+    amount`) because Pre-Audit can debit the same invoice more than once for
+    different reasons. This one SETS, because it is a correction of a figure
+    already on the invoice, not another deduction — see
+    `DEBIT_EDIT_STAGE_CODES`.
+
+    Returns the new absolute amount, or None when nothing is being changed
+    (field absent, or the same value it already has — re-sending the current
+    figure alongside a verdict should not litter the log with no-op notes).
+    """
+    if raw in (None, '', 'null'):
+        return None
+    if stage.code not in DEBIT_EDIT_STAGE_CODES:
+        raise ValidationError(
+            f'The debit amount cannot be edited at "{stage.name}".')
+
+    amount = _parse_amount(raw)
+    if amount is None or amount < 0:
+        raise ValidationError('The debit amount cannot be negative.')
+    amount = amount.quantize(Decimal('0.01'))
+    # A debit larger than the invoice would make `net_invoice_value` negative,
+    # which the payment stage has no meaning for.
+    if amount > (invoice.invoice_value or Decimal('0')):
+        raise ValidationError(
+            'The debit amount cannot be more than the invoice value '
+            f'({invoice.invoice_value}).')
+    if amount == (invoice.debit_amount or Decimal('0')):
+        return None
+    return amount
+
+
+def _record_debit_edit(invoice, stage, user, new_amount, remarks):
+    """Apply the edit and log it as an immutable note.
+
+    Written as a NOTE rather than folded into the verdict row because the two
+    are separate facts: the desk approved (or rejected) the invoice, AND it
+    restated the debit. A rejection is parked as a NOTE with `exited_at` NULL
+    and no verdict row at all, so an edit folded into the verdict would simply
+    be lost on exactly the path where someone is most likely to be adjusting
+    the figure.
+
+    The old value goes in the remarks because nothing else keeps it: the
+    invoice holds one running total, so without this the change is unreadable
+    after the fact.
+    """
+    was = invoice.debit_amount or Decimal('0')
+    invoice.debit_amount = new_amount
+    invoice.save(update_fields=['debit_amount', 'updated_at'])
+
+    note = f'Debit amount changed from {was} to {new_amount}.'
+    StageEvent.objects.create(
+        invoice=invoice, stage=stage,
+        event_type=StageEvent.EventType.NOTE,
+        stage_status='DEBIT', amount=new_amount,
+        remarks=f'{note} {remarks}'.strip() if (remarks or '').strip() else note,
+        acted_by=user, entered_at=invoice.current_stage_entered_at,
+    )
+
+
 def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amount):
     """Shared validation; raises ValidationError / PermissionDenied. Returns
     (kind, status, hold_type, amount) where kind is ADVANCE | RETURN | HOLD."""
@@ -900,19 +971,28 @@ def _validate_disposition(invoice, user, stage_status, remarks, hold_type, amoun
 
 @transaction.atomic
 def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
-                 hold_type='', amount=None):
+                 hold_type='', amount=None, debit_amount=None):
     """Advance / return / hold a single invoice, enforcing all stage rules.
 
     `action` may be given explicitly ('ADVANCE' | 'RETURN') or left blank and
     inferred from `stage_status`. HOLD splits into a full hold (invoice stays)
     and a partial hold (amount withheld, invoice advances). DEBIT requires an
     amount and then advances. Returns the (possibly moved) invoice.
+
+    `debit_amount` is a different thing from `amount`: it RESTATES the debit
+    already on the invoice and is accepted only at the desks in
+    `DEBIT_EDIT_STAGE_CODES`. It rides along with whatever verdict is being
+    given, so the transport approver corrects the figure and approves in one
+    action rather than needing a second trip through the desk.
     """
     invoice = Invoice.objects.select_for_update().select_related(
         'current_stage', 'category').get(pk=invoice.pk)
     amount = _parse_amount(amount)
     kind, status, hold_type, amount = _validate_disposition(
         invoice, user, stage_status, remarks, hold_type, amount)
+    # Validated before anything is written, so a bad figure rejects the whole
+    # action rather than relying on the rollback to undo half of it.
+    new_debit = _parse_debit_edit(invoice, invoice.current_stage, debit_amount)
 
     # An explicit RETURN action overrides an advance-looking status.
     if (action or '').upper() == 'RETURN':
@@ -925,6 +1005,11 @@ def apply_action(*, invoice, user, action=None, stage_status='', remarks='',
     now = timezone.now()
     stage = invoice.current_stage
     visit = _open_event(invoice)
+
+    # Before the HOLD / REJECT_PENDING early returns below: those keep the
+    # invoice where it is, and the edit still has to stick.
+    if new_debit is not None:
+        _record_debit_edit(invoice, stage, user, new_debit, remarks)
 
     if kind == 'HOLD':
         # Annotate in place — the invoice does not move, dwell clock keeps
@@ -1228,7 +1313,7 @@ def sync_jsap_all(*, user=None, limit=None):
 
 
 def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',
-               hold_type='', amount=None):
+               hold_type='', amount=None, debit_amount=None):
     """Apply the same action to many invoices. All must sit at the same stage.
     Returns (processed, errors) where errors is a list of {id, error}."""
     invoices = list(
@@ -1242,6 +1327,13 @@ def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',
         raise ValidationError(
             'All selected invoices must be at the same stage to act in bulk.'
         )
+    # A debit edit is an absolute figure for ONE invoice. Applied across a
+    # selection it would silently give every one of them the same deduction,
+    # which is never what the number means.
+    if debit_amount not in (None, '') and len(invoices) > 1:
+        raise ValidationError(
+            'The debit amount can only be edited on one invoice at a time.'
+        )
 
     processed, errors = [], []
     for inv in invoices:
@@ -1250,6 +1342,7 @@ def apply_bulk(*, invoice_ids, user, action=None, stage_status='', remarks='',
                 invoice=inv, user=user, action=action,
                 stage_status=stage_status, remarks=remarks,
                 hold_type=hold_type, amount=amount,
+                debit_amount=debit_amount,
             )
             processed.append(inv.pk)
         except (ValidationError, PermissionDenied) as exc:
