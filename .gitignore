@@ -53,3 +53,7 @@ test_results/
 .vscode/
 .idea/
 *.swp
+
+# Employee master exports (personal data): kept out of git, loaded with
+# `manage.py load_jsap_employees <file>` or migration 0002 when present.
+advance_payment/data/*.psv
