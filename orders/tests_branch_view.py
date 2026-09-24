@@ -66,3 +66,38 @@ class BranchViewTests(TestCase):
 
         with self.assertRaises((LookupError, ImproperlyConfigured)):
             apps.get_model('orders', 'Branches')
+
+
+class OrderDefaultsViewTests(TestCase):
+    """`/api/orders/defaults/` hands the form the warehouse the SAP push would
+    apply — read from the environment, per category — so the screen and the
+    shipment cannot disagree."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        from users.models import User
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username='t-defaults', password='pw', name='T'))
+
+    def test_reads_the_env_backed_settings_per_category(self):
+        from django.test import override_settings
+        from django.urls import reverse
+        with override_settings(HANA_WAREHOUSE_CODE='GP-FG', HANA_WAREHOUSE_CODE_BEVERAGES='BV-FG'):
+            response = self.client.get(reverse('order-defaults'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'warehouse_code': {'OIL': 'GP-FG', 'BEVERAGES': 'BV-FG', 'MART': 'GP-FG'},
+        })
+
+    def test_the_push_resolves_the_same_default_the_form_is_shown(self):
+        from django.test import override_settings
+        from sap_sync.services.sync_service import (
+            SyncService, default_warehouse_code_for_category)
+        # `__new__`, not `SyncService()`: the constructor opens a SAP connection.
+        service = SyncService.__new__(SyncService)
+        with override_settings(HANA_WAREHOUSE_CODE='GP-FG', HANA_WAREHOUSE_CODE_BEVERAGES='BV-FG'):
+            for category in ('OIL', 'beverages', 'MART', ''):
+                self.assertEqual(service.resolve_warehouse_code_for_category(category),
+                                 default_warehouse_code_for_category(category))
+            self.assertEqual(default_warehouse_code_for_category('beverages'), 'BV-FG')

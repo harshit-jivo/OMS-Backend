@@ -701,6 +701,95 @@ class SchemeBoxToPiecesTests(TestCase):
         self.assertEqual(snapshot, 'FREE-4PK')
 
 
+class SchemeBenefitCategoryTests(TestCase):
+    """One item_code is one product *per category*, and not otherwise.
+
+    These are the real `FG0000306` rows: YELLOW MUSTARD OIL 1 LTR, 20 to a
+    carton, under OIL; GLASS BOTTLE 200 MLS BLUEBERRY, 12, under BEVERAGES;
+    PUMPKIN SEEDS 400 GM, 1, under MART. Resolving the giveaway on the code
+    alone labelled an OIL order's free mustard as a blueberry bottle, and would
+    size a carton of it at 12 or 1 pieces instead of 20.
+    """
+
+    OIL_NAME = 'YELLOW MUSTARD OIL 1 LTR 20 PCS'
+    BEVERAGE_NAME = 'GLASS BOTTLE 200 MLS BLUEBERRY 50 % SUGAR 12 PCS'
+
+    def setUp(self):
+        from sap_sync.models import Product
+
+        State.objects.create(name='Delhi', code='DL')
+        Parties.objects.create(card_code='P1', card_name='Dealer', state='DL')
+        # Created OIL-first so the lowest pk is the OIL row: a test that passes
+        # only because the fallback happens to be right would prove nothing.
+        Product.objects.create(item_code='FG0000306', item_name=self.OIL_NAME,
+                               category='OIL', sal_factor2=20, is_active='Y')
+        Product.objects.create(item_code='FG0000306', item_name=self.BEVERAGE_NAME,
+                               category='BEVERAGES', sal_factor2=12, is_active='Y')
+        Product.objects.create(item_code='FG0000306', item_name='PUMPKIN SEEDS 400 GM 1 PCS',
+                               category='MART', sal_factor2=1, is_active='Y')
+
+    def _scheme(self, code, *, free_uom='PCS', free_qty=1):
+        scheme = make_scheme(code)
+        SchemeTrigger.objects.create(scheme=scheme, match_type='ITEM',
+                                     match_value='FG0000306', min_uom='BOX')
+        SchemeBenefit.objects.create(scheme=scheme, free_item_code='FG0000306',
+                                     free_uom=free_uom, per_qty=1, free_qty=free_qty)
+        SchemeAssignment.objects.create(scheme=scheme, scope_type='STATE', scope_value='DL')
+        return scheme
+
+    def _line(self, category):
+        return {'item_code': 'FG0000306', 'category': category, 'qty': 100, 'boxes': 5}
+
+    def test_the_giveaway_is_named_in_the_earning_lines_category(self):
+        self._scheme('YW-MUSTARD')
+        proposal = scheme_engine.resolve_schemes('P1', 'OIL', [self._line('OIL')])[0]
+
+        self.assertEqual(proposal.benefit_item_name, self.OIL_NAME)
+
+    def test_the_same_code_names_a_different_product_elsewhere(self):
+        """The mirror image: the lookup follows the line, not the lowest pk."""
+        self._scheme('YW-MUSTARD')
+        proposal = scheme_engine.resolve_schemes(
+            'P1', 'BEVERAGES', [self._line('BEVERAGES')])[0]
+
+        self.assertEqual(proposal.benefit_item_name, self.BEVERAGE_NAME)
+
+    def test_a_carton_giveaway_is_sized_by_its_own_categorys_pack_size(self):
+        self._scheme('YW-MUSTARD-BOX', free_uom='BOX')
+        proposal = scheme_engine.resolve_schemes('P1', 'OIL', [self._line('OIL')])[0]
+
+        self.assertEqual(proposal.qty, Decimal('5'))            # 5 cartons, as written
+        self.assertEqual(proposal.qty_pieces, Decimal('100'))   # x20, as shipped
+
+    def test_a_line_with_no_category_falls_back_to_the_lowest_pk_row(self):
+        """Deterministic, not plan-ordered: the same answer on every server."""
+        self._scheme('YW-MUSTARD')
+        line = {'item_code': 'FG0000306', 'qty': 100, 'boxes': 5}
+        proposal = scheme_engine.resolve_schemes('P1', '', [line])[0]
+
+        self.assertEqual(proposal.benefit_item_name, self.OIL_NAME)
+
+    def test_the_approval_screen_names_it_in_the_lines_category_too(self):
+        """The order views serialise a saved row, not a proposal — same rule."""
+        from orders.models import Order, OrderItem, OrderItemScheme, OrderStatus
+        from orders.serializers import OrderItemSchemeSerializer
+
+        status = OrderStatus.objects.create(code='CREATED', name='Created')
+        order = Order.objects.create(order_number='SO-CAT', card_code='P1',
+                                     card_name='Dealer', status=status)
+        item = OrderItem.objects.create(order=order, item_code='FG0000306',
+                                        category='OIL', qty=100, boxes=5)
+        row = OrderItemScheme.objects.create(
+            order_item=item,
+            scheme_v2=self._scheme('YW-MUSTARD'),
+            benefit_item_code='FG0000306',
+            qty_scheme=Decimal('5'),
+        )
+
+        body = OrderItemSchemeSerializer(row).data
+        self.assertEqual(body['scheme_item_name'], self.OIL_NAME)
+
+
 class SchemeProposalShapeTests(SimpleTestCase):
     """The giveaway carries its own NAME to the client.
 

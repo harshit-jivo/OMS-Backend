@@ -172,6 +172,10 @@ class Order(models.Model):
     # reads it, THEN migrate the column away. Nothing in this repository reads
     # it today.
     reject_reason = models.TextField(blank=True)
+    # SO cancellation is NOT mirrored onto Order columns. A cancel sets the
+    # order's status to 'SO CANCELLED' (the FK below), and the who/when/why lives
+    # in `sap_sync.SalesCancelledLog` (table sales_cancellation_logs) plus the
+    # OrdersLog entry — so no dedicated cancel columns are needed here.
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
