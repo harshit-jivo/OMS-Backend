@@ -341,6 +341,7 @@ def group_sales_orders(rows):
             "Project":    row['Project'],
             "OcrCode":    row['OcrCode'],
             "LineStatus": row['LineStatus'],
+            "U_SchemeAgst": row.get('SchemeAgst') or "",
         })
 
     return list(orders.values())

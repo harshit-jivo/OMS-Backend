@@ -41,6 +41,21 @@ repair in section 7 is not available there — a bad row cannot be corrected or
 removed by `DSRN` at all. Get `UPDATE` granted before running Beverages again,
 or have someone with rights on standby.
 
+> **2026-09-19 — the running application does not connect as `DSRN`.** It connects
+> as **`B1i`**, whose grants are similar but not identical, and which also covers
+> Mart (absent from the table above):
+>
+> | schema | SELECT | INSERT | UPDATE | DELETE |
+> |---|:--:|:--:|:--:|:--:|
+> | `JIVO_OIL_HANADB` | yes | yes | **yes** | no |
+> | `JIVO_BEVERAGES_HANADB` | yes | yes | **no** | no |
+> | `JIVO_MART_HANADB` | yes | yes | **yes** | no |
+>
+> So the section-7 repair is available in Oil **and Mart**, but still not Beverages,
+> where an `UPDATE` fails with HANA **error 258 `insufficient privilege`**. Check
+> whichever principal you are actually using — the query in this section hardcodes
+> `DSRN`; use `USER_NAME = CURRENT_USER` to check the caller instead.
+
 Check with:
 
 ```sql
@@ -377,3 +392,12 @@ Verified: metadata uniform across all 101, `DocNum = DocEntry` holds for all
    write to `@UTL_MDEXTH` directly going forward, or the `CRYSTAL_*` procs should
    gain the `OMS_IRN_LOG` UNION that `OMS_SP_GST_INVOICE` already has. Otherwise
    this has to be repeated every time OMS generates IRNs.
+
+   > **2026-09-19 — built, and enabled in `.env`, but not yet live.** OMS now writes
+   > `@UTL_MDEXTH` directly, gated on `EINV_MIRROR_UDO`; see
+   > `IRN_DUAL_WRITE.md`. The flag was set on 2026-09-19 and the accumulated gaps
+   > closed (Oil 6 rows, Beverages 5), **but the service had not been restarted**, so
+   > the flag was still unread and new IRNs were continuing to arrive without a UDO
+   > row — Oil BaseEntry 80518 appeared minutes after `reconcile_udo_mirror` reported
+   > "up to date". Until that restart happens this backfill still has to be repeated.
+   > Confirm with `python manage.py reconcile_udo_mirror` (exit 0 = nothing missing).

@@ -668,10 +668,17 @@ class BranchView(APIView):
       not one place — they are two business lines' branches that happen to
       share a name.
 
-    Together those two lines turned 22 rows into 1. Branches are already
-    distinct within a category, so there is nothing to de-duplicate once the
-    category is known; the filter does the narrowing the DISTINCT was
-    reaching for.
+    Together those two lines turned 22 rows into 1.
+
+    `production` fixed the same bug by dropping only the FACTORY filter and
+    keeping `.distinct('bpl_name')`. That half-fix is what this merge drops,
+    because the DISTINCT is the more damaging of the two lines: names repeat
+    ACROSS categories (DELHI, PUNJAB and DELHI ISD exist in all three; FACTORY
+    in two), so it silently picks one business line's row to stand for every
+    line that shares the name. `bpl_id` is scoped to a category — id 2 is
+    FACTORY under OIL but HARYANA under MART — so the survivor's id is simply
+    wrong for the other lines. Filtering by category removes the ambiguity at
+    its source; there is nothing left to de-duplicate once it is known.
     """
 
     def get(self, request):
@@ -684,6 +691,27 @@ class BranchView(APIView):
         serializer = BranchSerializer(branches.order_by('category', 'bpl_id'),
                                       many=True)
         return Response(serializer.data)
+
+
+class OrderDefaultsView(APIView):
+    """What a new order starts with, read from the environment.
+
+    The warehouse default lives in `HANA_WAREHOUSE_CODE` (and the beverages
+    variant) and is applied by the SAP push when an order carries none. The
+    order form used to hardcode its own idea of the default, which is how an
+    order could show one warehouse on screen and ship from another. This
+    hands the form the same answer the push would give, per category.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from sap_sync.services.sync_service import default_warehouse_code_for_category
+        return Response({
+            'warehouse_code': {
+                category: default_warehouse_code_for_category(category)
+                for category in ('OIL', 'BEVERAGES', 'MART')
+            },
+        })
 
 
 class StaffProductsAPIView(APIView):

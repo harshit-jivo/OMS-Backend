@@ -216,6 +216,11 @@ class OrderItem(models.Model):
     # '' rather than NULL for tidiness.
     is_auto_free = models.BooleanField(default=False)
     combo_source_code = models.CharField(max_length=50, null=True, blank=True)
+    # A line the salesperson deliberately gives away. Priced at the FOC token
+    # rate, never from the price list, and always sent to Rate Approval with
+    # `free_reason` shown to the approver.
+    is_free = models.BooleanField(default=False)
+    free_reason = models.CharField(max_length=255, blank=True, default='')
 
     class Meta:
         db_table = 'order_items'

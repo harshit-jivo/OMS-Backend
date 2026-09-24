@@ -39,6 +39,7 @@ from hana.utils import normalize_branch, resolve_doc_entry
 from .services.jsap_db import get_credit_flow_id
 from .services.fg_stock import CONTEXT_KEY as FG_STOCK_CONTEXT_KEY, build_fg_stock_map
 from .services.item_names import CONTEXT_KEY as ITEM_NAME_CONTEXT_KEY, build_item_name_map
+from .services.sap_post import post_invoice_log
 
 
 def _external_verify():
@@ -147,6 +148,10 @@ def _history_actor(request):
     return claimed[:125] or None
 
 
+# Statuses only `post_invoice_log` sets or leaves.
+SAP_OWNED_STATUSES = ('POSTING', 'POSTED_TO_SAP')
+
+
 def scope_logs_to_user(invoice_logs, request):
     """Narrow an InvoiceLog queryset to the branches the caller may see."""
     branches = branches_for_user(getattr(request, 'user', None))
@@ -250,10 +255,26 @@ class InvoicelogStatusUpdateView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        # A posted invoice is a real SAP document, and a POSTING one is waiting
+        # on SAP's answer; neither may be moved from here. Live had posted logs
+        # knocked back to ERROR by a later failed repost, and one deleted.
+        if invoice_log.status in SAP_OWNED_STATUSES:
+            return Response(
+                {'error': f'This invoice is {invoice_log.get_status_display()}; its status can no longer be changed.',
+                 'status': invoice_log.status},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         new_status = request.data.get('status')
 
         if new_status not in dict(InvoiceLog.STATUS_CHOICES):
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_status in SAP_OWNED_STATUSES:
+            return Response(
+                {'error': 'Post the invoice with POST /api/invoice/<id>/post-to-sap/; '
+                          'the SAP outcome is recorded there.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if new_status == 'REJECTED' and not request.data.get('rejection_reason'):
             return Response({'error': 'Rejection reason is required when status is REJECTED'}, status=status.HTTP_400_BAD_REQUEST)
         if new_status == 'REJECTED':
@@ -265,14 +286,6 @@ class InvoicelogStatusUpdateView(APIView):
         # said on the latest attempt.
         if request.data.get('error_message'):
             invoice_log.error_message = request.data.get('error_message')
-
-        # SAP identifiers of the document that was just created. Sent by the
-        # review screen alongside POSTED_TO_SAP so the row can offer a bill
-        # print without anyone having to look the number up in SAP first.
-        if request.data.get('sap_doc_num'):
-            invoice_log.sap_doc_num = str(request.data.get('sap_doc_num'))[:50]
-        if request.data.get('sap_doc_entry'):
-            invoice_log.sap_doc_entry = str(request.data.get('sap_doc_entry'))[:50]
 
         invoice_log.status = new_status
         InvocieHistory.objects.create(
@@ -290,6 +303,16 @@ class InvoicelogStatusUpdateView(APIView):
         return Response({'message': 'Status updated successfully'}, status=status.HTTP_200_OK)
     
     
+class InvoicePostToSapView(APIView):
+    """Post one approved log to SAP and record the outcome — see services/sap_post.py."""
+
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        outcome = post_invoice_log(pk, _history_actor(request))
+        return Response(outcome.body, status=outcome.http_status)
+
+
 class InvoiceLogDeleteView(APIView):
     """Soft-delete a review entry, and restore one.
 
@@ -533,6 +556,18 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
     queryset = InvoiceLog.objects.filter(is_deleted=False)
     serializer_class = InvoiceLogSerializer
     lookup_field = 'id'
+
+    def update(self, request, *args, **kwargs):
+        # The payload of a posted (or posting) invoice is the record of what
+        # SAP holds; rewriting it would make the log describe another invoice.
+        instance = self.get_object()
+        if instance.status in SAP_OWNED_STATUSES:
+            return Response(
+                {'error': f'This invoice is {instance.get_status_display()} and can no longer be edited.',
+                 'status': instance.status},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
         invoice_log_instance = serializer.save()
@@ -846,7 +881,7 @@ class UsedSalesOrdersView(APIView):
 
     permission_classes = [AllowAny]
 
-    BLOCKING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTED_TO_SAP')
+    BLOCKING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTING', 'POSTED_TO_SAP')
 
     def get(self, request):
         logs = (
@@ -914,7 +949,8 @@ class ReservedBatchesView(APIView):
     # subtract the same pieces twice and make a batch look emptier than it is --
     # harmless when a hold merely hid the batch, wrong now that the quantity is
     # netted off. This endpoint exists only for the window before SAP knows.
-    HOLDING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED')
+    # POSTING holds too: SAP has not confirmed it, so OIBT may not reflect it.
+    HOLDING_STATUSES = ('PENDING', 'APPROVED', 'EDITED', 'ERROR', 'CL_RAISED', 'POSTING')
 
     def get(self, request):
         logs = (
@@ -926,6 +962,17 @@ class ReservedBatchesView(APIView):
         branch = normalize_branch(request.query_params.get('branch'), default=None)
         if branch:
             logs = logs.filter(branch=branch)
+
+        # `exclude_log` drops ONE log's own holds from the answer.
+        #
+        # For the re-check-batches repost: a failed log is ERROR, which is a
+        # holding status, so its own batches are reserved -- by itself. Asked to
+        # allocate that same invoice again it would find its own stock taken and
+        # report a shortage that does not exist. Excluding it frees exactly the
+        # pieces this invoice already claims and nobody else's.
+        exclude_log = str(request.query_params.get('exclude_log') or '').strip()
+        if exclude_log.isdigit():
+            logs = logs.exclude(pk=int(exclude_log))
 
         # Scoped like the review screens, so a beverage user is not blocked by
         # an oil draft they cannot even see.

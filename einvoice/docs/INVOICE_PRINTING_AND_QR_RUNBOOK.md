@@ -6,7 +6,23 @@ QR (or the whole PDF) fails. Complements the API-level
 [NIC e-Invoice + e-Way Bill reference](./NIC_EINVOICE_EWAYBILL_REFERENCE.md)
 (IRN generation, schema, error codes, crypto).
 
-> Last verified: 2026-07-29. Server/paths/credentials can drift — verify before acting.
+> Last verified: 2026-09-19. Server/paths/credentials can drift — verify before acting.
+>
+> **⚠️ 2026-09-19 — THE HOSTS IN THIS DOCUMENT MOVED.** Every `\\JIVO-APP`,
+> `20.20.45.25` and `.75` below is the *old* addressing and is kept only so older
+> stored paths and log lines still make sense. Current, verified on the app host:
+>
+> | Role | Old (as written below) | **Current** |
+> |---|---|---|
+> | App host (Django, IIS/Crystal) | `103.89.45.75` / `20.20.45.75` | **`10.10.101.118`**, hostname still `Jivo` |
+> | File server (QR bitmaps) | `JIVO-APP` = `20.20.45.25` | **`10.10.101.52`** |
+> | HANA | `103.89.45.192:30015` | `10.10.101.x` — confirm before use |
+>
+> `JIVO-APP` no longer resolves. This matters in two places: the §3 path rewrite
+> `REPLACE(…,'C:\SAP Attachments\','\\JIVO-APP\')` would produce a dead path — it is
+> harmless today **only because** both the add-on and OMS now store full
+> `\\10.10.101.52\…` UNCs, so the REPLACE never matches (verified: 16,537/16,539 Oil
+> rows). And "run it on .75" throughout §3/§6/§7 now means **run it on .118**.
 >
 > **2026-07-29 changes:** the flow is now **multi-company** (OIL / BEVERAGE / MART) —
 > see [§4](#4-multi-company-routing-oil--beverage--mart). The SP no longer requires a
@@ -44,8 +60,8 @@ the QR is blank (or the render 500s) — even though every other field is correc
 
 | Thing | Where | Notes |
 |---|---|---|
-| SAP B1 server / app host | **103.89.45.75** (internal `20.20.45.75`, host `Jivo`) | SSH `Admin` / `English@jivo`. Runs SAP B1 + IIS + many apps under `C:\LiveProjects`. |
-| File server (QR bitmaps) | **JIVO-APP = 20.20.45.25** | Only reachable from inside (from .75). Shares need login `OMS` / `Jivo@2026`. |
+| SAP B1 server / app host | **10.10.101.118** (host `Jivo`; was `103.89.45.75` / `20.20.45.75`) | SSH `Admin` / `English@jivo`. Runs SAP B1 + IIS + many apps under `C:\LiveProjects`. |
+| File server (QR bitmaps) | **10.10.101.52** (was `JIVO-APP` = `20.20.45.25`) | Only reachable from inside. Shares reached with the `EINV_QR_SMB_*` account (currently `B1i`), not `OMS`. |
 | HANA DB | **103.89.45.192:30015** | Schemas incl. `JIVO_OIL_HANADB` (= "hana_live_oil"). User `DSR` / `Jivo@2025`. |
 | Crystal render service | IIS site **CrystalReportService**, `C:\inetpub\CrystalReportService`, port **8008** | .NET Framework 4.8 Web API 2 + Crystal runtime 13.0.x. Source: `C:\LiveProjects\Crystal Report Utility`. |
 | OMS backend (Django) | `C:\LiveProjects\OMS\Backend` (dev) / deployed sites on .75 | Generates IRNs, writes QR PNGs to the share. |
@@ -77,6 +93,23 @@ Per-company destinations (verified reachable + writable from .75 as user `OMS`):
 
 > ⚠️ The folder is `MART_**ATTACHMENTS**` (two T's). A single-T spelling silently
 > breaks Mart QR saves — the hook is best-effort and only logs.
+
+> ⚠️ **2026-09-19 — two Oil rows carry a mangled server name.** A find/replace during
+> the file-server migration concatenated the new and old addresses, producing
+> `\\10.10.101.5220.20.45.247\SAP Attachments\…`. Both are add-on rows
+> (`Creator = 'USER13'`) in `@UTL_MDEXTH`: **DocEntry 16844** (invoice 726060102) and
+> **DocEntry 16848** (invoice 626060389). They print with a blank QR box. Oil has
+> `UPDATE`, so both are fixable:
+>
+> ```sql
+> UPDATE "JIVO_OIL_HANADB"."@UTL_MDEXTH"
+>    SET "U_UTL_QRPT" = '\\10.10.101.52\SAP Attachments\Jivo Oil\Bitmaps\'
+>                       || "U_UTL_IRN" || '.png'
+>  WHERE "U_UTL_QRPT" LIKE '%10.10.101.5220%';
+> ```
+>
+> Worth re-running that `LIKE` after any future address change — it is the signature
+> of a half-applied path rewrite, and nothing else detects it.
 
 - Both tables store the **same** signed-QR image content per invoice, just under
   different shares. OMS names its file `{irn}.png` (`EINV_QR_FILENAME`).
@@ -208,6 +241,33 @@ today (flag NULL → `CardName`); the trap is simply defused.
 **Whenever you edit any one of these three procs, check the other two**, and in
 all three schemas. That is 9 copies of the same logic, and drift between them is
 invisible until a bill prints wrong. Diff before assuming they match.
+
+#### 2026-09-19 — it is not 9 copies. Four of them do not exist.
+
+Queried `SYS.PROCEDURES` in all three live schemas:
+
+| Schema | `CRYSTAL_AR_INVOICE_ITEMS` | `CRYSTAL_AR_INVOICE_SERVICES` | `OMS_SP_GST_INVOICE` | `OMS_SP_GST_INVOICE_SAP` |
+|---|:--:|:--:|:--:|:--:|
+| `JIVO_OIL_HANADB` | ✅ | ✅ | ✅ | ✅ |
+| `JIVO_BEVERAGES_HANADB` | ✅ | **❌** | ✅ | **❌** |
+| `JIVO_MART_HANADB` | ✅ | ✅ | ✅ | **❌** |
+
+- **`OMS_SP_GST_INVOICE_SAP` exists only in Oil.** Beverages and Mart have no
+  SAP-side OMS print proc at all.
+- **Beverages has no `CRYSTAL_AR_INVOICE_SERVICES`.** Calling it there returns
+  HANA **error 328** (`no procedure with name …`), not an empty result. Low impact
+  today only because Beverages raises no service invoices (the 2026-09-18 measurement
+  below found Oil 11,503, Mart 77, Beverages 0) — but it is a hard failure the moment
+  one is raised.
+
+So "check the other two in all three schemas" is the right instinct, but the first
+question is whether the proc is even deployed there. Check existence before diffing:
+
+```sql
+SELECT SCHEMA_NAME, PROCEDURE_NAME FROM SYS.PROCEDURES
+ WHERE PROCEDURE_NAME LIKE 'CRYSTAL_AR_INVOICE%' OR PROCEDURE_NAME LIKE 'OMS_SP_GST%'
+ ORDER BY SCHEMA_NAME, PROCEDURE_NAME;
+```
 
 ### 2026-09-18 — service invoices printed completely blank (fixed)
 

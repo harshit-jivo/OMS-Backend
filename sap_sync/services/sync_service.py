@@ -265,9 +265,34 @@ def _get_sap_line_quantity(item):
 FOC_TOKEN_UNIT_PRICE = 0.001
 
 
+# Sub-groups that have no profit centre of their own in OPRC dimension 1 (the
+# column SAP labels "Variety"), mapped to the profit-centre NAME the business
+# books them under instead. Without an entry here the line goes out with no
+# CostingCode and SAP rejects the whole document with -1116 "Please Select the
+# Variety Column".
+#
+# Values are profit-centre NAMES, not PrcCodes: they still go through the OPRC
+# lookup, so a name that is missing or inactive in a given company resolves to
+# nothing and the line is sent without a CostingCode exactly as before. That
+# matters — CANOLA is active in the OIL company but Active='N' in BEVERAGE, so
+# this mapping only takes effect for OIL.
+#
+# PREFORM -> CANOLA confirmed with the SAP team 2026-09-18. Preforms are a
+# packing material with no profit centre of their own; the business books them
+# to CANOLA rather than create one.
+COSTING_CODE_SUBGROUP_ALIASES = {
+    "PREFORM": "CANOLA",
+}
+
+
 def _get_sap_unit_price(item, is_foc=False):
     price_list_basic = _to_float(getattr(item, "price_list_basic", None), 0)
     basic_price = _to_float(getattr(item, "basic_price", None), 0)
+
+    if getattr(item, "is_free", False):
+        # A line the salesperson marked free: the FOC token rate, whatever was
+        # stored or later edited onto it, and never the price list.
+        return FOC_TOKEN_UNIT_PRICE
 
     if basic_price > 0:
         return basic_price
@@ -375,6 +400,25 @@ def serialized_sync(sync_type):
                 return func(self, *args, **kwargs)
         return wrapper
     return decorator
+
+
+def default_warehouse_code_for_category(category):
+    """The warehouse an order of this category ships from unless it says
+    otherwise — `HANA_WAREHOUSE_CODE` from the environment, or the beverages
+    variant. Module-level so the order form can offer the same default the
+    SAP push would apply (`orders/defaults/`), without standing up a SAP
+    connection to ask.
+    """
+    normalized_category = str(category or "").strip().upper()
+    default_warehouse_code = str(
+        getattr(settings, "HANA_WAREHOUSE_CODE", "GP-FG") or ""
+    ).strip()
+    beverages_warehouse_code = str(
+        getattr(settings, "HANA_WAREHOUSE_CODE_BEVERAGES", "BH-FG") or ""
+    ).strip()
+    if normalized_category == "BEVERAGES":
+        return beverages_warehouse_code
+    return default_warehouse_code
 
 
 class SyncService:
@@ -634,18 +678,7 @@ class SyncService:
         return self.resolve_warehouse_code_for_category(category)
 
     def resolve_warehouse_code_for_category(self, category):
-        normalized_category = self._normalize_order_category(category)
-        default_warehouse_code = str(
-            getattr(settings, "HANA_WAREHOUSE_CODE", "GP-FG") or ""
-        ).strip()
-        beverages_warehouse_code = str(
-            getattr(settings, "HANA_WAREHOUSE_CODE_BEVERAGES", "") or ""
-        ).strip()
-
-        if normalized_category == "BEVERAGES":
-            return beverages_warehouse_code
-
-        return default_warehouse_code
+        return default_warehouse_code_for_category(category)
    
     @serialized_sync('ALL')
     def sync_all(self):
@@ -1131,9 +1164,16 @@ class SyncService:
             e.g. SUNFLOWER), and one *under* 8 chars is accepted and books the
             line to a profit center that may not be the intended one. Never
             raises -- an unresolvable name must not fail the whole mapping.
+
+            A sub_group with no profit centre of its own is first redirected via
+            COSTING_CODE_SUBGROUP_ALIASES; the aliased name is then resolved
+            through OPRC like any other, so an alias that is missing or inactive
+            in this company still yields None rather than a bad code.
             """
             if not prc_name:
                 return None
+            prc_name = COSTING_CODE_SUBGROUP_ALIASES.get(
+                prc_name.strip().upper(), prc_name)
             if prc_name not in costing_code_cache:
                 try:
                     resolved = sales_service.get_costing_code(prc_name, branch)

@@ -383,7 +383,7 @@ if JSAP_DB_HOST and not (JSAP_DB_NAME and JSAP_DB_USER and JSAP_DB_PASSWORD):
 
 HANA_COMPANY_DB_BEVERAGES = config('HANA_COMPANY_DB_BEVERAGES', default='')
 HANA_WAREHOUSE_CODE = config('HANA_WAREHOUSE_CODE', default='GP-FG')
-HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='')
+HANA_WAREHOUSE_CODE_BEVERAGES = config('HANA_WAREHOUSE_CODE_BEVERAGES', default='BH-FG')
 # In DEBUG, default to False for local/self-signed SAP endpoints unless explicitly set.
 HANA_SSL_VERIFY = config('HANA_SSL_VERIFY', default=not DEBUG, cast=bool)
 HANA_SSL_CA_BUNDLE = config('HANA_SSL_CA_BUNDLE', default='')

@@ -1,9 +1,10 @@
 from django.contrib import admin
 from django.urls import path,include
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
-from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,OrderDefaultsView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,DeleteDraftOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView, MartOrderListView, MartOrderDetailView, MartApproveView, MartRejectView, SalesOrderSapStatusView, MartResendSapView
+from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,OrderStatusTrackingView,OrderLogsByOrderView, OrderDetailsByOrderView,OrdersByUserView,DashboardChartsView,OrderStatusList,BranchView,OrderDefaultsView,PartyView,DispatchLocationListView, SchemeProductView,UpdateOrderStatusView,PartyAddressesView,ProductFiltersView,ProductListView,PartyProductsView,CreateOrderView,DeleteDraftOrderView,UpdateOrderView,OrderListView,RejectOrderView,ApproveOrderView,SchemeListView,CreateSchemeView, SchemeManageListView, SchemeDetailView, AiOrderSummaryView, TemplatePartyListView, TemplateOrderListView, NotificationListView, NotificationHistoryView, PushTokenView, WebPushPublicKeyView, WebPushSubscriptionView, StaffProductsAPIView, OrderStockCheckView, OrderFlowConfigView, PartyOrderFlowConfigView,GetOrdersByItemView
 from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
 from .views.crystal import SalesOrderPrintView
+from .views.queries import MasterOrderCreatorsView, MasterOrderListView
 
 urlpatterns=[
     
@@ -14,6 +15,7 @@ urlpatterns=[
     path('product-filters/', ProductFiltersView.as_view(), name='product-filters'),
     path('products/', ProductListView.as_view(), name='products'),
     path('create/', CreateOrderView.as_view(), name='create-order'),
+    path('<int:order_id>/delete-draft/', DeleteDraftOrderView.as_view(), name='delete-draft'),
     path('<int:order_id>/update/', UpdateOrderView.as_view(), name='update-order'),
     path('list/', OrderListView.as_view(), name='order_list'),
     path('<int:order_id>/approve/', ApproveOrderView.as_view(), name='approve_list'),
@@ -36,12 +38,15 @@ urlpatterns=[
     path('flow-config/',OrderFlowConfigView.as_view(),name='order-flow-config'),
     path('party-flow-config/',PartyOrderFlowConfigView.as_view(),name='party-order-flow-config'),
     path('branch/',BranchView.as_view(),name='branch'),
+    path('defaults/', OrderDefaultsView.as_view(), name='order-defaults'),
     path('<int:order_id>/update-status/',UpdateOrderStatusView.as_view(),name='update-status'),
     path('dashboard/', DashboardKPIView.as_view(), name='dashboard'),
     path('dashboard/charts/',DashboardChartsView.as_view(), name='dashboard-charts'),
     path('dashboardW/', WDashboardKPIView.as_view(), name='Wdashboard'),
     path('dashboardW/charts/',WDashboardChartsView.as_view(), name='Wdashboard-charts'),
     path('status-tracking/',OrderStatusTrackingView.as_view(), name='status-tracking'),
+    path('master/', MasterOrderListView.as_view(), name='order-master'),
+    path('master/creators/', MasterOrderCreatorsView.as_view(), name='order-master-creators'),
     path("<int:order_id>/orderlogs/",OrderLogsByOrderView.as_view(),name="order-logs-by-orderid"),
     path("orderdetailsbyid/<int:order_id>/",OrderDetailsByOrderView.as_view(),name="order-details-by-id"),
     path("<int:order_id>/orderdetails/",OrderDetailsByOrderView.as_view(),name="order-details-by-orderid"),

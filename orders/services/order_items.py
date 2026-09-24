@@ -146,7 +146,15 @@ def _create_order_item(order, item, to_float, to_bool):
     price_list_basic = to_float(item.get('price_list_basic', 0))
     total = to_float(item.get('total', 0))
 
-    if getattr(order, 'is_foc', False) and basic_price <= 0:
+    is_free = to_bool(item.get('is_free'))
+    if is_free:
+        # A deliberate giveaway on a paid order. Same token rate as FOC, for
+        # the same reason, and never the price list: a free line billed at the
+        # list rate is the one outcome the salesperson ruled out.
+        basic_price = FOC_TOKEN_BASIC_PRICE
+        price_list_basic = 0
+        total = round(qty * basic_price, 4)
+    elif getattr(order, 'is_foc', False) and basic_price <= 0:
         # An FOC line ships free, but a zero rate reaches SAP as either a
         # zero-value invoice (no IRN) or -- worse -- falls through to the price
         # list and bills the customer in full. The token rate is what the
@@ -177,6 +185,8 @@ def _create_order_item(order, item, to_float, to_bool):
         is_scheme_visible=to_bool(item.get('is_scheme_visible')) or bool(item_schemes),
         is_auto_free=to_bool(item.get('is_auto_free')),
         combo_source_code=item.get('combo_source_code') or '',
+        is_free=is_free,
+        free_reason=str(item.get('free_reason') or '').strip()[:255] if is_free else '',
     )
 
     OrderItemScheme.objects.bulk_create([
