@@ -493,6 +493,14 @@ class Queries():
         # through to OIL would offer warehouses from the wrong company DB.
         if branch == 'BEVERAGE':
             s = Queries.BEVERAGE_SCHEMA
+            return f"""
+                SELECT
+                     T0."WhsCode",
+                    T0."WhsName"
+                FROM "{s}"."OWHS" AS T0
+                WHERE T0."Locked" = 'N'
+                AND T0."WhsCode" IN ('DL-MP' , 'BH-FG')
+                """
         elif branch == 'MART':
             s = Queries.MART_SCHEMA
         else:

@@ -414,7 +414,7 @@ def default_warehouse_code_for_category(category):
         getattr(settings, "HANA_WAREHOUSE_CODE", "GP-FG") or ""
     ).strip()
     beverages_warehouse_code = str(
-        getattr(settings, "HANA_WAREHOUSE_CODE_BEVERAGES", "") or ""
+        getattr(settings, "HANA_WAREHOUSE_CODE_BEVERAGES", "BH-FG") or ""
     ).strip()
     if normalized_category == "BEVERAGES":
         return beverages_warehouse_code
