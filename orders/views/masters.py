@@ -645,13 +645,22 @@ class BranchView(APIView):
     `distinct('bpl_name')` is deliberate and Postgres-specific (DISTINCT ON):
     the table is unique on (bpl_id, category), so one physical branch appears
     once per company DB it exists in, and the selector wants it once.
+
+    `?category=OIL|BEVERAGES|MART` narrows the list to one company DB. The
+    order form must send it: a BPLId only means something inside its own DB
+    (Mart's 9 "BSU DELHI" does not exist in Beverages), and SAP rejects a
+    foreign one with "Specify an active branch [ORDR.BPLId]".
     """
 
     def get(self, request):
-        branches = (Branch.objects
-                    .filter(is_active=True)
-                    .order_by("bpl_name")
-                    .distinct('bpl_name'))
+        branches = Branch.objects.filter(is_active=True)
+        category = (request.query_params.get('category') or '').strip().upper()
+        if category == 'BEVERAGE':
+            category = 'BEVERAGES'
+        if category:
+            branches = branches.filter(category=category).order_by("bpl_name")
+        else:
+            branches = branches.order_by("bpl_name").distinct('bpl_name')
         serializer = BranchSerializer(branches, many=True)
         return Response(serializer.data)
 
