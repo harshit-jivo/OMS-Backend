@@ -382,6 +382,9 @@ class UpdateOrderView(APIView):
 
         if not items:
             return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+        free_error = _free_line_error(items)
+        if free_error:
+            return Response({'error': free_error}, status=status.HTTP_400_BAD_REQUEST)
         if order_type == 'STAFF' and not employee_id:
             return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
         if order_type == 'PARTY' and not data.get('card_code'):
@@ -577,6 +580,9 @@ class CreateOrderView(APIView):
             order_remarks = request.data.get('remarks', data.get('remarks', ''))
             if not items:
                 return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+            free_error = _free_line_error(items)
+            if free_error:
+                return Response({'error': free_error}, status=status.HTTP_400_BAD_REQUEST)
             if order_type == 'STAFF' and not employee_id:
                 return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
             if order_type == 'PARTY' and not data.get('card_code'):
@@ -719,6 +725,9 @@ class CreateOrderView(APIView):
 
         if not items:
             return Response({'error': 'At least one item is required'}, status=status.HTTP_400_BAD_REQUEST)
+        free_error = _free_line_error(items)
+        if free_error:
+            return Response({'error': free_error}, status=status.HTTP_400_BAD_REQUEST)
         if order_type == 'STAFF' and not employee_id:
             return Response({'error': 'employee_id is required for staff orders'}, status=status.HTTP_400_BAD_REQUEST)
         if order_type == 'PARTY' and not data.get('card_code'):
@@ -1116,6 +1125,20 @@ def _next_order_number():
     ).order_by('-order_number').first()
     new_num = int(last_order.order_number.split('-')[-1]) + 1 if last_order else 1
     return f'ORD-{today}-{new_num:04d}'
+
+
+def _free_line_error(items):
+    """Why these lines cannot be saved as given, or None.
+
+    A free line reaches the rate approver with its reason as the only
+    explanation, so it must have one.
+    """
+    for item in items:
+        is_free = str(item.get('is_free')).strip().lower() in ('true', '1', 'yes', 'on')
+        if is_free and not str(item.get('free_reason') or '').strip():
+            name = item.get('item_name') or item.get('item_code') or 'A free line'
+            return f'{name}: give a reason for making this line free.'
+    return None
 
 
 def _is_own_draft(order, user):

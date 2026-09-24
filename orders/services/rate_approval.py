@@ -114,6 +114,13 @@ def _get_rate_approval_reason(item, authorised_rate, basic_price):
         if qty <= 0:
             return None
 
+    # A line the salesperson marked free always needs a signature: it is a
+    # giveaway nobody else has agreed to, unlike a scheme or combo companion.
+    if str(_item_field(item, 'is_free')).lower() in ('true', '1', 'yes', 'on'):
+        item_name = item.get('item_name') or item.get('item_code') or 'Item'
+        reason = _item_field(item, 'free_reason') or 'no reason given'
+        return f"{item_name}: FREE ({reason})"
+
     # A zero-priced line is a giveaway -- a scheme companion, the free half of
     # a combo, or an FOC order. There is no discount to approve. This also
     # covers what the old `item_type == 'SCHEME'` and `is_auto_free` guards

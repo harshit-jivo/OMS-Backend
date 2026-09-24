@@ -289,6 +289,11 @@ def _get_sap_unit_price(item, is_foc=False):
     price_list_basic = _to_float(getattr(item, "price_list_basic", None), 0)
     basic_price = _to_float(getattr(item, "basic_price", None), 0)
 
+    if getattr(item, "is_free", False):
+        # A line the salesperson marked free: the FOC token rate, whatever was
+        # stored or later edited onto it, and never the price list.
+        return FOC_TOKEN_UNIT_PRICE
+
     if basic_price > 0:
         return basic_price
 
