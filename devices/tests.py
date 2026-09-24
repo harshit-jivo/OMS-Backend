@@ -392,7 +392,7 @@ class VersionPolicyTests(TestCase):
         from .version_policy import evaluate
         self.assertIsNone(evaluate("ANDROID", 1, "0.0.1", {}))
 
-    def test_evaluate_exact_match_allows(self):
+    def test_evaluate_exact_build_allows(self):
         from .version_policy import evaluate
         policies = {"IOS": {"required_build": 5, "required_version": "1.0.5", "store_url": "s"}}
         self.assertIsNone(evaluate("IOS", 5, "1.0.5", policies))
@@ -406,10 +406,41 @@ class VersionPolicyTests(TestCase):
         self.assertEqual(payload["required_build"], 5)
         self.assertEqual(payload["store_url"], "s")
 
-    def test_evaluate_version_mismatch_blocks(self):
+    def test_evaluate_newer_build_allows(self):
+        """The regression this rule exists for.
+
+        This used to BLOCK: the check was `build == required`, so a device that
+        had taken a newer release was told to update -- and no update could
+        clear it, because there was nothing newer than what it was running.
+        Every rollout locked out whoever updated first.
+        """
         from .version_policy import evaluate
         policies = {"ANDROID": {"required_build": 5, "required_version": "1.0.5", "store_url": ""}}
-        self.assertIsNotNone(evaluate("ANDROID", 5, "9.9.9", policies))
+        self.assertIsNone(evaluate("ANDROID", 6, "1.0.6", policies))
+        self.assertIsNone(evaluate("ANDROID", 99, "9.9.9", policies))
+
+    def test_evaluate_ignores_the_version_label(self):
+        """`required_version` is a label for humans, never a gate.
+
+        It was compared as a string, so "1.0.10" failed against a required
+        "1.0.9" -- a device ahead on both build and version, blocked on
+        lexicographic order.
+        """
+        from .version_policy import evaluate
+        policies = {"ANDROID": {"required_build": 9, "required_version": "1.0.9", "store_url": ""}}
+        self.assertIsNone(evaluate("ANDROID", 10, "1.0.10", policies))
+        self.assertIsNone(evaluate("ANDROID", 9, "", policies))
+        self.assertIsNone(evaluate("ANDROID", 9, None, policies))
+
+    def test_evaluate_blank_required_build_switches_the_gate_off(self):
+        """Clearing the build lets every version through -- the escape hatch
+        for a policy that is locking people out."""
+        from .version_policy import evaluate
+        for blank in (None, ""):
+            policies = {"ANDROID": {"required_build": blank, "required_version": "",
+                                    "store_url": ""}}
+            self.assertIsNone(evaluate("ANDROID", 1, "0.0.1", policies))
+            self.assertIsNone(evaluate("ANDROID", None, None, policies))
 
     # --- middleware --------------------------------------------------------
     def test_middleware_blocks_old_android_with_426(self):
