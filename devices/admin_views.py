@@ -295,12 +295,18 @@ class AdminDeviceAnalyticsView(APIView):
             policy = policies.get(platform)
             plat_qs = qs.filter(platform=platform)
             total = plat_qs.count()
-            if policy:
-                required_build = policy["required_build"]
-                latest = plat_qs.filter(build_number=required_build).count()
-                # Anything not on the required build is "old" (older or, oddly,
-                # newer). Kept simple to match the strict-equality policy rule.
+            if policy and policy.get("required_build") not in (None, ""):
+                required_build = int(policy["required_build"])
+                # At or above the floor is current; only BELOW it is old. This
+                # counted `build_number == required_build`, so every device on
+                # a newer release was reported as "old".
+                latest = plat_qs.filter(build_number__gte=required_build).count()
                 old = total - latest
+            elif policy:
+                # Policy row exists but the gate is off — nothing is out of date.
+                required_build = None
+                latest = total
+                old = 0
             else:
                 required_build = None
                 latest = 0

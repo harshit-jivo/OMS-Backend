@@ -158,15 +158,29 @@ class VersionPolicy(models.Model):
     and is never validated.
 
     ``required_build`` (an integer) is the value the middleware actually
-    compares; ``required_version`` is the human-readable label shown to users.
-    The rule is deliberately strict EQUALITY (build == required, version ==
-    required), per the feature spec: anything not on the exact required build is
-    told to update.
+    compares; ``required_version`` is the human-readable label shown to users
+    and is NEVER compared.
+
+    The rule is a MINIMUM: a client is out of policy only when its build is
+    BELOW ``required_build``. It used to be strict equality on both fields,
+    which had two consequences nobody wanted:
+
+    * A device on a NEWER build than the policy was told to update -- and
+      updating could not help it, because there was nothing newer to install.
+      Every rollout locked its own early adopters out until an admin edited the
+      policy, and the admin panel says "Devices below it are asked to update",
+      so nobody expected it.
+    * The version LABEL was compared as a string, so "1.0.10" failed against a
+      required "1.0.9" even on a high enough build.
+
+    ``required_build`` is NULL-able and ``required_version`` may be blank:
+    clearing them turns the gate off for that platform, which is the way to let
+    every version through during an incident.
     """
 
     platform = models.CharField(max_length=20, choices=MOBILE_PLATFORM_CHOICES)
-    required_version = models.CharField(max_length=20)
-    required_build = models.PositiveIntegerField()
+    required_version = models.CharField(max_length=20, blank=True, default="")
+    required_build = models.PositiveIntegerField(null=True, blank=True)
     store_url = models.URLField(blank=True, default="")
     is_active = models.BooleanField(default=True)
 
@@ -191,4 +205,9 @@ class VersionPolicy(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.platform} requires v{self.required_version} (build {self.required_build})"
+        if self.required_build is None:
+            return f"{self.platform} (no version gate)"
+        return (
+            f"{self.platform} requires build {self.required_build} or higher"
+            f"{f' (v{self.required_version})' if self.required_version else ''}"
+        )
