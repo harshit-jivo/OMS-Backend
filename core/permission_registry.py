@@ -80,6 +80,7 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Sap_Sync':                 'SAP Sync',
         'Party_Assignment':         'Party Assignment',
         'Party_Product_Assignment': 'Party Product Assignment',
+        'Bulk_Product_Assignment': 'Bulk Product Assignment',
         'Add_Scheme':               'Add Scheme',
         'Scheme_Manager':           'Schemes',
         'Combo_Mapping':            'Combo Mapping',

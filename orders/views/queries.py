@@ -24,7 +24,7 @@ from core.permissions import HasKey
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import OuterRef, Prefetch, Q, Subquery
+from django.db.models import Count, OuterRef, Prefetch, Q, Subquery
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
 from sap_sync.models import SalesQuotationLog
@@ -144,6 +144,10 @@ class _OrderDetailSchema(OrderDetailSerializer):
     )
     party_state = serializers.CharField(read_only=True, allow_null=True)
     created_by_name = serializers.CharField(read_only=True, allow_null=True)
+    # Null when the order carries no address id, or when the id no longer
+    # resolves to a row in `sap_party_addresses`.
+    bill_to_full_address = serializers.CharField(read_only=True, allow_null=True)
+    ship_to_full_address = serializers.CharField(read_only=True, allow_null=True)
 
 
 @extend_schema_serializer(component_name='OrderListByUserId')
@@ -217,6 +221,16 @@ ORDER_LIST_ROWS = inline_serializer(
 )
 
 
+def with_items_count(orders):
+    """Annotate `items_count` for `OrderListByUserIdSerializer`.
+
+    Applied AFTER a view's filters. The rate-approver branch of the tracking
+    view filters through `rate_approvals`, so the count is taken over a join;
+    `distinct=True` keeps it a count of items whatever that join yields.
+    """
+    return orders.annotate(items_count=Count('items', distinct=True))
+
+
 class OrderStatusTrackingView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -277,8 +291,10 @@ class OrderStatusTrackingView(APIView):
             return Response({'error': 'mode must be auditor, billing, or rate_approver'}, status=status.HTTP_400_BAD_REQUEST)
 
         
-        accepted_data = OrderListByUserIdSerializer(accepted_orders.distinct(), many=True).data
-        rejected_data = OrderListByUserIdSerializer(rejected_orders.distinct(), many=True).data
+        accepted_data = OrderListByUserIdSerializer(
+            with_items_count(accepted_orders.distinct()), many=True).data
+        rejected_data = OrderListByUserIdSerializer(
+            with_items_count(rejected_orders.distinct()), many=True).data
 
         for item in accepted_data:
             item['decision_type'] = 'accepted'
@@ -423,10 +439,11 @@ class OrdersByUserView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        orders = (
+        # No items prefetch: the serializer emits `items_count` only, which
+        # the annotation supplies in the same query as the orders.
+        orders = with_items_count(
             Order.objects.filter(created_by=user_id)
             .select_related("status", "created_by")
-            .prefetch_related("items", "items__schemes")
             .order_by("-created_at")
         )
 

@@ -212,7 +212,7 @@ class OrdersLogSerializer(serializers.ModelSerializer):
             and self._performed_by_role(obj) == "auditor"
             and not raw
         ):
-            return "Sales quotation created by auditor"
+            return "Sales Order created by auditor"
         return raw
    
     class Meta:
@@ -466,7 +466,12 @@ class OrderRateApprovalSerializer(serializers.ModelSerializer):
 class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source="status.name")
     # items = OrderItemSerializer(many=True, read_only=True)
-    # items_count = serializers.IntegerField(source="items.count", read_only=True)
+    # Read from the queryset, not from `items.count`: every caller annotates
+    # `items_count=Count('items', distinct=True)` (see `with_items_count` in
+    # views/queries.py) so the list costs one query however long it is. It was
+    # commented out along with `items`, and the Billing / Auditor Tracking
+    # pages showed 0 items on every order because of it.
+    items_count = serializers.IntegerField(read_only=True)
     # categories = serializers.SerializerMethodField()
     status_display = serializers.CharField(source="status.name", read_only=True)
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
@@ -515,7 +520,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "delivery_date",  
             # "sap_doc_number",
             # "items",
-            # "items_count",
+            "items_count",
             # "categories",
             # "rate_approvals",
         ]
@@ -529,6 +534,44 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
     rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
     vareity_cost = serializers.SerializerMethodField()
+    # The street address behind each of the order's two address NAMES.
+    #
+    # `bill_to_address` holds what the form saved, and the form saves
+    # `address_name or full_address` — so for every address that has a name,
+    # which is nearly all of them, the street is simply not on the order. The
+    # id is, though, and it points at `sap_party_addresses`, so the address can
+    # be resolved rather than duplicated onto the order.
+    #
+    # Read live rather than snapshotted at save time on purpose: a party whose
+    # premises move should show where the goods go NOW, and the name already on
+    # the order is the historical record of what was chosen.
+    bill_to_full_address = serializers.SerializerMethodField()
+    ship_to_full_address = serializers.SerializerMethodField()
+
+    def _full_address(self, address_id):
+        """The street address for one `sap_party_addresses` id, or None.
+
+        Cached on the serializer because bill-to and ship-to are frequently the
+        same row, and because an order re-serialised after a status change
+        would otherwise repeat the lookup.
+        """
+        if not address_id:
+            return None
+        cache = getattr(self, '_address_cache', None)
+        if cache is None:
+            cache = {}
+            self._address_cache = cache
+        if address_id not in cache:
+            address = SapPartyAddress.objects.filter(pk=address_id).only(
+                'full_address').first()
+            cache[address_id] = (address.full_address or '').strip() or None if address else None
+        return cache[address_id]
+
+    def get_bill_to_full_address(self, obj):
+        return self._full_address(obj.bill_to_id)
+
+    def get_ship_to_full_address(self, obj):
+        return self._full_address(obj.ship_to_id)
 
     # commodity_total = serializers.SerializerMethodField()
 
@@ -619,7 +662,8 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         model = Order
         fields = [
             "id", "order_number", "card_code", "card_name",
-            "bill_to_id", "bill_to_address", "ship_to_id", "ship_to_address",
+            "bill_to_id", "bill_to_address", "bill_to_full_address",
+            "ship_to_id", "ship_to_address", "ship_to_full_address",
             "dispatch_from_id", "dispatch_from_name", "company", "po_number",
             "warehouse_code", "is_foc",
             "remarks", "total_amount", "status", "status_display",

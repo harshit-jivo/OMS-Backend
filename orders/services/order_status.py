@@ -416,7 +416,7 @@ def apply_order_status_transition(order, status_id, reason, user):
         })
 
     if is_auditor_completed:
-        auditor_completed_remarks = reason or "Sales quotation created by auditor"
+        auditor_completed_remarks = reason or "Sales Order created by auditor"
         auditor_pending_log = (
             OrdersLog.objects
             .filter(order=order, action=previous_status, performed_by__isnull=True)

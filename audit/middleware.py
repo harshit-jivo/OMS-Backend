@@ -23,6 +23,17 @@ _ACTION_BY_METHOD = {
 }
 
 
+def mark_exempt(request):
+    """Declare that this request changes nothing, so no fallback row is wanted.
+
+    For a view that must be a POST because its QUERY is too large for a query
+    string, not because it writes. Sets the flag on the underlying HttpRequest:
+    a DRF view is handed a `Request` wrapper, and an attribute set on that
+    wrapper is invisible to middleware, which only ever sees what it passed in.
+    """
+    getattr(request, '_request', request).audit_exempt = True
+
+
 def _resolve_user(request):
     """Identify the user from the JWT (works even on AllowAny views)."""
     try:
@@ -68,6 +79,14 @@ class AuditMiddleware:
         # model-signal row (e.g. a bulk queryset.update() or an endpoint whose
         # model isn't individually audited).
         if not page or written > 0:
+            return
+        # A view that only READS may still have to be a POST, because its query
+        # is too big for a query string -- `bulk-party/products/` posts a list of
+        # party selections. Without this it would file one contentless "Created"
+        # row per fetch into the same table the rate history is read from, which
+        # is worse than logging nothing: it is noise in the one place that has to
+        # stay trustworthy. A view opts out by setting the flag on the request.
+        if getattr(request, 'audit_exempt', False):
             return
         status = getattr(response, 'status_code', None)
         if status is not None and status >= 400:
