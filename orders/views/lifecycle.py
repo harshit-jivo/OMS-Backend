@@ -554,6 +554,13 @@ class CreateOrderView(APIView):
                 return False
             return bool(value)
 
+        # ── Draft: saved as-is, outside the approval flow ───────────────────
+        # Without this branch an `is_draft` save fell through to the normal
+        # create below and went straight into the flow — the draft code was
+        # lost from this file in June while the button and /Drafts page stayed.
+        if _to_bool(request.data.get('is_draft')):
+            return self._save_as_draft(request, _to_float, _to_bool)
+
         # ── Edit mode: order_id in payload means update existing order ──────
         order_id = request.data.get('order_id')
         user = request.user if request.user.is_authenticated else None
@@ -717,19 +724,7 @@ class CreateOrderView(APIView):
         if order_type == 'PARTY' and not data.get('card_code'):
             return Response({'error': 'card_code is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Generate order number: ORD-YYYYMMDD-XXXX
-        today = datetime.now().strftime('%Y%m%d')
-        last_order = Order.objects.filter(
-            order_number__startswith=f'ORD-{today}'
-        ).order_by('-order_number').first()
-
-        if last_order:
-            last_num = int(last_order.order_number.split('-')[-1])
-            new_num = last_num + 1
-        else:
-            new_num = 1
-
-        order_number = f'ORD-{today}-{new_num:04d}'
+        order_number = _next_order_number()
         total_amount = sum(_to_float(item.get('total', 0)) for item in items)
         user = request.user if request.user.is_authenticated else None
         order = Order.objects.create(
@@ -846,6 +841,77 @@ class CreateOrderView(APIView):
             'remarks': order.remarks or '',
             'message': f"Order sent to {next_status.name.lower()}" if next_status else 'Order created successfully',
         }, status=status.HTTP_201_CREATED)
+
+    def _save_as_draft(self, request, _to_float, _to_bool):
+        """Create or update a Draft order: incomplete data allowed, no approval
+        flow, rate approvers, notifications or template. Submitting a draft
+        later is an ordinary edit (order_id, no is_draft), which runs the flow.
+        """
+        serializer = CreateOrderSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        data = serializer.validated_data
+        items = data.pop('items', []) or []
+        user = request.user if request.user.is_authenticated else None
+
+        draft_status = OrderStatus.objects.filter(code__iexact=DRAFT_STATUS_CODE).first()
+        if draft_status is None:
+            return Response({'error': 'The Draft order status is not configured.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        order_type = _normalize_order_type(data.get('order_type'))
+        employee_id = str(data.get('employee_id') or '').strip()
+        fields = dict(
+            order_type=order_type,
+            employee_id=employee_id,
+            card_code=data.get('card_code', ''),
+            card_name=data.get('card_name', ''),
+            bill_to_id=data.get('bill_to_id') or 0,
+            bill_to_address=data.get('bill_to_address', ''),
+            ship_to_id=data.get('ship_to_id') or 0,
+            ship_to_address=data.get('ship_to_address', ''),
+            dispatch_from_id=data.get('dispatch_from_id') or 0,
+            dispatch_from_name=data.get('dispatch_from_name', ''),
+            company=data.get('company', ''),
+            po_number=data.get('po_number', ''),
+            warehouse_code=_normalize_warehouse_code(data.get('warehouse_code')),
+            is_foc=data.get('is_foc', False),
+            delivery_date=data.get('delivery_date'),
+            remarks=request.data.get('remarks', data.get('remarks', '')),
+            total_amount=sum(_to_float(item.get('total', 0)) for item in items),
+            status=draft_status,
+        )
+
+        with transaction.atomic():
+            order_id = request.data.get('order_id')
+            if order_id:
+                order = get_object_or_404(Order.objects.select_for_update(), id=int(order_id))
+                # Only the author's own draft is re-saved in place. Anything
+                # else — a live order above all — would be pulled out of its
+                # flow and parked as a draft.
+                if not _is_own_draft(order, user):
+                    return Response({'error': 'Only your own draft can be saved as a draft again.'},
+                                    status=status.HTTP_409_CONFLICT)
+                for name, value in fields.items():
+                    setattr(order, name, value)
+                order.save()
+                order.items.all().delete()
+            else:
+                order = Order.objects.create(order_number=_next_order_number(),
+                                             created_by=user, **fields)
+            for item in items:
+                _create_order_item(order, item, _to_float, _to_bool)
+            log_order_action(order, 'Draft', user=user, remarks='Saved as draft')
+
+        return Response({
+            'id': order.id,
+            'order_number': order.order_number,
+            'total_amount': str(order.total_amount),
+            'status': draft_status.name,
+            'is_draft': True,
+            'needs_approval': False,
+            'message': 'Draft saved successfully',
+        }, status=status.HTTP_200_OK)
 
     def _finalize_distributor_order(self, order, items, user, _to_float, _to_bool,
                                     is_edit=False, previous_status=None):
@@ -1036,6 +1102,45 @@ def get_status(name):
         except OrderStatus.DoesNotExist:
             return None
     return _status_cache[name]
+
+
+# Seeded by migration orders.0049_add_draft_order_status.
+DRAFT_STATUS_CODE = 'DRAFT'
+
+
+def _next_order_number():
+    """ORD-YYYYMMDD-NNNN, one more than today's highest."""
+    today = datetime.now().strftime('%Y%m%d')
+    last_order = Order.objects.filter(
+        order_number__startswith=f'ORD-{today}'
+    ).order_by('-order_number').first()
+    new_num = int(last_order.order_number.split('-')[-1]) + 1 if last_order else 1
+    return f'ORD-{today}-{new_num:04d}'
+
+
+def _is_own_draft(order, user):
+    return (
+        order.status is not None
+        and (order.status.code or '').upper() == DRAFT_STATUS_CODE
+        and user is not None
+        and order.created_by_id == user.id
+    )
+
+
+class DeleteDraftOrderView(APIView):
+    """Discard a draft. Only its author, and only while it is still a draft —
+    a submitted order is never deleted here."""
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+        if not _is_own_draft(order, request.user):
+            return Response({'error': 'Only your own draft can be deleted.'},
+                            status=status.HTTP_409_CONFLICT)
+        order_number = order.order_number
+        order.delete()
+        return Response({'message': f'Draft {order_number} deleted'}, status=status.HTTP_200_OK)
 
 class ApproveOrderView(APIView):
     # Legacy simple-flow decision (no web caller; mobile/older clients). A
