@@ -215,7 +215,22 @@ def creator_may_change(advance, flow=None):
 
 
 def _locked(advance):
-    return (RequestFlow.objects.select_for_update().select_related('request', 'current_stage')
+    # `of=` is load-bearing, not a micro-optimisation. `current_stage` is
+    # nullable, so select_related() renders it as a LEFT OUTER JOIN, and
+    # Postgres rejects a bare FOR UPDATE that covers the nullable side of one:
+    #   NotSupportedError: FOR UPDATE cannot be applied to the nullable side
+    #                      of an outer join
+    # That made every approve/reject return a 500. Naming the rows to lock
+    # emits `FOR UPDATE OF flow, request`, which leaves the outer-joined
+    # stage unlocked and satisfies Postgres.
+    #
+    # Both named rows are on the inner side: `request` is a non-nullable
+    # OneToOneField. `current_stage` does not need locking - it is read to
+    # decide the next step, never mutated here, and the flow row being locked
+    # is what serialises two approvers acting at once.
+    return (RequestFlow.objects
+            .select_for_update(of=('self', 'request'))
+            .select_related('request', 'current_stage')
             .get(request=advance))
 
 
@@ -458,13 +473,27 @@ def return_to_creator(advance, *, user, remarks, version=None):
     return advance
 
 
+#: Stages that may hand a request back to Payment for correction. Audit is
+#: here as well as Final because Audit is the first desk that reads the
+#: payment details against the evidence: making it approve something it can
+#: see is wrong, purely so Final can be the one to send it back, adds a
+#: pointless round trip and an approval nobody meant.
+SEND_BACK_ROLES = (StageRole.FINAL, StageRole.AUDIT)
+
+
 @transaction.atomic
 def send_back(advance, *, user, remarks, version=None):
-    """Final: back to Payment, which rejects or corrects it (then Audit and Final again)."""
+    """Audit or Final: back to Payment, which rejects or corrects it.
+
+    The request then climbs the same stages again (Payment -> Audit -> Final),
+    with `cycle` incremented so the creator's edit rule and the "approved in
+    this round?" checks treat it as a fresh round.
+    """
     _remarks_required(remarks, 'sending it back')
     flow = _acting(advance, user, version)
-    if StageRole(flow.current_role) != StageRole.FINAL:
-        raise FlowError('Only the Final stage may send a request back to Payment.', status=409)
+    if StageRole(flow.current_role) not in SEND_BACK_ROLES:
+        raise FlowError('Only the Audit or Final stage may send a request back '
+                        'to Payment.', status=409)
     payment = next(((s, r) for s, r in _stages(flow) if r == StageRole.PAYMENT), None)
     advance = flow.request
     log(advance, LogAction.SENT_BACK, user=user, flow=flow, remarks=remarks,
@@ -651,7 +680,7 @@ def abilities(advance, user):
         'approve': actor,
         'reject': actor,
         'return_to_creator': actor and role in RETURN_TO_CREATOR_ROLES,
-        'send_back': actor and role == StageRole.FINAL,
+        'send_back': actor and role in SEND_BACK_ROLES,
         'edit_payout': actor and role == StageRole.PAYMENT,
         'record_utr': bool(utr),
     }
