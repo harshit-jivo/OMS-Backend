@@ -1,20 +1,13 @@
 """App configuration for Advance Payment.
 
-NO MODELS, AND THAT IS DELIBERATE — FOR NOW.
+The lists an advance is raised against (open purchase orders, open invoices,
+vendors, customers, the employee-advance GL accounts) are read from SAP live
+and are NOT copied into Postgres: SAP already answers them, and a copy would
+be a second, staler answer.
 
-Every endpoint in this app reads SAP live: open purchase orders, open
-invoices, vendors, customers and the employee-advance GL accounts all exist in
-the company databases and nowhere else. Copying them into Postgres would give
-OMS a second, staler answer to a question SAP already answers, and the module
-this one sits next to (`production`) exists because exactly that went wrong —
-a sync reported success for 33 days while writing nothing.
-
-The app will grow a model when it has something of its OWN to store: the
-advance request, who asked, who approved, what SAP document it produced.
-Those are OMS facts. The lists it picks from are not.
-
-There is therefore no migration, and nothing to register with the Workflow
-Engine yet.
+What the app stores is its own: `Employee` (models.py), the employee master
+with each person's role (HOD / Sub-HOD / Executive), first loaded from JSAP by
+migration 0002. The advance request itself will be the next model.
 """
 from django.apps import AppConfig
 
