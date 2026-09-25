@@ -296,6 +296,23 @@ HANA_USERNAME = config('HANA_USERNAME')
 HANA_PASSWORD = config('HANA_PASSWORD')
 CRYSTAL_URL = config('CRYSTAL_URL')
 
+# SAP attachment file service (FastAPI on .118): GET {URL}/{filename}?company=N
+# returns the file from the company's SAP attachments share, zipped. N is the
+# service's own company number, not ours, so it is mapped here per company.
+SAP_ATTACHMENT_FILES_URL = config('SAP_ATTACHMENT_FILES_URL', default='').rstrip('/')
+SAP_ATTACHMENT_COMPANY_IDS = {
+    'OIL': config('SAP_ATTACHMENT_COMPANY_OIL', default=''),
+    'BEVERAGES': config('SAP_ATTACHMENT_COMPANY_BEVERAGES', default=''),
+    'MART': config('SAP_ATTACHMENT_COMPANY_MART', default=''),
+}
+SAP_ATTACHMENT_TIMEOUT = config('SAP_ATTACHMENT_TIMEOUT', default=30, cast=int)
+
+# OCR service (ocr-service/ on the OMS server, 127.0.0.1:8014): reads photos
+# and scanned pages of payment proofs. Unset here = PDFs with text, Excel and
+# CSV still read; a photo or scan is refused with a clear message.
+OCR_SERVICE_URL = config('OCR_SERVICE_URL', default='').rstrip('/')
+OCR_SERVICE_TIMEOUT = config('OCR_SERVICE_TIMEOUT', default=180, cast=int)
+
 # Dedicated Service Layer user for Sales Order creation (falls back to the
 # default Service Layer user when not configured).
 SALES_ORDER_USER = config('SALES_ORDER_USER', default=HANA_USERNAME)

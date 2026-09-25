@@ -227,3 +227,39 @@ class SalesOrderLog(models.Model):
 
     def __str__(self):
         return f"{self.order_id} - {self.status}"
+
+
+class SalesCancelledLog(models.Model):
+    """Audit trail of SO cancellations — one row per cancel attempt.
+
+    Mirrors SalesOrderLog (the create-side log) but records the reversal:
+    cancelling a completed distributor order's SAP Sales Order via
+    POST /Orders(DocEntry)/Cancel. `cancellation_reason` is the reason the
+    approver gave; `status` moves STARTED -> SUCCESS/FAILED like the create log.
+    """
+    STATUS_CHOICES = [
+        ('STARTED', 'Started'),
+        ('SUCCESS', 'Success'),
+        ('FAILED', 'Failed'),
+    ]
+
+    order_id = models.CharField(max_length=100, blank=True, null=True)
+    sap_doc_entry = models.IntegerField(blank=True, null=True)
+    sap_doc_num = models.IntegerField(blank=True, null=True)
+
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='STARTED')
+    cancellation_reason = models.TextField(blank=True, null=True)
+
+    request_data = models.JSONField(blank=True, null=True)
+    response_data = models.JSONField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'sales_cancellation_logs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.order_id} - {self.status}"

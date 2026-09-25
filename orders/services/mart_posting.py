@@ -38,12 +38,16 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
-from orders.models import Order, log_order_action
+from orders.models import Order, OrderStatus, log_order_action
 from orders.views._shared import _mart_status, logger
 
 
 MART_STATUS_APPROVED_ID = 6
 MART_STATUS_COMPLETED_ID = 9   # set after a successful SAP/HANA push (Phase 2)
+# The SO-cancelled status is a row managed directly in the order_statuses table
+# (code 'SO_CANCELLED', name 'SO CANCELLED'), not seeded by a migration. Look it
+# up by its stable code rather than a hardcoded id.
+MART_STATUS_CANCELLED_CODE = 'SO_CANCELLED'
 
 
 def _sap_outcome_is_ambiguous(exc):
@@ -265,4 +269,123 @@ def resend_sales_order_to_sap(order_id, user):
             'doc_entry': sap_result.get('DocEntry') if isinstance(sap_result, dict) else None,
             'doc_num': sap_result.get('DocNum') if isinstance(sap_result, dict) else None,
         },
+    })
+
+
+def _latest_successful_sales_order_doc_entry(order):
+    """The SAP DocEntry of the sales order this OMS order booked into SAP.
+
+    A distributor order posts as a Sales Order (SalesOrderLog, keyed by
+    str(order.id)); the newest SUCCESS row carries the DocEntry we cancel
+    against. Returns None when there is no successful post on record — which is
+    exactly when a cancel must be refused, since there is nothing in SAP to
+    reverse.
+    """
+    from sap_sync.models import SalesOrderLog
+
+    return (
+        SalesOrderLog.objects
+        .filter(order_id=str(order.id), status='SUCCESS', sap_doc_entry__isnull=False)
+        .order_by('-created_at')
+        .values_list('sap_doc_entry', flat=True)
+        .first()
+    )
+
+
+def cancel_mart_order(order_id, user, reason):
+    """Cancel a completed distributor order and reverse its SAP Sales Order.
+
+    Only an order that reached 'Completed' (id 9) — approved AND successfully
+    booked into SAP — can be cancelled here. SAP is the system of record, so the
+    order in SAP is cancelled FIRST; only if that succeeds does OMS move to
+    'Cancelled' and stamp who/when/why. If SAP refuses (e.g. the sales order has
+    already been copied to a delivery/invoice), nothing changes in OMS and the
+    SAP message is surfaced.
+
+    The Completed-status check is taken under a row lock and re-checked after the
+    SAP call, so a double submission cannot cancel twice or race the status
+    write. `user` is passed through as `request.user`, mirroring
+    `approve_and_post_to_sap`.
+    """
+    reason = (reason or '').strip()
+    if not reason:
+        return Response({'error': 'Cancellation reason is required'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    cancelled = OrderStatus.objects.filter(code=MART_STATUS_CANCELLED_CODE).first()
+    if not cancelled:
+        return Response(
+            {'error': f"Cancelled status (code {MART_STATUS_CANCELLED_CODE!r}) is not "
+                      f"configured in the order_statuses table."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Validate the order is cancellable under a row lock, so two requests can't
+    # both pass the Completed check.
+    with transaction.atomic():
+        try:
+            order = (Order.objects
+                     .select_for_update()
+                     .get(id=order_id, order_type='DISTRIBUTOR'))
+        except Order.DoesNotExist:
+            raise Http404('Order not found')
+
+        if order.status_id != MART_STATUS_COMPLETED_ID:
+            return Response(
+                {'error': f'Order {order.order_number} is not a completed SAP order, '
+                          f'so it cannot be cancelled here.',
+                 'order_number': order.order_number,
+                 'status': order.status.name if order.status else ''},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        doc_entry = _latest_successful_sales_order_doc_entry(order)
+        if not doc_entry:
+            return Response(
+                {'error': f'No SAP sales order is recorded for {order.order_number}, '
+                          f'so there is nothing to cancel in SAP.',
+                 'order_number': order.order_number},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    # Cancel in SAP OUTSIDE the lock — the Service Layer round-trip is exactly
+    # the thing that hangs, and holding the row lock across it would block every
+    # other reader of this order.
+    from sap_sync.services.sync_service import SyncService
+
+    try:
+        service = SyncService(triggered_by=getattr(user, 'username', None))
+        service.cancel_sales_order(order, doc_entry, reason=reason)
+    except Exception as exc:
+        logger.exception("SAP sales order cancel failed for order %s", order.order_number)
+        # Lead with the actual SAP reason so the user sees WHY it was not
+        # cancelled (e.g. it already has a delivery/invoice). Nothing changed in
+        # OMS. The same reason is stored on the SalesCancelledLog row.
+        return Response(
+            {'message': f'Order {order.order_number} was not cancelled: {exc}',
+             'order_number': order.order_number,
+             'status': order.status.name if order.status else '',
+             'sap_error': str(exc)},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    # SAP cancelled → move OMS to Cancelled, re-checking the status under a fresh
+    # lock so a concurrent request that already did this cannot double-write.
+    # The who/when/why is NOT stored on the order (no cancel columns): the reason
+    # is on the SalesCancelledLog row written by cancel_sales_order, and the actor
+    # is recorded in OrdersLog by log_order_action below.
+    with transaction.atomic():
+        fresh = Order.objects.select_for_update().get(pk=order.pk)
+        if fresh.status_id == MART_STATUS_COMPLETED_ID:
+            fresh.status = cancelled
+            fresh.save(update_fields=['status', 'updated_at'])
+            log_order_action(fresh, cancelled.name, user=user,
+                             remarks=f'Cancelled: {reason}')
+        order = fresh
+
+    return Response({
+        'message': f'Order {order.order_number} cancelled in SAP and OMS',
+        'order_number': order.order_number,
+        'status': order.status.name if order.status else '',
+        'sap': {'doc_entry': doc_entry},
     })
