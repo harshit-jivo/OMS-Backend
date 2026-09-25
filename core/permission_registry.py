@@ -168,6 +168,9 @@ REGISTRY: dict[str, dict[str, str]] = {
         # REQUEST lands it gets a second key and stage-based scoping, exactly
         # as PRDO has.
         'Advance_Payment':           'Advance Payment — view SAP lookups',
+        # The approval desk. NOT sufficient to act: only the current stage's
+        # user (after replacements) may decide a request, as in PRDO.
+        'Advance_Payment_Approval':  'Advance Payment — approval desk',
     },
 
     # --- Payments actions (legacy keys, verbatim from
