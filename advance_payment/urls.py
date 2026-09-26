@@ -20,6 +20,7 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /partner-bank-accounts/ ?company=&card_code=           (payee's banks)
   GET /house-banks/           ?company=                     (our banks, all)
   GET /cash-accounts/         ?company=                     (our cash G/Ls)
+  GET /budgets/               ?company=                     (Payment Purpose: Budget, Sub Budget)
 
 `/open-invoices/` lists unpaid invoices across a company, for picking one.
 `/open-documents/` is ONE partner's whole open ledger — invoices, credit
@@ -76,6 +77,8 @@ urlpatterns = [
          name='advance-payment-house-banks'),
     path('cash-accounts/', views.CashAccountsView.as_view(),
          name='advance-payment-cash-accounts'),
+    path('budgets/', views.BudgetsView.as_view(),
+         name='advance-payment-budgets'),
 
     path('requests/', views.RequestListView.as_view(),
          name='advance-payment-requests'),

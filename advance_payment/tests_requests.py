@@ -75,8 +75,17 @@ class TheRoute(SimpleTestCase):
 FINANCE = SimpleNamespace(pk=35, id=35, name='Finance')
 
 
+#: The company's Budget and Sub Budget cost centres, as SAP lists them.
+BUDGETS = [
+    {'kind': 'BUDGET', 'code': 'BackOff', 'name': 'Back Office'},
+    {'kind': 'BUDGET', 'code': 'Factory', 'name': 'Factory'},
+    {'kind': 'SUB_BUDGET', 'code': 'Accounts', 'name': 'Accounts'},
+    {'kind': 'SUB_BUDGET', 'code': 'IT', 'name': 'IT'},
+]
+
+
 def _clean(data, *, subs=(92, 88), sub_found=True):
-    """`requests.clean` with the department tables stood in for."""
+    """`requests.clean` with the department tables and SAP's budgets stood in for."""
     department_qs = mock.Mock()
     department_qs.first.return_value = FINANCE
 
@@ -85,7 +94,8 @@ def _clean(data, *, subs=(92, 88), sub_found=True):
     sub_qs.filter.return_value.first.return_value = (
         SimpleNamespace(pk=92, id=92, name='AP') if sub_found else None)
     with mock.patch.object(request_service.Department.objects, 'filter', return_value=department_qs), \
-            mock.patch.object(request_service.SubDepartment.objects, 'filter', return_value=sub_qs):
+            mock.patch.object(request_service.SubDepartment.objects, 'filter', return_value=sub_qs), \
+            mock.patch('advance_payment.services.sap.budgets', return_value=BUDGETS):
         return request_service.clean(data)
 
 
@@ -95,6 +105,7 @@ def vendor_bill_request(**overrides):
         'partner_code': 'VENDA001465', 'partner_name': 'GODAMWALE TRADING',
         'department_id': 35, 'sub_department_id': 92, 'payment_date': '2026-10-01',
         'priority': 'HIGH', 'remarks': 'Part settlement', 'owner_label': 'Finance desk',
+        'budget_code': 'BackOff', 'sub_budget_code': 'Accounts',
         'documents': [
             {'kind': 'BILL', 'sap_doc_entry': 501, 'sap_doc_num': '126226523', 'original_amount': '300000',
              'paid_amount': '0', 'open_amount': '288746', 'mode': 'FIXED', 'amount': '200000'},
@@ -152,6 +163,25 @@ class WhatTheServerAccepts(SimpleTestCase):
         with self.assertRaisesRegex(request_service.RequestInvalid, 'Sub-department of Finance'):
             _clean(vendor_bill_request(sub_department_id=None))
 
+    def test_keeps_the_payment_purpose_with_sap_names(self):
+        cleaned = _clean(vendor_bill_request())
+        self.assertEqual(
+            {k: cleaned.fields[k] for k in ('budget_code', 'budget_name', 'sub_budget_code', 'sub_budget_name')},
+            {'budget_code': 'BackOff', 'budget_name': 'Back Office',
+             'sub_budget_code': 'Accounts', 'sub_budget_name': 'Accounts'})
+
+    def test_the_payment_purpose_is_required(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, r'Payment Purpose \(Sub Budget\)'):
+            _clean(vendor_bill_request(sub_budget_code=''))
+
+    def test_refuses_a_budget_sap_does_not_have(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Budget "Nowhere" is not an active budget'):
+            _clean(vendor_bill_request(budget_code='Nowhere'))
+
+    def test_a_sub_budget_is_not_a_budget(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Budget "IT" is not an active budget'):
+            _clean(vendor_bill_request(budget_code='IT'))
+
     def test_the_owner_is_found_by_the_code_in_their_label(self):
         preshit = SimpleNamespace(pk=12, employee_code='JWPL0030')
         with mock.patch.object(request_service.Employee.objects, 'alive') as alive:
@@ -172,6 +202,7 @@ class WhatTheServerAccepts(SimpleTestCase):
             'return_method': 'EMI', 'installments': 6, 'emi_amount': '10000',
             'expected_from_date': '2026-11-01', 'expected_to_date': '2027-04-01',
             'owner_label': 'HR', 'remarks': 'Relocation advance',
+            'budget_code': 'BackOff', 'sub_budget_code': 'IT',
         })
         self.assertTrue(cleaned.fields['partner_not_in_sap'])
         self.assertEqual(cleaned.fields['installments'], 6)
