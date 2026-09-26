@@ -117,6 +117,8 @@ def _remarks(advance):
     if docs:
         noun = 'Bill' if docs[0].kind == DocumentKind.BILL else 'PO'
         parts.append(f'{noun} ' + ', '.join(d.sap_doc_num or str(d.sap_doc_entry) for d in docs))
+    if getattr(advance, 'budget_code', ''):
+        parts.append(f'Budget {advance.budget_code}/{advance.sub_budget_code}')
     if advance.remarks:
         parts.append(advance.remarks)
     return ' | '.join(p for p in parts if p)[:REMARKS_MAX]

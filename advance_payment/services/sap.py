@@ -1350,3 +1350,36 @@ def employee_advance_account(company, employee_code):
         if (row['employee_code'] or '').upper() == code:
             return {'acct_code': row['acct_code'], 'acct_name': row['acct_name']}
     return None
+
+
+# ---------------------------------------------------------------------------
+# Payment purpose: the Budget and Sub Budget cost centres
+# ---------------------------------------------------------------------------
+
+#: SAP's cost-centre dimensions a payment's purpose is chosen from. The same
+#: in all three companies (ODIM, Sep 2026): 3 "Budget", 4 "Sub Budget".
+BUDGET_DIMENSION = int(getattr(settings, 'ADVANCE_PAYMENT_BUDGET_DIMENSION', 3))
+SUB_BUDGET_DIMENSION = int(getattr(settings, 'ADVANCE_PAYMENT_SUB_BUDGET_DIMENSION', 4))
+
+_COST_CENTRES_SQL = '''
+    SELECT "PrcCode" AS "code", "PrcName" AS "name", "DimCode" AS "dimension"
+    FROM "{schema}"."OPRC"
+    WHERE "Active" = 'Y' AND "DimCode" IN (?, ?)
+    ORDER BY "DimCode", "PrcName", "PrcCode"
+'''
+
+
+def budgets(company):
+    """The company's active Budget and Sub Budget cost centres.
+
+    `[{kind: BUDGET | SUB_BUDGET, code, name}]`. A cost centre with no name
+    ("R & D" in Oil) is shown by its code.
+    """
+    rows = _run(company, _COST_CENTRES_SQL.format(schema=_schema(company)),
+                [BUDGET_DIMENSION, SUB_BUDGET_DIMENSION], 'budget cost centres')
+    return [{
+        'kind': 'BUDGET' if int(r['dimension']) == BUDGET_DIMENSION else 'SUB_BUDGET',
+        'code': _s(r.get('code')),
+        'name': _s(r.get('name')) or _s(r.get('code')),
+    } for r in rows]
+

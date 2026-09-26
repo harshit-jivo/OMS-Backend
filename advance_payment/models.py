@@ -298,10 +298,11 @@ class AdvanceRequest(models.Model):
     #: OPRC codes of dimension 3 (Budget) and 4 (Sub Budget), with their
     #: names as they were when raised.
     #:
-    #: Blank on this branch. `origin/production` also asks for them on the form
-    #: and REQUIRES them (`_clean_purpose`); that half is deliberately not here,
-    #: because neither the web form nor the app on this branch sends them yet —
-    #: see the note in `services/requests.py`.
+    #: Populated when a client sends them; blank otherwise. `_clean_purpose`
+    #: validates them against SAP and is present on this branch, but it is NOT
+    #: enforced here — neither the web form nor the app sends the two fields
+    #: yet, so requiring them would refuse every request. See the note at the
+    #: call site in `services/requests.py` for the one-line switch.
     budget_code = models.CharField(max_length=20, blank=True, default='')
     budget_name = models.CharField(max_length=100, blank=True, default='')
     sub_budget_code = models.CharField(max_length=20, blank=True, default='')
