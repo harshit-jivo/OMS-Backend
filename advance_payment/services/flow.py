@@ -606,14 +606,19 @@ def save_payout(advance, data, *, user, version=None):
         raise FlowError('Confirm your password to enter the bank account by hand.', status=403,
                         problems=['manual_password'])
     data['to_account_manual'] = manual if account else bool(data.get('to_account_manual'))
+    before = payout_service.snapshot(advance)
     try:
         _payout, changed = payout_service.save(advance, data, user=user)
     except payout_service.PayoutInvalid as exc:
         raise FlowError(str(exc), problems=exc.problems) from exc
     if changed:
-        log(advance, LogAction.PAYOUT_UPDATED, user=user, flow=flow,
-            data={'manual_account': manual, 'account_last4': account[-4:] if account else ''}
-            if manual and not unchanged else None)
+        # What changed, Was -> Now (the account masked to its last four), and
+        # whether the payee account is one typed by hand rather than SAP's —
+        # `manual_new` when that typed account is new with this save.
+        data = payout_service.changes(before, payout_service.snapshot(advance))
+        data.update({'manual_account': manual, 'manual_new': manual and not unchanged,
+                     'account_last4': account[-4:] if account else ''})
+        log(advance, LogAction.PAYOUT_UPDATED, user=user, flow=flow, data=data)
     _save(flow)
     return advance
 
@@ -661,6 +666,32 @@ def may_add_file(flow, user, purpose):
 # Reading
 # ---------------------------------------------------------------------------
 
+#: The stages that see the payee's account: whom it is paid to, from where,
+#: the proofs, and the payee's SAP balance and ledger.
+ACCOUNT_ROLES = (StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL)
+
+
+def sees_account(advance, user):
+    """Whether `user` may see the account details: Payment and later only.
+
+    Today's user of the route's Payment, Audit or Final stage, or an
+    administrator. Not the creator, and not the approvals before Payment —
+    they decide the request, not where the money goes.
+    """
+    from core.permissions import is_admin
+
+    flow = getattr(advance, 'flow', None)
+    if flow is None or not getattr(user, 'is_authenticated', False):
+        return False
+    if is_admin(user):
+        return True
+    try:
+        return any(role in ACCOUNT_ROLES and effective_user_id(stage.id) == user.pk
+                   for stage, role in _stages(flow))
+    except FlowError:
+        return False
+
+
 def abilities(advance, user):
     """What `user` may do to it now: the buttons the pages show."""
     flow = getattr(advance, 'flow', None)
@@ -683,20 +714,57 @@ def abilities(advance, user):
         'send_back': actor and role in SEND_BACK_ROLES,
         'edit_payout': actor and role == StageRole.PAYMENT,
         'record_utr': bool(utr),
+        'see_account': sees_account(advance, user),
     }
 
 
-def desk_request_ids(user):
-    """What the approval desk LISTS for `user`: only what is theirs to act on.
+#: What an approver DOES to a request, as their desk counts it. Everything else
+#: in the log (saving payment details, recording a UTR, posting to SAP) is
+#: work on a request, not a decision about it.
+DECISION_ACTIONS = (LogAction.APPROVED, LogAction.REJECTED, LogAction.RETURNED, LogAction.SENT_BACK)
 
-    * waiting at a stage that is theirs today (replacements applied);
-    * completed, on a route where they hold Payment or Final: the UTR is
-      theirs to record after paying.
 
-    Not every request on their workflows, and not the ones they have passed
-    on: once approved, a request leaves their list (it stays readable, see
-    `readable_request_ids`).
+def decided_ids(user):
+    """Requests `user` approved, rejected, returned or sent back — ever."""
+    return set(RequestLog.objects.filter(actor=user, action__in=DECISION_ACTIONS)
+               .values_list('request_id', flat=True))
+
+
+def my_decisions(user, request_ids=None):
+    """`{request_id: that user's LATEST decision log}` — what the desk shows per row.
+
+    Latest, because a request can come round again: approved in round 1,
+    returned, resubmitted, and now waiting at the same stage. The desk puts
+    that one under Pending (it is awaiting them); this is only its history.
     """
+    qs = RequestLog.objects.filter(actor=user, action__in=DECISION_ACTIONS)
+    if request_ids is not None:
+        qs = qs.filter(request_id__in=list(request_ids))
+    latest = {}
+    for row in qs.order_by('request_id', '-created_on', '-id'):
+        latest.setdefault(row.request_id, row)
+    return latest
+
+
+def desk_request_ids(user):
+    """What the approval desk LISTS for `user`: their queue and their own decisions.
+
+    * waiting at a stage that is theirs today (replacements applied) — the
+      only thing they can act on;
+    * every request they approved, rejected, returned or sent back — so the
+      desk can count and list their own decisions.
+
+    Not every request on their workflows, and deliberately no longer "every
+    completed request on a route where they hold Payment or Final": that put
+    other people's settled requests in front of an approver whose only job
+    is their own stage. Those stay OPENABLE (see `readable_request_ids`), so
+    the UTR can still be recorded from a direct link.
+    """
+    return awaiting_ids(user) | decided_ids(user)
+
+
+def _payer_completed_ids(user):
+    """Completed requests on a route where `user` holds Payment or Final today."""
     from workflow.models import WorkflowStage
     from workflow.services import replacements
 
@@ -704,15 +772,18 @@ def desk_request_ids(user):
     payers = WorkflowStage.objects.filter(
         user_id__in=owners, is_active=True, workflow__module__code=MODULE_CODE,
         name__iregex=r'^\s*(payment|final)\s+approval\s*$').values_list('workflow_id', flat=True)
-    ids = awaiting_ids(user)
-    ids |= set(RequestFlow.objects.filter(status=FlowStatus.COMPLETED, workflow_id__in=list(payers))
+    return set(RequestFlow.objects.filter(status=FlowStatus.COMPLETED, workflow_id__in=list(payers))
                .values_list('request_id', flat=True))
-    return ids
 
 
 def readable_request_ids(user):
-    """What `user` may OPEN from the desk: their list, and what they have acted on."""
-    ids = desk_request_ids(user)
+    """What `user` may OPEN from the desk — wider than what it lists.
+
+    Their list, anything they have touched at all, and completed requests on
+    a route where they pay (the UTR is theirs to record after paying, even
+    when a stand-in approved it).
+    """
+    ids = desk_request_ids(user) | _payer_completed_ids(user)
     ids |= set(RequestLog.objects.filter(actor=user).values_list('request_id', flat=True))
     return ids
 

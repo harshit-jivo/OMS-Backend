@@ -430,33 +430,72 @@ def create(cleaned, *, user, files=()):
     raise RequestInvalid(['Could not number the request; try again.'])
 
 
-#: What an edit is compared on, for the EDITED log row.
-_COMPARED = (
-    'company', 'request_type', 'payment_against', 'payment_against_other', 'department_id',
-    'sub_department_id', 'partner_code', 'partner_name', 'amount', 'expected_date',
-    'expected_bill_date', 'return_method', 'return_method_other', 'installments', 'emi_amount',
-    'expected_from_date', 'expected_to_date', 'payment_date', 'priority', 'remarks',
-    'owner_employee_id', 'owner_label', 'budget_code', 'sub_budget_code',
-)
+#: What an edit is compared on, for the EDITED log row — as the request page
+#: reads each value, so the history says "Finance", not department 4.
+#: `{key: how to read it}`; the keys are what the page labels.
+_COMPARED = {
+    'company': lambda a: a.company,
+    'request_type': lambda a: a.request_type,
+    'payment_against': lambda a: a.payment_against,
+    'payment_against_other': lambda a: a.payment_against_other,
+    'department': lambda a: a.department.name if a.department_id else None,
+    'sub_department': lambda a: a.sub_department.name if a.sub_department_id else None,
+    'partner': lambda a: ' — '.join(v for v in (a.partner_code, a.partner_name) if v) or None,
+    'amount': lambda a: a.amount,
+    'expected_date': lambda a: a.expected_date,
+    'expected_bill_date': lambda a: a.expected_bill_date,
+    'return_method': lambda a: a.return_method,
+    'return_method_other': lambda a: a.return_method_other,
+    'installments': lambda a: a.installments,
+    'emi_amount': lambda a: a.emi_amount,
+    'expected_from_date': lambda a: a.expected_from_date,
+    'expected_to_date': lambda a: a.expected_to_date,
+    'payment_date': lambda a: a.payment_date,
+    'priority': lambda a: a.priority,
+    'remarks': lambda a: a.remarks,
+    'owner': lambda a: a.owner_label,
+    'budget': lambda a: ' — '.join(v for v in (a.budget_code, a.budget_name) if v) or None,
+    'sub_budget': lambda a: ' — '.join(v for v in (a.sub_budget_code, a.sub_budget_name) if v) or None,
+}
+
+
+def _shown(value):
+    """A value as the EDITED row stores it: text, or None when empty."""
+    if value is None or value == '':
+        return None
+    if isinstance(value, Decimal):
+        return f'{value:.2f}'  # 1000 and 1000.00 are the same amount
+    return value.isoformat() if hasattr(value, 'isoformat') else str(value)
 
 
 def _snapshot(advance):
-    out = {}
-    for name in _COMPARED:
-        value = getattr(advance, name)
-        out[name] = None if value is None else str(value)
-    out['documents'] = sorted(
-        f'{d.kind}:{d.sap_doc_entry}:{d.amount}' for d in advance.documents.all())
-    return out
+    return {name: _shown(read(advance)) for name, read in _COMPARED.items()}
+
+
+def _documents(advance):
+    """`{"A/P invoice 10256": "40000.00", ...}` — each document and its amount."""
+    return {f'{d.get_kind_display()} {d.sap_doc_num or d.sap_doc_entry}': _shown(d.amount)
+            for d in advance.documents.all()}
+
+
+def _document_changes(before, after):
+    added = [{'doc': k, 'amount': after[k]} for k in after if k not in before]
+    removed = [{'doc': k, 'amount': before[k]} for k in before if k not in after]
+    changed = [{'doc': k, 'old': before[k], 'new': after[k]}
+               for k in after if k in before and before[k] != after[k]]
+    out = {'added': added, 'removed': removed, 'changed': changed}
+    return {k: v for k, v in out.items() if v}
 
 
 def update(advance, cleaned, *, user, files=(), remove_file_ids=()):
     """Overwrite the request with the edited form. Returns what changed.
 
-    `{field: {"old": .., "new": ..}}`, for the EDITED log row.
+    `{field: {"old": .., "new": ..}}` for the fields, plus `documents`
+    (added / removed / changed amounts) and `files_added` / `files_removed` —
+    the EDITED log row, which the request page shows as Was → Now.
     """
     check_files(files)
-    before = _snapshot(advance)
+    before, docs_before = _snapshot(advance), _documents(advance)
     for name, value in cleaned.fields.items():
         setattr(advance, name, value)
     advance.save()
@@ -467,8 +506,12 @@ def update(advance, cleaned, *, user, files=(), remove_file_ids=()):
         row.file.delete(save=False)
         row.delete()
     added = add_files(advance, files, user=user)
+    advance.refresh_from_db()  # the department / sub-department names, as saved
     after = _snapshot(advance)
     changes = {k: {'old': before[k], 'new': after[k]} for k in after if before[k] != after[k]}
+    documents = _document_changes(docs_before, _documents(advance))
+    if documents:
+        changes['documents'] = documents
     if removed:
         changes['files_removed'] = removed
     if added:

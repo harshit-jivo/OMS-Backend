@@ -843,7 +843,11 @@ class RequestListView(_RequestView):
                 return fail('You do not have the Payments permission.',
                             status=http_status.HTTP_403_FORBIDDEN)
             qs = qs.filter(created_by=request.user)
-        rows = [request_data(r, user=request.user) for r in qs.order_by('-created_on')[:LIST_LIMIT]]
+        # The desk labels each row with the viewer's own decision; one query for
+        # the page. The requester's list has no use for it, so it skips the work.
+        decisions = flow_service.my_decisions(request.user) if scope == 'desk' else {}
+        rows = [request_data(r, user=request.user, my_decision=decisions.get(r.pk))
+                for r in qs.order_by('-created_on')[:LIST_LIMIT]]
         return ok({'count': len(rows), 'results': rows})
 
     def post(self, request):
@@ -1011,7 +1015,9 @@ class RequestFileView(_RequestView):
     def get(self, request, pk, file_id):
         advance = self._get(request, pk)
         row = advance.files.filter(pk=file_id).first()
-        if row is None:
+        # A bank or payment proof is account detail: Payment and later only.
+        if row is None or (row.purpose != FilePurpose.SUPPORTING
+                           and not flow_service.sees_account(advance, request.user)):
             raise Http404
         response = FileResponse(row.file.open('rb'), as_attachment=False, filename=row.name)
         return response
