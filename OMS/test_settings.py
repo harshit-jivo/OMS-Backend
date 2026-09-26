@@ -76,7 +76,7 @@ def _flatten_schema_qualified_tables(sender, **kwargs):
 
 
 # --- Postgres-only constraints dropped for SQLite -------------------------
-# `workflow.StageReplacement` guards overlapping cover periods with an
+# `workflow.WorkflowUserReplacement` guards overlapping cover periods with an
 # ExclusionConstraint — `EXCLUDE USING gist (old_user WITH =, daterange(...)
 # WITH &&)`. It is the right tool on Postgres and has no SQLite equivalent, so
 # the schema editor emits `EXCLUDE` verbatim and SQLite answers
