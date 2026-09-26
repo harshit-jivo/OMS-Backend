@@ -152,6 +152,60 @@ def fingerprint(advance):
     )
 
 
+def mask_account(number):
+    """An account number as history shows it: only the last four digits."""
+    number = str(number or '').strip()
+    if not number:
+        return None
+    return ('X' * max(len(number) - 4, 0)) + number[-4:]
+
+
+def _inr(amount):
+    """1234567.5 -> "₹12,34,567.50", Indian grouping."""
+    whole, _, frac = f'{Decimal(amount):.2f}'.partition('.')
+    head, tail = whole[:-3], whole[-3:]
+    groups = []
+    while len(head) > 2:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        groups.insert(0, head)
+    return '₹' + ','.join(groups + [tail]) + '.' + frac
+
+
+def _line_text(line):
+    parts = [line.method, _inr(line.amount)]
+    source = line.from_account_label or line.from_account
+    if source:
+        parts.append(f'from {source}')
+    if line.cheque_number:
+        parts.append(f'cheque {line.cheque_number}' + (f' ({line.cheque_bank})' if line.cheque_bank else ''))
+    return ' · '.join(parts)
+
+
+def snapshot(advance):
+    """The payment details as the history reads them — see `changes`."""
+    payout = Payout.objects.filter(request=advance).first()
+    if payout is None:
+        return {}
+    out = {
+        'beneficiary_name': payout.beneficiary_name or None,
+        'to_account': mask_account(payout.to_account_number),
+        'to_ifsc': payout.to_ifsc or None,
+        'account_source': ('Typed by hand' if payout.to_account_manual else 'From SAP')
+        if payout.to_account_number else None,
+    }
+    for index, line in enumerate(payout.lines.order_by('pk'), start=1):
+        out[f'payment_method_{index}'] = _line_text(line)
+    return out
+
+
+def changes(before, after):
+    """`{field: {"old": .., "new": ..}}` for what differs — the EDITED shape."""
+    return {k: {'old': before.get(k), 'new': after.get(k)}
+            for k in dict.fromkeys([*before, *after]) if before.get(k) != after.get(k)}
+
+
 def problems(advance):
     """Everything that stops the Payment stage approving. Empty when ready."""
     payout = Payout.objects.filter(request=advance).first()

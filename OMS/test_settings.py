@@ -73,6 +73,27 @@ def _flatten_schema_qualified_tables(sender, **kwargs):
     table = sender._meta.db_table
     if '"."' in table:
         sender._meta.db_table = table.replace('"."', '_')
+
+
+# --- Postgres-only constraints dropped for SQLite ---------------------------
+# `workflow.WorkflowUserReplacement` declares an ExclusionConstraint (no two
+# replacements for one user over overlapping dates), which is `EXCLUDE USING
+# gist (...)` — Postgres syntax. SQLite rejects it, and because Django builds
+# the WHOLE schema up front, that one table failed every DB-backed test in the
+# project, `workflow`'s own included, from the day the app landed.
+#
+# Only the constraint goes, and only here: this file is loaded by the test
+# runner alone, so Postgres keeps enforcing it. What is lost in tests is the
+# database refusing an overlap; the service code that checks it first is
+# unaffected.
+@_receiver(class_prepared)
+def _drop_postgres_only_constraints(sender, **kwargs):
+    from django.contrib.postgres.constraints import ExclusionConstraint
+
+    constraints = sender._meta.constraints
+    kept = [c for c in constraints if not isinstance(c, ExclusionConstraint)]
+    if len(kept) != len(constraints):
+        sender._meta.constraints = kept
 MIGRATION_MODULES = _SkipMigrations()
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 

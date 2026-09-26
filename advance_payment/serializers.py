@@ -182,11 +182,36 @@ def log_data(row):
     }
 
 
-def request_data(advance, *, user, detail=False):
-    """One request, as both pages read it. `detail` adds history and the route."""
+#: Log rows whose `data` is account detail: kept in the history, emptied for
+#: anyone before Payment (they still see THAT it happened, not the account).
+_ACCOUNT_LOGS = {'PAYOUT_UPDATED', 'UTR_RECORDED', 'PARTNER_LINKED'}
+
+
+def _hide_account(row, see_account):
+    if not see_account and row['action'] in _ACCOUNT_LOGS:
+        row['data'] = None
+    if not see_account and row['action'] in ('FILE_ADDED', 'FILE_REMOVED')             and (row['data'] or {}).get('purpose') not in (None, 'SUPPORTING'):
+        row['data'] = None
+    return row
+
+
+#: "Not passed" — distinct from None, which means "looked up: they never decided it".
+_UNSET = object()
+
+
+def request_data(advance, *, user, detail=False, my_decision=_UNSET):
+    """One request, as both pages read it. `detail` adds history and the route.
+
+    `my_decision` is the viewer's own latest decision log on it, for the desk.
+    A list passes it in from ONE query (`flow.my_decisions`) rather than one per
+    row; a single request looks it up itself.
+    """
     from advance_payment.services import flow as flow_service
 
     flow = getattr(advance, 'flow', None)
+    can = flow_service.abilities(advance, user)
+    # The payee's account, its proofs and its change log: Payment and later only.
+    see_account = can['see_account']
     try:
         payout = advance.payout
     except Exception:  # noqa: BLE001 — RelatedObjectDoesNotExist: none yet
@@ -228,8 +253,9 @@ def request_data(advance, *, user, detail=False):
         'created_on': _iso(advance.created_on),
         'updated_on': _iso(advance.updated_on),
         'documents': [document_data(d) for d in advance.documents.all()],
-        'files': [file_data(f) for f in advance.files.all()],
-        'payout': payout_data(payout),
+        'files': [file_data(f) for f in advance.files.all()
+                  if see_account or f.purpose == 'SUPPORTING'],
+        'payout': payout_data(payout) if see_account else None,
         'flow': None if flow is None else {
             'status': flow.status,
             'workflow': flow.workflow.code,
@@ -241,7 +267,7 @@ def request_data(advance, *, user, detail=False):
             'total_stages': flow.total_stages,
             'awaiting_me': bool(flow_service.is_actor(flow, user)),
         },
-        'can': flow_service.abilities(advance, user),
+        'can': can,
     }
     live = [v for v in advance.vouchers.all() if v.status == 'POSTED' and v.replaced_by_id is None]
     out['voucher'] = voucher_data(live[-1]) if live else None
@@ -250,8 +276,15 @@ def request_data(advance, *, user, detail=False):
     last = (advance.logs.filter(action__in=['RETURNED', 'SENT_BACK', 'REJECTED'])
             .select_related('actor').order_by('-id').first())
     out['last_decision'] = log_data(last) if last else None
+    # What THIS viewer did to it — the desk's "Approved by you" / "Rejected by
+    # you". Their own act, so it is not the approver status the desk hides.
+    if my_decision is _UNSET:
+        my_decision = (flow_service.my_decisions(user, [advance.pk]).get(advance.pk)
+                       if getattr(user, 'is_authenticated', False) else None)
+    out['my_decision'] = log_data(my_decision) if my_decision else None
     if detail:
         out['vouchers'] = [voucher_data(v) for v in advance.vouchers.all()]
-        out['logs'] = [log_data(r) for r in advance.logs.select_related('actor', 'on_behalf_of')]
+        out['logs'] = [_hide_account(log_data(r), see_account)
+                       for r in advance.logs.select_related('actor', 'on_behalf_of')]
         out['stages'] = flow_service.stage_plan(advance)
     return out

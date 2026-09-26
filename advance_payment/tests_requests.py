@@ -449,6 +449,7 @@ class TypingTheAccountByHand(SimpleTestCase):
                 mock.patch.object(flow_service, '_from_sap', return_value=from_sap), \
                 mock.patch.object(flow_service.Payout.objects, 'filter') as payouts, \
                 mock.patch.object(flow_service.payout_service, 'save', return_value=(None, True)) as save, \
+                mock.patch.object(flow_service.payout_service, 'snapshot', return_value={}), \
                 mock.patch.object(flow_service, 'log') as log:
             payouts.return_value.first.return_value = stored
             flow_service.save_payout(self.advance, data, user=self.user)
@@ -471,7 +472,8 @@ class TypingTheAccountByHand(SimpleTestCase):
                                    'manual_token': token}, from_sap=False)
         # The server says it was typed, whatever the client claimed.
         self.assertTrue(sent['to_account_manual'])
-        self.assertEqual(log.call_args.kwargs['data'], {'manual_account': True, 'account_last4': '8901'})
+        self.assertEqual(log.call_args.kwargs['data'],
+                         {'manual_account': True, 'manual_new': True, 'account_last4': '8901'})
 
     def test_a_typed_account_saved_again_unchanged_needs_no_new_password(self):
         stored = SimpleNamespace(to_account_number='12345678901', to_ifsc='SBIN0001234')
