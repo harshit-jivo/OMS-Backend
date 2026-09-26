@@ -294,6 +294,14 @@ class AdvanceRequest(models.Model):
     priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.MEDIUM)
     remarks = models.TextField(blank=True, default='')
 
+    # ── Payment purpose: SAP's Budget and Sub Budget cost centres ─────────
+    #: OPRC codes of dimension 3 (Budget) and 4 (Sub Budget), with their
+    #: names as they were when raised.
+    budget_code = models.CharField(max_length=20, blank=True, default='')
+    budget_name = models.CharField(max_length=100, blank=True, default='')
+    sub_budget_code = models.CharField(max_length=20, blank=True, default='')
+    sub_budget_name = models.CharField(max_length=100, blank=True, default='')
+
     # ── Ownership: information only, no say in the approval ──────────────
     owner_employee = models.ForeignKey(
         Employee, on_delete=models.PROTECT, null=True, blank=True, related_name='owned_requests')
