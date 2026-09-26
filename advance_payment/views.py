@@ -707,6 +707,19 @@ class CashAccountsView(_Lookup):
         return sap_service.cash_accounts(company)
 
 
+class BudgetsView(_Lookup):
+    """GET /api/advance-payments/budgets/?company=
+
+    The Payment Purpose pickers: the company's active Budget (cost-centre
+    dimension 3) and Sub Budget (dimension 4) codes, each row with its `kind`.
+    """
+
+    resource = 'budgets'
+
+    def fetch(self, request, company):
+        return sap_service.budgets(company)
+
+
 class OpenInvoicesView(_Lookup):
     """GET /api/advance-payments/open-invoices/
            ?company=&party_type=vendor|customer&card_code=&search=&limit=

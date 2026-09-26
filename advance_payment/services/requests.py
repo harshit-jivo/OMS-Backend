@@ -188,6 +188,8 @@ def clean(data):
     if not _text(data.get('remarks')):
         problems.append('Enter the Remarks.')
 
+    purpose = _clean_purpose(company, data, problems) if company in COMPANY_CODES else {}
+
     priority = _text(data.get('priority')).upper() or Priority.MEDIUM
     if priority not in Priority.values:
         problems.append('Priority must be Low, Medium or High.')
@@ -234,6 +236,7 @@ def clean(data):
             'expected_to_date': repayment.get('expected_to_date'),
             'payment_date': payment_date,
             'priority': priority,
+            **purpose,
             'remarks': _text(data.get('remarks')),
             'owner_employee': owner,
             'owner_label': owner_label,
@@ -308,6 +311,36 @@ def _clean_documents(raw, kind, problems):
             'attachment_check': doc.get('attachment_check') if isinstance(doc.get('attachment_check'), dict) else None,
         })
     return lines, total
+
+
+def _clean_purpose(company, data, problems):
+    """Budget and Sub Budget: both required, both one of the company's in SAP."""
+    from advance_payment.services import sap as sap_service
+
+    budget = _text(data.get('budget_code'), 20)
+    sub_budget = _text(data.get('sub_budget_code'), 20)
+    if not budget:
+        problems.append('Choose the Payment Purpose (Budget).')
+    if not sub_budget:
+        problems.append('Choose the Payment Purpose (Sub Budget).')
+    if not (budget and sub_budget):
+        return {}
+    try:
+        known = sap_service.budgets(company)
+    except sap_service.SapUnavailable:
+        problems.append('Could not check the Payment Purpose with SAP. Try again shortly.')
+        return {}
+    names = {(r['kind'], r['code']): r['name'] for r in known}
+    if ('BUDGET', budget) not in names:
+        problems.append(f'Budget "{budget}" is not an active budget in {company}.')
+    if ('SUB_BUDGET', sub_budget) not in names:
+        problems.append(f'Sub Budget "{sub_budget}" is not an active sub budget in {company}.')
+    return {
+        'budget_code': budget,
+        'budget_name': names.get(('BUDGET', budget), ''),
+        'sub_budget_code': sub_budget,
+        'sub_budget_name': names.get(('SUB_BUDGET', sub_budget), ''),
+    }
 
 
 def _clean_repayment(data, problems):
@@ -403,7 +436,7 @@ _COMPARED = (
     'sub_department_id', 'partner_code', 'partner_name', 'amount', 'expected_date',
     'expected_bill_date', 'return_method', 'return_method_other', 'installments', 'emi_amount',
     'expected_from_date', 'expected_to_date', 'payment_date', 'priority', 'remarks',
-    'owner_employee_id', 'owner_label',
+    'owner_employee_id', 'owner_label', 'budget_code', 'sub_budget_code',
 )
 
 
