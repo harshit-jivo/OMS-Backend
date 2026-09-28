@@ -310,6 +310,20 @@ def _clean_documents(raw, kind, problems):
     return lines, total
 
 
+# NOT VALIDATED HERE: the Payment Purpose (Budget / Sub Budget).
+#
+# `origin/production` asks for both on the form and REFUSES a request without
+# them (`_clean_purpose`, checked against SAP's OPRC dimensions 3 and 4). The
+# COLUMNS are on this branch — the shared database is migrated by production and
+# they are NOT NULL, so the model must know them or every insert fails — but the
+# requirement is not, because neither the web form nor the app on this branch
+# sends them yet. Adopting the check without the two pickers would refuse every
+# request from both clients.
+#
+# To finish the feature here: take `_clean_purpose` and the `/budgets/` lookup
+# from that commit, and add the two dropdowns to both clients.
+
+
 def _clean_repayment(data, problems):
     """Employee Advance: how the money comes back."""
     method = _text(data.get('return_method')).upper()

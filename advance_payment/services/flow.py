@@ -717,6 +717,37 @@ def readable_request_ids(user):
     return ids
 
 
+#: The log actions that are a DECISION by the person who made them.
+DECISIONS = [LogAction.APPROVED, LogAction.REJECTED, LogAction.RETURNED, LogAction.SENT_BACK]
+
+
+def decided_ids(user):
+    """Requests `user` has already decided — approved, rejected, returned, sent back.
+
+    The desk itself lists only what is waiting on them (`desk_request_ids`), so
+    a request leaves it the moment they approve. That is right for a queue and
+    wrong for a list: an approver also needs to see what they have dealt with,
+    which is what this adds.
+    """
+    return set(RequestLog.objects.filter(actor=user, action__in=DECISIONS)
+               .values_list('request_id', flat=True))
+
+
+def my_decision(advance, user):
+    """What `user` last did to this request, or '' if they never decided it.
+
+    Read from `advance.my_logs` when the caller prefetched it (the list does, so
+    one query serves every row); otherwise looked up, which is what the detail
+    view needs for one request.
+    """
+    prefetched = getattr(advance, 'my_logs', None)
+    if prefetched is not None:
+        return prefetched[0].action if prefetched else ''
+    row = (advance.logs.filter(actor=user, action__in=DECISIONS)
+           .order_by('-id').first())
+    return row.action if row else ''
+
+
 def awaiting_ids(user):
     """Requests whose current stage is `user`'s today."""
     from workflow.models import WorkflowStage

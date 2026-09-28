@@ -470,19 +470,26 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
     # fell back to 0. `OrdersByUserView` already prefetches `items`, so this
     # `.count()` reads the prefetch cache — no extra query per row.
     items_count = serializers.IntegerField(source="items.count", read_only=True)
-    # categories = serializers.SerializerMethodField()
+    categories = serializers.SerializerMethodField()
     status_display = serializers.SerializerMethodField()
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     # rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
 
     def get_categories(self, obj):
-        return list(
-            obj.items.exclude(category__isnull=True)
-            .exclude(category__exact="")
-            .values_list("category", flat=True)
-            .distinct()
-        )
+        """The distinct categories on this order, in first-seen line order.
+
+        Deduped in Python off `obj.items.all()` — the `prefetch_related`
+        cache `OrdersByUserView` already fills. The ORM form
+        (`.exclude(...).values_list(...).distinct()`) cannot read that cache,
+        so it would cost one query per row of the list.
+        """
+        seen = []
+        for item in obj.items.all():
+            category = str(getattr(item, "category", "") or "").strip()
+            if category and category not in seen:
+                seen.append(category)
+        return seen
 
     def get_created_by_name(self, obj):
         if obj.created_by:
@@ -535,7 +542,7 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             # "sap_doc_number",
             # "items",
             "items_count",
-            # "categories",
+            "categories",
             # "rate_approvals",
         ]
 

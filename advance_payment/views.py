@@ -45,7 +45,7 @@ from core.responses import created, fail, ok
 from advance_payment import permissions as ap_perms
 from advance_payment.models import (
     AdvanceRequest, Department, Employee, EmployeeRole, FilePurpose, LogAction, PayoutLine,
-    RequestFile, SapVoucher, SubDepartment)
+    RequestFile, RequestLog, SapVoucher, SubDepartment)
 from advance_payment.serializers import EmployeeSerializer, request_data
 from advance_payment.services import (
     attachment_files, invoice_fields, payment_proof, proof_reader)
@@ -822,9 +822,20 @@ class RequestListView(_RequestView):
             if APPROVAL_KEY not in keys:
                 return fail('You do not have the Payments Approval permission.',
                             status=http_status.HTTP_403_FORBIDDEN)
-            # Only what is theirs to act on; administrators see every request.
+            # What is theirs to act on, AND what they have already decided:
+            # an approver's list is not just a queue, it is also the record of
+            # what they have passed on or refused. Administrators see every
+            # request.
             if not is_admin(request.user):
-                qs = qs.filter(pk__in=flow_service.desk_request_ids(request.user))
+                qs = qs.filter(pk__in=(flow_service.desk_request_ids(request.user)
+                                       | flow_service.decided_ids(request.user)))
+            # One query for every row's own decision, rather than one per row.
+            qs = qs.prefetch_related(Prefetch(
+                'logs',
+                queryset=RequestLog.objects.filter(
+                    actor=request.user, action__in=flow_service.DECISIONS).order_by('-id'),
+                to_attr='my_logs',
+            ))
         else:
             if ap_perms.VIEW_KEY not in keys:
                 return fail('You do not have the Payments permission.',

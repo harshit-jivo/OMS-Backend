@@ -216,6 +216,10 @@ def request_data(advance, *, user, detail=False):
         'expected_to_date': _iso(advance.expected_to_date),
         'payment_date': _iso(advance.payment_date),
         'priority': advance.priority,
+        'budget_code': advance.budget_code,
+        'budget_name': advance.budget_name,
+        'sub_budget_code': advance.sub_budget_code,
+        'sub_budget_name': advance.sub_budget_name,
         'remarks': advance.remarks,
         'owner_employee_id': advance.owner_employee_id,
         'owner_label': advance.owner_label,
@@ -238,6 +242,11 @@ def request_data(advance, *, user, detail=False):
             'awaiting_me': bool(flow_service.is_actor(flow, user)),
         },
         'can': flow_service.abilities(advance, user),
+        # What THIS user last did to it — APPROVED / REJECTED / RETURNED /
+        # SENT_BACK, or ''. The desk filters on this: a request the reader has
+        # approved is "approved" TO THEM even while it sits pending at the next
+        # stage, and the document's own status cannot express that.
+        'my_action': flow_service.my_decision(advance, user),
     }
     live = [v for v in advance.vouchers.all() if v.status == 'POSTED' and v.replaced_by_id is None]
     out['voucher'] = voucher_data(live[-1]) if live else None

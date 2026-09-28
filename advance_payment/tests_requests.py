@@ -20,7 +20,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from advance_payment.models import StageRole
+from advance_payment.models import LogAction, StageRole
 from advance_payment.services import flow as flow_service
 from advance_payment.services import payout as payout_service
 from advance_payment.services import requests as request_service
@@ -203,6 +203,33 @@ def payout_problems(amount, the_payout):
     with mock.patch.object(payout_service.Payout.objects, 'filter') as found:
         found.return_value.first.return_value = the_payout
         return payout_service.problems(advance)
+
+
+class TheApproverList(SimpleTestCase):
+    """An approver's list says what THEY did, not what the document is."""
+
+    def _advance(self, action):
+        """A request carrying this user's own decision, as the list prefetches it."""
+        log = SimpleNamespace(action=action)
+        return SimpleNamespace(my_logs=[log] if action else [])
+
+    def test_reports_the_decision_this_user_made(self):
+        # A request approved at stage 1 is still IN_APPROVAL while stage 2 holds
+        # it, so the document's status cannot say who has dealt with it. This is
+        # what the desk filters on instead.
+        for action in ('APPROVED', 'REJECTED', 'RETURNED', 'SENT_BACK'):
+            self.assertEqual(flow_service.my_decision(self._advance(action), user=None), action)
+
+    def test_reports_nothing_for_a_request_they_have_never_decided(self):
+        self.assertEqual(flow_service.my_decision(self._advance(None), user=None), '')
+
+    def test_every_decision_counts_as_one(self):
+        # `decided_ids` and `my_decision` read the same list, so a new action
+        # cannot be a decision for one and not the other.
+        self.assertEqual(
+            set(flow_service.DECISIONS),
+            {LogAction.APPROVED, LogAction.REJECTED, LogAction.RETURNED, LogAction.SENT_BACK},
+        )
 
 
 class ThePaymentDetails(SimpleTestCase):

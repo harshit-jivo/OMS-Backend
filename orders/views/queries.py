@@ -182,6 +182,22 @@ ORDER_STATUS_OPTIONS = inline_serializer(
     many=True,
 )
 
+def _distinct_categories(items):
+    """The distinct categories across an order's lines, first-seen order.
+
+    Takes an already-loaded iterable — `order.items.all()` under a
+    `prefetch_related('items')` — and never touches the database. The ORM
+    equivalent (`.exclude(...).values_list(...).distinct()`) cannot use the
+    prefetch cache, so it would issue one query per row of the list.
+    """
+    seen = []
+    for item in items:
+        category = str(getattr(item, 'category', '') or '').strip()
+        if category and category not in seen:
+            seen.append(category)
+    return seen
+
+
 #: `OrderListView`'s hand-built row. No serializer describes it; the types are
 #: what the view puts in the dict, not what the model column is.
 ORDER_LIST_ROWS = inline_serializer(
@@ -212,6 +228,9 @@ ORDER_LIST_ROWS = inline_serializer(
         'created_at': serializers.DateTimeField(),
         'delivery_date': serializers.DateField(allow_null=True),
         'is_foc': serializers.BooleanField(),
+        # Distinct `OrderItem.category` values, in first-seen line order.
+        # Empty for an order whose lines carry no category.
+        'categories': serializers.ListField(child=serializers.CharField()),
     },
     many=True,
 )
@@ -544,12 +563,12 @@ class OrderListView(APIView):
                 # 'bill_to_address': order.bill_to_address,
                 # 'ship_to_address': order.ship_to_address,
                 # 'dispatch_from_id': order.dispatch_from_id,
-                # 'categories': list(
-                #     items_qs.exclude(category__isnull=True)
-                #     .exclude(category__exact='')
-                #     .values_list('category', flat=True)
-                #     .distinct()
-                # ),
+                # The categories in this order, for the list cards. Deduped in
+                # Python rather than with `.exclude(...).distinct()`: filtering
+                # a prefetched relation issues a fresh query per row, which is
+                # what made this too expensive to keep on before. `items_qs` is
+                # the prefetch cache, so this loop costs nothing.
+                'categories': _distinct_categories(items_qs),
                 # 'rate_approvals': _order_rate_approval_payload(order),
                 # 'items': OrderItemSerializer(items_qs, many=True).data
             })
