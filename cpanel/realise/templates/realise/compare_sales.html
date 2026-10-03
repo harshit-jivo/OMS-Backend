@@ -1,0 +1,1273 @@
+{% extends base_template %}
+{% block title %}Compare Sales — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important;padding:10px 20px !important}   /* tighter top/left gap on this page only */
+  .cs-wrap{max-width:1780px;margin:0 auto}
+  .cs-h1{font-size:30px;font-weight:800;color:var(--rz-ink);margin:0;letter-spacing:-.5px}
+  .cs-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:8px}
+  .cs-viewseg{padding:5px}
+  .cs-viewseg button{padding:12px 32px;font-size:16px;font-weight:900;letter-spacing:.3px}
+  .cs-psub{margin:6px 0 0;font-size:13px;color:var(--rz-muted)}
+
+  /* Toolbar */
+  .cs-bar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin:8px 0 12px;background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:14px;padding:12px 14px;box-shadow:var(--rz-shadow)}
+  .cs-fld{display:flex;flex-direction:column;gap:5px}
+  .cs-lbl{font-size:10px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .cs-bar input[type=number],.cs-bar input[type=search],.cs-bar select{font-family:inherit;font-size:13px;font-weight:600;color:var(--rz-ink);border:1px solid #e2e8f0;border-radius:9px;padding:8px 10px;background:#fff;outline:none}
+  .cs-bar input[type=number]{width:64px}
+  .cs-bar input[type=search]{min-width:150px}
+  .cs-bar input[type=search]::placeholder{color:var(--rz-faint)}
+  .cs-bar input[type=number]:focus,.cs-bar input[type=search]:focus,.cs-bar select:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .cs-fetch{background:var(--rz-soft);color:var(--rz-indigo-deep);border:1px solid var(--rz-soft-brd);border-radius:9px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+  .cs-hidbtn{border:1px solid #e2e8f0;background:#fff;color:var(--rz-muted);font-family:inherit;font-size:13px;font-weight:800;padding:8px 18px;border-radius:9px;cursor:pointer;min-width:58px;letter-spacing:.4px}
+  .cs-hidbtn.on{background:var(--rz-indigo,#4f46e5);border-color:var(--rz-indigo,#4f46e5);color:#fff}
+  .cs-fetch:hover{background:#e0e7ff;border-color:#c7d2fe}
+  .cs-export{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;padding:9px 14px;font-size:12px;font-weight:700;color:#047857;cursor:pointer;font-family:inherit}
+  .cs-export:hover{background:#ecfdf5;border-color:#a7f3d0}
+  .cs-curm{display:inline-flex;align-items:center;gap:5px;margin-top:5px;font-size:11px;font-weight:700;color:var(--rz-muted,#64748b);cursor:pointer;white-space:nowrap}
+  .cs-curm input{cursor:pointer;accent-color:var(--rz-indigo,#4f46e5)}
+  .cs-calc{display:inline-flex;align-items:center;gap:6px;background:var(--rz-indigo,#4f46e5);border:1px solid var(--rz-indigo,#4f46e5);border-radius:9px;padding:9px 14px;font-size:12px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit}
+  .cs-calc:hover{filter:brightness(.94)}
+  .cs-isel{width:15px;height:15px;margin-right:7px;vertical-align:middle;cursor:pointer;accent-color:var(--rz-indigo,#4f46e5)}
+  .csd-tbl td.l{text-align:left}
+  .csd-tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .csd-tbl tr.csd-hdr td{background:#0f172a;color:#fff;font-weight:800;text-align:center;padding:8px 12px;white-space:nowrap;position:sticky;top:0}
+  .csd-tbl tr.csd-tot td{background:#eef2ff;font-weight:800;border-top:2px solid #c7d2fe}
+  /* Compare segmented control */
+  .cs-seg{display:inline-flex;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:3px;box-shadow:0 1px 2px rgba(15,23,42,.05)}
+  .cs-seg button{border:0;background:transparent;font-family:inherit;font-size:12px;font-weight:700;color:var(--rz-muted);padding:7px 11px;border-radius:8px;cursor:pointer}
+  .cs-seg button.active{background:var(--rz-soft);color:var(--rz-indigo-deep);box-shadow:0 1px 2px rgba(15,23,42,.08)}
+
+  /* Dropdown panels (Main Group + Drill By) — shared with the Realise theme */
+  .com-drill-box{position:relative}
+  .com-drill-btn{display:inline-flex;align-items:center;gap:8px;min-width:132px;justify-content:space-between;background:#fff;border:1px solid #e2e8f0;color:var(--rz-indigo-deep);font-weight:700;font-size:12px;padding:8px 10px;border-radius:9px;cursor:pointer;font-family:inherit}
+  .com-drill-btn .com-caret{color:var(--rz-muted);font-size:10px}
+  .com-drill-panel{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:260px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--rz-card-brd);border-radius:12px;box-shadow:var(--rz-shadow-lg)}
+  .com-drill-panel.open{display:block}
+  .com-dp-head{display:flex;justify-content:space-between;padding:9px 12px;border-bottom:1px solid #eef2f6;position:sticky;top:0;background:#fff}
+  .com-dp-head a{color:var(--rz-indigo-deep);font-size:12px;font-weight:700;cursor:pointer}
+  .com-dp-list{padding:4px 0}
+  .cs-itm-search{display:block;margin:8px 10px;padding:7px 10px;width:calc(100% - 20px);box-sizing:border-box;border:1px solid var(--rz-card-brd);border-radius:8px;font-size:12px;outline:none;background:#f8fafc}
+  .cs-itm-search:focus{border-color:var(--rz-indigo-deep);background:#fff}
+  .com-dp-item{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:13px}
+  .com-dp-item:hover{background:#f4f7fb}
+  .com-dp-item input{width:16px;height:16px;cursor:pointer;flex:0 0 auto}
+  .com-dp-item .com-dp-name{flex:1 1 auto;font-weight:600;color:var(--rz-body)}
+  .com-dp-item .com-dp-sub{font-size:10px;color:var(--rz-faint);font-weight:600}
+  .com-dp-item .com-pos{flex:0 0 auto;width:19px;height:19px;border-radius:50%;background:var(--rz-indigo);color:#fff;font-size:11px;font-weight:800;display:none;align-items:center;justify-content:center}
+  .com-dp-item.checked .com-pos{display:inline-flex}
+  .com-dp-foot{padding:9px 12px;border-top:1px solid #eef2f6;position:sticky;bottom:0;background:#fff}
+  .com-dp-foot button{width:100%;background:var(--rz-indigo);color:#fff;border:none;border-radius:8px;padding:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit}
+  /* Item-first refine bar: Product (U_Sub_Group) + SKU (U_SKU) multi-select filters. */
+  .cd-refine{display:none;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;position:relative;z-index:60}
+  .cd-refine.show{display:flex}
+  .cd-refine .ir-cap{font-size:11px;font-weight:800;letter-spacing:.4px;color:var(--rz-muted);text-transform:uppercase}
+  .cd-refine .com-drill-btn{min-width:150px;padding:7px 10px}
+  .cd-refine .com-drill-panel{left:0;width:220px;max-height:340px;overflow:auto;z-index:120}
+
+  /* Pivot table */
+  .cs-table-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow)}
+  .cs-table-wrap{overflow:auto;max-height:74vh}
+  table.cs-table{width:max-content;min-width:100%;border-collapse:collapse;font-size:13px}
+  table.cs-table thead th{position:sticky;top:0;z-index:2;background:var(--rz-head-bg);color:var(--rz-head-ink);text-align:right;font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:12px 16px;white-space:nowrap;border-bottom:1px solid var(--rz-line)}
+  table.cs-table thead th.gc-name{text-align:left;left:0;z-index:3}
+  table.cs-table tbody td{padding:9px 16px;border-bottom:1px solid #eef2f6;color:var(--rz-body);text-align:right;font-variant-numeric:tabular-nums;font-family:'CPNum',system-ui,-apple-system,"Segoe UI",Arial,sans-serif;white-space:nowrap}
+  table.cs-table tbody td.gc-name{text-align:left;color:var(--rz-ink);font-weight:600;position:sticky;left:0;background:#fff;z-index:1}
+  table.cs-table tbody tr:nth-child(even) td.gc-name{background:#fafcff}
+  table.cs-table tbody tr:hover td{background:#f1f5ff}
+  table.cs-table tbody tr:hover td.gc-name{background:#eef3ff}
+  .cs-grand{background:var(--rz-total-bg);font-weight:800;color:var(--rz-ink)}
+  table.cs-table thead th.cs-grand{background:var(--rz-head-bg);color:var(--rz-head-ink)}
+  /* Avg Sales column — subordinate to Grand Total */
+  table.cs-table tbody td.cs-avg{color:var(--rz-muted);font-weight:600}
+  table.cs-table thead th.cs-avg-h{background:var(--rz-head-bg);color:var(--rz-head-ink)}
+  table.cs-table tbody tr.cs-total td.cs-avg{background:var(--rz-total-bg);color:var(--rz-ink);font-weight:800}
+  table.cs-table tbody tr.cs-total td{background:var(--rz-total-bg);color:var(--rz-ink);font-weight:800;position:sticky;top:38px;z-index:2;border-bottom:2px solid var(--rz-total-brd)}
+  table.cs-table tbody tr.cs-total td.gc-name{background:var(--rz-total-bg);color:var(--rz-ink);left:0;z-index:3}
+  .cs-tw{display:inline-block;width:13px;font-size:9px;color:var(--rz-muted);margin-right:7px;cursor:pointer;transition:transform .12s;vertical-align:middle}
+  .cs-tw.open{transform:rotate(90deg)}
+  .cs-tw-empty{display:inline-block;width:13px;margin-right:7px}
+  .cs-r{font-size:11px;color:#0d9488;font-weight:700;margin-top:1px}      /* secondary metric line(s) when combined */
+  .cs-up{color:#16a34a;font-weight:800}     /* A-vs-B: positive change */
+  .cs-down{color:#dc2626;font-weight:800}   /* A-vs-B: negative change */
+  table.cs-table td.cs-absplit,table.cs-table th.cs-absplit{border-left:2px solid #c7d2fe}   /* A|B block divider */
+  .cs-abonly .com-drill-btn{min-width:150px}
+  .cs-mrow{line-height:1.25}
+  .cs-munit{font-size:.72em;color:var(--rz-faint,#94a3b8);font-weight:600}
+  .cs-metseg button{display:inline-flex;align-items:center;gap:6px}
+  .cs-cb{width:13px;height:13px;border:1.5px solid var(--rz-muted,#94a3b8);border-radius:3px;position:relative;flex:0 0 auto;box-sizing:border-box}
+  .cs-metseg button.active .cs-cb{background:var(--rz-indigo,#4f46e5);border-color:var(--rz-indigo,#4f46e5)}
+  .cs-metseg button.active .cs-cb::after{content:'';position:absolute;left:3px;top:0;width:3.5px;height:7px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  table.cs-table tbody tr.cs-total .cs-r{color:#0d9488}
+  .cs-empty{padding:40px;text-align:center;color:var(--rz-muted)}
+  .cs-tag{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:4px;background:var(--rz-soft);color:var(--rz-indigo-deep);margin-right:8px;vertical-align:middle}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="cs-wrap">
+  <div class="cs-head">
+    <h1 class="cs-h1">Compare Sales</h1>
+    <div class="cs-seg cs-viewseg" id="csViewMode" title="Trend = the fetched months across; A vs B = compare two chosen month-sets">
+      <button type="button" data-mode="trend" class="active">Trend</button>
+      <button type="button" data-mode="ab">A vs B</button>
+    </div>
+  </div>
+
+  <div class="cs-bar">
+    <div class="cs-fld"><span class="cs-lbl">Last (months)</span>
+      <input type="number" id="csMonths" min="1" max="120" step="1" value="6">
+      <label class="cs-curm" title="Untick to exclude the running month — the window then ends at the previous complete month"><input type="checkbox" id="csInclCur" checked> Incl. current month</label>
+    </div>
+    <button class="cs-fetch" id="csFetch">&#9654; Fetch</button>
+    <div class="cs-fld"><span class="cs-lbl">Hidden Sales</span>
+      <button type="button" class="cs-hidbtn" id="csHiddenBtn" aria-pressed="false" title="Include hidden sales (U_ARNO='H') in the pivot — click to toggle ON/OFF">OFF</button>
+      <input type="checkbox" id="csHidden" hidden>
+    </div>
+    <div class="cs-fld cs-abonly" style="display:none"><span class="cs-lbl">Period A</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csMonAbtn"><span id="csMonAlbl">— months —</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csMonApanel">
+          <div class="com-dp-head"><a id="csMonAall">Select All</a><a id="csMonAclr">Clear All</a></div>
+          <div class="com-dp-list" id="csMonAlist"></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld cs-abonly" style="display:none"><span class="cs-lbl">Period B</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csMonBbtn"><span id="csMonBlbl">— months —</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csMonBpanel">
+          <div class="com-dp-head"><a id="csMonBall">Select All</a><a id="csMonBclr">Clear All</a></div>
+          <div class="com-dp-list" id="csMonBlist"></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Type</span>
+      <select id="csType">
+        <option value="">All</option>
+        <option value="PREMIUM">Premium</option>
+        <option value="COMMODITY">Commodity</option>
+      </select>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Customer</span>
+      <input type="search" id="csCustSearch" placeholder="Search customer…" autocomplete="off">
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Main Group</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csMgBtn"><span id="csMgLabel">All groups</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csMgPanel">
+          <div class="com-dp-head"><a id="csMgAll">Select All</a><a id="csMgClr">Clear All</a></div>
+          <div class="com-dp-list" id="csMgList"></div>
+          <div class="com-dp-foot"><button type="button" id="csMgApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Person</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csPsBtn"><span id="csPsLabel">All persons</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csPsPanel">
+          <div class="com-dp-head"><a id="csPsAll">Select All</a><a id="csPsClr">Clear All</a></div>
+          <div class="com-dp-list" id="csPsList"></div>
+          <div class="com-dp-foot"><button type="button" id="csPsApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Variety</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csVarBtn"><span id="csVarLabel">All varieties</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csVarPanel">
+          <div class="com-dp-head"><a id="csVarAll">Select All</a><a id="csVarClr">Clear All</a></div>
+          <div class="com-dp-list" id="csVarList"></div>
+          <div class="com-dp-foot"><button type="button" id="csVarApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Pack Size</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csSkuBtn"><span id="csSkuLabel">All sizes</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csSkuPanel">
+          <div class="com-dp-head"><a id="csSkuAll">Select All</a><a id="csSkuClr">Clear All</a></div>
+          <div class="com-dp-list" id="csSkuList"></div>
+          <div class="com-dp-foot"><button type="button" id="csSkuApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Items</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csItmBtn"><span id="csItmLabel">All items</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csItmPanel">
+          <div class="com-dp-head"><a id="csItmAll">Select All</a><a id="csItmClr">Clear All</a></div>
+          <input type="search" id="csItmSearch" class="cs-itm-search" placeholder="Search item…" autocomplete="off">
+          <div class="com-dp-list" id="csItmList"></div>
+          <div class="com-dp-foot"><button type="button" id="csItmApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Compare</span>
+      <div class="cs-seg cs-metseg" id="csG1" title="Tick Litres / Revenue / Realise — combine freely with the Pcs group">
+        <button type="button" data-metric="liters" class="active"><span class="cs-cb"></span>Litres</button>
+        <button type="button" data-metric="revenue"><span class="cs-cb"></span>Revenue</button>
+        <button type="button" data-metric="realise"><span class="cs-cb"></span>Realise</button>
+        <button type="button" data-both="g1" title="Litres + Realise">Both</button>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Compare (Pcs)</span>
+      <div class="cs-seg cs-metseg" id="csG2" title="Tick Pieces and/or Rate — combine freely with the Litres group">
+        <button type="button" data-metric="pieces"><span class="cs-cb"></span>Pieces</button>
+        <button type="button" data-metric="rate"><span class="cs-cb"></span>Rate</button>
+        <button type="button" data-both="g2" title="Pieces + Rate">Both</button>
+      </div>
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">Drill By</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="csDrillBtn"><span id="csDrillLabel">Main Group</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="csDrillPanel">
+          <div class="com-dp-head"><a id="csDrillAll">Select All</a><a id="csDrillClr">Clear All</a></div>
+          <div class="com-dp-list" id="csDrillList"></div>
+          <div class="com-dp-foot"><button type="button" id="csDrillApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="cs-fld" id="csTopWrap" style="display:none"><span class="cs-lbl">Top N Items</span>
+      <input type="number" id="csTopN" min="0" step="1" placeholder="All" title="Show only the top N items by grand total (blank = all)">
+    </div>
+    <div class="cs-fld"><span class="cs-lbl">&nbsp;</span>
+      <button class="cs-export" id="csExport" title="Export the current pivot to Excel"><i class="ic ic-download" style="font-size:16px"></i>Export Excel</button>
+    </div>
+    <div class="cs-fld" id="csCalcWrap" style="display:none"><span class="cs-lbl">&nbsp;</span>
+      <button class="cs-calc" id="csCalc" title="Compare the selected items' Litres / Revenue / Realise"><i class="ic ic-calculator" style="font-size:16px"></i>Calculate (<span id="csCalcN">0</span>)</button>
+    </div>
+  </div>
+
+  <div class="cd-refine" id="csRefine"></div>
+
+  <!-- Selected-items comparison popup -->
+  <div id="csCalc2" class="csd-overlay">
+    <div class="csd-modal">
+      <div class="csd-head">
+        <div><div class="csd-title">Selected Items — Realise Comparison</div><div class="csd-sub" id="csCalcSub"></div></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button type="button" class="cs-export" id="csCalcXlsx"><i class="ic ic-download" style="font-size:15px"></i>Excel</button>
+          <button type="button" class="csd-x" id="csCalcClose">&times;</button>
+        </div>
+      </div>
+      <div class="csd-body" id="csCalcBody"></div>
+      <div class="csd-foot">Grand-total Litres, Revenue &amp; Realise (₹/L) for the ticked items, plus a blended total. Uses the current Type / Main-Group / Pack-Size filters.</div>
+    </div>
+  </div>
+
+  <div class="cs-table-card">
+    <div class="cs-table-wrap">
+      <table class="cs-table">
+        <thead id="csHead"></thead>
+        <tbody id="csBody"><tr><td class="cs-empty">Pick a period and click Fetch.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Invoice drill: the invoices + item names behind a clicked value cell -->
+  <style>
+    .cs-vcell{cursor:pointer}
+    .cs-vcell:hover{background:#eef2ff;outline:1px solid #c7d2fe}
+    .csd-overlay{display:none;position:fixed;inset:0;z-index:5000;background:rgba(15,23,42,.45);align-items:flex-start;justify-content:center;padding:40px 16px}
+    .csd-overlay.open{display:flex}
+    .csd-modal{background:#fff;border-radius:14px;max-width:1120px;width:100%;max-height:84vh;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(2,6,23,.35);overflow:hidden}
+    .csd-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid #eef2f7}
+    .csd-title{font-weight:800;font-size:15px;color:#1e293b}
+    .csd-sub{font-size:12px;color:#64748b;margin-top:3px}
+    .csd-x{border:0;background:#f1f5f9;color:#475569;width:30px;height:30px;border-radius:8px;font-size:20px;cursor:pointer;line-height:1}
+    .csd-body{overflow:auto;padding:0}
+    .csd-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+    .csd-tbl th{position:sticky;top:0;background:#f8fafc;color:#475569;text-align:left;font-weight:700;padding:9px 14px;border-bottom:1px solid #e2e8f0;white-space:nowrap;z-index:1}
+    .csd-tbl td{padding:8px 14px;border-bottom:1px solid #f1f5f9;color:#334155}
+    .csd-tbl td.num,.csd-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}
+    .csd-tbl tr.csd-docrow{cursor:pointer}
+    .csd-tbl tr.csd-docrow td{background:#fbfcfe;font-weight:700;color:#3730a3;border-top:1px solid #e2e8f0}
+    .csd-tbl tr.csd-docrow:hover td{background:#eef2ff}
+    .csd-cx{display:inline-block;width:12px;margin-right:6px;color:#94a3b8;font-size:9px;transition:transform .12s}
+    .csd-tbl tr.csd-docrow.open .csd-cx{transform:rotate(90deg)}
+    .csd-hint{color:#94a3b8;font-size:11px;font-weight:600}
+    .csd-tbl tr.csd-itemrow td{color:#475569;font-weight:500}
+    .csd-tbl tr.csd-tot td{font-weight:800;background:#eef2ff;border-bottom:2px solid #c7d2fe;position:sticky;top:33px;z-index:2}
+    .csd-neg{color:#dc2626}
+    .csd-foot{padding:10px 20px;border-top:1px solid #eef2f7;font-size:11px;color:#94a3b8}
+    .csd-empty{padding:34px;text-align:center;color:#94a3b8}
+  </style>
+  <div id="csDrill" class="csd-overlay">
+    <div class="csd-modal">
+      <div class="csd-head">
+        <div><div class="csd-title" id="csdTitle">Invoices</div><div class="csd-sub" id="csdSub"></div></div>
+        <button type="button" class="csd-x" id="csdClose">&times;</button>
+      </div>
+      <div class="csd-body" id="csdBody"></div>
+      <div class="csd-foot">Reads invoice base tables (OINV/INV1 + returns/credit memos) — net litres may differ slightly from the cell, which comes from the sales-analysis proc.</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function(){
+  var TERRITORY_DATA={{ territory_payload|safe }};
+  var TERRITORY=TERRITORY_DATA.map||{}, GROUP_OWNERS=TERRITORY_DATA.group_owners||{};
+  function assignedPerson(group,state){
+    group=String(group||'').trim().toUpperCase(); state=String(state||'').trim().toUpperCase();
+    return TERRITORY[group+'|'+state]||GROUP_OWNERS[group]||null;
+  }
+  function csrf(){var m=document.querySelector('meta[name=csrf-token]');return m?m.content:'';}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function fN(n){return (Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:0});}
+  function fRz(n){return '₹'+(Number(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+  function debounce(fn,ms){var t;return function(){clearTimeout(t);t=setTimeout(fn,ms);};}
+
+  var DIMS=[
+    {key:'group',label:'Main Group',sub:'GT / MT / ROI / …'},
+    {key:'state',label:'State',sub:'Full state names'},
+    {key:'person',label:'Contact Person',sub:'Assigned territory owner'},
+    {key:'product',label:'Product',sub:'Sub-group / category'},
+    {key:'item',label:'Item Name',sub:'SAP item name'},
+    {key:'customer',label:'Customer',sub:'CardName / buyer'},
+  ];
+  var DIM_LABEL={}; DIMS.forEach(function(d){DIM_LABEL[d.key]=d.label;});
+
+  var rows=[], loaded=false, err=null, expanded={};
+  var order=['group'], chosen=['group'];                 // drill order
+  var csNodeByPath={};                                   // path -> {dim:value} filters (for the invoice drill)
+  var csAllNodes={};                                     // path -> pivot node (for the Calculate popup)
+  var itemSel={};                                        // selected item paths (checkbox) → Calculate
+  var csMonthsArr=[];                                    // current rendered months (for grand-total drill range)
+  var typeF='', custF='', topN=0;
+  // Compare metrics — multi-select. Pick any combination (Litres + Pieces, Litres + Rate, …).
+  // fmt = on-screen cell text; xv = numeric value for the Excel export; lbl = small unit tag.
+  var METRICS=[
+    {k:'liters',  seg:'Litres',  lbl:'L',    hdr:'Litres',  fmt:function(L,R,P){return L?fN(Math.round(L)):'';},          xv:function(L,R,P){return Math.round(L);}},
+    {k:'revenue', seg:'Revenue', lbl:'Rev',  hdr:'Revenue', fmt:function(L,R,P){return R?fRz(Math.round(R)):'';},         xv:function(L,R,P){return Math.round(R);}},
+    {k:'realise', seg:'Realise', lbl:'₹/L',  hdr:'₹/L',     fmt:function(L,R,P){return L>0?fRz(R/L):'';},                 xv:function(L,R,P){return L>0?Math.round(R/L*100)/100:'';}},
+    {k:'pieces',  seg:'Pieces',  lbl:'pcs',  hdr:'Pieces',  fmt:function(L,R,P){return P?fN(Math.round(P)):'';},          xv:function(L,R,P){return Math.round(P);}},
+    {k:'rate',    seg:'Rate',    lbl:'₹/pc', hdr:'₹/Pc',    fmt:function(L,R,P){return P>0?fRz(R/P):'';},                 xv:function(L,R,P){return P>0?Math.round(R/P*100)/100:'';}}
+  ];
+  // Each metric pill has its own checkbox — tick any combination (Litres + Pieces + Rate, …).
+  // "Both" pills are shortcuts that toggle both metrics of their group.
+  var metricSel={liters:true, revenue:false, realise:false, pieces:false, rate:false};   // default: Litres
+  function _viewKeys(){ var ks=['liters','revenue','realise','pieces','rate'].filter(function(k){return metricSel[k];}); return ks.length?ks:['liters']; }
+  function activeMetrics(){ var ks=_viewKeys(); return METRICS.filter(function(m){return ks.indexOf(m.k)!==-1;}); }
+  function exportMetrics(){ return activeMetrics(); }   // Revenue is its own checkbox — export mirrors the ticks exactly
+  var mgAllGroups=[], mgSelected=[], mgChosen=[];         // main-group filter
+  var psAll=[], psSelected=[], psChosen=[];               // person (ASM) filter
+  function personOf(r){ return assignedPerson(String(r.main_group||'').toUpperCase(), r.state) || '—'; }
+  var skuAll=[], skuSelected=[], skuChosen=[];            // SKU pack-size filter
+  var varAll=[], varSelected=[], varChosen=[];            // Variety filter — OITM.U_Sub_Group (CANOLA / MUSTARD / SOYABEAN / …)
+  var itmAll=[], itmSel=[], itmChosen=[], itmSearch='';   // Item picker (cascades off Type/Group/Variety/Pack Size) + in-panel search
+
+  function rowVal(r,dim){
+    var g=String(r.main_group||'').toUpperCase();
+    if(dim==='group')return g||'—';
+    if(dim==='person')return assignedPerson(g,r.state)||'—';
+    if(dim==='product')return String(r.u_sub_group||'').trim().toUpperCase()||'—';
+    if(dim==='item')return String(r.item_name||'').trim().toUpperCase()||'—';
+    if(dim==='customer')return String(r.card_name||'').trim().toUpperCase()||'—';
+    return String(r.state||'').trim().toUpperCase()||'UNKNOWN';
+  }
+
+  function activeRows(){
+    var out=[], months={};
+    var mgAll=mgSelected.length===0||mgSelected.length===mgAllGroups.length;
+    var mgset={}; mgSelected.forEach(function(g){mgset[g]=1;});
+    var skuAllSel=skuSelected.length===0||skuSelected.length===skuAll.length;
+    var skuset={}; skuSelected.forEach(function(s){skuset[s]=1;});
+    var varAllSel=varSelected.length===0||varSelected.length===varAll.length;
+    var varset={}; varSelected.forEach(function(v){varset[v]=1;});
+    var itmAllSel=itmSel.length===0||itmSel.length===itmAll.length;
+    var itmset={}; itmSel.forEach(function(n){itmset[n]=1;});
+    var psAllSel=psSelected.length===0||psSelected.length===psAll.length;
+    var psset={}; psSelected.forEach(function(p){psset[p]=1;});
+    for(var i=0;i<rows.length;i++){var r=rows[i];
+      if(typeF&&String(r.u_type||'').toUpperCase()!==typeF)continue;
+      if(!mgAll&&!mgset[String(r.main_group||'').toUpperCase()])continue;
+      if(!psAllSel&&!psset[personOf(r)])continue;
+      if(!skuAllSel&&!skuset[String(r.sku||'').trim().toUpperCase()||'—'])continue;
+      if(!varAllSel&&!varset[String(r.u_sub_group||'').trim().toUpperCase()||'—'])continue;
+      if(!itmAllSel&&!itmset[String(r.item_name||'').trim().toUpperCase()||'—'])continue;
+      if(custF&&String(r.card_name||'').toLowerCase().indexOf(custF)===-1)continue;
+      if(!r.ym)continue;
+      if(!months[r.ym])months[r.ym]={ym:r.ym,label:r.mlabel||r.ym};
+      out.push(r);
+    }
+    return {rows:out, months:Object.keys(months).sort().map(function(k){return months[k];})};
+  }
+
+  function buildTree(subset,dims,depth,prefix,pfilters){
+    if(depth>=dims.length)return [];
+    var dim=dims[depth], map={}, ord=[];
+    for(var i=0;i<subset.length;i++){var r=subset[i],k=rowVal(r,dim);
+      var n=map[k]; if(!n){n=map[k]={label:k,dim:dim,byL:{},byR:{},byP:{},totL:0,totR:0,totP:0,_rows:[]};ord.push(k);}
+      var L=Number(r.liter)||0, R=Number(r.line_total)||0, P=Number(r.pcs)||0;
+      n.byL[r.ym]=(n.byL[r.ym]||0)+L; n.byR[r.ym]=(n.byR[r.ym]||0)+R; n.byP[r.ym]=(n.byP[r.ym]||0)+P;
+      n.totL+=L; n.totR+=R; n.totP+=P; n._rows.push(r);
+    }
+    return ord.map(function(k){var n=map[k]; n.path=prefix+'>'+dim+':'+k;
+      n.filters=Object.assign({},pfilters||{}); n.filters[dim]=k;   // accumulate dim→value down the path
+      csNodeByPath[n.path]=n.filters; csAllNodes[n.path]=n;         // node registry (for the Calculate popup)
+      n.kids=buildTree(n._rows,dims,depth+1,n.path,n.filters); n.leaf=!n.kids.length; delete n._rows; return n;
+    }).sort(function(a,b){return b.totL-a.totL||String(a.label).localeCompare(String(b.label));});
+  }
+
+  // One cell rendering every selected metric (Litres / Revenue / ₹L / Pieces / ₹pc), stacked.
+  function cell(L,R,P){
+    L=Number(L)||0; R=Number(R)||0; P=Number(P)||0;
+    var act=activeMetrics();
+    if(act.length===1)return act[0].fmt(L,R,P);
+    var lines=act.map(function(m,i){ var v=m.fmt(L,R,P); if(v==='')return '';
+      return '<div class="cs-mrow'+(i>0?' cs-r':'')+'">'+v+' <span class="cs-munit">'+m.lbl+'</span></div>'; }).filter(Boolean);
+    return lines.join('');
+  }
+
+  // Build the pivot tree, then — only when the FIRST drill dimension is the Item — keep the top N
+  // items by grand total (Top N Items input; blank/0 = all). buildTree already sorts top-level nodes
+  // by total litres desc, so slicing yields the biggest N.
+  function pivotTree(subset,dims){
+    csNodeByPath={}; csAllNodes={};         // rebuilt fresh each render so stale paths never drill
+    var t=buildTree(subset,dims,0,'',{});
+    if(dims[0]==='item'&&topN>0)t=t.slice(0,topN);
+    return t;
+  }
+
+  function treeRows(nodes,months,depth){
+    var html='', nM=months.length||1;
+    nodes.forEach(function(n){
+      var hasKids=!n.leaf, open=!!expanded[n.path], pad='padding-left:'+(12+depth*18)+'px';
+      var tw=hasKids?'<span class="cs-tw'+(open?' open':'')+'" data-cspath="'+esc(n.path)+'">&#9654;</span>':'<span class="cs-tw-empty"></span>';
+      var tag='<span class="cs-tag">'+esc(DIM_LABEL[n.dim]||n.dim)+'</span>';
+      // Item rows get a checkbox → select several, then Calculate to compare their Litres/Revenue/Realise.
+      var chk=(n.dim==='item')?'<input type="checkbox" class="cs-isel" title="Select to compare" data-cspath="'+esc(n.path)+'"'+(itemSel[n.path]?' checked':'')+'>':'';
+      var name='<td class="gc-name" style="'+pad+(hasKids?';cursor:pointer':'')+'" '+(hasKids?'data-cstoggle="'+esc(n.path)+'"':'')+'>'+tw+chk+tag+esc(n.label)+'</td>';
+      var cells=months.map(function(mo){
+        var L=n.byL[mo.ym]||0, R=n.byR[mo.ym]||0, P=n.byP[mo.ym]||0;
+        var clk=(L||R||P)?' class="cs-vcell" data-cspath="'+esc(n.path)+'" data-csym="'+esc(mo.ym)+'" data-cslabel="'+esc(mo.label)+'" title="Click to see the invoices behind this value"':'';
+        return '<td'+clk+'>'+cell(L,R,P)+'</td>';
+      }).join('');
+      html+='<tr>'+name+cells+'<td class="cs-grand">'+cell(n.totL,n.totR,n.totP)+'</td><td class="cs-avg">'+cell(n.totL/nM,n.totR/nM,n.totP/nM)+'</td></tr>';
+      if(hasKids&&open)html+=treeRows(n.kids,months,depth+1);
+    });
+    return html;
+  }
+
+  /* ── Item-first refine filters ──────────────────────────────────────────────
+     When the FIRST drill dimension is the Item, expose two multi-select dropdowns —
+     Product (U_Sub_Group) and SKU (U_SKU pack size) — that narrow the rows before the
+     pivot is built. Selections auto-clear when Item is no longer first.
+     opts: {mountId, itemKey, prodField, skuField, getRows, getOrder, onChange}. */
+  function makeItemRefine(opts){
+    var selProd={}, selSku={}, sig='', built=false;
+    function norm(v){return String(v==null?'':v).trim().toUpperCase()||'—';}
+    function fP(){return typeof opts.prodField==='function'?opts.prodField():opts.prodField;}
+    function fS(){return typeof opts.skuField==='function'?opts.skuField():opts.skuField;}
+    function firstIsItem(){var o=opts.getOrder()||[];return o.length>0 && o[0]===opts.itemKey;}
+    function distinct(field){var seen={},rs=opts.getRows()||[];for(var i=0;i<rs.length;i++)seen[norm(rs[i][field])]=1;return Object.keys(seen).sort();}
+    function filterRows(rs){
+      if(!firstIsItem())return rs;
+      var hp=Object.keys(selProd).length, hs=Object.keys(selSku).length;
+      if(!hp&&!hs)return rs;
+      var pf=fP(), sf=fS();
+      return (rs||[]).filter(function(r){return (!hp||selProd[norm(r[pf])])&&(!hs||selSku[norm(r[sf])]);});
+    }
+    function lbl(name,sel){var n=Object.keys(sel).length;return n?name+' ('+n+')':name;}
+    function syncChecks(list,sel){list.querySelectorAll('.com-dp-item').forEach(function(it){var v=it.querySelector('.com-dp-name').textContent;var on=!!sel[v];it.querySelector('input').checked=on;it.classList.toggle('checked',on);});}
+    function buildOne(name,field,sel){
+      var vals=distinct(field);
+      var box=document.createElement('div');box.className='com-drill-box';
+      var btn=document.createElement('button');btn.type='button';btn.className='com-drill-btn ir-btn';
+      btn.innerHTML='<span class="ir-lbl"></span><span class="com-caret">&#9662;</span>';
+      btn.querySelector('.ir-lbl').textContent=lbl(name,sel);
+      var panel=document.createElement('div');panel.className='com-drill-panel';
+      var head=document.createElement('div');head.className='com-dp-head';
+      var aAll=document.createElement('a');aAll.textContent='Select All';
+      var aClr=document.createElement('a');aClr.textContent='Clear All';
+      head.appendChild(aAll);head.appendChild(aClr);
+      var list=document.createElement('div');list.className='com-dp-list';
+      vals.forEach(function(v){
+        var it=document.createElement('label');it.className='com-dp-item'+(sel[v]?' checked':'');
+        it.innerHTML='<input type="checkbox" '+(sel[v]?'checked':'')+'><span class="com-dp-name">'+esc(v)+'</span>';
+        it.querySelector('input').addEventListener('change',function(){
+          if(this.checked)sel[v]=1;else delete sel[v];
+          it.classList.toggle('checked',this.checked);
+          btn.querySelector('.ir-lbl').textContent=lbl(name,sel);
+          opts.onChange&&opts.onChange();
+        });
+        list.appendChild(it);
+      });
+      aAll.addEventListener('click',function(e){e.stopPropagation();vals.forEach(function(v){sel[v]=1;});syncChecks(list,sel);btn.querySelector('.ir-lbl').textContent=lbl(name,sel);opts.onChange&&opts.onChange();});
+      aClr.addEventListener('click',function(e){e.stopPropagation();Object.keys(sel).forEach(function(k){delete sel[k];});syncChecks(list,sel);btn.querySelector('.ir-lbl').textContent=lbl(name,sel);opts.onChange&&opts.onChange();});
+      btn.addEventListener('click',function(e){e.stopPropagation();var open=panel.classList.contains('open');var wrap=document.getElementById(opts.mountId);if(wrap)wrap.querySelectorAll('.com-drill-panel').forEach(function(p){p.classList.remove('open');});if(!open){var r=btn.getBoundingClientRect();panel.style.position='fixed';panel.style.top=(r.bottom+6)+'px';panel.style.left=r.left+'px';panel.style.zIndex='4000';panel.classList.add('open');}});
+      panel.addEventListener('click',function(e){e.stopPropagation();});
+      panel.appendChild(head);panel.appendChild(list);
+      box.appendChild(btn);box.appendChild(panel);
+      return box;
+    }
+    function sync(){
+      var wrap=document.getElementById(opts.mountId);if(!wrap)return;
+      if(!firstIsItem()){if(built||wrap.classList.contains('show')){wrap.classList.remove('show');wrap.innerHTML='';selProd={};selSku={};built=false;sig='';}return;}
+      var newSig=(opts.getRows()||[]).length+'|'+distinct(fP()).join(',')+'|'+distinct(fS()).join(',');
+      wrap.classList.add('show');
+      if(built&&newSig===sig)return;
+      sig=newSig;built=true;wrap.innerHTML='';
+      var cap=document.createElement('span');cap.className='ir-cap';cap.textContent='Filter items ›';wrap.appendChild(cap);
+      wrap.appendChild(buildOne('Product',fP(),selProd));
+      wrap.appendChild(buildOne('SKU',fS(),selSku));
+    }
+    function reset(){selProd={};selSku={};built=false;sig='';var wrap=document.getElementById(opts.mountId);if(wrap){wrap.classList.remove('show');wrap.innerHTML='';}}
+    return {sync:sync, filterRows:filterRows, reset:reset};
+  }
+  document.addEventListener('click',function(){document.querySelectorAll('.cd-refine .com-drill-panel.open').forEach(function(p){p.classList.remove('open');});});
+  var csRefine=makeItemRefine({mountId:'csRefine',itemKey:'item',prodField:'u_sub_group',skuField:'sku',
+    getRows:function(){return activeRows().rows;},getOrder:function(){return order;},onChange:render});
+
+  // ── Month-vs-Month (A vs B) mode ─────────────────────────────────────────────
+  var cmpMode='trend', monthsA=[], monthsB=[];   // 'trend' | 'ab'; period month sets (ym[])
+  function availYms(){ var s={}; rows.forEach(function(r){if(r.ym)s[r.ym]=r.mlabel||r.ym;}); return Object.keys(s).sort().map(function(k){return {ym:k,label:s[k]};}); }
+  function periodSum(n,yms){ var L=0,R=0,P=0; for(var i=0;i<yms.length;i++){var y=yms[i]; L+=n.byL[y]||0; R+=n.byR[y]||0; P+=n.byP[y]||0;} return {L:L,R:R,P:P}; }
+  function metricNum(k,L,R,P){ if(k==='liters')return L; if(k==='revenue')return R; if(k==='realise')return L>0?R/L:0; if(k==='pieces')return P; if(k==='rate')return P>0?R/P:0; return 0; }
+  function fmtDelta(k,d){ var neg=d<0, x=Math.abs(d), s;
+    if(k==='revenue')s='₹'+Math.round(x).toLocaleString('en-IN');
+    else if(k==='realise'||k==='rate')s='₹'+x.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    else s=Math.round(x).toLocaleString('en-IN');
+    return '<span class="'+(neg?'cs-down':'cs-up')+'">'+(neg?'−':'+')+s+'</span>'; }
+  function abDiffCell(a,b){ var act=activeMetrics(), out=act.map(function(m,i){ var av=metricNum(m.k,a.L,a.R,a.P), bv=metricNum(m.k,b.L,b.R,b.P); if(!av&&!bv)return ''; return '<div class="'+(i>0?'cs-r':'')+'">'+fmtDelta(m.k,bv-av)+(act.length>1?' <span class="cs-munit">'+m.lbl+'</span>':'')+'</div>'; }).filter(Boolean).join(''); return out||'—'; }
+  function abPctCell(a,b){ var act=activeMetrics(), out=act.map(function(m,i){ var av=metricNum(m.k,a.L,a.R,a.P), bv=metricNum(m.k,b.L,b.R,b.P); if(!av&&!bv)return ''; var pct=av?((bv-av)/Math.abs(av)*100):null; var s=(pct===null)?'—':((pct>=0?'+':'')+pct.toFixed(1)+'%'); var cls=(pct===null)?'':(pct>=0?'cs-up':'cs-down'); return '<div class="'+(i>0?'cs-r ':'')+cls+'">'+s+(act.length>1?' <span class="cs-munit">'+m.lbl+'</span>':'')+'</div>'; }).filter(Boolean).join(''); return out||'—'; }
+  function abPeriods(){
+    var avail=availYms().map(function(x){return x.ym;});
+    var A=monthsA.filter(function(y){return avail.indexOf(y)!==-1;});
+    var B=monthsB.filter(function(y){return avail.indexOf(y)!==-1;});
+    if(!A.length&&!B.length){ var h=Math.ceil(avail.length/2); A=avail.slice(0,h); B=avail.slice(h); }   // sensible default split
+    return {A:A,B:B};
+  }
+  function periodLabel(yms){ var map={}; availYms().forEach(function(x){map[x.ym]=x.label;}); if(!yms.length)return '—'; if(yms.length<=2)return yms.map(function(y){return map[y]||y;}).join(', '); return (map[yms[0]]||yms[0])+' … '+(map[yms[yms.length-1]]||yms[yms.length-1]); }
+  function treeRowsAB(nodes,A,B,depth){
+    var html='';
+    nodes.forEach(function(n){
+      var hasKids=!n.leaf, open=!!expanded[n.path], pad='padding-left:'+(12+depth*18)+'px';
+      var tw=hasKids?'<span class="cs-tw'+(open?' open':'')+'" data-cspath="'+esc(n.path)+'">&#9654;</span>':'<span class="cs-tw-empty"></span>';
+      var tag='<span class="cs-tag">'+esc(DIM_LABEL[n.dim]||n.dim)+'</span>';
+      var chk=(n.dim==='item')?'<input type="checkbox" class="cs-isel" title="Select to compare" data-cspath="'+esc(n.path)+'"'+(itemSel[n.path]?' checked':'')+'>':'';
+      var name='<td class="gc-name" style="'+pad+(hasKids?';cursor:pointer':'')+'" '+(hasKids?'data-cstoggle="'+esc(n.path)+'"':'')+'>'+tw+chk+tag+esc(n.label)+'</td>';
+      var pa=periodSum(n,A), pb=periodSum(n,B);
+      var aCells=A.map(function(ym){return '<td>'+cell(n.byL[ym]||0,n.byR[ym]||0,n.byP[ym]||0)+'</td>';}).join('');
+      var bCells=B.map(function(ym,bi){return '<td'+(bi===0?' class="cs-absplit"':'')+'>'+cell(n.byL[ym]||0,n.byR[ym]||0,n.byP[ym]||0)+'</td>';}).join('');
+      html+='<tr>'+name+aCells+'<td class="cs-grand">'+cell(pa.L,pa.R,pa.P)+'</td>'
+        +bCells+'<td class="cs-grand">'+cell(pb.L,pb.R,pb.P)+'</td>'
+        +'<td class="cs-grand">'+abDiffCell(pa,pb)+'</td><td class="cs-avg">'+abPctCell(pa,pb)+'</td></tr>';
+      if(hasKids&&open)html+=treeRowsAB(n.kids,A,B,depth+1);
+    });
+    return html;
+  }
+  function renderAB(){
+    document.getElementById('csDrillLabel').textContent=order.length?order.map(function(k){return DIM_LABEL[k];}).join(' › '):'— none —';
+    var head=document.getElementById('csHead'), body=document.getElementById('csBody');
+    if(err){head.innerHTML='';body.innerHTML='<tr><td class="cs-empty">Could not load ('+esc(err)+').</td></tr>';return;}
+    if(!loaded){head.innerHTML='';body.innerHTML='<tr><td class="cs-empty">Pick a period and click Fetch.</td></tr>';return;}
+    var a=activeRows(); csRefine.sync(); var arows=csRefine.filterRows(a.rows); var dims=order.length?order:['group'];
+    document.getElementById('csTopWrap').style.display=(dims[0]==='item')?'':'none';
+    var pr=abPeriods(), A=pr.A, B=pr.B, rowLabel=dims.map(function(k){return DIM_LABEL[k];}).join(' › ');
+    var lm={}; availYms().forEach(function(x){lm[x.ym]=x.label;});
+    head.innerHTML='<tr><th class="gc-name">'+esc(rowLabel)+'</th>'
+      +A.map(function(ym){return '<th>'+esc(lm[ym]||ym)+'</th>';}).join('')
+      +'<th class="cs-grand">A · Total</th>'
+      +B.map(function(ym,bi){return '<th'+(bi===0?' class="cs-absplit"':'')+'>'+esc(lm[ym]||ym)+'</th>';}).join('')
+      +'<th class="cs-grand">B · Total</th>'
+      +'<th class="cs-grand">Difference (B−A)</th><th class="cs-avg-h">% Change</th></tr>';
+    if(!arows.length){body.innerHTML='<tr><td class="cs-empty" colspan="'+(A.length+B.length+5)+'">No sales in this selection.</td></tr>';return;}
+    var tree=pivotTree(arows,dims);
+    var mTot={}; A.concat(B).forEach(function(ym){mTot[ym]={L:0,R:0,P:0};});
+    var TA={L:0,R:0,P:0}, TB={L:0,R:0,P:0};
+    tree.forEach(function(n){
+      var pa=periodSum(n,A),pb=periodSum(n,B); TA.L+=pa.L;TA.R+=pa.R;TA.P+=pa.P; TB.L+=pb.L;TB.R+=pb.R;TB.P+=pb.P;
+      A.concat(B).forEach(function(ym){mTot[ym].L+=n.byL[ym]||0;mTot[ym].R+=n.byR[ym]||0;mTot[ym].P+=n.byP[ym]||0;});
+    });
+    var totRow='<tr class="cs-total"><td class="gc-name">TOTAL</td>'
+      +A.map(function(ym){var m=mTot[ym];return '<td>'+cell(m.L,m.R,m.P)+'</td>';}).join('')
+      +'<td class="cs-grand">'+cell(TA.L,TA.R,TA.P)+'</td>'
+      +B.map(function(ym,bi){var m=mTot[ym];return '<td'+(bi===0?' class="cs-absplit"':'')+'>'+cell(m.L,m.R,m.P)+'</td>';}).join('')
+      +'<td class="cs-grand">'+cell(TB.L,TB.R,TB.P)+'</td>'
+      +'<td class="cs-grand">'+abDiffCell(TA,TB)+'</td><td class="cs-avg">'+abPctCell(TA,TB)+'</td></tr>';
+    body.innerHTML=totRow+treeRowsAB(tree,A,B,0);
+    updateCalcBtn();
+  }
+
+  function render(){
+    if(cmpMode==='ab'){ renderAB(); return; }
+    document.getElementById('csDrillLabel').textContent=order.length?order.map(function(k){return DIM_LABEL[k];}).join(' › '):'— none —';
+    var body=document.getElementById('csBody'), head=document.getElementById('csHead');
+    if(err){head.innerHTML='';body.innerHTML='<tr><td class="cs-empty">Could not load ('+esc(err)+').</td></tr>';return;}
+    if(!loaded){head.innerHTML='';body.innerHTML='<tr><td class="cs-empty">Pick a period and click Fetch.</td></tr>';return;}
+    var a=activeRows(), months=a.months, dims=order.length?order:['group'];
+    csRefine.sync();
+    var arows=csRefine.filterRows(a.rows);   // + Product/SKU narrowing when Item is first
+    // Top N Items input is only relevant when the Item is the first drill dimension.
+    document.getElementById('csTopWrap').style.display=(dims[0]==='item')?'':'none';
+    var nMonths=months.length||1;
+    var rowLabel=dims.map(function(k){return DIM_LABEL[k];}).join(' › ');
+    head.innerHTML='<tr><th class="gc-name">'+esc(rowLabel)+'</th>'
+      +months.map(function(mo){return '<th>'+esc(mo.label)+'</th>';}).join('')
+      +'<th class="cs-grand">Grand Total</th><th class="cs-avg-h">Avg Sales</th></tr>';
+    if(!arows.length){body.innerHTML='<tr><td class="cs-empty" colspan="'+(months.length+3)+'">No sales in this selection.</td></tr>';return;}
+    var tree=pivotTree(arows,dims);          // top-level nodes, sliced to Top N when Item is first
+    // Totals row — summed over the DISPLAYED top-level nodes, so Top N totals reflect the shown items.
+    var colL={},colR={},colP={},gL=0,gR=0,gP=0;
+    tree.forEach(function(n){months.forEach(function(mo){colL[mo.ym]=(colL[mo.ym]||0)+(n.byL[mo.ym]||0);colR[mo.ym]=(colR[mo.ym]||0)+(n.byR[mo.ym]||0);colP[mo.ym]=(colP[mo.ym]||0)+(n.byP[mo.ym]||0);});gL+=n.totL;gR+=n.totR;gP+=n.totP;});
+    var totCells=months.map(function(mo){return '<td>'+cell(colL[mo.ym]||0,colR[mo.ym]||0,colP[mo.ym]||0)+'</td>';}).join('');
+    var totRow='<tr class="cs-total"><td class="gc-name">TOTAL</td>'+totCells+'<td class="cs-grand">'+cell(gL,gR,gP)+'</td><td class="cs-avg">'+cell(gL/nMonths,gR/nMonths,gP/nMonths)+'</td></tr>';
+    body.innerHTML=totRow+treeRows(tree,months,0);   // TOTAL pinned on top, then the drilldown rows
+    updateCalcBtn();                                  // refresh the Calculate (N) button for valid selections
+  }
+
+  // ── Invoice drill: the invoices + item names behind a clicked value cell ─────
+  function ymRange(ym){
+    var p=String(ym||'').split('-'), y=+p[0], m=+p[1];
+    if(!y||!m)return null;
+    var mm=String(m).padStart(2,'0'), last=new Date(y,m,0).getDate();
+    return {start:y+'-'+mm+'-01', end:y+'-'+mm+'-'+String(last).padStart(2,'0')};
+  }
+  function drillTitle(filters){
+    var parts=order.map(function(k){return filters[k];}).filter(Boolean);
+    if(!parts.length)for(var k in filters)parts.push(filters[k]);
+    return parts.join('  ›  ');
+  }
+  function csdMoney0(n){ n=Number(n)||0; var s=fN(Math.abs(Math.round(n))); return n<0?'<span class="csd-neg">('+s+')</span>':s; }
+  function csdRupee(n){ n=Number(n)||0; var s='₹'+fN(Math.abs(Math.round(n))); return n<0?'<span class="csd-neg">('+s+')</span>':s; }
+  function csdRate(n){ n=Number(n)||0; return n?'₹'+n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}):''; }
+  function csdBox(n){ n=Number(n)||0; if(!n)return ''; var s=Math.abs(n).toLocaleString('en-IN',{maximumFractionDigits:2}); return n<0?'<span class="csd-neg">('+s+')</span>':s; }
+  function csdRlz(val,lit){ lit=Number(lit)||0; if(!lit)return ''; var v=(Number(val)||0)/lit; var s='₹'+Math.abs(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}); return v<0?'<span class="csd-neg">('+s+')</span>':s; }
+  function openDrill(path,ym,mlabel){
+    var filters=csNodeByPath[path]; if(!filters)return;
+    var rng=ymRange(ym); if(!rng)return;
+    document.getElementById('csdTitle').textContent=drillTitle(filters);
+    document.getElementById('csdSub').textContent=mlabel+' · loading invoices…';
+    document.getElementById('csdBody').innerHTML='<div class="csd-empty">Loading…</div>';
+    document.getElementById('csDrill').classList.add('open');
+    var payload={start_date:rng.start,end_date:rng.end,seg:typeF||''};
+    for(var k in filters)payload[k]=filters[k];
+    fetch('/realise/api/compare-docs/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},body:JSON.stringify(payload)})
+      .then(function(r){return r.ok?r.json():{status:'error',error:'HTTP '+r.status};})
+      .then(function(p){ renderDrill(p,mlabel); })
+      .catch(function(){ document.getElementById('csdBody').innerHTML='<div class="csd-empty">Could not load invoices.</div>'; });
+  }
+  function renderDrill(p,mlabel){
+    var sub=document.getElementById('csdSub'), bodyEl=document.getElementById('csdBody');
+    if(!p||p.status!=='ok'){ sub.textContent=mlabel; bodyEl.innerHTML='<div class="csd-empty">'+esc((p&&p.error)||'No data.')+'</div>'; return; }
+    var docs=p.data||[];
+    if(!docs.length){ sub.textContent=mlabel+' · 0 invoices'; bodyEl.innerHTML='<div class="csd-empty">No invoices found for this selection.</div>'; return; }
+    var totL=0, totBox=0, totVal=0, rowsHtml='';
+    docs.forEach(function(d,di){
+      var items=d.items||[];
+      // Invoice header row — click to expand/collapse its item lines (hidden by default).
+      rowsHtml+='<tr class="csd-docrow" data-doc="'+di+'"><td><span class="csd-cx">&#9654;</span>'+esc(d.doc_num||'—')+'</td>'
+        +'<td>'+esc(d.doc_date||'')+'</td><td>'+esc(d.party||'')+'</td>'
+        +'<td class="csd-hint">'+items.length+' item(s)</td>'
+        +'<td class="num">'+csdBox(d.boxes)+'</td><td class="num"></td>'
+        +'<td class="num">'+csdRupee(d.taxable)+'</td><td class="num">'+csdMoney0(d.litres)+'</td>'
+        +'<td class="num">'+csdRlz(d.taxable,d.litres)+'</td></tr>';
+      items.forEach(function(it){
+        rowsHtml+='<tr class="csd-itemrow" data-doc="'+di+'" style="display:none"><td></td><td></td><td></td>'
+          +'<td>'+esc(it.name||'')+'</td><td class="num">'+csdBox(it.boxes)+'</td>'
+          +'<td class="num">'+csdRate(it.rate)+'</td><td class="num">'+csdRupee(it.taxable)+'</td>'
+          +'<td class="num">'+csdMoney0(it.litres)+'</td>'
+          +'<td class="num">'+csdRlz(it.taxable,it.litres)+'</td></tr>';
+      });
+      totL+=Number(d.litres)||0; totBox+=Number(d.boxes)||0; totVal+=Number(d.taxable)||0;
+    });
+    // TOTAL row pinned at the top (right under the header), before the invoice list.
+    var totRow='<tr class="csd-tot"><td colspan="4">TOTAL · '+docs.length+' invoice(s)</td>'
+      +'<td class="num">'+csdBox(totBox)+'</td><td class="num"></td>'
+      +'<td class="num">'+csdRupee(totVal)+'</td><td class="num">'+csdMoney0(totL)+'</td>'
+      +'<td class="num">'+csdRlz(totVal,totL)+'</td></tr>';
+    var html='<table class="csd-tbl"><thead><tr><th>Doc No</th><th>Date</th><th>Party</th><th>Item Name</th>'
+      +'<th class="num">Box Qty</th><th class="num">Rate/Bottle</th><th class="num">Taxable Value</th>'
+      +'<th class="num">Litres</th><th class="num">Realise ₹/L</th></tr></thead><tbody>'
+      +totRow+rowsHtml+'</tbody></table>';
+    bodyEl.innerHTML=html;
+    sub.textContent=mlabel+' · '+docs.length+' invoice(s) · '+fN(Math.round(totL))+' L · ₹'+fN(Math.round(totVal))+' taxable · '+csdRlz(totVal,totL).replace(/<[^>]+>/g,'')+'/L';
+  }
+  // Expand / collapse an invoice's item rows.
+  document.getElementById('csdBody').addEventListener('click',function(e){
+    var dr=e.target.closest('.csd-docrow'); if(!dr)return;
+    var di=dr.getAttribute('data-doc'), open=dr.classList.toggle('open');
+    this.querySelectorAll('.csd-itemrow[data-doc="'+di+'"]').forEach(function(r){ r.style.display=open?'':'none'; });
+  });
+  function closeDrill(){ document.getElementById('csDrill').classList.remove('open'); }
+  document.getElementById('csBody').addEventListener('click',function(e){
+    var td=e.target.closest('.cs-vcell'); if(!td)return;
+    openDrill(td.getAttribute('data-cspath'),td.getAttribute('data-csym'),td.getAttribute('data-cslabel'));
+  });
+  document.getElementById('csdClose').addEventListener('click',closeDrill);
+  document.getElementById('csDrill').addEventListener('click',function(e){ if(e.target===this)closeDrill(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'){closeDrill();closeCalc();} });
+
+  /* ── Multi-item "Calculate": compare ticked items' Litres / Revenue / Realise ── */
+  document.getElementById('csBody').addEventListener('change',function(e){
+    var cb=e.target; if(!cb||!cb.classList||!cb.classList.contains('cs-isel'))return;
+    var p=cb.getAttribute('data-cspath'); if(cb.checked)itemSel[p]=1; else delete itemSel[p];
+    updateCalcBtn();
+  });
+  function selCount(){ var n=0; for(var k in itemSel)if(csAllNodes[k])n++; return n; }
+  function updateCalcBtn(){
+    var n=selCount();
+    document.getElementById('csCalcN').textContent=n;
+    document.getElementById('csCalcWrap').style.display=n?'':'none';
+  }
+  function splitItemLbl(v){ v=v||''; var i=v.indexOf(' — '); return i>=0?[v.slice(0,i),v.slice(i+3)]:['',v]; }
+  function calcSummaryAoa(){
+    var nM=(activeRows().months.length)||1;            // months in the current window → monthly average
+    var HD=function(v){return {value:v,bold:true,fill:'0F172A',color:'FFFFFF'};};
+    var TB=function(v){return {value:v,bold:true};};
+    function rlz(rv,lt){return lt>0?Math.round(rv/lt*100)/100:'';}
+    var out=[[HD('Item Code'),HD('Item Name'),HD('Litres'),HD('Revenue'),HD('Realise ₹/L'),
+              HD('Avg Litres'),HD('Avg Revenue'),HD('Avg ₹/L')]];
+    var gL=0,gR=0,cnt=0;
+    for(var p in itemSel){ var n=csAllNodes[p]; if(!n)continue; cnt++;
+      var s=splitItemLbl(n.label), lt=n.totL||0, rv=n.totR||0; gL+=lt; gR+=rv;
+      out.push([s[0],s[1],Math.round(lt),Math.round(rv),rlz(rv,lt),
+                Math.round(lt/nM),Math.round(rv/nM),rlz(rv,lt)]); }
+    out.push([TB('TOTAL'),TB('('+cnt+' item'+(cnt===1?'':'s')+')'),TB(Math.round(gL)),TB(Math.round(gR)),TB(rlz(gR,gL)),
+              TB(Math.round(gL/nM)),TB(Math.round(gR/nM)),TB(rlz(gR,gL))]);
+    return {aoa:out, count:cnt, litres:gL, revenue:gR, months:nM};
+  }
+  function calcRenderTable(aoa){
+    var h='<table class="csd-tbl">';
+    aoa.forEach(function(row,ri){
+      var isHdr=(ri===0), isTot=(!isHdr && row[0]&&typeof row[0]==='object'&&row[0].bold);
+      h+='<tr class="'+(isHdr?'csd-hdr':(isTot?'csd-tot':''))+'">';
+      row.forEach(function(cell,ci){
+        var v=(cell&&typeof cell==='object')?cell.value:cell;
+        var disp=(typeof v==='number')?v.toLocaleString('en-IN'):(v==null?'':String(v));
+        h+='<td class="'+(ci<2?'l':'num')+'">'+esc(disp)+'</td>';
+      });
+      h+='</tr>';
+    });
+    return h+'</table>';
+  }
+  function openCalc(){
+    var d=calcSummaryAoa();
+    if(!d.count){ window.alert('Tick at least one item (checkbox on the Item rows) first.'); return; }
+    document.getElementById('csCalcSub').textContent=d.count+' item'+(d.count===1?'':'s')+' · '+fN(Math.round(d.litres))+' L · ₹'+fN(Math.round(d.revenue))+' · '+(d.litres>0?fRz(d.revenue/d.litres):'₹0')+'/L · avg over '+d.months+' month'+(d.months===1?'':'s');
+    document.getElementById('csCalcBody').innerHTML=calcRenderTable(d.aoa);
+    document.getElementById('csCalc2').classList.add('open');
+  }
+  function closeCalc(){ document.getElementById('csCalc2').classList.remove('open'); }
+  function calcExcel(){
+    var d=calcSummaryAoa(); if(!d.count)return;
+    fetch('/realise/api/export-xlsx/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({filename:'Oil_Selected_Items',sheets:[{name:'Selected Items',rows:d.aoa}]})})
+      .then(function(r){return r.ok?r.blob():null;})
+      .then(function(b){ if(!b){window.alert('Export failed.');return;} var u=URL.createObjectURL(b),el=document.createElement('a');el.href=u;el.download='Oil_Selected_Items.xlsx';document.body.appendChild(el);el.click();el.remove();URL.revokeObjectURL(u); });
+  }
+  document.getElementById('csCalc').addEventListener('click',openCalc);
+  document.getElementById('csCalcClose').addEventListener('click',closeCalc);
+  document.getElementById('csCalcXlsx').addEventListener('click',calcExcel);
+  document.getElementById('csCalc2').addEventListener('click',function(e){ if(e.target===this)closeCalc(); });
+
+  function rebuildMgList(){
+    var seen={}; mgAllGroups=[];
+    rows.forEach(function(r){var g=String(r.main_group||'').toUpperCase()||'—'; if(!seen[g]){seen[g]=1;mgAllGroups.push(g);}});
+    mgAllGroups.sort();
+    mgSelected=mgAllGroups.slice();           // default: all
+    renderMgList(); updateMgLabel();
+  }
+  function updateMgLabel(){
+    var el=document.getElementById('csMgLabel');
+    el.textContent=(mgSelected.length===0||mgSelected.length===mgAllGroups.length)?'All groups':(mgSelected.length+' group(s)');
+  }
+  function renderMgList(){
+    var list=document.getElementById('csMgList'); list.innerHTML='';
+    mgAllGroups.forEach(function(g){
+      var on=mgChosen.indexOf(g)!==-1;
+      var item=document.createElement('label'); item.className='com-dp-item'+(on?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(on?'checked':'')+'><span class="com-dp-name">'+esc(g)+'</span><span class="com-pos">&#10003;</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=mgChosen.indexOf(g); if(this.checked){if(i===-1)mgChosen.push(g);}else if(i!==-1)mgChosen.splice(i,1);
+        renderMgList();
+      });
+      list.appendChild(item);
+    });
+  }
+  // ── Person (ASM) filter — the territory owner for each row's group+state ──
+  function rebuildPsList(){
+    var seen={}; psAll=[];
+    rows.forEach(function(r){var p=personOf(r); if(!seen[p]){seen[p]=1;psAll.push(p);}});
+    psAll.sort();
+    psSelected=psAll.slice();                  // default: all
+    renderPsList(); updatePsLabel();
+  }
+  function updatePsLabel(){
+    var el=document.getElementById('csPsLabel');
+    el.textContent=(psSelected.length===0||psSelected.length===psAll.length)?'All persons':(psSelected.length===1?psSelected[0]:psSelected.length+' persons');
+  }
+  function renderPsList(){
+    var list=document.getElementById('csPsList'); list.innerHTML='';
+    psAll.forEach(function(p){
+      var on=psChosen.indexOf(p)!==-1;
+      var item=document.createElement('label'); item.className='com-dp-item'+(on?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(on?'checked':'')+'><span class="com-dp-name">'+esc(p)+'</span><span class="com-pos">&#10003;</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=psChosen.indexOf(p); if(this.checked){if(i===-1)psChosen.push(p);}else if(i!==-1)psChosen.splice(i,1);
+        renderPsList();
+      });
+      list.appendChild(item);
+    });
+  }
+  // ── SKU pack-size filter (distinct OITM.U_SKU pack sizes: 1 LTR, 5 LTR, 700 GMS, …) ──
+  function skuSortKey(s){ var m=/(\d+(?:\.\d+)?)/.exec(s); return m?parseFloat(m[1]):1e9; }
+  function rebuildSkuList(){
+    var wasAll=(skuSelected.length===0||skuSelected.length===skuAll.length), prev=setOf(skuSelected);
+    var seen={}; skuAll=[];
+    facetRows('sku').forEach(function(r){var s=String(r.sku||'').trim().toUpperCase()||'—'; if(!seen[s]){seen[s]=1;skuAll.push(s);}});
+    skuAll.sort(function(a,b){return skuSortKey(a)-skuSortKey(b)||a.localeCompare(b);});
+    skuSelected = wasAll ? skuAll.slice() : skuAll.filter(function(s){return prev[s];});   // preserve picks / "all"
+    renderSkuList(); updateSkuLabel();
+  }
+  function updateSkuLabel(){
+    document.getElementById('csSkuLabel').textContent=
+      (skuSelected.length===0||skuSelected.length===skuAll.length)?'All sizes':(skuSelected.length+' size(s)');
+  }
+  function renderSkuList(){
+    var list=document.getElementById('csSkuList'); list.innerHTML='';
+    skuAll.forEach(function(s){
+      var on=skuChosen.indexOf(s)!==-1;
+      var item=document.createElement('label'); item.className='com-dp-item'+(on?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(on?'checked':'')+'><span class="com-dp-name">'+esc(s)+'</span><span class="com-pos">&#10003;</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=skuChosen.indexOf(s); if(this.checked){if(i===-1)skuChosen.push(s);}else if(i!==-1)skuChosen.splice(i,1);
+        renderSkuList();
+      });
+      list.appendChild(item);
+    });
+  }
+
+  // ── Variety filter (distinct OITM.U_Variety: KACCHI GHANI / REFINED / COLD PRESS / …) ──
+  function rebuildVarList(){
+    var wasAll=(varSelected.length===0||varSelected.length===varAll.length), prev=setOf(varSelected);
+    var seen={}, vtype={}; varAll=[];   // vtype: variety -> category rank (Premium first, then Commodity)
+    facetRows('variety').forEach(function(r){
+      var v=String(r.u_sub_group||'').trim().toUpperCase()||'—';
+      if(!seen[v]){seen[v]=1;varAll.push(v);}
+      var t=String(r.u_type||'').trim().toUpperCase(), rank=(t==='PREMIUM')?0:(t==='COMMODITY')?1:2;
+      if(vtype[v]===undefined||rank<vtype[v])vtype[v]=rank;   // if a variety spans both, Premium wins
+    });
+    varAll.sort(function(a,b){
+      var ra=(vtype[a]===undefined?2:vtype[a]), rb=(vtype[b]===undefined?2:vtype[b]);
+      return ra-rb||a.localeCompare(b);     // Premium varieties first, then Commodity, then A–Z
+    });
+    varSelected = wasAll ? varAll.slice() : varAll.filter(function(v){return prev[v];});   // preserve picks / "all"
+    renderVarList(); updateVarLabel();
+  }
+  function updateVarLabel(){
+    document.getElementById('csVarLabel').textContent=
+      (varSelected.length===0||varSelected.length===varAll.length)?'All varieties':(varSelected.length===1?varSelected[0]:varSelected.length+' varieties');
+  }
+  function renderVarList(){
+    var list=document.getElementById('csVarList'); list.innerHTML='';
+    varAll.forEach(function(v){
+      var on=varChosen.indexOf(v)!==-1;
+      var item=document.createElement('label'); item.className='com-dp-item'+(on?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(on?'checked':'')+'><span class="com-dp-name">'+esc(v)+'</span><span class="com-pos">&#10003;</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=varChosen.indexOf(v); if(this.checked){if(i===-1)varChosen.push(v);}else if(i!==-1)varChosen.splice(i,1);
+        renderVarList();
+      });
+      list.appendChild(item);
+    });
+  }
+
+  // ── Item picker — cascades: lists only items that survive the Type / Main Group / Variety /
+  //    Pack Size / Customer filters (everything except the item picker itself), so after you
+  //    pick varieties this shows just those varieties' items to choose from. ──────────────────
+  function setOf(arr){var o={};for(var i=0;i<arr.length;i++)o[arr[i]]=1;return o;}
+  // Faceted cross-filtering: rows passing every active filter EXCEPT the named dimension, so
+  // the Variety / Pack Size / Items lists each reflect the others' current selections (pick a
+  // variety → sizes & items narrow to it; pick a size → varieties & items narrow; and so on).
+  function facetRows(except){
+    var mgAll=mgSelected.length===0||mgSelected.length===mgAllGroups.length, mgset=setOf(mgSelected);
+    var psAllSel=psSelected.length===0||psSelected.length===psAll.length, psset=setOf(psSelected);
+    var skuAllSel=skuSelected.length===0||skuSelected.length===skuAll.length, skuset=setOf(skuSelected);
+    var varAllSel=varSelected.length===0||varSelected.length===varAll.length, varset=setOf(varSelected);
+    var itmAllSel=itmSel.length===0||itmSel.length===itmAll.length, itmset=setOf(itmSel);
+    var out=[];
+    for(var i=0;i<rows.length;i++){var r=rows[i];
+      if(except!=='type'&&typeF&&String(r.u_type||'').toUpperCase()!==typeF)continue;
+      if(except!=='mg'&&!mgAll&&!mgset[String(r.main_group||'').toUpperCase()])continue;
+      if(except!=='person'&&!psAllSel&&!psset[personOf(r)])continue;
+      if(except!=='sku'&&!skuAllSel&&!skuset[String(r.sku||'').trim().toUpperCase()||'—'])continue;
+      if(except!=='variety'&&!varAllSel&&!varset[String(r.u_sub_group||'').trim().toUpperCase()||'—'])continue;
+      if(except!=='item'&&!itmAllSel&&!itmset[String(r.item_name||'').trim().toUpperCase()||'—'])continue;
+      if(custF&&String(r.card_name||'').toLowerCase().indexOf(custF)===-1)continue;
+      out.push(r);
+    }
+    return out;
+  }
+  function rebuildItemList(){
+    var wasAll=(itmSel.length===0||itmSel.length===itmAll.length);   // preserve an "all" selection
+    var prev=setOf(itmSel);
+    var seen={}; itmAll=[];
+    facetRows('item').forEach(function(r){var n=String(r.item_name||'').trim().toUpperCase()||'—'; if(!seen[n]){seen[n]=1;itmAll.push(n);}});
+    itmAll.sort(function(a,b){return a.localeCompare(b);});
+    itmSel = wasAll ? itmAll.slice() : itmAll.filter(function(n){return prev[n];});   // keep explicit picks still in range
+    renderItemList(); updateItemLabel();
+  }
+  // Rebuild all linked lists so a change in any one re-facets the others.
+  function refreshFacets(){ rebuildVarList(); rebuildSkuList(); rebuildItemList(); }
+  function updateItemLabel(){
+    document.getElementById('csItmLabel').textContent=
+      (itmSel.length===0||itmSel.length===itmAll.length)?'All items':(itmSel.length+' item(s)');
+  }
+  function renderItemList(){
+    var list=document.getElementById('csItmList'); list.innerHTML='';
+    if(!itmAll.length){ list.innerHTML='<div class="com-dp-item" style="color:#94a3b8;cursor:default">No items</div>'; return; }
+    var q=(itmSearch||'').toLowerCase();
+    var shown=q?itmAll.filter(function(n){return n.toLowerCase().indexOf(q)!==-1;}):itmAll;
+    if(!shown.length){ list.innerHTML='<div class="com-dp-item" style="color:#94a3b8;cursor:default">No matches</div>'; return; }
+    shown.forEach(function(n){
+      var on=itmChosen.indexOf(n)!==-1;
+      var item=document.createElement('label'); item.className='com-dp-item'+(on?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(on?'checked':'')+'><span class="com-dp-name">'+esc(n)+'</span><span class="com-pos">&#10003;</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=itmChosen.indexOf(n); if(this.checked){if(i===-1)itmChosen.push(n);}else if(i!==-1)itmChosen.splice(i,1);
+        renderItemList();
+      });
+      list.appendChild(item);
+    });
+  }
+
+  function renderDrillList(){
+    var list=document.getElementById('csDrillList'); list.innerHTML='';
+    DIMS.forEach(function(d){
+      var pos=chosen.indexOf(d.key);
+      var item=document.createElement('label'); item.className='com-dp-item'+(pos!==-1?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(pos!==-1?'checked':'')+'><span class="com-dp-name">'+esc(d.label)+'<div class="com-dp-sub">'+esc(d.sub)+'</div></span><span class="com-pos">'+(pos!==-1?pos+1:'')+'</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=chosen.indexOf(d.key); if(this.checked){if(i===-1)chosen.push(d.key);}else if(i!==-1)chosen.splice(i,1);
+        renderDrillList();
+      });
+      list.appendChild(item);
+    });
+  }
+
+  function ymd(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+  function load(){
+    itemSel={};                                       // new data → clear the item selection
+    var n=parseInt(document.getElementById('csMonths').value,10); if(!n||n<1)n=6; if(n>120)n=120;
+    var now=new Date(), inclCur=document.getElementById('csInclCur').checked, sd, ed;
+    if(inclCur){                                       // N months ending at the current (running) month
+      ed=ymd(now); sd=ymd(new Date(now.getFullYear(), now.getMonth()-(n-1), 1));
+    } else {                                           // exclude the running month → end at the previous complete month
+      ed=ymd(new Date(now.getFullYear(), now.getMonth(), 0));      // last day of the previous month
+      sd=ymd(new Date(now.getFullYear(), now.getMonth()-n, 1));    // first day, n months before that
+    }
+    var btn=document.getElementById('csFetch'); btn.disabled=true; btn.textContent='Loading…';
+    document.getElementById('csBody').innerHTML='<tr><td class="cs-empty">Loading…</td></tr>';
+    var inclHidden=document.getElementById('csHidden').checked;
+    fetch('/realise/api/sales-data/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},body:JSON.stringify({start_date:sd,end_date:ed,include_hidden:inclHidden})})
+      .then(function(r){return r.ok?r.json():{};})
+      .then(function(p){ rows=(p.channel_month_rows||[]).filter(function(r){return r.is_fg;}); err=p.status==='error'?(p.error||'error'):null; loaded=true; expanded={}; csRefine.reset(); rebuildMgList(); rebuildPsList(); varSelected=[]; skuSelected=[]; itmSel=[]; refreshFacets(); monthsA=[]; monthsB=[]; if(cmpMode==='ab')refreshMonPickers(); render(); if(!err)saveCache(); })
+      .catch(function(){ err='load failed'; loaded=true; render(); })
+      .then(function(){ btn.disabled=false; btn.innerHTML='&#9654; Fetch'; });
+  }
+
+  // Cache the fetched pivot for this browser session so leaving and returning to the tab
+  // doesn't re-hit SAP. It is NOT auto-fetched: the cache lives until the user clicks Fetch
+  // again (overwrites it) or does a full refresh / "Clear Cache & Refresh" (clears it).
+  var CS_CACHE_KEY='cs_compare_v2';   // v2: rows are finished-goods only (drop PM/RM lines)
+  function wasReload(){ try{var nav=performance.getEntriesByType&&performance.getEntriesByType('navigation')[0]; return nav&&nav.type==='reload';}catch(e){return false;} }
+  function clearCacheOnReload(){
+    var nocache=new URLSearchParams(location.search).get('nocache')==='1';
+    if(wasReload()||nocache){ try{sessionStorage.removeItem(CS_CACHE_KEY);}catch(e){} }
+  }
+  function saveCache(){
+    try{ sessionStorage.setItem(CS_CACHE_KEY,JSON.stringify({months:document.getElementById('csMonths').value,rows:rows})); }catch(e){}
+  }
+  function restoreCache(){
+    try{
+      var raw=sessionStorage.getItem(CS_CACHE_KEY); if(!raw)return false;
+      var c=JSON.parse(raw); if(!c||!Array.isArray(c.rows))return false;
+      if(c.months)document.getElementById('csMonths').value=c.months;
+      rows=(c.rows||[]).filter(function(r){return r.is_fg;}); err=null; loaded=true; expanded={}; csRefine.reset(); rebuildMgList(); rebuildPsList(); varSelected=[]; skuSelected=[]; itmSel=[]; refreshFacets(); monthsA=[]; monthsB=[]; if(cmpMode==='ab')refreshMonPickers(); render(); return true;
+    }catch(e){ try{sessionStorage.removeItem(CS_CACHE_KEY);}catch(_e){} return false; }
+  }
+
+  // Excel export — ONE sheet, one metric block per month (two-row header) for whichever Compare
+  // mode is active (Litres / Realise / Both / Pieces / Rate / Both-pcs). Only LEAF rows are
+  // written (each ancestor dimension filled in) so nothing double-counts. The Item dimension is
+  // split into Item Code + Item Name. Respects the drill order and all active filters.
+  // A-vs-B export: dim columns, then per selected metric a block of [A, B, Diff, %].
+  function exportAB(){
+    var a=activeRows(), dims=order.length?order:['group'];
+    var arows=csRefine.filterRows(a.rows);
+    if(!arows.length){ window.alert('No data to export — click Fetch first.'); return; }
+    var pr=abPeriods(), A=pr.A, B=pr.B, tree=pivotTree(arows,dims), mets=activeMetrics();
+    var lm={}; availYms().forEach(function(x){lm[x.ym]=x.label;});
+    var dimCols=[]; dims.forEach(function(k){ if(k==='item'){dimCols.push('Item Code');dimCols.push('Item Name');} else dimCols.push(DIM_LABEL[k]); });
+    var HD=function(v,ex){ var o={value:v,bold:true,fill:'0F172A',color:'FFFFFF'}; if(ex)for(var k in ex)o[k]=ex[k]; return o; };
+    function splitItem(v){ v=v||''; var i=v.indexOf(' — '); return i>=0?[v.slice(0,i),v.slice(i+3)]:['',v]; }
+    function dimCells(dc,bold){ var cells=[]; for(var i=0;i<dims.length;i++){ if(dims[i]==='item'){var p=splitItem(dc[i]);cells.push(bold?{value:p[0],bold:true}:p[0]);cells.push(bold?{value:p[1],bold:true}:p[1]);}else cells.push(bold?{value:dc[i],bold:true}:dc[i]); } return cells; }
+    function rnd(v){ return (v===''||v==null)?'':Math.round(v*100)/100; }
+    // one metric block per row: [A months…, A Total, B months…, B Total, Diff, %]
+    function mv(m,v){ return rnd(metricNum(m.k,v.L,v.R,v.P)); }
+    function abCells(getM,pa,pb,bold){ var cells=[];
+      mets.forEach(function(m){
+        A.forEach(function(ym,i){ var o={value:mv(m,getM(ym))}; if(bold)o.bold=true; if(i===0)o.border='l'; cells.push(o); });
+        cells.push({value:mv(m,pa),bold:true,fill:'EEF2FF'});
+        B.forEach(function(ym,i){ var o={value:mv(m,getM(ym))}; if(bold)o.bold=true; if(i===0)o.border='l'; cells.push(o); });
+        cells.push({value:mv(m,pb),bold:true,fill:'EEF2FF'});
+        var av=metricNum(m.k,pa.L,pa.R,pa.P), bv=metricNum(m.k,pb.L,pb.R,pb.P), pct=av?((bv-av)/Math.abs(av)*100):'';
+        cells.push({value:rnd(bv-av),bold:true,border:'l'});
+        cells.push({value:(pct===''?'':Math.round(pct*10)/10),bold:true});
+      }); return cells; }
+    var per=A.length+B.length+4;
+    var h1=dimCols.map(function(){return HD('');});
+    mets.forEach(function(m){ h1.push(HD(m.hdr,{colspan:per,align:'center',border:'l'})); });
+    var h2=dimCols.map(function(l){return HD(l);});
+    mets.forEach(function(){
+      A.forEach(function(ym,i){h2.push(HD(lm[ym]||ym,i===0?{align:'center',border:'l'}:{align:'center'}));});
+      h2.push(HD('A Total',{align:'center'}));
+      B.forEach(function(ym,i){h2.push(HD(lm[ym]||ym,i===0?{align:'center',border:'l'}:{align:'center'}));});
+      h2.push(HD('B Total',{align:'center'})); h2.push(HD('Diff',{align:'center',border:'l'})); h2.push(HD('%',{align:'center'}));
+    });
+    var out=[h1,h2];
+    (function walk(nodes,depth,labels){ nodes.forEach(function(n){ if(n.leaf){ var dc=[]; for(var i=0;i<dims.length;i++)dc.push(i<depth?labels[i]:(i===depth?n.label:'')); out.push(dimCells(dc,false).concat(abCells(function(ym){return {L:n.byL[ym]||0,R:n.byR[ym]||0,P:n.byP[ym]||0};},periodSum(n,A),periodSum(n,B),false))); } else walk(n.kids,depth+1,labels.concat([n.label])); }); })(tree,0,[]);
+    var mTot={}; A.concat(B).forEach(function(ym){mTot[ym]={L:0,R:0,P:0};});
+    var TA={L:0,R:0,P:0},TB={L:0,R:0,P:0};
+    tree.forEach(function(n){var pa=periodSum(n,A),pb=periodSum(n,B);TA.L+=pa.L;TA.R+=pa.R;TA.P+=pa.P;TB.L+=pb.L;TB.R+=pb.R;TB.P+=pb.P;A.concat(B).forEach(function(ym){mTot[ym].L+=n.byL[ym]||0;mTot[ym].R+=n.byR[ym]||0;mTot[ym].P+=n.byP[ym]||0;});});
+    out.push(dimCells(dims.map(function(k,i){return i===0?'TOTAL':'';}),true).concat(abCells(function(ym){return mTot[ym]||{L:0,R:0,P:0};},TA,TB,true)));
+    var fn='Oil_Compare_AvsB';
+    fetch('/realise/api/export-xlsx/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},body:JSON.stringify({filename:fn,sheets:[{name:'A vs B',rows:out}]})})
+      .then(function(r){return r.ok?r.blob():null;})
+      .then(function(b){ if(!b){window.alert('Export failed.');return;} var u=URL.createObjectURL(b),el=document.createElement('a');el.href=u;el.download=fn+'.xlsx';document.body.appendChild(el);el.click();el.remove();URL.revokeObjectURL(u); });
+  }
+
+  function exportXlsx(){
+    if(cmpMode==='ab'){ exportAB(); return; }
+    var a=activeRows(), months=a.months, dims=order.length?order:['group'];
+    var arows=csRefine.filterRows(a.rows);
+    if(!arows.length){ window.alert('No data to export — click Fetch first.'); return; }
+    var nMonths=months.length||1;
+    var tree=pivotTree(arows,dims);          // respects the Top N Items slice when Item is first
+    var colL={},colR={},colP={},gL=0,gR=0,gP=0;
+    tree.forEach(function(n){months.forEach(function(mo){colL[mo.ym]=(colL[mo.ym]||0)+(n.byL[mo.ym]||0);colR[mo.ym]=(colR[mo.ym]||0)+(n.byR[mo.ym]||0);colP[mo.ym]=(colP[mo.ym]||0)+(n.byP[mo.ym]||0);});gL+=n.totL;gR+=n.totR;gP+=n.totP;});
+    // Left dimension columns — the Item dim becomes TWO physical columns (Item Code + Item Name).
+    var dimCols=[]; dims.forEach(function(k){ if(k==='item'){dimCols.push('Item Code');dimCols.push('Item Name');} else dimCols.push(DIM_LABEL[k]); });
+    var HD=function(v,ex){ var o={value:v,bold:true,fill:'0F172A',color:'FFFFFF'}; if(ex)for(var k in ex)o[k]=ex[k]; return o; };
+    function rlz(rv,lt){ return lt>0?Math.round(rv/lt*100)/100:''; }   // Realise ₹/L
+    function splitItem(v){ v=v||''; var i=v.indexOf(' — '); return i>=0?[v.slice(0,i),v.slice(i+3)]:['',v]; }
+    function dimCells(dc,bold){
+      var cells=[];
+      for(var i=0;i<dims.length;i++){
+        if(dims[i]==='item'){ var p=splitItem(dc[i]); cells.push(bold?{value:p[0],bold:true}:p[0]); cells.push(bold?{value:p[1],bold:true}:p[1]); }
+        else cells.push(bold?{value:dc[i],bold:true}:dc[i]);
+      }
+      return cells;
+    }
+    // Export the ticked metric columns; a left divider starts every month / grand / avg block.
+    var mcols=exportMetrics().map(function(m){return {h:m.hdr, v:m.xv};}), nMet=mcols.length;
+    // metCells: one styled cell per metric for a block, with a left border on the block's first col.
+    function metCells(L,R,P,bold){ return mcols.map(function(c,i){ var o={value:c.v(L,R,P)}; if(bold)o.bold=true; if(i===0)o.border='l'; return o; }); }
+    // Header row 1: month / Grand Total / Avg Sales names spanning the metric columns; row 2: the metric labels.
+    var h1=dimCols.map(function(){return HD('');});
+    months.forEach(function(mo){ h1.push(HD(mo.label,{colspan:nMet,align:'center',border:'l'})); });
+    h1.push(HD('Grand Total',{colspan:nMet,align:'center',border:'l'})); h1.push(HD('Avg Sales',{colspan:nMet,align:'center',border:'l'}));
+    var h2=dimCols.map(function(l){return HD(l);});
+    for(var m=0;m<months.length+2;m++)mcols.forEach(function(c,i){h2.push(HD(c.h,i===0?{align:'center',border:'l'}:{align:'center'}));});   // months + grand + avg
+    var out=[h1,h2];
+    // Emit ONLY leaf rows (deepest drill level) — every ancestor dimension is filled in on the leaf,
+    // so no parent/child value duplication and the metric columns sum correctly.
+    (function walk(nodes,depth,labels){
+      nodes.forEach(function(n){
+        if(n.leaf){
+          var dc=[]; for(var i=0;i<dims.length;i++)dc.push(i<depth?labels[i]:(i===depth?n.label:''));
+          var row=dimCells(dc,false);
+          months.forEach(function(mo){ var L=n.byL[mo.ym]||0,R=n.byR[mo.ym]||0,P=n.byP[mo.ym]||0; metCells(L,R,P,false).forEach(function(o){row.push(o);}); });
+          metCells(n.totL||0,n.totR||0,n.totP||0,false).forEach(function(o){row.push(o);});
+          metCells((n.totL||0)/nMonths,(n.totR||0)/nMonths,(n.totP||0)/nMonths,false).forEach(function(o){row.push(o);});
+          out.push(row);
+        } else walk(n.kids,depth+1,labels.concat([n.label]));
+      });
+    })(tree,0,[]);
+    // TOTAL row
+    var tr=dimCells(dims.map(function(k,i){return i===0?'TOTAL':'';}),true);
+    months.forEach(function(mo){ var L=colL[mo.ym]||0,R=colR[mo.ym]||0,P=colP[mo.ym]||0; metCells(L,R,P,true).forEach(function(o){tr.push(o);}); });
+    metCells(gL,gR,gP,true).forEach(function(o){tr.push(o);});
+    metCells(gL/nMonths,gR/nMonths,gP/nMonths,true).forEach(function(o){tr.push(o);});
+    out.push(tr);
+    var fn='Oil_Compare_Sales';
+    fetch('/realise/api/export-xlsx/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({filename:fn,sheets:[{name:'Compare Sales',rows:out}]})})
+      .then(function(r){return r.ok?r.blob():null;})
+      .then(function(b){ if(!b){window.alert('Export failed.');return;} var u=URL.createObjectURL(b),el=document.createElement('a');el.href=u;el.download=fn+'.xlsx';document.body.appendChild(el);el.click();el.remove();URL.revokeObjectURL(u); });
+  }
+
+  // Wiring
+  document.getElementById('csFetch').addEventListener('click',load);
+  // Hidden Sales ON/OFF — ON folds hidden invoices (U_ARNO='H') into the pivot; re-fetches.
+  document.getElementById('csHiddenBtn').addEventListener('click',function(){
+    var cb=document.getElementById('csHidden'); cb.checked=!cb.checked;
+    this.classList.toggle('on',cb.checked); this.textContent=cb.checked?'ON':'OFF'; this.setAttribute('aria-pressed',cb.checked);
+    if(loaded) load();   // only refetch once a period has been fetched
+  });
+  // ── A vs B: month pickers + view-mode toggle ──
+  function renderMonPick(listId,selArr){
+    var list=document.getElementById(listId); if(!list)return;
+    var avail=availYms();
+    list.innerHTML=avail.length? avail.map(function(x){var on=selArr.indexOf(x.ym)!==-1;
+      return '<label class="com-dp-item'+(on?' checked':'')+'"><input type="checkbox" value="'+esc(x.ym)+'"'+(on?' checked':'')+'><span class="com-dp-name">'+esc(x.label)+'</span><span class="com-pos">&#10003;</span></label>';}).join('')
+      : '<div class="com-dp-item" style="color:#94a3b8;cursor:default">Fetch a period first</div>';
+  }
+  function syncMonLabels(){
+    document.getElementById('csMonAlbl').textContent=monthsA.length?monthsA.length+' month(s)':'— months —';
+    document.getElementById('csMonBlbl').textContent=monthsB.length?monthsB.length+' month(s)':'— months —';
+  }
+  function refreshMonPickers(){
+    var pr=abPeriods(); if(!monthsA.length&&!monthsB.length){ monthsA=pr.A.slice(); monthsB=pr.B.slice(); }
+    renderMonPick('csMonAlist',monthsA); renderMonPick('csMonBlist',monthsB); syncMonLabels();
+  }
+  function wireMonPick(listId,which,btnId,panelId,allId,clrId){
+    var btn=document.getElementById(btnId), panel=document.getElementById(panelId);
+    btn.addEventListener('click',function(e){e.stopPropagation();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById(listId).addEventListener('change',function(e){
+      var cb=e.target; if(!cb||cb.type!=='checkbox')return;
+      var arr=(which==='A')?monthsA:monthsB, i=arr.indexOf(cb.value);
+      if(cb.checked){if(i===-1)arr.push(cb.value);}else if(i!==-1)arr.splice(i,1);
+      arr.sort(); syncMonLabels(); render();
+    });
+    document.getElementById(allId).addEventListener('click',function(){
+      var a=availYms().map(function(x){return x.ym;}); if(which==='A')monthsA=a.slice();else monthsB=a.slice();
+      renderMonPick(listId,which==='A'?monthsA:monthsB); syncMonLabels(); render();
+    });
+    document.getElementById(clrId).addEventListener('click',function(){
+      if(which==='A')monthsA=[];else monthsB=[]; renderMonPick(listId,[]); syncMonLabels(); render();
+    });
+  }
+  wireMonPick('csMonAlist','A','csMonAbtn','csMonApanel','csMonAall','csMonAclr');
+  wireMonPick('csMonBlist','B','csMonBbtn','csMonBpanel','csMonBall','csMonBclr');
+  document.getElementById('csViewMode').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    cmpMode=b.getAttribute('data-mode');
+    [].forEach.call(this.children,function(x){x.classList.toggle('active',x===b);});
+    var ab=(cmpMode==='ab');
+    [].forEach.call(document.querySelectorAll('.cs-abonly'),function(el){el.style.display=ab?'':'none';});
+    if(ab)refreshMonPickers();
+    render();
+  });
+  document.getElementById('csExport').addEventListener('click',exportXlsx);
+  document.getElementById('csMonths').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  document.getElementById('csType').addEventListener('change',function(){typeF=this.value;refreshFacets();render();});
+  var searchFilter=debounce(render,120);
+  document.getElementById('csCustSearch').addEventListener('input',function(){custF=this.value.trim().toLowerCase();refreshFacets();searchFilter();});
+  document.getElementById('csTopN').addEventListener('input',function(){var v=parseInt(this.value,10);topN=(!v||v<0)?0:v;searchFilter();});
+  document.getElementById('csBody').addEventListener('click',function(e){
+    var t=e.target&&e.target.closest?e.target.closest('[data-cstoggle]'):null; if(!t)return;
+    var p=t.getAttribute('data-cstoggle'); expanded[p]=!expanded[p]; render();
+  });
+  // Compare — pill-checkboxes across two groups; tick any combination. "Both" toggles a
+  // group's pair. At least one metric always stays on.
+  function metCount(){ return ['liters','revenue','realise','pieces','rate'].filter(function(k){return metricSel[k];}).length; }
+  function syncMet(){
+    ['csG1','csG2'].forEach(function(id){
+      [].forEach.call(document.getElementById(id).children,function(b){
+        var k=b.getAttribute('data-metric'); if(k)b.classList.toggle('active',!!metricSel[k]);
+      });
+    });
+    document.querySelector('[data-both="g1"]').classList.toggle('active',metricSel.liters&&metricSel.realise);
+    document.querySelector('[data-both="g2"]').classList.toggle('active',metricSel.pieces&&metricSel.rate);
+  }
+  function toggleMetric(k){
+    if(metricSel[k]&&metCount()<=1)return;   // keep ≥1
+    metricSel[k]=!metricSel[k]; syncMet(); render();
+  }
+  function setBoth(a,b){
+    if(metricSel[a]&&metricSel[b]){          // both on → turn the pair off (if something else stays on)
+      if(['liters','realise','pieces','rate'].filter(function(k){return k!==a&&k!==b&&metricSel[k];}).length){metricSel[a]=false;metricSel[b]=false;}
+    } else { metricSel[a]=true; metricSel[b]=true; }
+    syncMet(); render();
+  }
+  ['csG1','csG2'].forEach(function(id){
+    document.getElementById(id).addEventListener('click',function(e){
+      var b=e.target.closest('button'); if(!b)return;
+      var k=b.getAttribute('data-metric');
+      if(k)toggleMetric(k);
+      else if(b.getAttribute('data-both')==='g1')setBoth('liters','realise');
+      else if(b.getAttribute('data-both')==='g2')setBoth('pieces','rate');
+    });
+  });
+  syncMet();
+  // Main Group panel
+  (function(){
+    var btn=document.getElementById('csMgBtn'), panel=document.getElementById('csMgPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();mgChosen=mgSelected.slice();renderMgList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById('csMgAll').addEventListener('click',function(){mgChosen=mgAllGroups.slice();renderMgList();});
+    document.getElementById('csMgClr').addEventListener('click',function(){mgChosen=[];renderMgList();});
+    document.getElementById('csMgApply').addEventListener('click',function(){mgSelected=mgChosen.slice();updateMgLabel();refreshFacets();panel.classList.remove('open');render();});
+  })();
+  // Person panel
+  (function(){
+    var btn=document.getElementById('csPsBtn'), panel=document.getElementById('csPsPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();psChosen=psSelected.slice();renderPsList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById('csPsAll').addEventListener('click',function(){psChosen=psAll.slice();renderPsList();});
+    document.getElementById('csPsClr').addEventListener('click',function(){psChosen=[];renderPsList();});
+    document.getElementById('csPsApply').addEventListener('click',function(){psSelected=psChosen.slice();updatePsLabel();refreshFacets();panel.classList.remove('open');render();});
+  })();
+  // Pack Size (SKU) panel
+  (function(){
+    var btn=document.getElementById('csSkuBtn'), panel=document.getElementById('csSkuPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();rebuildSkuList();skuChosen=skuSelected.slice();renderSkuList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById('csSkuAll').addEventListener('click',function(){skuChosen=skuAll.slice();renderSkuList();});
+    document.getElementById('csSkuClr').addEventListener('click',function(){skuChosen=[];renderSkuList();});
+    document.getElementById('csSkuApply').addEventListener('click',function(){skuSelected=skuChosen.slice();refreshFacets();panel.classList.remove('open');render();});
+  })();
+  // Variety panel
+  (function(){
+    var btn=document.getElementById('csVarBtn'), panel=document.getElementById('csVarPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();rebuildVarList();varChosen=varSelected.slice();renderVarList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById('csVarAll').addEventListener('click',function(){varChosen=varAll.slice();renderVarList();});
+    document.getElementById('csVarClr').addEventListener('click',function(){varChosen=[];renderVarList();});
+    document.getElementById('csVarApply').addEventListener('click',function(){varSelected=varChosen.slice();refreshFacets();panel.classList.remove('open');render();});
+  })();
+  // Items panel (cascades off the other filters)
+  (function(){
+    var btn=document.getElementById('csItmBtn'), panel=document.getElementById('csItmPanel'), srch=document.getElementById('csItmSearch');
+    btn.addEventListener('click',function(e){e.stopPropagation();itmSearch='';srch.value='';rebuildItemList();itmChosen=itmSel.slice();renderItemList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    srch.addEventListener('input',function(){itmSearch=this.value.trim();renderItemList();});
+    document.getElementById('csItmAll').addEventListener('click',function(){itmChosen=itmAll.slice();renderItemList();});  // selects the full list, not just filtered
+    document.getElementById('csItmClr').addEventListener('click',function(){itmChosen=[];renderItemList();});
+    document.getElementById('csItmApply').addEventListener('click',function(){itmSel=itmChosen.slice();refreshFacets();panel.classList.remove('open');render();});
+  })();
+  // Drill By panel
+  (function(){
+    var btn=document.getElementById('csDrillBtn'), panel=document.getElementById('csDrillPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();chosen=order.slice();renderDrillList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById('csDrillAll').addEventListener('click',function(){chosen=DIMS.map(function(d){return d.key;});renderDrillList();});
+    document.getElementById('csDrillClr').addEventListener('click',function(){chosen=[];renderDrillList();});
+    document.getElementById('csDrillApply').addEventListener('click',function(){if(!chosen.length){return;}order=chosen.slice();expanded={};itemSel={};panel.classList.remove('open');render();});
+  })();
+
+  renderDrillList();
+  // No auto-fetch: restore a cached pivot if one exists (and wasn't invalidated by a
+  // refresh), else sit on the "Pick a period and click Fetch" empty state.
+  clearCacheOnReload();
+  restoreCache();
+})();
+</script>
+{% endblock %}

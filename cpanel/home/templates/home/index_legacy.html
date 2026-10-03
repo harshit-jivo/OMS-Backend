@@ -1,0 +1,255 @@
+{% extends base_template %}
+{% block title %}Control Panel — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  /* ── Welcome banner ──────────────────────────────────────────────────────
+     A white card holding the greeting and today's date, with a soft wash on the
+     right. The banner is shorter now that the subtitle and figures are gone. */
+  .home-hero { position: relative; overflow: hidden; display: flex; align-items: center; gap: 20px;
+               background: #fff; border: 1px solid var(--rz-card-brd); border-radius: 18px;
+               box-shadow: var(--rz-shadow); padding: 24px 28px; margin-bottom: 24px;
+               min-height: 84px; }
+  /* The diagonal tint. ::after so it needs no extra element, and it sits behind
+     the text because everything real is lifted to z-index 1. */
+  .home-hero::after { content: ""; position: absolute; inset: 0 0 0 50%; pointer-events: none;
+                      background: linear-gradient(100deg, transparent 0 14%, #f5f3ff 14% 100%); }
+  .home-hero > * { position: relative; z-index: 1; }
+  .home-hero-copy { flex: 1; min-width: 0; }
+  .home-title { font-size: 30px; font-weight: 900; margin: 0 0 6px 0; color: #0f172a; letter-spacing: -.4px; }
+  .home-date { align-self: flex-start; display: inline-flex; align-items: center; gap: 7px;
+               background: #eef2ff; border: 1px solid #e0e7ff; color: #4338ca; border-radius: 999px;
+               padding: 6px 13px; font-size: 12.5px; font-weight: 800; white-space: nowrap; }
+  .home-date .ic { font-size: 14px; }
+  @media (max-width: 640px) {
+    .home-hero { flex-direction: column; align-items: flex-start; gap: 12px; padding: 20px; }
+    .home-hero::after { display: none; }
+    .home-title { font-size: 24px; }
+  }
+  .home-period { color: #4f46e5; font-weight: 600; }
+
+  .section-header { display: flex; align-items: center; gap: 10px; margin: 28px 0 14px 0; }
+  .section-title { font-size: 15px; font-weight: 850; color: #000; letter-spacing: 0.4px; text-transform: uppercase; margin: 0; }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 1200px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 720px)  { .kpi-grid { grid-template-columns: 1fr; } }
+
+  /* ── KPI cards (light theme — white card, colour accent bar + tinted icon) ── */
+  .kpi-card { position: relative; padding: 16px 18px 15px; border-radius: 16px; color: var(--rz-ink); min-height: 172px; display: flex; flex-direction: column; gap: 8px; background: var(--rz-card); border: 1px solid var(--rz-card-brd); box-shadow: var(--rz-shadow); transition: transform .15s, box-shadow .15s; overflow: hidden; }
+  .kpi-card::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--kpi-accent, var(--rz-indigo)); }
+  .kpi-card:hover { transform: translateY(-2px); box-shadow: var(--rz-shadow-lg); }
+  .kpi-card[data-glimpse-source] { cursor: pointer; }
+  .kpi-card[data-glimpse-source]:focus-visible { outline: 3px solid var(--kpi-accent, var(--rz-indigo)); outline-offset: 3px; }
+  .kpi-card.no-data { opacity: 0.72; }
+  /* Each colour class only sets the accent + a soft icon tint; the surface stays white. */
+  .kpi-card.gradient-blue   { --kpi-accent:#2563eb; --kpi-tint:#eff6ff; --kpi-ic:#2563eb; }
+  .kpi-card.gradient-green  { --kpi-accent:#0d9488; --kpi-tint:#ecfdf5; --kpi-ic:#0d9488; }
+  .kpi-card.gradient-orange { --kpi-accent:#ea580c; --kpi-tint:#fff5ec; --kpi-ic:#ea580c; }
+  .kpi-card.gradient-red    { --kpi-accent:#dc2626; --kpi-tint:#fef2f2; --kpi-ic:#dc2626; }
+  .kpi-card.gradient-purple { --kpi-accent:#7c3aed; --kpi-tint:#f6f0ff; --kpi-ic:#7c3aed; }
+  .kpi-card.gradient-indigo { --kpi-accent:#4338ca; --kpi-tint:#eef2ff; --kpi-ic:#4338ca; }
+  .kpi-card.gradient-grey   { --kpi-accent:#6b7280; --kpi-tint:#f3f4f6; --kpi-ic:#6b7280; }
+  .kpi-head { display: flex; align-items: flex-start; justify-content: space-between; }
+  .kpi-icon { width: 36px; height: 36px; border-radius: 10px; background: var(--kpi-tint, var(--rz-soft)); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .kpi-icon .ic { font-size: 20px; color: var(--kpi-ic, var(--rz-indigo)); }
+  /* Trend pill is coloured by MEANING (green = good move, red = bad move), not by arrow. */
+  .kpi-trend { display: inline-flex; align-items: center; gap: 3px; padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 800; }
+  .kpi-trend.good { background: #dcfce7; color: #15803d; }
+  .kpi-trend.bad  { background: #fee2e2; color: #b91c1c; }
+  .kpi-trend.flat { background: #f1f5f9; color: #64748b; }
+  .kpi-label { font-size: 11.5px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase; color: var(--rz-muted); }
+  .kpi-value { font-size: 28px; font-weight: 900; line-height: 1.08; color: var(--rz-ink); font-variant-numeric: tabular-nums; }
+  .kpi-compare { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 600; color: var(--rz-muted); }
+  .kpi-compare b { color: var(--rz-body); font-weight: 800; font-variant-numeric: tabular-nums; }
+  .kpi-sub   { font-size: 11.5px; font-weight: 600; color: var(--rz-muted); }
+  .kpi-footer { margin-top: auto; padding-top: 9px; border-top: 1px solid var(--rz-line); display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; color: var(--rz-muted); }
+  .cogs-inline-form { display: grid; grid-template-columns: 64px 1fr 64px; gap: 6px; margin-top: auto; }
+  .cogs-inline-form select,
+  .cogs-inline-form input,
+  .cogs-inline-form button { min-width: 0; height: 32px; border: 1px solid var(--rz-line); border-radius: 8px; font: inherit; font-size: 12px; font-weight: 700; }
+  .cogs-inline-form select,
+  .cogs-inline-form input { color: var(--rz-ink); background: #fff; padding: 0 9px; outline: none; }
+  .cogs-inline-form select:focus,
+  .cogs-inline-form input:focus { border-color: var(--rz-indigo); box-shadow: 0 0 0 3px rgba(99,102,241,.14); }
+  .cogs-inline-form button { color: #fff; background: var(--rz-indigo-deep); border-color: var(--rz-indigo-deep); cursor: pointer; }
+  .cogs-inline-form button:disabled { opacity: 0.58; cursor: wait; }
+  @media (max-width: 420px) { .cogs-inline-form { grid-template-columns: 72px 1fr; } .cogs-inline-form button { grid-column: 1 / -1; } }
+
+  .glimpse-modal { position: fixed; inset: 0; z-index: 70; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(17,24,39,0.42); }
+  .glimpse-modal.show { display: flex; }
+  .glimpse-panel { width: min(720px, 100%); max-height: min(680px, calc(100vh - 48px)); overflow: auto; background: #fff; border-radius: 12px; box-shadow: 0 24px 70px rgba(17,24,39,0.24); }
+  .glimpse-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #e5e7eb; }
+  .glimpse-title { margin: 0; font-size: 18px; font-weight: 850; color: #111827; letter-spacing: 0; }
+  .glimpse-close { width: 34px; height: 34px; border: 0; border-radius: 8px; background: #f3f4f6; color: #374151; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .glimpse-body { padding: 14px 20px 20px; }
+  .glimpse-table { width: 100%; border-collapse: collapse; }
+  .glimpse-table th { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: #6b7280; text-align: right; padding: 9px 8px; border-bottom: 1px solid #e5e7eb; }
+  .glimpse-table th:first-child, .glimpse-table td:first-child { text-align: left; }
+  .glimpse-table td { padding: 12px 8px; border-bottom: 1px solid #f1f5f9; text-align: right; color: #111827; font-size: 14px; }
+  .glimpse-table td:first-child { font-weight: 760; }
+  .glimpse-diff.up { color: #047857; }
+  .glimpse-diff.down { color: #dc2626; }
+  .glimpse-diff.flat { color: #6b7280; }
+  .glimpse-empty { padding: 22px; color: #6b7280; text-align: center; }
+  @media (max-width: 560px) { .glimpse-modal { padding: 14px; } .glimpse-head { padding: 16px; } .glimpse-body { padding: 10px 14px 16px; } .glimpse-table th, .glimpse-table td { font-size: 12px; padding: 10px 5px; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="home-hero">
+  <div class="home-hero-copy">
+    <h1 class="home-title">Welcome back, {{ display_name }}</h1>
+  </div>
+
+
+  <div class="home-date"><i class="ic ic-calendar"></i>{% now "l, j F Y" %}</div>
+</div>
+
+{# ── P&L Metrics ── #}
+<div class="section-header">
+  <span class="section-title">P &amp; L Metrics</span>
+</div>
+<div class="kpi-grid">
+  {% if can_sales %}
+  {% include "home/_kpi_card.html" with kpi=kpis.total_sales_volume only %}
+  {% endif %}
+  {% if can_realise %}
+  {% include "home/_kpi_card.html" with kpi=kpis.avg_realisation only %}
+  {% endif %}
+  {% if can_cogs %}
+  {% include "home/_kpi_card.html" with kpi=kpis.cogs only %}
+  {% endif %}
+  {% if can_expenses %}
+  {% include "home/_kpi_card.html" with kpi=kpis.opex only %}
+  {% endif %}
+  {% if can_salaries %}
+  {% include "home/_kpi_card.html" with kpi=kpis.salaries only %}
+  {% endif %}
+</div>
+
+{# ── Balance Sheet ── #}
+{% if can_inventory %}
+<div class="section-header">
+  <span class="section-title">Balance Sheet</span>
+</div>
+<div class="kpi-grid">
+  {% include "home/_kpi_card.html" with kpi=kpis.inventory is_inventory=True only %}
+</div>
+{% endif %}
+
+<div class="glimpse-modal" id="kpiGlimpseModal" aria-hidden="true">
+  <div class="glimpse-panel" role="dialog" aria-modal="true" aria-labelledby="kpiGlimpseTitle">
+    <div class="glimpse-head">
+      <h2 class="glimpse-title" id="kpiGlimpseTitle">KPI Difference</h2>
+      <button class="glimpse-close" type="button" id="kpiGlimpseClose" aria-label="Close">
+        <i class="ic ic-x"></i>
+      </button>
+    </div>
+    <div class="glimpse-body" id="kpiGlimpseBody"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  (function () {
+    function bindCogsCard(card) {
+      var form = card.querySelector('[data-cogs-form]');
+      if (!form) return;
+      var valueEl = card.querySelector('[data-cogs-value]');
+      var subEl = card.querySelector('[data-cogs-sub]');
+      var statusEl = card.querySelector('[data-cogs-status]');
+      var litersEl = card.querySelector('[data-cogs-liters]');
+      var button = form.querySelector('button');
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var params = new URLSearchParams();
+        params.set('from_date', card.dataset.fromDate || '');
+        params.set('to_date', card.dataset.toDate || '');
+        params.set('param_type', form.param_type.value || '');
+        params.set('otp', form.otp.value || '');
+
+        button.disabled = true;
+        fetch('/api/cogs/?' + params.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+          .then(function (response) { return response.json(); })
+          .then(function (payload) {
+            var cogs = payload.cogs || {};
+            if (litersEl) litersEl.textContent = cogs.total_liter_display || '-';
+            if (cogs.opt_missing) {
+              if (valueEl) valueEl.textContent = cogs.total_liter_display || '-';
+              if (subEl) subEl.textContent = 'Enter OTP to view COGS';
+              if (statusEl) statusEl.textContent = 'COGS locked';
+            } else {
+              if (valueEl) valueEl.textContent = cogs.total_cogs_display || '-';
+              if (subEl) subEl.textContent = (cogs.cogs_per_liter_display || '-') + ' · ' + (cogs.total_liter_display || '-');
+              if (statusEl) statusEl.textContent = 'COGS visible';
+            }
+          })
+          .catch(function () {
+            if (subEl) subEl.textContent = 'Unable to load COGS';
+          })
+          .finally(function () {
+            button.disabled = false;
+          });
+      });
+    }
+
+    document.querySelectorAll('.cogs-kpi-card').forEach(bindCogsCard);
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+      });
+    }
+
+    var modal = document.getElementById('kpiGlimpseModal');
+    var modalTitle = document.getElementById('kpiGlimpseTitle');
+    var modalBody = document.getElementById('kpiGlimpseBody');
+    var modalClose = document.getElementById('kpiGlimpseClose');
+
+    function openGlimpse(card) {
+      var sourceId = card.dataset.glimpseSource;
+      var source = sourceId ? document.getElementById(sourceId) : null;
+      if (!source || !modal) return;
+      var rows = [];
+      try { rows = JSON.parse(source.textContent || '[]'); } catch (e) { rows = []; }
+      modalTitle.textContent = (card.dataset.glimpseTitle || 'KPI') + ' Difference';
+      modalBody.innerHTML = rows.length ? (
+        '<table class="glimpse-table"><thead><tr><th>Category</th><th>Current</th><th>Last</th><th>Difference</th></tr></thead><tbody>' +
+        rows.map(function (row) {
+          var direction = row.direction || 'flat';
+          return '<tr><td>' + escapeHtml(row.label) + '</td><td>' + escapeHtml(row.current) + '</td><td>' + escapeHtml(row.last) + '</td><td class="glimpse-diff ' + escapeHtml(direction) + '">' + escapeHtml(row.diff) + '</td></tr>';
+        }).join('') +
+        '</tbody></table>'
+      ) : '<div class="glimpse-empty">No category difference available for this KPI.</div>';
+      modal.classList.add('show');
+      modal.setAttribute('aria-hidden', 'false');
+      modalClose.focus();
+    }
+
+    function closeGlimpse() {
+      if (!modal) return;
+      modal.classList.remove('show');
+      modal.setAttribute('aria-hidden', 'true');
+    }
+
+    document.querySelectorAll('.kpi-card[data-glimpse-source]').forEach(function (card) {
+      card.addEventListener('click', function (event) {
+        if (event.target.closest('form, button, input, select, a')) return;
+        openGlimpse(card);
+      });
+      card.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openGlimpse(card);
+        }
+      });
+    });
+    if (modalClose) modalClose.addEventListener('click', closeGlimpse);
+    if (modal) modal.addEventListener('click', function (event) { if (event.target === modal) closeGlimpse(); });
+    document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeGlimpse(); });
+  })();
+</script>
+{% endblock %}
