@@ -171,6 +171,9 @@ REGISTRY: dict[str, dict[str, str]] = {
         # The approval desk. NOT sufficient to act: only the current stage's
         # user (after replacements) may decide a request, as in PRDO.
         'Advance_Payment_Approval':  'Advance Payment — approval desk',
+        # Send SAP bills and POs to Advance Payment Users, who raise the
+        # payment request from them (the "Send Bills & POs" page).
+        'Advance_Payment_Dispatch':  'Advance Payment — send bills & POs to users',
     },
 
     # --- Payments actions (legacy keys, verbatim from

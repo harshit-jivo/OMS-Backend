@@ -37,7 +37,7 @@ class EditHistory(DeskFixture):
                             [doc(10256, '40000'), doc(10271, '20000')])
         self.assertEqual(changes['amount'], {'old': '1000.00', 'new': '1500.00'})
         self.assertEqual(changes['remarks'], {'old': None, 'new': 'Mobilisation'})
-        self.assertNotIn('priority', changes)  # unchanged: not listed
+        self.assertNotIn('payment_date', changes)  # unchanged: not listed
         self.assertNotIn('documents', changes)
 
     def test_names_the_department_rather_than_its_id(self):
@@ -61,14 +61,14 @@ class EditHistory(DeskFixture):
         advance = self.request(status=RequestStatus.RETURNED, flow_status=FlowStatus.RETURNED)
         RequestDocument.objects.filter(request=self.advance).update(request=advance)
         self.advance = advance
-        flow_service.edit(self.advance, CleanRequest(fields={'priority': 'HIGH'},
+        flow_service.edit(self.advance, CleanRequest(fields={'remarks': 'Mobilisation'},
                                                      documents=[doc(10256, '40000'), doc(10271, '20000')]),
                           user=self.creator)
         row = self.advance.logs.get(action=LogAction.EDITED)
         self.assertEqual(row.actor, self.creator)
-        self.assertEqual(row.data['priority']['new'], 'HIGH')
+        self.assertEqual(row.data['remarks']['new'], 'Mobilisation')
 
-        flow_service.edit(self.advance, CleanRequest(fields={'priority': 'HIGH'},
+        flow_service.edit(self.advance, CleanRequest(fields={'remarks': 'Mobilisation'},
                                                      documents=[doc(10256, '40000'), doc(10271, '20000')]),
                           user=self.creator)
         self.assertEqual(self.advance.logs.filter(action=LogAction.EDITED).count(), 1)

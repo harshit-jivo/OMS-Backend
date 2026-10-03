@@ -93,6 +93,9 @@ def document_data(doc):
         'id': doc.pk,
         'kind': doc.kind,
         'sap_doc_entry': doc.sap_doc_entry,
+        'sap_line': doc.sap_line,
+        'sap_object': doc.sap_object,
+        'direction': doc.direction,
         'sap_doc_num': doc.sap_doc_num,
         'vendor_ref': doc.vendor_ref,
         'doc_date': _iso(doc.doc_date),
@@ -130,6 +133,9 @@ def payout_data(payout):
         'to_account_number': payout.to_account_number,
         'to_ifsc': payout.to_ifsc,
         'to_account_manual': payout.to_account_manual,
+        'tds': ({'code': payout.tds_code, 'label': payout.tds_label, 'rate': _amount(payout.tds_rate),
+                 'account': payout.tds_account, 'amount': _amount(payout.tds_amount)}
+                if payout.tds_code else None),
         'updated_by': _user(payout.updated_by),
         'updated_on': _iso(payout.updated_on),
         'lines': [{
@@ -223,7 +229,8 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'request_type': advance.request_type,
         'payment_against': advance.payment_against,
         'payment_against_other': advance.payment_against_other,
-        'department': {'id': advance.department_id, 'name': advance.department.name},
+        'department': ({'id': advance.department_id, 'name': advance.department.name}
+                       if advance.department_id else None),
         'sub_department': ({'id': advance.sub_department_id, 'name': advance.sub_department.name}
                            if advance.sub_department_id else None),
         'partner_code': advance.partner_code,
@@ -240,11 +247,12 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'expected_from_date': _iso(advance.expected_from_date),
         'expected_to_date': _iso(advance.expected_to_date),
         'payment_date': _iso(advance.payment_date),
-        'priority': advance.priority,
         'budget_code': advance.budget_code,
         'budget_name': advance.budget_name,
         'sub_budget_code': advance.sub_budget_code,
         'sub_budget_name': advance.sub_budget_name,
+        'purpose_code': advance.purpose_code,
+        'purpose_label': advance.purpose_label,
         'remarks': advance.remarks,
         'owner_employee_id': advance.owner_employee_id,
         'owner_label': advance.owner_label,
@@ -288,3 +296,27 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
                        for r in advance.logs.select_related('actor', 'on_behalf_of')]
         out['stages'] = flow_service.stage_plan(advance)
     return out
+
+
+def assignment_data(row):
+    return {
+        'id': row.pk,
+        'company': row.company,
+        'kind': row.kind,
+        'sap_doc_entry': row.sap_doc_entry,
+        'sap_doc_num': row.sap_doc_num,
+        'card_code': row.card_code,
+        'card_name': row.card_name,
+        'vendor_ref': row.vendor_ref,
+        'doc_date': _iso(row.doc_date),
+        'due_date': _iso(row.due_date),
+        'doc_total': _amount(row.doc_total),
+        'open_amount': _amount(row.open_amount),
+        'note': row.note,
+        'status': row.status,
+        'assigned_to': _user(row.assigned_to),
+        'assigned_by': _user(row.assigned_by),
+        'request': ({'id': row.request_id, 'request_no': row.request.request_no, 'status': row.request.status}
+                    if row.request_id else None),
+        'created_on': _iso(row.created_on),
+    }

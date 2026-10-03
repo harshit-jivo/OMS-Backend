@@ -44,13 +44,16 @@ from core.responses import created, fail, ok
 
 from advance_payment import permissions as ap_perms
 from advance_payment.models import (
-    AdvanceRequest, Department, Employee, EmployeeRole, FilePurpose, LogAction, PayoutLine,
+    AdvanceRequest, Department, DocumentKind, Employee, EmployeeRole, FilePurpose, LogAction, PayoutLine,
     RequestFile, SapVoucher, SubDepartment)
-from advance_payment.serializers import EmployeeSerializer, request_data
+from advance_payment.purposes import PURPOSE_GROUPS, purposes
+from advance_payment.serializers import EmployeeSerializer, assignment_data, request_data
 from advance_payment.services import (
     attachment_files, invoice_fields, payment_proof, proof_reader)
 from advance_payment.services import flow as flow_service
 from advance_payment.services import requests as request_service
+from advance_payment.services import assignments as assignment_service
+from advance_payment.services import reservations
 from advance_payment.services import sap as sap_service
 
 logger = logging.getLogger(__name__)
@@ -103,11 +106,15 @@ class _Lookup(APIView):
         except sap_service.SapUnavailable as exc:
             return fail(str(exc),
                         status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
-        return ok({
+        payload = {
             'company': company,
             'count': len(rows),
             'results': rows,
-        })
+        }
+        # A paged lookup (`?offset=`) also says how many there are in all.
+        if getattr(self, 'total', None) is not None:
+            payload['total'] = self.total
+        return ok(payload)
 
     def fetch(self, request, company):  # pragma: no cover - interface
         raise NotImplementedError
@@ -119,6 +126,26 @@ def _search(request):
 
 def _limit(request):
     return request.query_params.get('limit')
+
+
+def _paged(request):
+    """`?offset=` was sent: a page of the list, which also counts the whole."""
+    return request.query_params.get('offset') not in (None, '')
+
+
+def _offset(request):
+    return request.query_params.get('offset')
+
+
+def _from_date(request):
+    """`?from_date=YYYY-MM-DD`: only documents posted on or after it. A bad date is a 400."""
+    raw = (request.query_params.get('from_date') or '').strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise ValueError('from_date must be a date, YYYY-MM-DD.') from None
 
 
 class VendorsView(_Lookup):
@@ -173,12 +200,17 @@ class OpenPurchaseOrdersView(_Lookup):
     resource = 'open purchase orders'
 
     def fetch(self, request, company):
-        return sap_service.open_purchase_orders(
-            company,
-            card_code=request.query_params.get('card_code'),
-            search=_search(request),
-            limit=_limit(request),
-        )
+        filters = dict(card_code=request.query_params.get('card_code'), search=_search(request),
+                       from_date=_from_date(request))
+        paged = _paged(request)
+        rows = sap_service.open_purchase_orders(company, limit=_limit(request), offset=_offset(request), **filters)
+        if paged:
+            self.total = sap_service.count_open_purchase_orders(company, **filters)
+        # What OMS already holds against each PO. One with nothing left is not
+        # offered, except on a paged list, where it stays (marked) so the pages
+        # and the total stay true.
+        return reservations.annotate(company, DocumentKind.PO, rows, key=lambda r: (r['doc_entry'], 0),
+                                     open_field='open_amount', drop_exhausted=not paged)
 
 
 class OpenDocumentsView(_Lookup):
@@ -228,6 +260,11 @@ class OpenDocumentsView(_Lookup):
             return fail(str(exc),
                         status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
 
+        # What OMS already holds against each item a customer refund can be
+        # applied to. Annotated, never dropped: this is also the ledger itself.
+        refundable = [r for r in rows if r.get('doc_type_code') in request_service.LEDGER_OBJECTS]
+        reservations.annotate(company, DocumentKind.LEDGER, refundable, key=ledger_key,
+                              open_field='open_amount', drop_exhausted=False)
         return ok({
             'company': company,
             'partner': info,
@@ -483,6 +520,28 @@ class DepartmentsView(APIView):
         return ok({'count': len(results), 'results': results})
 
 
+class PaymentPurposesView(APIView):
+    """GET /api/advance-payments/payment-purposes/
+
+    What the money is for: the Payment Desk's purpose list
+    (`advance_payment.purposes`), in the form's order:
+
+        {"groups": ["Goods", ...],
+         "results": [{"code": "RAW_MATERIAL", "label": "Raw Material Purchase",
+                      "group": "Goods"}, ...]}
+
+    The same for every company. The code is what a request stores and what
+    workflow queries may match on.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanViewLookups()]
+
+    def get(self, request):
+        results = purposes()
+        return ok({'count': len(results), 'groups': list(PURPOSE_GROUPS), 'results': results})
+
+
 class EmployeeDirectoryView(_Lookup):
     """GET /api/advance-payments/employee-directory/
 
@@ -538,13 +597,212 @@ class EmployeeDirectoryView(_Lookup):
         return ok({'company': company, 'count': len(results), 'results': results})
 
 
-class DocumentAttachmentView(_Lookup):
-    """GET /api/advance-payments/document-attachment/?company=&kind=po|bill&doc_entry=
+def ledger_key(row):
+    """A ledger row's `(sap_doc_entry, sap_line)`, as a refund line stores it.
 
-    The document's LATEST SAP attachment (the last ATC1 line), as the file
-    itself, inline: a PDF or image the browser can show. The open PO and
-    open invoice lists already say, per row, whether there is one
-    (`attachment`), so the screen only asks for a file that exists.
+    The key SAP's PaymentInvoices wants: an A/R invoice or credit memo by its
+    own DocEntry, a receipt or journal entry by the journal TransId and line.
+    """
+    if request_service.LEDGER_OBJECTS.get(row.get('doc_type_code'), {}).get('by_journal'):
+        return row['trans_id'], row.get('line_id') or 0
+    return row.get('doc_entry') or row['trans_id'], 0
+
+
+class AssignmentRecipientsView(APIView):
+    """GET /api/advance-payments/assignment-recipients/
+
+    Who a bill or PO may be sent to: active users holding the Advance Payment
+    User or Approver role (primary or extra). `[{id, name, username}]`.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanDispatch()]
+
+    def get(self, request):
+        rows = [{'id': u.pk, 'name': u.name or u.username, 'username': u.username}
+                for u in assignment_service.recipients()]
+        return ok({'count': len(rows), 'results': rows})
+
+
+class AssignmentsView(APIView):
+    """GET  /api/advance-payments/assignments/?scope=mine|sent
+       POST /api/advance-payments/assignments/  {company, assigned_to, documents: [{kind, sap_doc_entry}], note}
+
+    `mine`: what was sent to you (Advance_Payment). `sent`: what you sent
+    (Advance_Payment_Dispatch). Sending needs the dispatch key.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def get(self, request):
+        from advance_payment.models import DocumentAssignment
+
+        scope = (request.query_params.get('scope') or 'mine').lower()
+        keys = effective_keys(request.user)
+        qs = DocumentAssignment.objects.select_related('assigned_to', 'assigned_by', 'request')
+        if scope == 'sent':
+            if ap_perms.DISPATCH_KEY not in keys:
+                return fail('You do not have the permission to send bills and POs.',
+                            status=http_status.HTTP_403_FORBIDDEN)
+            qs = qs.filter(assigned_by=request.user)
+        else:
+            if ap_perms.VIEW_KEY not in keys:
+                return fail('You do not have the Payments permission.', status=http_status.HTTP_403_FORBIDDEN)
+            qs = qs.filter(assigned_to=request.user)
+        status = (request.query_params.get('status') or '').upper()
+        if status:
+            qs = qs.filter(status=status)
+        rows = [assignment_data(a) for a in qs[:500]]
+        return ok({'count': len(rows), 'results': rows})
+
+    def post(self, request):
+        if ap_perms.DISPATCH_KEY not in effective_keys(request.user):
+            return fail('You do not have the permission to send bills and POs.',
+                        status=http_status.HTTP_403_FORBIDDEN)
+        data = request.data or {}
+        try:
+            made = assignment_service.send(company=data.get('company'), recipient_id=data.get('assigned_to'),
+                                           documents=data.get('documents'), note=data.get('note'),
+                                           user=request.user)
+        except assignment_service.AssignmentInvalid as exc:
+            return fail(str(exc), errors={'problems': exc.problems}, status=exc.status)
+        rows = [assignment_data(a) for a in made]
+        noun = 'document' if len(rows) == 1 else 'documents'
+        return created({'count': len(rows), 'results': rows}, f'{len(rows)} {noun} sent.')
+
+
+class AssignmentActionView(APIView):
+    """POST /api/advance-payments/assignments/<id>/dismiss|withdraw/"""
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def post(self, request, pk, action):
+        handlers = {'dismiss': assignment_service.dismiss, 'withdraw': assignment_service.withdraw}
+        if action not in handlers:
+            raise Http404
+        try:
+            row = handlers[action](pk, user=request.user)
+        except assignment_service.AssignmentInvalid as exc:
+            return fail(str(exc), errors={'problems': exc.problems}, status=exc.status)
+        return ok(assignment_data(row), 'Dismissed.' if action == 'dismiss' else 'Withdrawn.')
+
+
+class TdsOptionsView(_Lookup):
+    """GET /api/advance-payments/tds-options/?company=&card_code=&bills=1,2
+
+    What the Payment desk offers for TDS on a vendor payment: the rates SAP
+    has codes at (of 1, 2, 5, 10%), each rate's codes — the vendor's own
+    first — with the section and 2133xxx account each books to; and any of the
+    request's bills that already had TDS deducted in SAP (then TDS is blocked).
+    """
+
+    resource = 'TDS options'
+
+    def get(self, request, company=None):
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            bills = [int(b) for b in (request.query_params.get('bills') or '').split(',') if b.strip()]
+        except ValueError:
+            return fail('bills must be DocEntries separated by commas.', status=http_status.HTTP_400_BAD_REQUEST)
+        try:
+            codes = sap_service.tds_codes(company, request.query_params.get('card_code'))
+            taxed = sap_service.bills_with_tds(company, bills)
+        except ValueError as exc:
+            return fail(str(exc), status=http_status.HTTP_400_BAD_REQUEST)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        rates = sorted({c['rate'] for c in codes}, key=float)
+        return ok({
+            'company': company,
+            'rates': rates,
+            'codes': codes,
+            'bills_with_tds': [{'doc_entry': e, **v} for e, v in taxed.items()],
+        })
+
+
+class DocumentHistoryView(_Lookup):
+    """GET /api/advance-payments/document-history/?company=&kind=po|bill|ledger&doc_entry=[&line=]
+
+    Every OMS request that has reserved or paid against one SAP document,
+    newest first, with what each paid and what was open when it was raised:
+
+        {"summary": {"reserved": "10.00", "paid": "40.00", "requests": 3},
+         "results": [{"request_no", "status", "effect": RESERVED|PAID|RELEASED,
+                      "amount", "open_amount", "raised_on", "raised_by",
+                      "sap_payment"}, ...]}
+    """
+
+    resource = 'document history'
+    _KINDS = {'po': DocumentKind.PO, 'bill': DocumentKind.BILL, 'ledger': DocumentKind.LEDGER}
+
+    def get(self, request):
+        company, error = self._company(request)
+        if error:
+            return error
+        kind = self._KINDS.get((request.query_params.get('kind') or '').strip().lower())
+        if kind is None:
+            return fail('kind must be one of: bill, ledger, po.', status=http_status.HTTP_400_BAD_REQUEST)
+        try:
+            entry = int(request.query_params.get('doc_entry'))
+            line = int(request.query_params.get('line') or 0)
+        except (TypeError, ValueError):
+            return fail('doc_entry and line must be numbers.', status=http_status.HTTP_400_BAD_REQUEST)
+        return ok({'company': company, **reservations.history(company, kind, entry, line)})
+
+
+class DocumentAttachmentsView(_Lookup):
+    """GET /api/advance-payments/document-attachments/?company=&kind=po|bill&doc_entry=
+
+    EVERY SAP attachment related to a document, as a list (no files): for a
+    bill, its own ATC1 lines, then its GRPOs', then the POs behind those
+    GRPOs; for a PO, its own. Each row is opened with
+    `document-attachment/?kind=&doc_entry=&line=`.
+    """
+
+    resource = 'document attachments'
+
+    def fetch(self, request, company):
+        return sap_service.related_attachments(
+            company, request.query_params.get('kind'), request.query_params.get('doc_entry'))
+
+
+class PurchaseOrderView(_Lookup):
+    """GET /api/advance-payments/purchase-order/?company=&doc_entry=
+
+    One PO as SAP holds it: `{header, lines, follow_on, attachments}` (see
+    `sap.purchase_order`). For the desk, from the Payment stage on. 404 when
+    SAP has no such PO.
+    """
+
+    resource = 'purchase order'
+
+    def get(self, request):
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            po = sap_service.purchase_order(company, request.query_params.get('doc_entry'))
+        except ValueError as exc:
+            return fail(str(exc), status=http_status.HTTP_400_BAD_REQUEST)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        if po is None:
+            return fail('SAP has no such purchase order.', status=http_status.HTTP_404_NOT_FOUND)
+        return ok({'company': company, **po})
+
+
+class DocumentAttachmentView(_Lookup):
+    """GET /api/advance-payments/document-attachment/?company=&kind=po|bill|grpo&doc_entry=[&line=]
+
+    One SAP attachment of a document, as the file itself, inline: a PDF or
+    image the browser can show. Without `line`, the LATEST one (the last ATC1
+    line) of a PO or bill, which is the one read for its invoice fields. With
+    `line`, that line of a PO, bill or GRPO, as `document-attachments/` lists
+    them.
 
     The file name is read from SAP here, by document, never taken from the
     caller. The file comes from the attachment file service
@@ -562,8 +820,12 @@ class DocumentAttachmentView(_Lookup):
             return error
         kind = request.query_params.get('kind')
         doc_entry = request.query_params.get('doc_entry')
+        line = request.query_params.get('line')
         try:
-            meta = sap_service.document_attachment(company, kind, doc_entry)
+            if line not in (None, ''):
+                meta = sap_service.attachment_line(company, kind, doc_entry, line)
+            else:
+                meta = sap_service.document_attachment(company, kind, doc_entry)
         except ValueError as exc:
             return fail(str(exc), status=http_status.HTTP_400_BAD_REQUEST)
         except sap_service.SapUnavailable as exc:
@@ -586,7 +848,8 @@ class DocumentAttachmentView(_Lookup):
         response = HttpResponse(content, content_type=content_type)
         response['Content-Disposition'] = f"inline; filename*=UTF-8''{quote(name)}"
         response['X-Attachment-Name'] = quote(name)
-        response['X-Attachment-Count'] = str(meta['count'])
+        if 'count' in meta:
+            response['X-Attachment-Count'] = str(meta['count'])
         response['Access-Control-Expose-Headers'] = 'X-Attachment-Name, X-Attachment-Count, Content-Disposition'
         return response
 
@@ -734,13 +997,18 @@ class OpenInvoicesView(_Lookup):
     resource = 'open invoices'
 
     def fetch(self, request, company):
-        return sap_service.open_invoices(
-            company,
-            party_type=request.query_params.get('party_type') or 'vendor',
-            card_code=request.query_params.get('card_code'),
-            search=_search(request),
-            limit=_limit(request),
-        )
+        party_type = request.query_params.get('party_type') or 'vendor'
+        filters = dict(party_type=party_type, card_code=request.query_params.get('card_code'),
+                       search=_search(request), from_date=_from_date(request))
+        paged = _paged(request)
+        rows = sap_service.open_invoices(company, limit=_limit(request), offset=_offset(request), **filters)
+        if paged:
+            self.total = sap_service.count_open_invoices(company, **filters)
+        if party_type != 'vendor':
+            return rows
+        # What OMS already holds against each bill (see the PO view on paging).
+        return reservations.annotate(company, DocumentKind.BILL, rows, key=lambda r: (r['doc_entry'], 0),
+                                     open_field='balance_due', drop_exhausted=not paged)
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +1133,9 @@ class RequestListView(_RequestView):
             return fail(str(exc), errors={'problems': exc.problems})
         except flow_service.FlowError as exc:
             return _flow_error(exc)
+        # Raised from a bill / PO sent to them: that assignment is now done.
+        if data.get('assignment_id'):
+            assignment_service.link_request(data['assignment_id'], advance, user=request.user)
         return self._answer(request, advance, f'{advance.request_no} raised.',
                             status=http_status.HTTP_201_CREATED)
 
@@ -872,6 +1143,25 @@ class RequestListView(_RequestView):
 class RequestDetailView(_RequestView):
     def get(self, request, pk):
         return ok(request_data(self._get(request, pk), user=request.user, detail=True))
+
+
+class RequestSapCheckView(_RequestView):
+    """GET /api/advance-payments/requests/<id>/sap-check/
+
+    The request's documents against SAP as it is NOW (`reservations.live_check`):
+    open when raised vs open now, status, what other OMS requests hold, and
+    whether each line still fits. What Final checks before posting, shown to
+    the desk from Payment on so a change is fixed before Final, not at it.
+    """
+
+    def get(self, request, pk):
+        advance = self._get(request, pk)
+        try:
+            rows = reservations.live_check(advance)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        return ok({'ok': all(r['ok'] for r in rows), 'changed': any(r['changed'] for r in rows),
+                   'results': rows})
 
 
 class RequestEditView(_RequestView):
