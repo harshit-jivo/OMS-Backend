@@ -1,0 +1,1682 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+  <meta charset="UTF-8">
+  {% comment %}
+    Chrome kept mis-reading these pages as Spanish and popping up its "Translate?"
+    bar on every page change. translate="no" on <html> plus this meta tag tell it
+    the page is already in the reader's language, so it stops asking. The login
+    page was fixed this way already; this is the same fix for every other page.
+  {% endcomment %}
+  <meta name="google" content="notranslate">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}Jivo Control Panel{% endblock %}</title>
+  <link href="{% static 'vendor/css/lucide.css' %}" rel="stylesheet">
+  
+  {% comment %}
+    Inter = everything. A system serif = big headings. Caveat = handwriting accent.
+    Spline Sans Mono handles the digits (see core/_numerals.html). All served
+    from our own /static/, so no page waits on Google.
+    NOTE: {# #} only works on ONE line - across lines Django prints it as text.
+  {% endcomment %}
+  <link href="{% static 'vendor/css/inter.css' %}" rel="stylesheet">
+  <link href="{% static 'vendor/css/archivo.css' %}" rel="stylesheet">
+  <link href="{% static 'vendor/css/caveat.css' %}" rel="stylesheet">
+  {% include 'core/_numerals.html' %}
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    /* The browser paints the <html> element before it knows about <body>.
+       Without a colour here that moment is plain white - the flash you see
+       between pages. Same grey as the body, so there is nothing to notice. */
+    html { background: #f7f7f9; }
+    body { margin: 0; font-family: 'CPNum', 'Inter', sans-serif; background: var(--rz-bg, #f7f7f9);
+           color: var(--rz-body, #4a4a61); -webkit-font-smoothing: antialiased; }
+
+    /* The serif display face on the big headings. Plain h1/h2 selectors, so any page
+       that sets its own heading font still wins - this only fills in where nothing
+       else was specified. */
+    h1, h2 { font-family: var(--font-display); color: var(--rz-ink); font-weight: 400;
+             letter-spacing: -.01em; }
+
+    /* Cross-fade from the old page to the new one instead of cutting to blank.
+       Browsers that do not support this just navigate the old way - nothing
+       breaks, it simply is not smoothed. */
+    @view-transition { navigation: auto; }
+    ::view-transition-old(root),
+    ::view-transition-new(root) { animation-duration: .15s; }
+    /* Windows "reduce motion" setting - honour it. */
+    @media (prefers-reduced-motion: reduce) {
+      ::view-transition-old(root),
+      ::view-transition-new(root) { animation: none; }
+    }
+
+    /* ── Light & subtle report theme tokens ───────────────────────────────────
+       Shared palette for the Realise/report pages so they all read like the Home
+       dashboard: white cards, thin colour accents, soft shadows, dark-on-light text.
+       Tweak here to re-tone every page at once. */
+    :root {
+      /* Surfaces: a very light, slightly cool page behind white cards with a thin
+         border. Depth comes from the border, not from shadow. */
+      --rz-bg:        #f7f7f9;   /* page background                       */
+      --rz-card:      #ffffff;   /* card / panel surface                  */
+      --rz-card-brd:  #e7e7ec;   /* subtle card border                    */
+      --rz-shadow:    0 4px 14px rgba(30,30,50,.06);   /* soft card shadow */
+      --rz-shadow-lg: 0 10px 28px rgba(30,30,50,.09);  /* hero / raised    */
+      /* Text: dark navy-charcoal down to a muted lavender-grey, never pure black
+         and never a cold slate. */
+      --rz-ink:       #29283a;   /* primary heading / value text          */
+      --rz-body:      #4a4a61;   /* body text                             */
+      --rz-muted:     #8585a3;   /* muted labels                          */
+      --rz-faint:     #a3a3bb;   /* faint / placeholder                   */
+      --rz-line:      #e7e7ec;   /* hairline / divider                    */
+      --rz-indigo:    #5865f2;   /* primary accent                        */
+      --rz-indigo-deep:#4049c9;  /* accent text on soft bg                */
+      --rz-soft:      #eef1ff;   /* soft accent fill (active chips)       */
+      --rz-soft-brd:  #dde2ff;   /* soft accent border                    */
+      --rz-head-bg:   #fafafc;   /* table header background (light)       */
+      --rz-head-ink:  #8585a3;   /* table header text                     */
+      --rz-total-bg:  #f7f7f9;   /* grand-total row background            */
+      --rz-total-brd: #e7e7ec;   /* grand-total row top border            */
+      --rz-pos:       #00a878;   /* positive / green                      */
+      --rz-neg:       #e5484d;   /* negative / red                        */
+      --rz-amber:     #f59e0b;   /* amber accent                          */
+      --rz-teal:      #00afa5;   /* teal accent                           */
+      /* ── Status tints ────────────────────────────────────────────────────
+         Every badge and soft-filled chip pairs a colour above with the matching
+         tint here, so a "done" green looks the same on every screen. */
+      --rz-pos-soft:   #eafbf5;  /* green tint   - completed / positive   */
+      --rz-pos-brd:    #bdeedd;
+      --rz-teal-soft:  #e8faf8;  /* teal tint    - categories             */
+      --rz-teal-brd:   #bfeeeb;
+      --rz-amber-soft: #fff7e6;  /* amber tint   - in progress            */
+      --rz-amber-brd:  #fbe2b4;
+      --rz-indigo-soft:#eef1ff;  /* indigo tint  - pending / info         */
+      --rz-indigo-brd: #dde2ff;
+      --rz-neg-soft:   #fff0f1;  /* red tint     - short / negative       */
+      --rz-neg-brd:    #fbd0d2;
+      /* ── Radius scale ────────────────────────────────────────────────────
+         Four steps only. Mixing more than this is what makes an interface look
+         assembled from unrelated parts. */
+      --r-card:   15px;
+      --r-btn:    10px;
+      --r-input:  10px;
+      --r-badge:   7px;
+      --r-avatar: 10px;
+      /* Numeric font: the same face the Jivo E-Commerce app uses for every figure, so
+         numbers look identical across both products. Spline Sans Mono is a monospace, so
+         every digit is the same width and columns line up. Change this one line to
+         re-tone every number in the whole control panel at once.                        */
+      --rz-num: 'CPNum', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      /* The four faces, matching the Jivo E-Commerce app.
+           --font-body    Inter    everything: text, tables, buttons, labels
+           --font-display serif    big headings (system stack, no download)
+           --font-hand    Caveat   handwriting accent (declared, not yet used)
+           --rz-num       Spline Sans Mono, digits only (see _numerals.html)
+         A font is only downloaded when something actually uses it, so
+         declaring Caveat here costs nothing until you put it on an element. */
+      --font-body:    'Inter', system-ui, -apple-system, "Segoe UI", sans-serif;
+      /* Page titles and big figures are set in a serif, which is what gives the
+         interface its character against the plain sans everything else uses.
+         This is a SYSTEM stack on purpose - Georgia ships on Windows and macOS, so
+         it costs no download and works with no internet, which the panel requires.
+         Swap in a webfont here (vendored under core/static/vendor) if an exact
+         face is ever wanted; nothing else has to change. */
+      --font-display: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua',
+                      'Times New Roman', serif;
+      --font-hand:    'Caveat', 'Inter', cursive;
+      /* Big headline figures (the KPI stat cards) do NOT use the mono face. The
+         Spline Sans Mono subset only ships one weight, so a 900-weight KPI value
+         came out looking thin. This plain sans stack is what the live server uses,
+         and it honours font-weight properly.                                       */
+      --rz-num-plain: system-ui, "Segoe UI", Roboto, -apple-system, "Helvetica Neue", Arial, sans-serif;
+      /* KPI accent bars (thin top strip on white stat cards). Flat colour, not a
+         gradient: at 3px tall a gradient reads as a muddy smear, and a single clean
+         colour is what ties the strip to the badge of the same meaning. */
+      --rz-acc-indigo: #5865f2;
+      --rz-acc-green:  #00a878;
+      --rz-acc-red:    #e5484d;
+      --rz-acc-amber:  #f59e0b;
+      --rz-acc-teal:   #00afa5;
+    }
+
+    /* ── Numeric values: subtle, upright figures across every report ───────────
+       Numbers in these pages were inheriting Inter, whose numerals look slanted /
+       "cursive". Force a neutral tabular sans + normal style on the numeric containers
+       used app-wide: KPI stat values (*-kpi-v), the shared .num table cell, and the
+       common per-report money/qty cell classes. Selectors only hit number-only elements,
+       so prose (party names, headings) keeps Inter. Edit --rz-num to re-tone at once. */
+    /* the "KPI difference" popup: every column except the category name */
+    .glimpse-table td:not(:first-child), .glimpse-diff,
+    .num, td.num, .op-hi, .dd-mono,
+    .sv, .sp-amt, .sa-qty, .doc, .doc-bal, .cmp-big, .cmp-chg, .cm-gst,
+    .rc-so-one, .pf-prow-qty, .sc2-state-val, .sc2-drillval {
+      font-family: var(--rz-num);
+      font-variant-numeric: tabular-nums;
+      font-style: normal;
+      letter-spacing: 0;
+    }
+
+    /* KPI stat values keep the plain sans, so a bold number really looks bold. */
+    [class$="kpi-v"], [class*="kpi-v "], .kpi-value {
+      font-family: var(--rz-num-plain);
+      font-variant-numeric: tabular-nums;
+      font-style: normal;
+      letter-spacing: 0;
+    }
+
+
+    /* ── Shell ── */
+    /* ---- Top bar ---------------------------------------------------------------
+       A thin strip across the top holding the profile button. It used to live at the
+       bottom of the sidebar, where it took space from the menu and disappeared on the
+       collapsed rail. The bar is a normal block above the shell, so the sidebar simply
+       starts 56px lower - no overlapping, nothing floating. */
+    .cp-topbar { height: 56px; display: flex; align-items: center; background: #fff;
+                 border-bottom: 1px solid #e5e7eb; position: relative; z-index: 200; }
+    /* The logo block lines up exactly with the sidebar below it. --cp-sbw is written
+       by JS from the sidebar's real width, so this follows the sidebar through every
+       state - open, collapsed rail, and the hover-peek in between - with no guessing. */
+    .cp-topbar-brand { width: var(--cp-sbw, 244px); flex-shrink: 0; height: 100%;
+                       display: flex; align-items: center; justify-content: center;
+                       gap: 10px; padding: 0 14px;
+                       border-right: 1px solid #e5e7eb; overflow: hidden;
+                       transition: width .22s ease, padding .22s ease; }
+    .cp-topbar-rest { flex: 1; display: flex; align-items: center; justify-content: flex-end;
+                      gap: 10px; padding: 0 20px; min-width: 0; }
+    /* The arrow straddles the divider, half on each side, like a seam button. */
+    .cp-topbar .cp-sb-arrow { position: absolute; left: var(--cp-sbw, 244px); top: 50%;
+                              margin: -13px 0 0 -13px; opacity: 1; pointer-events: auto;
+                              z-index: 3; transition: left .22s ease; }
+    /* On the narrow rail there is only room for the logo. */
+    /* The logo reloads the page. cursor + hover say so, because nothing else
+       about a logo suggests it can be clicked. */
+    .cp-brand { cursor: pointer; }
+    .cp-brand:focus-visible { outline: 2px solid #a5b4fc; outline-offset: 2px;
+                              border-radius: 10px; }
+    body.cp-sb-narrow .cp-topbar-brand { padding: 0 8px; }
+    /* On the collapsed rail the logo shrinks so it still fits the narrow strip. */
+    body.cp-sb-narrow .cp-brand-logo { height: 30px; min-width: 62px; }
+    .cp-userwrap { position: relative; }
+    /* A plain square icon button - no name, no role. The details live in the menu. */
+    .cp-userbtn { width: 36px; height: 36px; padding: 0; display: inline-flex;
+                  align-items: center; justify-content: center; border: 1px solid #e5e7eb;
+                  background: #fff; border-radius: 10px; cursor: pointer; color: #475569;
+                  transition: background .15s, border-color .15s, color .15s; }
+    .cp-userbtn:hover { background: #eef2ff; border-color: #c7d2fe; color: #4338ca; }
+    .cp-userbtn[aria-expanded="true"] { background: #eef2ff; border-color: #a5b4fc; color: #4338ca; }
+    .cp-userbtn .ic { font-size: 18px; }
+    /* The one icon lucide.css does not ship - added here so the vendor file stays as it came. */
+    .ic-log-out { --ic: url("data:image/svg+xml;base64,PHN2ZyBjbGFzcz0ibHVjaWRlIGx1Y2lkZS1sb2ctb3V0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiID4gPHBhdGggZD0iTTkgMjFINWEyIDIgMCAwIDEtMi0yVjVhMiAyIDAgMCAxIDItMmg0IiAvPiA8cG9seWxpbmUgcG9pbnRzPSIxNiAxNyAyMSAxMiAxNiA3IiAvPiA8bGluZSB4MT0iMjEiIHgyPSI5IiB5MT0iMTIiIHkyPSIxMiIgLz4gPC9zdmc+"); }
+    /* Menu rows */
+    .cp-userpop-item { display: flex; align-items: center; gap: 10px; width: 100%;
+                       border: 0; background: transparent; padding: 9px 10px; border-radius: 9px;
+                       font: inherit; font-size: 13px; font-weight: 700; color: #334155;
+                       cursor: pointer; text-align: left; }
+    .cp-userpop-item:hover { background: #f1f5f9; }
+    .cp-userpop-item .ic { font-size: 16px; color: #64748b; }
+    .cp-userpop-item.danger { color: #dc2626; }
+    .cp-userpop-item.danger .ic { color: #dc2626; }
+    .cp-userpop-item.danger:hover { background: #fef2f2; }
+    .cp-userpop-sep { height: 1px; background: #eef2f6; margin: 6px 0; }
+    .cp-userpop-det { display: none; }
+    .cp-userpop-det.open { display: block; }
+    /* The panel that opens under it. */
+    .cp-userpop { position: absolute; right: 0; top: calc(100% + 8px); width: 240px;
+                  background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+                  box-shadow: 0 12px 34px rgba(15,23,42,.14); padding: 8px; display: none; }
+    .cp-userpop.open { display: block; }
+    .cp-userpop-head { display: flex; align-items: center; gap: 11px; padding-bottom: 12px;
+                       border-bottom: 1px solid #eef2f6; }
+    .cp-userpop-head .cp-avatar { width: 42px; height: 42px; font-size: 15px; }
+    .cp-userpop-name { font-size: 14px; font-weight: 800; color: #0f172a; word-break: break-word; }
+    .cp-userpop-role { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .cp-userpop-row { display: flex; justify-content: space-between; gap: 10px;
+                      font-size: 12px; padding: 9px 0; border-bottom: 1px solid #f1f5f9; }
+    .cp-userpop-row span:first-child { color: #94a3b8; font-weight: 700; }
+    .cp-userpop-row span:last-child { color: #334155; font-weight: 700; text-align: right;
+                                      word-break: break-word; }
+    .cp-userpop .cp-logout-btn { margin-top: 12px; }
+
+    .cp-shell { display: flex; min-height: calc(100vh - 56px); position: relative; }
+
+    /* ── Sidebar ── */
+    /* Frozen in place: sticky just below the 56px topbar and exactly viewport-tall, so the
+       sidebar stays put while only .cp-main scrolls. align-self:flex-start stops the flex
+       row from stretching it (which would break sticky); overflow-y lets a tall sidebar
+       scroll on its own. */
+    /* Width is set by the longest label, "Inventory & Production", which must fit
+       on one line beside its icon and chevron.
+       282px was measured against the OLD font. Switching the app to Inter made the
+       same words wider, ate the ~9px of spare room, and the label started getting
+       cut off mid-word. 310px restores a real margin - enough that a font tweak or
+       a slightly different rendering cannot clip it again. */
+    .cp-sidebar { width: 244px; background: var(--rz-card); color: var(--rz-body); padding: 14px 10px; display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; overflow-x: hidden; border-right: 1px solid var(--rz-card-brd); transition: width .22s ease, padding .22s ease; position: sticky; top: 0; height: calc(100vh - 56px); align-self: flex-start; }
+    /* Collapsed = a slim icon rail (not empty space): keep the nav icons,
+       hide all text/labels, and let the floating menu button expand it. */
+    /* Smart hover sidebar: collapsed = a slim icon rail that expands on hover and PUSHES
+       the content (everything adjusts smoothly — nothing is hidden). 'cp-sb-peek' is
+       toggled by JS on mouse enter/leave (with a small close-delay); :focus-within keeps
+       keyboard navigation working. */
+    body.cp-sidebar-collapsed .cp-sidebar {
+      width: 64px; padding: 16px 8px;
+      transition: width .2s ease, padding .2s ease;
+    }
+    body.cp-sidebar-collapsed .cp-sidebar.cp-sb-peek,
+    body.cp-sidebar-collapsed .cp-sidebar:focus-within {
+      width: 244px; padding: 14px 10px;   /* keep the hover-out rail the same width */
+    }
+    /* Icon-only look only while the rail is NOT peeking/focused */
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-section-label { display: none; }
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item { justify-content: center; gap: 0; padding: 11px 0; font-size: 0; }
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item .ic { font-size: 22px; }
+    /* On the slim rail, collapse the group to just its icon (no chevron, no sub-items). */
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-sub,
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-group-chev { display: none; }
+    /* Was a block at the top of the sidebar; now a row inside the top bar, so the
+       old bottom border and padding are gone and the logo is bar-height. */
+    .cp-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    /* The mark is a WIDE logotype (373.7 x 182), not a square avatar, so the old white
+       tile with its 44px box would have squashed it. Height is set to the 56px bar less
+       the brand's padding; width follows the artwork's own ratio. */
+    .cp-brand-logo { height: 40px; min-width: 82px; display: flex; align-items: center;
+                     color: #16a34a; font-weight: 900; font-size: 18px; flex-shrink: 0; }
+    .cp-brand-logo svg { height: 100%; width: auto; display: block; }
+    .cp-sb-arrow { border: 0; cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; justify-content: center; transition: background .15s, color .15s, opacity .15s, transform .15s, border-color .15s; }
+    /* Round arrow that closes the sidebar (it replaced the old X). It stays invisible
+       until the pointer is on the sidebar, so the header reads clean; :focus-within
+       keeps it reachable for anyone using the keyboard instead of a mouse. */
+    .cp-sb-arrow { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+                   border: 1px solid #e5e7eb; background: #fff; color: #64748b;
+                   box-shadow: 0 2px 6px rgba(15,23,42,.10);
+                   opacity: 0; pointer-events: none; }
+    /* It used to hide until the sidebar was hovered. In the top bar it is always
+       visible - it is the only way to reopen a collapsed sidebar. */
+    .cp-sb-arrow:hover { background: var(--rz-soft, #eef2ff); color: var(--rz-indigo-deep, #4338ca); border-color: var(--rz-soft-brd, #e0e7ff); }
+    /* The icon set only ships ic-chevron-right, so it is turned round to point LEFT
+       while the sidebar is open (click = close), and left as-is once collapsed
+       (click = open). */
+    .cp-sb-arrow .ic { font-size: 16px; transform: rotate(180deg); transition: transform .2s ease; }
+    body.cp-sidebar-collapsed .cp-sb-arrow .ic { transform: rotate(0deg); }
+    .cp-section-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: var(--rz-faint); margin: 16px 6px 6px 6px; text-transform: uppercase; }
+    /* The 16px above each label separated it from the block before it. The first one
+       now sits at the very top of the sidebar, so it needs no gap of its own. */
+    .cp-section-label:first-child { margin-top: 0; }
+    .cp-nav { display: flex; flex-direction: column; gap: 3px; }
+    .cp-nav-item { display: flex; align-items: center; gap: 9px; padding: 9px 8px; border-radius: var(--r-btn); color: var(--rz-body); text-decoration: none; font-size: 14px; font-weight: 600; transition: background .15s, color .15s; }
+    .cp-nav-item:hover { background: var(--rz-bg); color: var(--rz-ink); }
+    /* Selected page: a light indigo tint with indigo text, not a dark filled block.
+       Hover is #eef2ff (one shade lighter), so the two never look the same. */
+    /* No filled block behind the current page - the indigo wording and icon mark it
+       instead. Hover still tints, so the row does not feel dead under the pointer. */
+    /* The current page is the one solid block of colour in the whole sidebar - that is
+       what makes it findable at a glance without any other item shouting. */
+    .cp-nav-item.active { background: var(--rz-ink); color: #fff; font-weight: 600; }
+    .cp-nav-item.active:hover { background: #1f1e2c; color: #fff; }
+    .cp-nav-item.active .ic { color: #fff; }
+    .cp-nav-item .ic { font-size: 20px; }
+
+    /* ── Collapsible nav group (e.g. Analytical Reports) ── */
+    .cp-nav-group { display: flex; flex-direction: column; }
+    /* A <button> centres its text by default, an <a> does not. That is why the
+       wrapped label looked pushed in while every other item lined up. */
+    /* The chevron used to be pinned to the far right (space-between), so the wider
+       the sidebar got, the bigger the empty gap between the words and the arrow.
+       flex-start puts it right after the label instead; the leftover width is
+       simply empty space at the end of the row, which nobody sees.
+       Bonus: the label can now shrink if it ever needs to, so a long name can
+       never shove the arrow out of view. */
+    .cp-nav-group-btn { width: 100%; border: 0; background: none; font-family: inherit; cursor: pointer; justify-content: flex-start; gap: 6px; text-align: left; }
+    /* "Inventory & Production" is the only label long enough to wrap onto two
+       lines. With the default line spacing those two lines sat far apart, which
+       made the row look like it had a gap in front of the words. Tightening the
+       spacing makes a wrapped label read as one block, level with the icon. */
+    .cp-nav-group-lead { display: flex; align-items: center; gap: 9px; min-width: 0; line-height: 1.15; white-space: nowrap; }
+    /* Safety net: if a label ever outgrows the sidebar it is trimmed with an
+       ellipsis rather than dropping onto a second line.
+       NOTE: this used to say the full text stayed in a title attribute. It does
+       not any more - browser tooltips are stripped app-wide - so a trimmed label
+       is simply unreadable. Keep the sidebar wide enough that this never fires. */
+    .cp-nav-group-lead, .cp-nav-item { overflow: hidden; text-overflow: ellipsis; }
+    .cp-nav-group-chev { font-size: 18px !important; color: #94a3b8; transition: transform .18s ease; }
+    .cp-nav-group.open > .cp-nav-group-btn { color: #1e293b; }
+    .cp-nav-group.open > .cp-nav-group-btn .cp-nav-group-chev { transform: rotate(180deg); }
+    .cp-nav-sub { display: none; flex-direction: column; gap: 3px; margin: 3px 0 2px 17px; padding-left: 12px; border-left: 2px solid #e2e8f0; }
+    .cp-nav-group.open > .cp-nav-sub { display: flex; }
+    .cp-nav-sub .cp-nav-item { font-size: 12.5px; padding: 8px 11px; }
+
+    /* ══ Sidebar, E-Commerce look ═══════════════════════════════════════════
+       Taken from Ecom/Frontend/src/App.css so the two products feel like one:
+       a lavender gradient panel, a soft grey tile behind every icon, and the
+       current page marked by an indigo bar on the sidebar's own edge rather
+       than by a heavy filled block.
+       Written as overrides at the end of the sidebar rules - the properties
+       restated below are the ones being changed, the rest still apply. */
+    .cp-sidebar {
+      background: linear-gradient(180deg, #faf9ff 0%, #f1f0fa 100%);
+      border-right: 1px solid #eef0f4;
+      /* 210px held the labels only while the text was 11.5px. At 14.5px the longest
+         label - "Inventory & Production" - needs 193px of row, which 210px cannot give
+         it. Measured minimum is 256px; 258 leaves 2px so a font that renders a shade
+         wider on another machine still does not clip it. */
+      width: 258px;
+    }
+    /* WORKSPACE / DATA / INSIGHTS - quiet, small, wide-tracked. */
+    .cp-section-label {
+      font-size: 10px; font-weight: 600; letter-spacing: .8px;
+      color: #b2bec3; margin: 14px 10px 4px;
+    }
+    /* Full-bleed rows. The sidebar keeps its 10px side padding, so the row pulls
+       back out by that much - otherwise the active bar would float in from the
+       edge instead of sitting on it. */
+    .cp-nav-item {
+      position: relative; gap: 6px;
+      margin: 1px -10px; padding: 9px 6px;
+      border-radius: 0;
+      font-size: 14.5px; font-weight: 500; color: #636e72;
+      transition: background .18s ease, color .18s ease;
+    }
+    .cp-nav-item:hover { background: #f8f9fc; color: #2d3436; }
+    /* The indigo edge bar. Drawn on every row but scaled to nothing, so switching
+       page slides it in rather than popping it. */
+    .cp-nav-item::before {
+      content: ''; position: absolute; left: 0; top: 0; width: 3px; height: 100%;
+      background: #667eea; border-radius: 0 2px 2px 0;
+      transform: scaleY(0); transition: transform .25s ease;
+    }
+    .cp-nav-item.active::before { transform: scaleY(1); }
+    /* Current page: indigo wording on a whisper of indigo - not a solid dark block. */
+    .cp-nav-item.active,
+    .cp-nav-item.active:hover {
+      background: rgba(102, 126, 234, .06); color: #667eea; font-weight: 600;
+    }
+    /* The icon tile.
+       These icons are CSS MASKS, not a font: every .ic-NAME sets
+       background-color:currentColor and the mask clips that paint to the glyph. A
+       background on .ic is therefore not a tile behind the icon - it IS the icon's
+       paint. So the tile is drawn as a separate layer by ::after and parked behind
+       the glyph, and .ic is left to do nothing but be an icon. */
+    .cp-nav-item { --tile-x: 6px; }
+    .cp-nav-item::after {
+      content: ''; position: absolute; left: var(--tile-x); top: 50%;
+      width: 26px; height: 26px; margin-top: -13px;
+      border-radius: 8px; background: #f0f2f5;
+      z-index: 0; pointer-events: none;
+      transition: background .2s ease, box-shadow .2s ease, transform .25s ease;
+    }
+    /* Lift the real content above the tile - ::after is painted after its siblings. */
+    .cp-nav-item > *, .cp-nav-group-lead { position: relative; z-index: 1; }
+    /* A 16px glyph centred in the 28px tile: 6px either side makes the icon take up
+       exactly the tile's width in the flex row, so the two line up without measuring. */
+    /* margin 3px, not 4: at 230px the longest label fitted with exactly 0px to spare,
+       and a font that renders a hair wider on another machine would have clipped it. */
+    .cp-nav-item .ic { font-size: 16px; margin: 0 5px; color: #95a5a6; }
+    .cp-nav-item:hover::after { transform: scale(1.08); }
+    .cp-nav-item.active::after {
+      background: rgba(102, 126, 234, .12);
+      box-shadow: 0 2px 8px rgba(102, 126, 234, .15);
+    }
+    .cp-nav-item.active .ic { color: #667eea; }
+    /* Group headers (Accounts, Inventory & Production ...) read as rows too. */
+    .cp-nav-group-btn { margin: 1px -10px; padding: 9px 6px; border-radius: 0; font-size: 14.5px; font-weight: 500; }
+    .cp-nav-group-chev { font-size: 14px !important; flex: 0 0 auto; }
+    .cp-nav-group.open > .cp-nav-group-btn { color: #2d3436; }
+    /* Sub-items: same row, one size down, and the old left rule is dropped - the
+       indent alone is enough once every row is full width. */
+    .cp-nav-sub { margin: 1px 0 2px; padding-left: 0; border-left: 0; }
+    .cp-nav-sub .cp-nav-item { font-size: 14px; padding: 8px 6px 8px 16px; --tile-x: 16px; }
+    /* Collapsed rail: only the tile is left, so centre it and drop the bleed. */
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item,
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-group-btn {
+      margin: 1px 0; padding: 9px 0; justify-content: center;
+    }
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item .ic {
+      font-size: 17px; margin: 0;
+    }
+    body.cp-sidebar-collapsed .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item::after {
+      left: 50%; margin-left: -16px; margin-top: -16px; width: 32px; height: 32px;
+    }
+
+    /* ── Avatar + sign-out button (used by the top bar profile menu) ── */
+    /* A quiet rounded square rather than a bright circle: initials are a label, not a
+       thing to look at first. */
+    .cp-avatar { width: 32px; height: 32px; border-radius: var(--r-avatar); background: var(--rz-bg); border: 1px solid var(--rz-card-brd); color: var(--rz-ink); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; letter-spacing: .3px; flex-shrink: 0; }
+    .cp-logout-btn { width: 100%; padding: 9px; background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; border-radius: 9px; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 700; transition: background .15s, color .15s, border-color .15s; }
+    .cp-uiswitch { margin: 0; }
+    .cp-uiswitch .cp-userpop-item { width: 100%; }
+    .cp-logout-btn:hover { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+
+    /* ── Main content ── */
+    .cp-main { flex: 1; padding: 28px 32px; overflow: auto; min-width: 0; }
+
+    /* Hide the grey scrollbars on the sidebar and the content area. Both still
+       scroll exactly as before - wheel, trackpad, keyboard, drag - the bar is
+       just not drawn. scrollbar-width is the standard property (Firefox and new
+       Chrome/Edge); the ::-webkit- rule covers older Chrome/Edge/Safari. */
+    .cp-sidebar, .cp-main { scrollbar-width: none; -ms-overflow-style: none; }
+    .cp-sidebar::-webkit-scrollbar, .cp-main::-webkit-scrollbar { width: 0; height: 0; }
+
+    /* ---- Drag handle ---------------------------------------------------------------
+       The real bars above are hidden, which looks clean but leaves no way to SEE that
+       there is more below, and nothing to grab. This is a slim grip drawn over the
+       right edge of a scrolling area: grab it, pull down, the area scrolls down.
+       It only appears when the content is actually taller than the space. */
+    .cp-dbar { position: fixed; width: 12px; z-index: 60; opacity: 0; pointer-events: none;
+               transition: opacity .18s ease; }
+    .cp-dbar.on { opacity: .55; pointer-events: auto; }
+    .cp-dbar.on:hover, .cp-dbar.drag { opacity: 1; }
+    .cp-dbar-thumb { position: absolute; top: 0; left: 3px; width: 6px; border-radius: 4px;
+                     background: #94a3b8; cursor: grab; }
+    .cp-dbar-thumb:hover { background: #64748b; }
+    .cp-dbar.drag .cp-dbar-thumb { background: #475569; cursor: grabbing; }
+    /* While dragging, stop the pointer selecting text everywhere else. */
+    body.cp-dbar-dragging { user-select: none; }
+    /* (push mode) content sits flush after the flex sidebar — no extra left padding. */
+    /* Dashboard pages auto-size to the available width at any screen size / zoom: drop the
+       per-page fixed max-width caps on the content root (the single ".<name>-wrap" div that
+       each page renders directly inside .cp-main). Higher specificity than the page's own
+       ".x-wrap{max-width:…}" rule, so this wins without !important. */
+    .cp-main > div[class*="-wrap"] { max-width: none; }
+
+    /* ══════════════════════════════════════════════════════════════════════════
+       SHARED UI PRIMITIVES
+       One definition per thing, used by every page. Before this, each report
+       styled its own buttons, inputs, cards and badges, which is why the same
+       control looked slightly different on every screen. Build new UI from these
+       classes; retune here to move the whole panel at once.
+       ══════════════════════════════════════════════════════════════════════════ */
+
+    /* ── Page heading ──────────────────────────────────────────────────────── */
+    .ui-title { font-family: var(--font-display); font-weight: 400; font-size: 30px;
+                line-height: 1.15; letter-spacing: -.015em; color: var(--rz-ink); margin: 0; }
+    .ui-subtitle { font-size: 13px; color: var(--rz-muted); margin-top: 6px; font-weight: 500; }
+    /* Small, wide-tracked, muted: the pattern for every label that sits above or
+       below a value rather than being the value itself. */
+    .ui-label { font-size: 10.5px; font-weight: 700; letter-spacing: .08em;
+                text-transform: uppercase; color: var(--rz-faint); }
+    .ui-head { display: flex; align-items: flex-end; justify-content: space-between;
+               gap: 18px; flex-wrap: wrap; margin-bottom: 22px; }
+    .ui-head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+    /* ── Buttons ───────────────────────────────────────────────────────────── */
+    .ui-btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+              height: 40px; padding: 0 16px; border-radius: var(--r-btn);
+              border: 1px solid var(--rz-card-brd); background: var(--rz-card);
+              color: var(--rz-body); font-family: var(--font-body); font-size: 13.5px;
+              font-weight: 600; cursor: pointer; white-space: nowrap;
+              transition: background .15s, border-color .15s, color .15s; }
+    .ui-btn:hover { background: var(--rz-bg); color: var(--rz-ink); }
+    .ui-btn .ic { font-size: 16px; }
+    .ui-btn:disabled { opacity: .5; cursor: not-allowed; }
+    /* Dark = the main action on the screen. Only ever one per view. */
+    .ui-btn-primary { background: var(--rz-ink); border-color: var(--rz-ink); color: #fff; }
+    .ui-btn-primary:hover { background: #1f1e2c; border-color: #1f1e2c; color: #fff; }
+    /* Green = adds or confirms something. */
+    .ui-btn-green { background: var(--rz-pos); border-color: var(--rz-pos); color: #fff; }
+    .ui-btn-green:hover { background: #00926a; border-color: #00926a; color: #fff; }
+    .ui-btn-soft { background: var(--rz-soft); border-color: var(--rz-soft-brd);
+                   color: var(--rz-indigo-deep); }
+    .ui-btn-soft:hover { background: var(--rz-soft-brd); color: var(--rz-indigo-deep); }
+    .ui-btn-danger { background: var(--rz-neg-soft); border-color: var(--rz-neg-brd);
+                     color: var(--rz-neg); }
+
+    /* ── Inputs & selects ──────────────────────────────────────────────────── */
+    .ui-input, .ui-select { height: 40px; padding: 0 12px; border-radius: var(--r-input);
+              border: 1px solid var(--rz-card-brd); background: var(--rz-card);
+              color: var(--rz-ink); font-family: var(--font-body); font-size: 13.5px;
+              font-weight: 500; outline: none;
+              transition: border-color .15s, box-shadow .15s; }
+    .ui-input::placeholder { color: var(--rz-faint); }
+    .ui-input:focus, .ui-select:focus { border-color: var(--rz-indigo);
+              box-shadow: 0 0 0 3px rgba(88,101,242,.14); }
+    .ui-select { padding-right: 32px; cursor: pointer; }
+
+    /* ── Cards ─────────────────────────────────────────────────────────────── */
+    .ui-card { background: var(--rz-card); border: 1px solid var(--rz-card-brd);
+               border-radius: var(--r-card); box-shadow: var(--rz-shadow); padding: 20px 22px; }
+    /* Stat card: a big serif figure over a small muted label, with a thin colour
+       strip on top that matches the badge of the same meaning. */
+    .ui-stat { position: relative; overflow: hidden; background: var(--rz-card);
+               border: 1px solid var(--rz-card-brd); border-radius: var(--r-card);
+               box-shadow: var(--rz-shadow); padding: 20px 22px 18px; }
+    .ui-stat::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
+               background: var(--rz-acc-indigo); }
+    .ui-stat.is-green::before  { background: var(--rz-acc-green); }
+    .ui-stat.is-amber::before  { background: var(--rz-acc-amber); }
+    .ui-stat.is-teal::before   { background: var(--rz-acc-teal); }
+    .ui-stat.is-red::before    { background: var(--rz-acc-red); }
+    /* Sans, tabular, lining - see the note on headline figures in the normaliser. */
+    .ui-stat-v { font-family: var(--rz-num-plain); font-weight: 600; font-size: 32px;
+               line-height: 1.1; color: var(--rz-ink);
+               font-variant-numeric: tabular-nums lining-nums;
+               font-feature-settings: "tnum" 1, "lnum" 1; letter-spacing: -.01em; }
+    .ui-stat-l { font-size: 10.5px; font-weight: 700; letter-spacing: .08em;
+               text-transform: uppercase; color: var(--rz-faint); margin-top: 8px; }
+    .ui-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+               gap: 16px; }
+
+    /* ── Badges ────────────────────────────────────────────────────────────── */
+    /* Compact and quiet. A badge labels a row; it should never outweigh the row. */
+    .ui-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+                border-radius: var(--r-badge); font-size: 11.5px; font-weight: 600;
+                line-height: 1.5; white-space: nowrap; border: 1px solid transparent; }
+    .ui-badge-green  { color: var(--rz-pos);   background: var(--rz-pos-soft);    border-color: var(--rz-pos-brd); }
+    .ui-badge-amber  { color: #b4780a;         background: var(--rz-amber-soft);  border-color: var(--rz-amber-brd); }
+    .ui-badge-indigo { color: var(--rz-indigo-deep); background: var(--rz-indigo-soft); border-color: var(--rz-indigo-brd); }
+    .ui-badge-teal   { color: #00847c;         background: var(--rz-teal-soft);   border-color: var(--rz-teal-brd); }
+    .ui-badge-red    { color: var(--rz-neg);   background: var(--rz-neg-soft);    border-color: var(--rz-neg-brd); }
+    .ui-badge-grey   { color: var(--rz-muted); background: var(--rz-bg);          border-color: var(--rz-card-brd); }
+
+    /* ── Lists & tables ────────────────────────────────────────────────────── */
+    /* Hairline separators and roomy rows, not ruled boxes. */
+    .ui-panel { background: var(--rz-card); border: 1px solid var(--rz-card-brd);
+                border-radius: var(--r-card); box-shadow: var(--rz-shadow); overflow: hidden; }
+    .ui-panel-head { padding: 15px 22px; border-bottom: 1px solid var(--rz-card-brd);
+                background: var(--rz-head-bg); font-size: 11px; font-weight: 700;
+                letter-spacing: .07em; text-transform: uppercase; color: var(--rz-muted); }
+    .ui-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    .ui-table th { padding: 13px 18px; text-align: left; background: var(--rz-head-bg);
+                color: var(--rz-head-ink); font-size: 10.5px; font-weight: 700;
+                letter-spacing: .07em; text-transform: uppercase; white-space: nowrap;
+                border-bottom: 1px solid var(--rz-card-brd); }
+    .ui-table td { padding: 15px 18px; border-bottom: 1px solid var(--rz-line);
+                color: var(--rz-ink); vertical-align: middle; }
+    .ui-table tbody tr:last-child td { border-bottom: 0; }
+    .ui-table tbody tr:hover { background: var(--rz-head-bg); }
+    .ui-table .num, .ui-table td.num, .ui-table th.num { text-align: right;
+                font-variant-numeric: tabular-nums; }
+    /* The line under a row's title: who, when, how long. */
+    .ui-meta { font-size: 12px; color: var(--rz-muted); margin-top: 3px; font-weight: 500; }
+
+    /* ── Tablet & phone: the sidebar becomes a rail, then a drawer ────────────
+       The shell is a two-column flex with a 310px sidebar, which on a phone left
+       the content a sliver wide. Rather than a second navigation mechanism, this
+       reuses the icon rail the collapse button already produces.
+
+       Under 1024px the rail is forced on, so content gets the width back.
+       Under 760px the rail lifts out of the flow entirely and slides over the
+       content when opened, because 64px out of a 390px screen is still a lot. */
+    @media (max-width: 1024px) {
+      .cp-sidebar { width: 64px; padding: 16px 8px; }
+      .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-section-label,
+      .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-sub,
+      .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-group-chev { display: none; }
+      .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item {
+        justify-content: center; gap: 0; padding: 11px 0; font-size: 0; }
+      .cp-sidebar:not(.cp-sb-peek):not(:focus-within) .cp-nav-item .ic { font-size: 22px; }
+      /* Peeking must not shove the page sideways on a small screen, so the expanded
+         rail floats above the content instead of pushing it. */
+      .cp-sidebar.cp-sb-peek, .cp-sidebar:focus-within {
+        width: 244px; padding: 14px 10px;
+        position: fixed; left: 0; top: 56px; bottom: 0; height: auto; z-index: 60;
+        box-shadow: var(--rz-shadow-lg); }
+      .cp-topbar-brand { width: 64px !important; }
+      .cp-topbar .cp-sb-arrow { left: 64px !important; }
+    }
+    @media (max-width: 760px) {
+      /* Off-canvas: the rail itself slides away, and the arrow button brings it back. */
+      .cp-sidebar { position: fixed; left: 0; top: 56px; bottom: 0; z-index: 60;
+                    transform: translateX(-100%); transition: transform .2s ease;
+                    box-shadow: var(--rz-shadow-lg); }
+      .cp-sidebar.cp-sb-peek, .cp-sidebar:focus-within { transform: translateX(0); }
+      .cp-topbar-brand { width: auto !important; padding-right: 12px; }
+      .cp-topbar .cp-sb-arrow { left: auto !important; right: 56px;
+                                position: absolute; transform: none; }
+    }
+
+    /* ── Closed sidebar = icons in the top bar ───────────────────────────────
+       When the user closes the sidebar the left rail goes away completely and
+       its page icons move into the top bar (built by JS from the sidebar, so
+       the two never drift apart). Open the sidebar again and the strip empties
+       and the rail comes back. These rules sit after the collapsed-rail and
+       media rules above on purpose, so they win. */
+    body.cp-sidebar-collapsed .cp-sidebar,
+    body.cp-sidebar-collapsed .cp-sidebar.cp-sb-peek,
+    body.cp-sidebar-collapsed .cp-sidebar:focus-within {
+      width: 0 !important; min-width: 0; padding: 0 !important; border-right: 0;
+      visibility: hidden; overflow: hidden; transform: none; box-shadow: none;
+    }
+    /* The logo keeps its own width now that nothing sits under it. */
+    body.cp-sidebar-collapsed .cp-topbar-brand { width: 244px !important; border-right: 0; }  /* as wide as the open sidebar, so the icons start where the sidebar ends */
+    body.cp-sidebar-collapsed .cp-brand-logo { height: 40px; min-width: 82px; }
+    /* A short line between the logo and the icons - the same line that separates
+       the icon sections further right. It is the first thing in the strip, so the
+       strip starts flush at the logo's edge (no bar padding on that side). */
+    body.cp-sidebar-collapsed .cp-topbar-rest { padding-left: 0; }
+    body.cp-sidebar-collapsed .cp-topnav::before { content: ''; flex: 0 0 auto; width: 1px; height: 22px;
+                                                   background: #e5e7eb; margin: 0 8px 0 0; }
+    /* The arrow sits ON that line (negative margins give it no width of its own)
+       and stays hidden until the pointer is over the logo or the line itself, so the
+       bar reads clean. Keyboard focus shows it too. */
+    body.cp-sidebar-collapsed .cp-topbar .cp-sb-arrow { position: relative !important; top: auto; left: auto; margin: 0 -13px; z-index: 3;
+                                                        transform: none; opacity: 0; pointer-events: auto; }
+    body.cp-sidebar-collapsed .cp-topbar-brand:hover ~ .cp-sb-arrow,
+    body.cp-sidebar-collapsed .cp-topbar .cp-sb-arrow:hover,
+    body.cp-sidebar-collapsed .cp-topbar .cp-sb-arrow:focus-visible { opacity: 1; }
+
+    .cp-topnav { display: none; flex: 1; min-width: 0; align-items: center; gap: 4px;
+                 margin-right: 12px; overflow-x: auto; overflow-y: visible;
+                 scrollbar-width: none; -ms-overflow-style: none; }
+    .cp-topnav::-webkit-scrollbar { display: none; }
+    body.cp-sidebar-collapsed .cp-topnav { display: flex; }
+    .cp-topnav-sep { width: 1px; height: 22px; background: #e5e7eb; margin: 0 6px; flex: 0 0 auto; }
+    /* One square per page, icon only; the page name is the browser tooltip. */
+    .cp-topbar .cp-topnav-btn { flex: 0 0 auto; width: 36px; height: 36px; padding: 0; display: inline-flex;
+                    align-items: center; justify-content: center; position: relative;
+                    border: 1px solid transparent; background: transparent; border-radius: 10px;
+                    color: #475569; cursor: pointer; text-decoration: none; font: inherit;
+                    transition: background .15s, border-color .15s, color .15s; }
+    .cp-topbar .cp-topnav-btn .ic { font-size: 18px; }
+    .cp-topbar .cp-topnav-btn:hover { background: #eef2ff; border-color: #c7d2fe; color: #4338ca; }
+    .cp-topbar .cp-topnav-btn.active { background: var(--rz-ink, #0f172a); border-color: var(--rz-ink, #0f172a); color: #fff; }
+    .cp-topbar .cp-topnav-btn.active .ic { color: #fff; }
+    .cp-topbar .cp-topnav-btn:focus-visible { outline: 2px solid #a5b4fc; outline-offset: 2px; }
+    /* A group (Sales, Accounts...) shows a tiny chevron in the corner and opens a menu. */
+    .cp-topnav-group { position: relative; flex: 0 0 auto; }
+    .cp-topbar .cp-topnav-btn .cp-topnav-chev { position: absolute; right: 2px; bottom: 1px; font-size: 9px; opacity: .7; }
+    .cp-topnav-group.open > .cp-topnav-btn { background: #eef2ff; border-color: #a5b4fc; color: #4338ca; }
+    .cp-topnav-menu { display: none; position: fixed; min-width: 230px; padding: 6px;
+                      background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+                      box-shadow: 0 12px 32px rgba(15, 23, 42, .14); z-index: 400; }
+    .cp-topnav-group.open > .cp-topnav-menu { display: block; }
+    .cp-topnav-menu-h { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+                        color: #94a3b8; padding: 6px 10px 4px; }
+    .cp-topnav-link { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 9px;
+                      font-size: 13px; font-weight: 700; color: #334155; text-decoration: none; white-space: nowrap; }
+    .cp-topnav-link .ic { font-size: 16px; color: #64748b; }
+    .cp-topnav-link:hover { background: #f1f5f9; color: #0f172a; }
+    .cp-topnav-link.active { background: var(--rz-ink, #0f172a); color: #fff; }
+    .cp-topnav-link.active .ic { color: #fff; }
+    /* One shared tooltip bubble (moved under whichever icon the pointer is on).
+       A per-icon bubble would be clipped by the strip's sideways scrolling. */
+    .cp-topnav-tip { position: fixed; z-index: 500; pointer-events: none; opacity: 0;
+                     transform: translate(-50%, -4px); transition: opacity .12s, transform .12s;
+                     background: #0f172a; color: #fff; font-size: 12px; font-weight: 700;
+                     line-height: 1; padding: 7px 10px; border-radius: 8px; white-space: nowrap;
+                     box-shadow: 0 6px 18px rgba(15, 23, 42, .18); }
+    .cp-topnav-tip::before { content: ''; position: absolute; left: 50%; top: -4px; width: 8px; height: 8px;
+                             margin-left: -4px; background: #0f172a; transform: rotate(45deg); border-radius: 2px; }
+    .cp-topnav-tip.show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* ── Small screens ─────────────────────────────────────────────────────── */
+    @media (max-width: 760px) {
+      .cp-main { padding: 18px 14px; }
+      .ui-title { font-size: 24px; }
+      .ui-stat-v { font-size: 28px; }
+      .ui-head { align-items: stretch; }
+      .ui-head-actions { width: 100%; }
+      /* A control that is the only thing on its line should fill it rather than
+         leaving a ragged edge. */
+      .ui-head-actions > .ui-btn, .ui-head-actions > .ui-input,
+      .ui-head-actions > .ui-select { flex: 1 1 auto; }
+      .ui-stats { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+      .ui-card, .ui-stat { padding: 16px 16px 14px; }
+      .ui-table th, .ui-table td { padding: 12px 12px; }
+    }
+  </style>
+  {% comment %}
+    bkdatepicker - our own calendar for every <input type="date"/"month"> and our
+    own list for every <select>, because the browser's versions cannot be styled.
+    Loaded here so EVERY page gets it without changing a single page template.
+  {% endcomment %}
+  {% comment %} ?v= forces browsers to fetch a fresh copy - bump it on every change. {% endcomment %}
+  <link href="{% static 'core/bkdatepicker.css' %}?v=4" rel="stylesheet">
+  {% block extra_styles %}{% endblock %}
+
+  {% comment %}
+    DESIGN-SYSTEM NORMALISER - deliberately last in <head>.
+
+    Every report page carries its own inline <style>, written before there was a shared
+    system, so each one re-styled the same furniture slightly differently: its own hero
+    gradient, its own KPI number font, its own radii. Rewriting nine thousand lines of
+    page CSS to fix that would be a large, risky diff for a purely visual change.
+
+    Loading AFTER {% block extra_styles %} means these rules win at equal specificity,
+    so one block re-tones every page at once. Keep it to cross-cutting corrections -
+    anything page-specific belongs in that page.
+  {% endcomment %}
+  <style>
+    /* ── Button borders ─────────────────────────────────────────────
+       One light hairline on every button and pill, copied from the Ecom app's controls:
+           border: 1px solid color-mix(in srgb, <accent> 48%, #e2e8f0)
+       so the same mix is used here against this project's indigo.
+
+       Written as "every <button>, minus a short exclusion list" rather than a list of class
+       names. The first attempt listed classes and missed every button that has no "btn" in
+       its name - Date Range, Month-Wise, Grading, the Brand switch - so only Compare and
+       Drill Order changed. Matching the element and naming what to SKIP cannot drift that
+       way: a new button is bordered by default.
+
+       ONLY the border is set. No colour, padding, radius or shadow is touched, so every
+       button keeps the shape and fill its own page gave it.
+
+       Scoped to .cp-main, which is the page body. That is deliberate: the date picker and
+       the custom dropdown append their popups to <body>, OUTSIDE .cp-main, so a calendar's
+       day cells and a dropdown's option rows never pick this up. Only what you see before
+       opening anything is bordered. Scoping also adds a class of weight, which is what
+       finally let this beat the per-page `.xx-bar select` rules.
+
+       Skipped on purpose: icon-only furniture - the sidebar rows and their toggles, the
+       sidebar arrow, the profile avatar, and modal close crosses. A hairline around a bare
+       glyph reads as a stray box rather than a button. */
+    :root { --cp-btn-brd: color-mix(in srgb, var(--rz-acc-indigo, #6366f1) 48%, #e2e8f0); }
+    .cp-main button:not(.cp-sb-arrow):not(.cp-nav-item):not(.cp-nav-group-btn):not(.cp-userbtn):not(.bev-sold-close):not(.rc-modal-x):not([aria-label="Close"]):not([aria-label="Close table"]):not([aria-label^="Toggle"]):not([aria-label^="Close or open"]),
+    .cp-main a.btn, .cp-main [role="button"]:not(.cp-brand),
+    .cp-main label.btn, .cp-main .btn-group > *, .cp-main .ds-btn, .cp-main .ag-pick,
+    .cp-main select:not(.cp-no-border):not([multiple]),
+    .cp-main input:not(.cp-no-border)[type="date"],
+    .cp-main input:not(.cp-no-border)[type="month"],
+    .cp-main input:not(.cp-no-border)[type="number"],
+    .cp-main input:not(.cp-no-border)[type="text"],
+    .cp-main input:not(.cp-no-border)[type="search"] {
+      border: 1px solid var(--cp-btn-brd);
+    }
+
+    /* ── Headline figures ─────────────────────────────────────────────────────
+       Set in a clean sans, NOT the serif. Georgia and most system serifs ship
+       old-style figures, where 3 4 5 7 9 hang below the baseline - in a column of
+       money that reads as a zig-zag. Tabular, lining figures keep every digit the
+       same width and sitting on one line, so decimal points line up down a column.
+       The serif stays where it belongs: titles and headings, which are words. */
+    .kpi-value, .kpi-card .kpi-value, .pf-kpi-v, .sc2-kpi-val, .sc2-kpi-val > span,
+    .rc-chip-v, .pd-kpi-v, .rl-kpi-v, .oih-kpi-box b, .bev-sum .scard .sv, .scard .sv,
+    .ag-kpi-v, .cd-kpi-v, .ui-stat-v, .rc-kpi-v, .nm-kpi-v, .sa-kpi-v, .st-kpi-v,
+    .inv-val, .kc-v, .kvalue, .amount, .cmp-big {
+      font-family: var(--rz-num-plain) !important;
+      font-weight: 600 !important;
+      font-variant-numeric: tabular-nums lining-nums !important;
+      font-feature-settings: "tnum" 1, "lnum" 1 !important;
+      letter-spacing: -.01em;
+      color: var(--rz-ink);
+    }
+
+    /* ── Flat surfaces ────────────────────────────────────────────────────────
+       Page headers and "accent" cards were tinted with lavender gradients. The
+       reference gets its calm from flat white against a light page, so the tint
+       goes and the thin border does the work. */
+    .cd-header, .doc-header, .ag-hero, .rz-hero, .hero-band, .pf-hero, .sc2-titlebar {
+      background: var(--rz-card) !important;
+    }
+    .pd-kpi.acc, .rl-kpi.acc, .rc-chip.acc {
+      background: var(--rz-soft) !important;
+      border-color: var(--rz-soft-brd) !important;
+    }
+    /* Table rows were tinted with a left-to-right wash; a hairline and a flat hover
+       read more calmly and keep the figures legible. */
+    tr.ag-grp { background: var(--rz-card) !important; }
+    tr.ag-grp:hover { background: var(--rz-head-bg) !important; }
+
+    /* ── Expenses / Salaries ──────────────────────────────────────────────────
+       These two arrived with a different visual language: a violet dotted page and
+       saturated gradient cards with white text. Folded into the system - flat page,
+       white cards, a coloured strip on top like every other stat card. */
+    .dash-page { background: var(--rz-bg) !important; background-image: none !important;
+                 color: var(--rz-ink) !important; }
+    .kcard { background: var(--rz-card) !important; color: var(--rz-ink) !important;
+             border: 1px solid var(--rz-card-brd) !important;
+             border-radius: var(--r-card) !important;
+             box-shadow: var(--rz-shadow) !important; min-height: 0 !important;
+             padding: 20px 22px !important; }
+    /* the two decorative bubbles that sat behind the white text */
+    .kcard:before, .kcard:after { display: none !important; }
+    /* the gradient becomes a 3px strip, same idiom as the other stat cards */
+    .kcard { position: relative; overflow: hidden; }
+    .kcard > .kstrip { display: none; }
+    .k-purple::before, .k-indigo::before, .k-teal::before, .k-blue::before {
+      display: block !important; content: "" !important; position: absolute !important;
+      inset: 0 0 auto 0 !important; width: auto !important; height: 3px !important;
+      border-radius: 0 !important; background: var(--rz-acc-indigo) !important; }
+    .k-teal::before  { background: var(--rz-acc-teal) !important; }
+    .k-blue::before  { background: var(--rz-acc-indigo) !important; }
+    .k-purple::before{ background: var(--rz-acc-amber) !important; }
+    .klabel { color: var(--rz-faint) !important; font-size: 10.5px !important;
+              font-weight: 700 !important; letter-spacing: .08em !important; }
+    .ksub { color: var(--rz-muted) !important; opacity: 1 !important;
+            border-top-color: var(--rz-line) !important; }
+    .panel { background: var(--rz-card) !important; border-color: var(--rz-card-brd) !important;
+             border-radius: var(--r-card) !important; box-shadow: var(--rz-shadow) !important; }
+    .panel-head { border-bottom-color: var(--rz-card-brd) !important; }
+    .panel-head h2 { font-size: 17px !important; }
+    .group { border-bottom-color: var(--rz-line) !important; }
+    .rows { background: var(--rz-head-bg) !important; }
+    .gmeta, .metric { color: var(--rz-muted) !important; }
+    .hint { color: var(--rz-muted) !important; }
+
+    /* ── Radius discipline ────────────────────────────────────────────────────
+       Pages had picked 8, 12, 13, 14, 16 and 18px for the same kinds of thing. */
+    .kpi-card, .ui-card, .ui-stat, .scard, .pf-kpi, .ag-kpi, .cd-box,
+    .bev-tablewrap, .pf-table-wrap, .ui-panel { border-radius: var(--r-card); }
+
+    /* ── Section headings between cards ───────────────────────────────────────
+       These were dark and bold enough to compete with the page title. A section
+       label is signposting, so it should be small, tracked and muted. */
+    .sec-title, .section-title, .cp-sec-title {
+      font-family: var(--font-body) !important;
+      font-size: 11px !important;
+      font-weight: 700 !important;
+      letter-spacing: .09em !important;
+      text-transform: uppercase;
+      color: var(--rz-faint) !important;
+    }
+
+    /* ── Controls ─────────────────────────────────────────────────────────────
+       Inputs and selects across the reports get one height, one radius and one
+       focus ring, whatever class each page happened to give them. */
+    .cp-main input[type="text"], .cp-main input[type="search"], .cp-main input[type="date"],
+    .cp-main input[type="number"], .cp-main input[type="month"], .cp-main select {
+      border-radius: var(--r-input);
+      border: 1px solid var(--rz-card-brd);
+      background: var(--rz-card);
+      color: var(--rz-ink);
+      font-family: var(--font-body);
+    }
+    .cp-main input:focus, .cp-main select:focus {
+      outline: none;
+      border-color: var(--rz-indigo);
+      box-shadow: 0 0 0 3px rgba(88,101,242,.14);
+    }
+
+    /* ── Buttons ──────────────────────────────────────────────────────────────
+       The main action on a screen is dark charcoal, not saturated indigo with a
+       drop shadow. One height and one radius so buttons line up with the inputs
+       they sit beside. */
+    .cp-main .btn.btn-primary, .cp-main button.btn-primary {
+      background: var(--rz-ink) !important;
+      border: 1px solid var(--rz-ink) !important;
+      color: #fff !important;
+      border-radius: var(--r-btn) !important;
+      box-shadow: none !important;
+      font-weight: 600 !important;
+    }
+    .cp-main .btn.btn-primary:hover, .cp-main button.btn-primary:hover {
+      background: #1f1e2c !important; border-color: #1f1e2c !important;
+    }
+    .cogs-inline-form button {
+      background: var(--rz-ink) !important; border-color: var(--rz-ink) !important;
+      border-radius: var(--r-btn) !important;
+    }
+
+    /* The welcome panel carried a diagonal violet wash across its right half. The
+       page already reads as calm white on light grey; the wash only added noise. */
+    .home-hero::after { display: none !important; }
+  </style>
+  {% comment %}
+    Inside OMS: the OMS app draws the navigation, the page title and the
+    account menu around this page, so the Control Panel's own top bar and
+    sidebar are hidden and the page fills its frame. Pages that subtracted the
+    56px top bar from the viewport get it back.
+  {% endcomment %}
+  <style>
+    .cp-topbar, .cp-sidebar, .cp-sb-arrow { display: none !important; }
+    .cp-shell { min-height: 100vh; }
+    body.pt-page .cp-main { height: 100vh; }
+  </style>
+</head>
+<body>
+<script>
+  // This has to run before the page is drawn. Left at the bottom (where it used
+  // to be) the sidebar was drawn open first and then snapped shut - that snap is
+  // the blink on refresh. document.body already exists here, but nothing inside
+  // it has been drawn yet, so the change is invisible.
+  try {
+    if (localStorage.getItem('cpSidebarOpen') === '0') {
+      document.body.classList.add('cp-sidebar-collapsed');
+    }
+  } catch (err) {}
+</script>
+
+  {# ── TOPBAR removed — brand lives in the sidebar; company-wide ticker retired from the header ── #}
+
+  {# ── TOP BAR (profile + sign out) ── #}
+  {% if user.is_authenticated %}
+  <header class="cp-topbar">
+    <div class="cp-topbar-brand">
+      <div class="cp-brand" id="cpBrand" role="button" tabindex="0" aria-label="Reload this page">
+        {% comment %}
+          Logo only - the wordmark beside it is gone. The animated SVG is INLINED by the
+          script further down this file, because an <img> never runs the animation the
+          file carries inside it.
+        {% endcomment %}
+        <div class="cp-brand-logo" id="cpBrandLogo"
+             data-logo="{% static 'core/jivo-logo-animated.svg' %}"></div>
+      </div>
+    </div>
+    <script>
+    /* Ported from the Ecom app's AnimatedJivoLogo component. Same idea, no React:
+         - fetch the SVG ONCE, then inline it, so the animation inside the file runs
+           natively (an <img> would show only the final frame);
+         - re-insert that same markup every 10s, which builds fresh elements and so
+           restarts the CSS animation - no refetch, nothing in the Network tab;
+         - clicking the logo reloads the page, which cpBrand already did. */
+    (function () {
+      var host = document.getElementById('cpBrandLogo');
+      if (!host || !window.fetch) return;
+      var REPLAY_MS = 10 * 1000, markup = null;
+      function paint() { if (markup) host.innerHTML = markup; }
+      fetch(host.getAttribute('data-logo'))
+        .then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (t) { if (t) { markup = t; paint(); } })
+        .catch(function () { host.textContent = 'JG'; });   // only if the file truly fails
+      setInterval(paint, REPLAY_MS);
+    })();
+    </script>
+    <button class="cp-sb-arrow" type="button" onclick="toggleControlPanelSidebar()" aria-label="Close or open the control panel sidebar">
+      <i class="ic ic-chevron-right"></i>
+    </button>
+    <div class="cp-topbar-rest">
+    {% comment %}
+      Filled by script from the sidebar links, only while the sidebar is closed.
+      Empty and hidden while the sidebar is open.
+    {% endcomment %}
+    <nav class="cp-topnav" id="cpTopNav" aria-label="Pages"></nav>
+    <div class="cp-userwrap">
+      <button type="button" class="cp-userbtn" id="cpUserBtn" aria-haspopup="true" aria-expanded="false" aria-label="Account">
+        <i class="ic ic-user"></i>
+      </button>
+      <div class="cp-userpop" id="cpUserPop" role="menu">
+        {# Profile opens the details below it - there is no separate profile page. #}
+        <button type="button" class="cp-userpop-item" id="cpProfileBtn" aria-expanded="false">
+          <i class="ic ic-user"></i>Profile
+        </button>
+        <div class="cp-userpop-det" id="cpProfileDet">
+          <div class="cp-userpop-head">
+            <div class="cp-avatar">{{ display_name|slice:":2"|upper }}</div>
+            <div>
+              <div class="cp-userpop-name">{{ display_name }}</div>
+              <div class="cp-userpop-role">{{ role }}</div>
+            </div>
+          </div>
+          <div class="cp-userpop-row"><span>Username</span><span>{{ user.get_username }}</span></div>
+          {% if user.email %}
+            <div class="cp-userpop-row"><span>Email</span><span>{{ user.email }}</span></div>
+          {% endif %}
+        </div>
+        <div class="cp-userpop-sep"></div>
+        {% comment %}
+          Look switcher. Both designs ship together and each person picks; the
+          choice lives in their session, so nobody else's screen changes.
+          POST, not a link, so a prefetch can never flip it by accident.
+        {% endcomment %}
+        <form method="post" action="{% url 'switch_ui' %}" class="cp-uiswitch">
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <input type="hidden" name="mode" value="{% if ui_is_new %}old{% else %}new{% endif %}">
+          <button type="submit" class="cp-userpop-item">
+            <i class="ic ic-layout-dashboard"></i>
+            {% if ui_is_new %}Switch to old design{% else %}Try the new design{% endif %}
+          </button>
+        </form>
+        <div class="cp-userpop-sep"></div>
+        <form method="post" action="{% url 'logout' %}">
+          {% csrf_token %}
+          <button type="submit" class="cp-userpop-item danger">
+            <i class="ic ic-log-out"></i>Sign out
+          </button>
+        </form>
+      </div>
+    </div>
+    </div>
+  </header>
+  {% endif %}
+
+  {# ── SHELL (sidebar + main) ── #}
+  <div class="cp-shell">
+    <aside class="cp-sidebar">
+
+      {% if is_authenticated %}
+        <div class="cp-section-label">Main Menu</div>
+        <nav class="cp-nav">
+          {# Control Panel home page removed - Sales is the main page now, and "/" forwards to it. #}
+          {% if can_realise %}
+          {# Oils and Beverages were one page with a corner toggle; they are two pages now. #}
+          <a class="cp-nav-item {% if sidebar_active == 'realise' %}active{% endif %}" href="{% url 'realise:dashboard' %}" title="Oils Sale">
+            <i class="ic ic-zap"></i>Oils Sale
+          </a>
+          <a class="cp-nav-item {% if sidebar_active == 'realise_beverages' %}active{% endif %}" href="{% url 'realise:dashboard_beverages' %}" title="Beverages Sale">
+            <i class="ic ic-cup-soda"></i>Beverages Sale
+          </a>
+          <a class="cp-nav-item {% if sidebar_active == 'realise_product' %}active{% endif %}" href="{% url 'realise:realise_dashboard' %}" title="Realise Dashboard">
+            <i class="ic ic-table"></i>Realise Dashboard
+          </a>
+          {% endif %}
+        </nav>
+
+        {% if can_inventory or can_stock_available or can_reconciliation or can_production or can_oih_vs_stock or can_compare_sales or can_customer_aging or can_required_credit_limit or can_open_payments or can_dispatch_details or can_realise_calculator or can_expenses or can_salaries or can_realise %}
+        <div class="cp-section-label">Reports</div>
+        <nav class="cp-nav">
+          {% if can_inventory %}
+          <a class="cp-nav-item {% if sidebar_active == 'inventory' %}active{% endif %}" href="{% url 'inventory:dashboard' %}" title="Inventory">
+            <i class="ic ic-package"></i>Inventory
+          </a>
+          {% endif %}
+          {# ── Sales reports ── #}
+          {% if can_compare_sales or can_sales_cn or can_hidden_sales or can_sales_flow or can_dispatch_details or can_realise_calculator %}
+          <div class="cp-nav-group{% if sidebar_active == 'compare_sales' or sidebar_active == 'sales_cn' or sidebar_active == 'hidden_sales' or sidebar_active == 'sales_flow' or sidebar_active == 'dispatch_details' or sidebar_active == 'realise_calculator' or sidebar_active == 'rate_list' or sidebar_active == 'plan_vs_done' %} open{% endif %}" data-group="reports-sales">
+            <button type="button" class="cp-nav-item cp-nav-group-btn" onclick="toggleNavGroup(this)" title="Sales" aria-label="Toggle Sales reports">
+              <span class="cp-nav-group-lead"><i class="ic ic-trending-up"></i>Sales</span>
+              <i class="ic ic-chevron-down cp-nav-group-chev"></i>
+            </button>
+            <div class="cp-nav-sub">
+              {% if can_compare_sales %}
+              <a class="cp-nav-item {% if sidebar_active == 'compare_sales' %}active{% endif %}" href="{% url 'realise:compare_sales' %}" title="Compare Sales">
+                <i class="ic ic-chart-column"></i>Compare Sales
+              </a>
+              {% endif %}
+              {% if can_sales_cn %}
+              <a class="cp-nav-item {% if sidebar_active == 'sales_cn' %}active{% endif %}" href="{% url 'realise:sales_cn' %}" title="Sales vs Credit Notes">
+                <i class="ic ic-receipt-text"></i>Sales vs CN
+              </a>
+              {% endif %}
+              {% if can_hidden_sales %}
+              <a class="cp-nav-item {% if sidebar_active == 'hidden_sales' %}active{% endif %}" href="{% url 'realise:hidden_sales' %}" title="Hidden Customer Sales">
+                <i class="ic ic-eye-off"></i>Hidden Sales
+              </a>
+              {% endif %}
+              {% if can_sales_flow %}
+              <a class="cp-nav-item {% if sidebar_active == 'sales_flow' %}active{% endif %}" href="{% url 'realise:sales_flow' %}" title="Sales Document Flow">
+                <i class="ic ic-network"></i>Sales Doc Flow
+              </a>
+              {% endif %}
+              {% if can_dispatch_details %}
+              <a class="cp-nav-item {% if sidebar_active == 'dispatch_details' %}active{% endif %}" href="{% url 'realise:dispatch_details' %}" title="Dispatch Details">
+                <i class="ic ic-truck"></i>Dispatch Details
+              </a>
+              {% endif %}
+              {% if can_realise_calculator %}
+              <a class="cp-nav-item {% if sidebar_active == 'realise_calculator' %}active{% endif %}" href="{% url 'realise:realise_calculator' %}" title="Realise Calculator">
+                <i class="ic ic-calculator"></i>Realise Calculator
+              </a>
+              <a class="cp-nav-item {% if sidebar_active == 'rate_list' %}active{% endif %}" href="{% url 'realise:rate_list' %}" title="Rate List">
+                <i class="ic ic-tag"></i>Rate List
+              </a>
+              <a class="cp-nav-item {% if sidebar_active == 'plan_vs_done' %}active{% endif %}" href="{% url 'realise:plan_vs_done' %}" title="Plan vs Done">
+                <i class="ic ic-clipboard-check"></i>Plan vs Done
+              </a>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          {# ── Accounts / receivables ── #}
+          {% if can_customer_aging or can_required_credit_limit or can_claims or can_open_payments or can_reconciliation %}
+          <div class="cp-nav-group{% if sidebar_active == 'customer_aging' or sidebar_active == 'beverages_gst' or sidebar_active == 'required_credit_limit' or sidebar_active == 'claims' or sidebar_active == 'open_payments' or sidebar_active == 'reconciliation' %} open{% endif %}" data-group="reports-accounts">
+            <button type="button" class="cp-nav-item cp-nav-group-btn" onclick="toggleNavGroup(this)" title="Accounts" aria-label="Toggle Accounts reports">
+              <span class="cp-nav-group-lead"><i class="ic ic-landmark"></i>Accounts</span>
+              <i class="ic ic-chevron-down cp-nav-group-chev"></i>
+            </button>
+            <div class="cp-nav-sub">
+              {% if can_customer_aging %}
+              <a class="cp-nav-item {% if sidebar_active == 'customer_aging' %}active{% endif %}" href="{% url 'realise:customer_aging' %}" title="Customer Aging">
+                <i class="ic ic-wallet"></i>Customer Aging
+              </a>
+              <a class="cp-nav-item {% if sidebar_active == 'beverages_gst' %}active{% endif %}" href="{% url 'realise:beverages_gst' %}" title="Beverages GST Data">
+                <i class="ic ic-receipt-text"></i>Beverages GST Data
+              </a>
+              {% endif %}
+              {% if can_required_credit_limit %}
+              <a class="cp-nav-item {% if sidebar_active == 'required_credit_limit' %}active{% endif %}" href="{% url 'realise:required_credit_limit' %}" title="Required Credit Limit">
+                <i class="ic ic-credit-card"></i>Required Credit Limit
+              </a>
+              {% endif %}
+              {% if can_open_payments %}
+              <a class="cp-nav-item {% if sidebar_active == 'open_payments' %}active{% endif %}" href="{% url 'realise:open_payments' %}" title="Open Payments">
+                <i class="ic ic-landmark"></i>Open Payments
+              </a>
+              {% endif %}
+              {% if can_claims %}
+              <a class="cp-nav-item {% if sidebar_active == 'claims' %}active{% endif %}" href="{% url 'realise:claims' %}" title="Claims">
+                <i class="ic ic-gavel"></i>Claims
+              </a>
+              {% endif %}
+              {% if can_reconciliation %}
+              <a class="cp-nav-item {% if sidebar_active == 'reconciliation' %}active{% endif %}" href="{% url 'inventory:reconciliation' %}" title="Wellness–Mart Reconciliation">
+                <i class="ic ic-network"></i>Wellness–Mart Recon
+              </a>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          {# ── Inventory & production ── #}
+          {% if can_stock_available or can_non_inventory or can_oih_vs_stock or can_production or can_daily_production %}
+          <div class="cp-nav-group{% if sidebar_active == 'stock_available' or sidebar_active == 'non_inventory' or sidebar_active == 'oih_vs_stock' or sidebar_active == 'production' or sidebar_active == 'daily_production' %} open{% endif %}" data-group="reports-inventory">
+            <button type="button" class="cp-nav-item cp-nav-group-btn" onclick="toggleNavGroup(this)" title="Inventory & Production" aria-label="Toggle Inventory & Production reports">
+              <span class="cp-nav-group-lead"><i class="ic ic-boxes"></i>Inventory &amp; Production</span>
+              <i class="ic ic-chevron-down cp-nav-group-chev"></i>
+            </button>
+            <div class="cp-nav-sub">
+              {% if can_stock_available %}
+              <a class="cp-nav-item {% if sidebar_active == 'stock_available' %}active{% endif %}" href="{% url 'inventory:stock_available' %}" title="Stock Available">
+                <i class="ic ic-warehouse"></i>Stock Available
+              </a>
+              {% endif %}
+              {% if can_non_inventory %}
+              <a class="cp-nav-item {% if sidebar_active == 'non_inventory' %}active{% endif %}" href="{% url 'inventory:non_inventory' %}" title="Finished Goods — Non Moving Stock">
+                <i class="ic ic-package"></i>Non Moving Stock
+              </a>
+              {% endif %}
+              {% if can_oih_vs_stock %}
+              <a class="cp-nav-item {% if sidebar_active == 'oih_vs_stock' %}active{% endif %}" href="{% url 'realise:oih_vs_stock' %}" title="OIH vs Stock">
+                <i class="ic ic-arrow-left-right"></i>OIH vs Stock
+              </a>
+              {% endif %}
+              {% if can_production %}
+              <a class="cp-nav-item {% if sidebar_active == 'production' %}active{% endif %}" href="{% url 'inventory:production' %}" title="Production Plan">
+                <i class="ic ic-cog"></i>Production Plan
+              </a>
+              {% endif %}
+              {% if can_daily_production %}
+              <a class="cp-nav-item {% if sidebar_active == 'daily_production' %}active{% endif %}" href="{% url 'inventory:daily_production' %}" title="Daily Production Transaction">
+                <i class="ic ic-factory"></i>Daily Production
+              </a>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          {# ── Master data ── #}
+          {% if can_customer_master %}
+          <div class="cp-nav-group{% if sidebar_active == 'customer_master' %} open{% endif %}" data-group="reports-master">
+            <button type="button" class="cp-nav-item cp-nav-group-btn" onclick="toggleNavGroup(this)" title="Master Data" aria-label="Toggle Master Data">
+              <span class="cp-nav-group-lead"><i class="ic ic-database"></i>Master Data</span>
+              <i class="ic ic-chevron-down cp-nav-group-chev"></i>
+            </button>
+            <div class="cp-nav-sub">
+              {% if can_customer_master %}
+              <a class="cp-nav-item {% if sidebar_active == 'customer_master' %}active{% endif %}" href="{% url 'realise:customer_master' %}" title="Customer Master">
+                <i class="ic ic-contact-round"></i>Customer Master
+              </a>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+          {% if can_expenses %}
+          <a class="cp-nav-item {% if sidebar_active == 'expenses' %}active{% endif %}" href="{% url 'dashboard:expenses' %}" title="Expenses">
+            <i class="ic ic-receipt-text"></i>Expenses
+          </a>
+          {% endif %}
+          {% if can_salaries %}
+          <a class="cp-nav-item {% if sidebar_active == 'salaries' %}active{% endif %}" href="{% url 'dashboard:salaries' %}" title="Salaries">
+            <i class="ic ic-banknote"></i>Salaries
+          </a>
+          {% endif %}
+        </nav>
+        {% endif %}
+
+        {% if user.is_staff or user.is_superuser %}
+        <div class="cp-section-label">Admin</div>
+        <nav class="cp-nav">
+          <a class="cp-nav-item {% if sidebar_active == 'user_management' %}active{% endif %}" href="{% url 'user_management' %}" title="User Management">
+            <i class="ic ic-user-cog"></i>Users
+          </a>
+        </nav>
+        {% endif %}
+
+      {% endif %}
+
+    </aside>
+
+    <script>
+    (function () {
+      // Re-open the groups the user had open. This sits here, straight after the
+      // sidebar markup, so the groups are already in the page but nothing has
+      // been drawn yet - doing it at the bottom made the menu visibly jump open.
+      // Groups the server already opened (the one holding the current page) are
+      // left alone.
+      document.querySelectorAll('.cp-nav-group').forEach(function (g) {
+        if (g.classList.contains('open')) return;
+        try {
+          if (localStorage.getItem('cpNavGroup_' + (g.dataset.group || 'g')) === '1') g.classList.add('open');
+        } catch (err) {}
+      });
+    })();
+
+    (function () {
+      // The sidebar has its own scrollbar. Every page in this app is a full
+      // reload, so without this the sidebar jumps back to the start and you
+      // lose the spot you were clicking from. Remember where it was and put
+      // it back. sessionStorage = remembered for this tab only, forgotten
+      // when the tab closes, which is right for a scroll position.
+      var KEY = 'cpSidebarScroll';
+      var sb = document.querySelector('.cp-sidebar');
+      if (!sb) return;
+
+      function saved() {
+        try { return parseInt(sessionStorage.getItem(KEY) || '0', 10) || 0; }
+        catch (e) { return 0; }
+      }
+      function save() {
+        try { sessionStorage.setItem(KEY, String(sb.scrollTop)); } catch (e) {}
+      }
+
+      // Put it back straight away - this runs before the page is painted, so
+      // there is no visible jump.
+      var y = saved();
+      if (y > 0) sb.scrollTop = y;
+
+      // If the first attempt did not stick (icons/fonts can still be loading,
+      // so the list may have been too short to scroll yet), try once more when
+      // everything has loaded - but only if it is still sitting at the top, so
+      // we never yank the sidebar away from someone who has already scrolled.
+      window.addEventListener('load', function () {
+        var want = saved();
+        if (want > 0 && sb.scrollTop === 0) sb.scrollTop = want;
+      });
+
+      // Store the position as it changes, but not on every single scroll tick.
+      var timer = null;
+      sb.addEventListener('scroll', function () {
+        clearTimeout(timer);
+        timer = setTimeout(save, 120);
+      });
+
+      // Clicking a link leaves the page immediately, so grab the position now.
+      // Capture phase, so it runs before the browser starts navigating.
+      sb.addEventListener('click', save, true);
+      window.addEventListener('pagehide', save);
+    })();
+    </script>
+
+
+    <main class="cp-main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+  <script>
+    window.loginUser = {{ login_user_json|safe }};
+
+    function setControlPanelSidebar(open) {
+      document.body.classList.toggle('cp-sidebar-collapsed', !open);
+      var sb = document.querySelector('.cp-sidebar');
+      if (sb) sb.classList.remove('cp-sb-peek');   // pinning/unpinning clears any hover-peek
+      /* Let go of the button that was just clicked. The rail stays full width while
+         anything inside it still has keyboard focus (the :focus-within rule above),
+         so without this the sidebar would not actually close until you clicked
+         somewhere else on the page. */
+      if (!open && sb && document.activeElement && sb.contains(document.activeElement)
+          && document.activeElement.blur) {
+        document.activeElement.blur();
+      }
+      try { localStorage.setItem('cpSidebarOpen', open ? '1' : '0'); } catch (err) {}
+    }
+    // Pin (expand & lock) when collapsed; unpin (back to hover-rail) when expanded.
+    function toggleControlPanelSidebar() {
+      setControlPanelSidebar(document.body.classList.contains('cp-sidebar-collapsed'));
+    }
+
+    // Expand/collapse a sidebar nav group (e.g. Analytical Reports); remember the choice.
+    function toggleNavGroup(btn) {
+      var g = btn.closest('.cp-nav-group');
+      if (!g) return;
+      var open = g.classList.toggle('open');
+      try { localStorage.setItem('cpNavGroup_' + (g.dataset.group || 'g'), open ? '1' : '0'); } catch (err) {}
+    }
+    // Smart hover: while collapsed, hovering the rail expands it (overlay); a short delay
+    // before collapse prevents flicker if the cursor briefly leaves the edge.
+    (function () {
+      var sb = document.querySelector('.cp-sidebar');
+      if (!sb) return;
+      var timer = null;
+      sb.addEventListener('mouseenter', function () {
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (document.body.classList.contains('cp-sidebar-collapsed')) sb.classList.add('cp-sb-peek');
+      });
+      sb.addEventListener('mouseleave', function () {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(function () { sb.classList.remove('cp-sb-peek'); }, 180);
+      });
+    })();
+
+    /* ── Top-bar icons while the sidebar is closed ─────────────────────────────
+       The strip is a copy of the sidebar: every top-level page becomes one icon
+       button, every group (Sales, Accounts...) becomes one icon that opens a menu
+       with the group's pages. It is built when the sidebar closes and emptied when
+       it opens, so the icons are only ever in one place. */
+    (function () {
+      var sb = document.querySelector('.cp-sidebar'), nav = document.getElementById('cpTopNav');
+      if (!sb || !nav) return;
+      function esc(t) { return String(t).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+      function icon(el) { var i = el.querySelector('.ic:not(.cp-nav-group-chev)'); return i ? i.className : 'ic ic-circle'; }
+      function label(el) { return (el.getAttribute('title') || el.textContent || '').trim(); }
+      function build() {
+        var html = '', lastNav = null;
+        var all = sb.querySelectorAll('.cp-nav-item:not(.cp-nav-group-btn), .cp-nav-group');
+        Array.prototype.forEach.call(all, function (el) {
+          if (el.closest('.cp-nav-sub')) return;              // handled by its group
+          var owner = el.closest('.cp-nav');                  // a thin line between menu sections
+          if (lastNav && owner !== lastNav) html += '<span class="cp-topnav-sep" aria-hidden="true"></span>';
+          lastNav = owner;
+          if (el.classList.contains('cp-nav-group')) {
+            var btn = el.querySelector('.cp-nav-group-btn'), name = btn ? label(btn) : 'More';
+            var subs = el.querySelectorAll('.cp-nav-sub .cp-nav-item'), on = el.querySelector('.cp-nav-sub .cp-nav-item.active');
+            html += '<div class="cp-topnav-group">'
+                 +  '<button type="button" class="cp-topnav-btn' + (on ? ' active' : '') + '" aria-label="' + esc(name) + '" aria-haspopup="true" aria-expanded="false">'
+                 +  '<i class="' + esc(btn ? icon(btn) : 'ic ic-folder') + '"></i><i class="ic ic-chevron-down cp-topnav-chev"></i></button>'
+                 +  '<div class="cp-topnav-menu" role="menu"><div class="cp-topnav-menu-h">' + esc(name) + '</div>';
+            Array.prototype.forEach.call(subs, function (a) {
+              html += '<a class="cp-topnav-link' + (a.classList.contains('active') ? ' active' : '') + '" role="menuitem" href="' + esc(a.getAttribute('href')) + '">'
+                   +  '<i class="' + esc(icon(a)) + '"></i>' + esc(label(a)) + '</a>';
+            });
+            html += '</div></div>';
+          } else {
+            html += '<a class="cp-topnav-btn' + (el.classList.contains('active') ? ' active' : '') + '" href="' + esc(el.getAttribute('href')) + '" aria-label="' + esc(label(el)) + '">'
+                 +  '<i class="' + esc(icon(el)) + '"></i></a>';
+          }
+        });
+        nav.innerHTML = html;
+      }
+      function closeMenus() {
+        Array.prototype.forEach.call(nav.querySelectorAll('.cp-topnav-group.open'), function (g) {
+          g.classList.remove('open');
+          var b = g.querySelector('.cp-topnav-btn'); if (b) b.setAttribute('aria-expanded', 'false');
+        });
+      }
+      function sync() {
+        var closed = document.body.classList.contains('cp-sidebar-collapsed');
+        if (closed && !nav.childElementCount) build();
+        if (!closed && nav.childElementCount) { closeMenus(); nav.innerHTML = ''; }
+      }
+      // A group menu opens under its icon; the strip can scroll sideways, so the
+      // menu is placed from the icon's real position on screen.
+      nav.addEventListener('click', function (e) {
+        var g = e.target.closest('.cp-topnav-group');
+        if (!g || !nav.contains(g) || e.target.closest('.cp-topnav-menu')) return;
+        var wasOpen = g.classList.contains('open');
+        closeMenus();
+        if (!wasOpen) {
+          var b = g.querySelector('.cp-topnav-btn'), m = g.querySelector('.cp-topnav-menu'), r = b.getBoundingClientRect();
+          m.style.top = Math.round(r.bottom + 8) + 'px';
+          m.style.left = Math.min(Math.round(r.left), Math.max(8, window.innerWidth - 246)) + 'px';
+          g.classList.add('open'); b.setAttribute('aria-expanded', 'true');
+        }
+      });
+      // Page name under the icon while the pointer rests on it (hidden while a
+      // group menu is open - the menu already shows the names).
+      var tip = document.createElement('div'); tip.className = 'cp-topnav-tip'; tip.setAttribute('role', 'tooltip');
+      document.body.appendChild(tip);
+      function hideTip() { tip.classList.remove('show'); }
+      function showTip(b) {
+        var g = b.closest('.cp-topnav-group');
+        if (g && g.classList.contains('open')) { hideTip(); return; }
+        var r = b.getBoundingClientRect();
+        tip.textContent = b.getAttribute('aria-label') || '';
+        tip.style.left = Math.round(r.left + r.width / 2) + 'px';
+        tip.style.top = Math.round(r.bottom + 8) + 'px';
+        tip.classList.add('show');
+      }
+      nav.addEventListener('mouseover', function (e) {
+        var b = e.target.closest('.cp-topnav-btn');
+        if (b && nav.contains(b)) showTip(b); else hideTip();
+      });
+      nav.addEventListener('mouseleave', hideTip);
+      nav.addEventListener('click', hideTip);
+      nav.addEventListener('focusin', function (e) { var b = e.target.closest('.cp-topnav-btn'); if (b) showTip(b); });
+      nav.addEventListener('focusout', hideTip);
+      document.addEventListener('click', function (e) { if (!nav.contains(e.target)) closeMenus(); });
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeMenus(); });
+      window.addEventListener('resize', closeMenus);
+      new MutationObserver(sync).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      sync();
+    })();
+
+  </script>
+  {% block extra_scripts %}{% endblock %}
+  {% comment %} Last, so it also picks up anything a page's own script just built. {% endcomment %}
+  <script src="{% static 'core/bkdatepicker.js' %}?v=3"></script>
+
+  <script>
+  /* ── Logo reloads the page ─────────────────────────────────────────────────
+     location.reload() re-requests the current URL with whatever filters and
+     query string are already on it, so you come back to the same view with
+     fresh figures - not to the home page. */
+  (function () {
+    var brand = document.getElementById('cpBrand');
+    if (!brand) return;
+    function reload() { window.location.reload(); }
+    brand.addEventListener('click', reload);
+    // A div is not a button, so Enter and Space have to be wired up by hand.
+    brand.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reload(); }
+    });
+  })();
+  </script>
+
+  <script>
+  /* ── Keep the top bar lined up with the sidebar ────────────────────────────
+     The logo block and the divider arrow must sit exactly above the sidebar's
+     right edge. Rather than hard-coding 282px and 64px in two places, we measure
+     the sidebar and publish its width as --cp-sbw. That way the bar follows every
+     state, including the hover-peek, and stays correct if the width ever changes. */
+  (function () {
+    var sb = document.querySelector('.cp-sidebar');
+    if (!sb) return;
+    var last = -1;
+    function sync() {
+      var w = Math.round(sb.getBoundingClientRect().width);
+      if (w === last) return;
+      last = w;
+      document.documentElement.style.setProperty('--cp-sbw', w + 'px');
+      // Below this there is only room for the logo, not the wording.
+      document.body.classList.toggle('cp-sb-narrow', w < 140);
+    }
+    if (window.ResizeObserver) { new ResizeObserver(sync).observe(sb); }
+    window.addEventListener('resize', sync);
+    sb.addEventListener('transitionend', sync);
+    sync();
+  })();
+  </script>
+
+  <script>
+  /* ── Profile menu ──────────────────────────────────────────────────────────
+     Click the button to open. It closes when the pointer moves off it, when you
+     click outside, when you click the button again, or on Esc.
+
+     The move-away close waits a moment first. There is an 8px gap between the
+     button and the panel, and the pointer is briefly outside both while crossing
+     it - without the pause the menu would shut in your face on the way down.
+     Coming back inside cancels the pending close.
+
+     Touch devices never send mouseleave, so tapping outside still closes it. */
+  (function () {
+    var btn = document.getElementById('cpUserBtn');
+    var pop = document.getElementById('cpUserPop');
+    if (!btn || !pop) return;
+    var CLOSE_DELAY = 350, timer = null;
+    function cancelClose() { if (timer) { clearTimeout(timer); timer = null; } }
+    function show(open) {
+      if (open) cancelClose();
+      pop.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      show(!pop.classList.contains('open'));
+    });
+
+    // The wrapper holds both the button and the panel, so moving between them
+    // does not count as leaving.
+    var wrap = btn.parentNode;
+    if (wrap) {
+      wrap.addEventListener('mouseleave', function () {
+        cancelClose();
+        timer = setTimeout(function () { timer = null; show(false); }, CLOSE_DELAY);
+      });
+      wrap.addEventListener('mouseenter', cancelClose);
+    }
+    // Clicks inside the panel (the Sign out form) must not close it first.
+    pop.addEventListener('click', function (e) { e.stopPropagation(); });
+    // "Profile" folds the account details open underneath it.
+    var pbtn = document.getElementById('cpProfileBtn');
+    var pdet = document.getElementById('cpProfileDet');
+    if (pbtn && pdet) {
+      pbtn.addEventListener('click', function () {
+        var open = !pdet.classList.contains('open');
+        pdet.classList.toggle('open', open);
+        pbtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    }
+    document.addEventListener('click', function () { show(false); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') show(false);
+    });
+  })();
+  </script>
+
+  <script>
+  /* ── Drag-to-scroll handle ─────────────────────────────────────────────────
+     The sidebar and the content area both have their scrollbars hidden. The wheel
+     still works, but there was nothing to see and nothing to grab. This draws a
+     slim grip over the right edge of each: pull it down and the area scrolls down.
+
+     How it is positioned: the grip is a fixed element sitting on top, not a child
+     of the scrolling box - a child would scroll away with the content. Its place is
+     recalculated whenever the box scrolls, resizes, or its contents change (opening
+     a menu group makes the sidebar taller).
+
+     The grip's LENGTH shows how much of the content you can see, exactly like a real
+     scrollbar: a short grip means there is a lot more below. */
+  (function () {
+    function attach(box) {
+      if (!box) return;
+      var bar = document.createElement('div');
+      var thumb = document.createElement('div');
+      bar.className = 'cp-dbar';
+      thumb.className = 'cp-dbar-thumb';
+      bar.appendChild(thumb);
+      document.body.appendChild(bar);
+
+      var MIN_GRIP = 32;          // never smaller than this, or it cannot be grabbed
+      var queued = false;
+
+      function draw() {
+        queued = false;
+        var view = box.clientHeight, all = box.scrollHeight;
+        var r = box.getBoundingClientRect();
+        bar.style.top = r.top + 'px';
+        bar.style.height = r.height + 'px';
+        bar.style.left = (r.right - 14) + 'px';
+
+        if (all <= view + 1) { bar.classList.remove('on'); return; }   // nothing to scroll
+        bar.classList.add('on');
+
+        var grip = Math.max(MIN_GRIP, Math.round(view * view / all));
+        var travel = view - grip;                 // how far the grip can move
+        var scrollable = all - view;              // how far the content can move
+        var y = scrollable > 0 ? (box.scrollTop / scrollable) * travel : 0;
+        thumb.style.height = grip + 'px';
+        thumb.style.transform = 'translateY(' + Math.round(y) + 'px)';
+      }
+      // Redraws are cheap but can be asked for in bursts; do at most one per frame.
+      function update() {
+        if (queued) return;
+        queued = true;
+        window.requestAnimationFrame(draw);
+      }
+
+      var dragging = false, grabY = 0, grabScroll = 0;
+      thumb.addEventListener('pointerdown', function (e) {
+        dragging = true; grabY = e.clientY; grabScroll = box.scrollTop;
+        try { thumb.setPointerCapture(e.pointerId); } catch (_) {}
+        bar.classList.add('drag');
+        document.body.classList.add('cp-dbar-dragging');
+        e.preventDefault(); e.stopPropagation();
+      });
+      thumb.addEventListener('pointermove', function (e) {
+        if (!dragging) return;
+        var view = box.clientHeight, all = box.scrollHeight;
+        var travel = view - thumb.offsetHeight, scrollable = all - view;
+        if (travel <= 0) return;
+        // Move the content further than the grip, in the same proportion.
+        box.scrollTop = grabScroll + (e.clientY - grabY) * (scrollable / travel);
+      });
+      function stop() {
+        dragging = false;
+        bar.classList.remove('drag');
+        document.body.classList.remove('cp-dbar-dragging');
+      }
+      thumb.addEventListener('pointerup', stop);
+      thumb.addEventListener('pointercancel', stop);
+
+      // Clicking the empty part of the bar jumps one screenful that way.
+      bar.addEventListener('pointerdown', function (e) {
+        if (e.target === thumb) return;
+        var top = bar.getBoundingClientRect().top + thumb.offsetTop;
+        box.scrollTop += (e.clientY < top ? -0.9 : 0.9) * box.clientHeight;
+      });
+
+      box.addEventListener('scroll', update, { passive: true });
+      window.addEventListener('resize', update);
+      if (window.ResizeObserver) { new ResizeObserver(update).observe(box); }
+      if (window.MutationObserver) {
+        // Opening a menu group changes the height, so watch the contents too.
+        new MutationObserver(update).observe(box,
+          { subtree: true, childList: true, attributes: true });
+      }
+      // The sidebar animates its width; catch the size it settles at.
+      box.addEventListener('transitionend', update);
+      update();
+    }
+
+    attach(document.querySelector('.cp-sidebar'));
+    attach(document.querySelector('.cp-main'));
+  })();
+  </script>
+
+  <script>
+  /* ── No browser tooltips ───────────────────────────────────────────────────
+     That little grey box that pops up about a second after the mouse stops on
+     something is the browser's own tooltip. It comes from title="..." in the
+     HTML, it cannot be styled, and it is not wanted here.
+
+     Two things this does, and why:
+
+     1. The text is copied to aria-label before title is removed - but only when
+        the element has no aria-label already. Screen readers still announce the
+        hint; only the visual pop-up goes. Deleting the text outright would have
+        made the app harder to use for anyone on a screen reader.
+
+     2. A MutationObserver keeps watching. Several pages set titles from their
+        own JavaScript after load (the inventory lock button, the Plan vs Done
+        state picker, buttons built on the fly). A one-time sweep would miss all
+        of those, and the tooltip would come back.
+
+     To bring tooltips back, delete this whole <script> block. Nothing else
+     depends on it - no code anywhere reads a title attribute for logic. */
+  (function () {
+    function strip(el) {
+      if (!el || !el.getAttribute) return;
+      var t = el.getAttribute('title');
+      if (t === null) return;                       // nothing to do
+      if (t && !el.getAttribute('aria-label')) el.setAttribute('aria-label', t);
+      el.removeAttribute('title');                  // re-fires the observer, but
+                                                    // then title is null and we stop
+    }
+    function stripAll(root) {
+      if (!root) return;
+      strip(root);
+      if (!root.querySelectorAll) return;
+      var found = root.querySelectorAll('[title]');
+      for (var i = 0; i < found.length; i++) strip(found[i]);
+    }
+
+    stripAll(document);
+
+    if (window.MutationObserver) {
+      new MutationObserver(function (records) {
+        for (var i = 0; i < records.length; i++) {
+          var r = records[i];
+          if (r.type === 'attributes') strip(r.target);
+          else for (var j = 0; j < r.addedNodes.length; j++) stripAll(r.addedNodes[j]);
+        }
+      }).observe(document.documentElement, {
+        subtree: true, childList: true, attributes: true, attributeFilter: ['title']
+      });
+    }
+  })();
+  </script>
+
+</body>
+</html>

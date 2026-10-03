@@ -1,0 +1,3769 @@
+{% extends base_template %}
+{% load static %}
+{% block title %}Inventory Dashboard{% endblock %}
+
+{% block extra_styles %}
+<link href="{% static 'vendor/css/inter.css' %}" rel="stylesheet">
+<link href="{% static 'vendor/css/archivo.css' %}" rel="stylesheet">
+<link href="{% static 'vendor/css/caveat.css' %}" rel="stylesheet">
+<style>
+    :root {
+      --bg: #f4f5f7;
+      --side: #ffffff;
+      --side-solid: #4f46e5;
+      --side-ac: #7c3aed;
+      --side-ac-strong: #eef2ff;
+      --card: #fff; 
+      --tx: #111;
+      --tx2: #444;
+      --mt: #8b8fa3;
+      --bd: #ebebef;
+      --ac: #0ea5e9;
+      --font: 'CPNum', 'Inter', sans-serif;
+      --r: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0
+    }
+
+    /* lucide.css gives every .ic a fixed 24px, which made icons inside chips, buttons
+       and badges oversized and off-baseline. Inside this page an icon takes the size
+       of the text it sits in; the few places that want a specific size set it below. */
+    .inv-dashboard .ic { font-size: 1em; vertical-align: -.14em }
+
+    /* Spacing scale + control height, used everywhere below. */
+    .inv-dashboard {
+      --sp: 16px;
+      --sp-lg: 24px;
+      --ctl-h: 34px;
+      --ts-off: 190px;
+      --sh: 0 1px 2px rgba(15, 23, 42, .04)
+    }
+
+    /* The shell pads .cp-main for ordinary report pages. This page is an app with its
+       own panel and top bar, so it fills the frame edge to edge instead of floating
+       in a grey margin. */
+    .cp-main:has(> #inventoryDashboard) { padding: 0 !important }
+
+    /* Height of the sidebar header AND the main top bar - they must match. */
+    .inv-dashboard {
+      --hdr-h: 58px;
+      --side-w: 236px;
+      --rail-w: 76px;
+      position: relative
+    }
+
+    .inv-dashboard { font-family: var(--font); background: var(--bg); color: var(--tx); display: flex; height: 100vh; min-height: 0; overflow: hidden; font-size: 15px }
+
+    /* ── SIDEBAR ── */
+    .side {
+      width: var(--side-w);
+      min-width: var(--side-w);
+      background: var(--side);
+      border-right: 1px solid var(--bd);
+      display: flex;
+      flex-direction: column;
+      transition: width .3s, min-width .3s;
+      overflow: hidden;
+      flex-shrink: 0
+    }
+
+    /* Collapsed is a slim RAIL, not an empty gap: the logo and the arrow stay on the
+       top line and the nav keeps its icons, so you can still see where you are and
+       click your way back open. */
+    .side.collapsed {
+      width: var(--rail-w);
+      min-width: var(--rail-w)
+    }
+
+    /* !important is required, not laziness: setOilOnlyVisible() sets display on
+       .schema-badge as an INLINE style, and inline beats a stylesheet rule. */
+    .side.collapsed .side-nm,
+    .side.collapsed .cs-caret,
+    .side.collapsed .ng,
+    .side.collapsed .schema-badge,
+    .side.collapsed .cs-pop {
+      display: none !important
+    }
+
+    .side.collapsed .side-hd {
+      padding: 0 6px;
+      gap: 0;
+      justify-content: center
+    }
+
+    /* The rail is 76px wide and, with 6px of padding either side, 64px of that is
+       usable. 48px fills it properly and still leaves the logo clear of the edges.
+       It used to be 28px "so the logo and the arrow both fit on one line" - but the
+       arrow is position:absolute on the rail's edge, so it was never on that line
+       and the logo was being shrunk for no reason.
+
+       font-size needs !important: switchDivision() writes logo.style.fontSize as an
+       INLINE style (17px for Oil, 20px for Beverages) to size the expanded logo, and
+       inline beats a stylesheet rule - so without this the box would grow while the
+       letter stayed small inside it. */
+    .side.collapsed .side-logo {
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      font-size: 22px !important
+    }
+
+    /* Collapsed: the header row only has room for the logo, so the arrow drops to
+       just under it, centred in the rail - still fully inside the panel. The nav
+       moves down by the same amount so nothing sits under the arrow. */
+    .side-toggle.is-collapsed {
+      left: calc(var(--rail-w) / 2);
+      top: calc(var(--hdr-h) + 22px)
+    }
+
+    .side.collapsed .side-nav {
+      padding-top: 42px
+    }
+
+    /* icons only: font-size 0 hides the label text, the icon gets its own size back */
+    .side.collapsed .ni {
+      justify-content: center;
+      gap: 0;
+      padding: 10px 0;
+      font-size: 0
+    }
+
+    .side.collapsed .ni .i {
+      font-size: 18px;
+      width: auto
+    }
+
+    /* Same height as .top, so the two bottom borders form one straight line
+       across the page. Change --hdr-h and both follow. */
+    .side-hd {
+      height: var(--hdr-h);
+      /* right padding keeps the caret clear of the collapse arrow, which sits
+         inside this row at its right end */
+      padding: 0 44px 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid var(--bd);
+      white-space: nowrap;
+      /* The whole block is now the company switcher, so it has to look pressable. */
+      cursor: pointer;
+      position: relative;
+      transition: background .15s
+    }
+
+    .side-hd:hover { background: #f7f7fb }
+    /* The shell outlines every [role=button] in the page with an indigo hairline,
+       which boxed this header differently from the panel it belongs to. It is part
+       of the panel: no box, just the divider underneath. */
+    #inventoryDashboard .side-hd { border: 0; border-bottom: 1px solid var(--bd); border-radius: 0 }
+    .side-nm { min-width: 0; flex: 1 1 auto; overflow: hidden }
+    .side-nm h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2 }
+    .side-nm span { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis }
+    .side-hd .cs-caret { margin-left: auto; flex-shrink: 0; font-size: 15px; color: var(--mt); transition: transform .18s }
+    .side-hd.open .cs-caret { transform: rotate(180deg) }
+
+    /* The panel that drops out of it. */
+    .cs-pop {
+      display: none;
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      top: calc(100% - 4px);
+      z-index: 400;
+      background: #fff;
+      border: 1px solid var(--bd);
+      border-radius: 12px;
+      box-shadow: 0 14px 34px rgba(15, 23, 42, .16);
+      padding: 6px;
+      white-space: normal
+    }
+
+    .cs-pop.open { display: block }
+
+    .cs-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      border: 0;
+      background: transparent;
+      border-radius: 9px;
+      padding: 9px 10px;
+      cursor: pointer;
+      font-family: inherit;
+      text-align: left
+    }
+
+    .cs-item:hover { background: #f3f4f6 }
+    .cs-ic {
+      width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 900
+    }
+    /* The sidebar already has `.side-hd div span { 8px, uppercase, muted }`, and the
+       popup is a div inside .side-hd - so that rule was landing on these labels and
+       shrinking both lines to tiny grey capitals. These selectors are deliberately
+       longer so they outrank it, and they reset letter-spacing and text-transform
+       explicitly rather than relying on order. */
+    .side-hd .cs-pop .cs-nm {
+      font-size: 13px; font-weight: 800; color: #000;
+      letter-spacing: 0; text-transform: none
+    }
+    .side-hd .cs-pop .cs-sub {
+      font-size: 9px; font-weight: 700; letter-spacing: .5px;
+      text-transform: uppercase; color: var(--mt)
+    }
+    /* A tick, not a colour, marks where you already are. */
+    .cs-on { margin-left: auto; color: #16a34a; font-size: 15px; display: none }
+    .cs-item.on .cs-on { display: block }
+
+    .side-logo {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, color-mix(in srgb,#6366f1 15%,#fff), color-mix(in srgb,#7c3aed 15%,#fff));
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+      font-weight: 800;
+      color: #fff;
+      flex-shrink: 0
+    }
+
+    .side-hd div h1 {
+      font-size: 14.5px;
+      font-weight: 800;
+      color: #111827
+    }
+
+    .side-hd div span {
+      font-size: 8px;
+      color: var(--side-solid);
+      font-weight: 700;
+      letter-spacing: .9px;
+      text-transform: uppercase
+    }
+
+    .side-nav {
+      flex: 1;
+      padding: 6px 10px 16px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      white-space: nowrap
+    }
+
+    .ng {
+      font-size: 9px;
+      font-weight: 800;
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      padding: 16px 10px 5px
+    }
+
+    .ni {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 36px;
+      padding: 7px 12px;
+      border-radius: 10px;
+      color: #6b7280;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: .15s;
+      margin: 2px 0
+    }
+
+    /* Light theme: the page you are on is marked by a pale tint and bolder indigo
+       text - no coloured bar down the left edge. */
+    .ni:hover {
+      background: #f1f2fe;
+      color: var(--side-solid)
+    }
+
+    .ni.on {
+      background: #eef2ff;
+      color: var(--side-solid);
+      font-weight: 800
+    }
+
+    .ni .i {
+      width: 20px;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px
+    }
+
+    /* ── MAIN ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0
+    }
+
+    /* Section header row: title on the left, actions on the right. Same side padding
+       as .ct, so the title lines up with the content under it. */
+    .top {
+      min-height: var(--hdr-h);
+      padding: 11px var(--sp-lg);
+      background: var(--card);
+      border-bottom: 1px solid var(--bd);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      flex-shrink: 0
+    }
+
+    /* Round arrow, the same control the main panel's sidebar uses. It stays in the
+       top bar rather than inside the sidebar, because this sidebar collapses to zero
+       width - an arrow inside it would vanish with it and there would be no way back. */
+    /* Sits INSIDE the panel header, at its right end (it used to straddle the
+       divider and hang over the top bar). */
+    .side-toggle {
+      position: absolute;
+      z-index: 20;
+      left: calc(var(--side-w) - 25px);
+      top: calc(var(--hdr-h) / 2);
+      transform: translate(-50%, -50%);
+      width: 28px;
+      height: 28px;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 50%;
+      color: #64748b;
+      font-size: 15px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, .10);
+      transition: background .15s, color .15s, border-color .15s, left .3s, top .3s;
+      flex-shrink: 0
+    }
+
+    .side-toggle:hover {
+      background: #eef2ff;
+      color: #4338ca;
+      border-color: #e0e7ff
+    }
+
+    /* Only ic-chevron-right exists in the icon set, so it is turned round to point
+       LEFT while the sidebar is open (click = close), and left as-is once collapsed
+       (click = open). */
+    .side-toggle .ic {
+      font-size: 16px;
+      transform: rotate(180deg);
+      transition: transform .2s ease
+    }
+
+    .side-toggle.is-collapsed .ic {
+      transform: rotate(0deg)
+    }
+
+    .top-t {
+      font-size: 16px;
+      font-weight: 800;
+      margin-right: auto;
+      letter-spacing: -.3px;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis
+    }
+
+    .pls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap
+    }
+
+    /* White panel with a soft shadow and dark text - the look of the reference.
+       One height for every chip and button on the page; icon and label centred on
+       one line. */
+    .pl {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      height: var(--ctl-h);
+      padding: 0 13px;
+      line-height: 1;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid #eef0f4;
+      border-radius: 10px;
+      cursor: pointer;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+      font-family: var(--font);
+      color: var(--tx);
+      transition: .15s
+    }
+
+    .pl .ic {
+      font-size: 15px;
+      vertical-align: 0
+    }
+
+    .pl:hover:not(.on) {
+      background: #f8fafc;
+      border-color: #dfe3ea
+    }
+
+    /* selected: a light indigo tint like the rest of the panel, not a colour block */
+    .pl.on {
+      background: #eef2ff;
+      border-color: #e0e7ff;
+      color: #4338ca;
+      font-weight: 800
+    }
+
+    .pl.premium.on {
+      background: #fdf2f8;
+      color: #9d174d;
+      border-color: #fbcfe8
+    }
+
+    .pl.commodity.on {
+      background: #eff6ff;
+      color: #1e40af;
+      border-color: #bfdbfe
+    }
+
+    .sep {
+      width: 1px;
+      height: 22px;
+      margin: 0 2px;
+      background: var(--bd);
+      flex-shrink: 0
+    }
+
+    /* Refresh and the lock get the same white panel as the chips. */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      height: var(--ctl-h);
+      min-width: var(--ctl-h);
+      padding: 0 13px;
+      line-height: 1;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+      background: #fff;
+      color: var(--tx);
+      border: 1px solid #eef0f4;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+      cursor: pointer;
+      font-family: var(--font);
+      transition: background .15s, border-color .15s
+    }
+
+    .btn:hover {
+      background: #f8fafc;
+      border-color: #dfe3ea
+    }
+
+    .btn .ic {
+      font-size: 15px;
+      vertical-align: 0
+    }
+
+    /* the lock button is icon-only: square, same height as the rest */
+    #lockBtn { padding: 0; width: var(--ctl-h) }
+
+    /* container-type lets the KPI grids and the trace layout respond to the width of
+       the CONTENT area (which changes when the panel collapses), not the window. */
+    .ct {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: var(--sp-lg);
+      container-type: inline-size
+    }
+
+    .sec {
+      display: none
+    }
+
+    .sec.on {
+      display: block
+    }
+
+    @keyframes fu {
+      from {
+        opacity: 0;
+        transform: translateY(6px)
+      }
+
+      to {
+        opacity: 1
+      }
+    }
+
+    .sec.on>* {
+      animation: fu .3s ease both
+    }
+
+    /* ── KPI CARDS ── */
+    /* KPI rows. The column count follows the number of cards (read with :has), so a
+       section's cards share ONE row on a wide screen and never leave a lone card on a
+       second row. Narrower content areas step down in the @container rules at the end
+       of this sheet. The ABC-XYZ combo cards use the same grid. */
+    .kg,
+    .combo-kpis {
+      --kn: 4;
+      display: grid;
+      grid-template-columns: repeat(var(--kn), minmax(0, 1fr));
+      gap: var(--sp);
+      margin-bottom: var(--sp-lg)
+    }
+
+    .kg:has(> :nth-child(5)),
+    .combo-kpis:has(> :nth-child(5)) { --kn: 5 }
+    .kg:not(:has(> :nth-child(4))) { --kn: 3 }
+    .kg:not(:has(> :nth-child(3))) { --kn: 2 }
+    .kg:not(:has(> :nth-child(2))) { --kn: 1 }
+
+    /* Light KPI cards: pale gradient fill (see .k1-.k5), dark text. The children
+       below fade this colour with opacity, so they follow on their own. */
+    .kc {
+      min-width: 0;
+      border-radius: var(--r);
+      padding: 16px 16px 15px;
+      cursor: pointer;
+      transition: .25s;
+      position: relative;
+      overflow: hidden;
+      color: #0f172a;
+      border: 1px solid rgba(15, 23, 42, .08)
+    }
+
+    .kc:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .12)
+    }
+
+    .kc-l {
+      font-size: 11px;
+      font-weight: 700;
+      opacity: .85;
+      text-transform: uppercase;
+      letter-spacing: .5px
+    }
+
+    .kc-v {
+      font-size: 26px;
+      font-weight: 800;
+      margin-top: 6px;
+      letter-spacing: -1px;
+      line-height: 1.15;
+      white-space: nowrap
+    }
+
+    .kc-s {
+      font-size: 11px;
+      opacity: .65;
+      margin-top: 6px;
+      line-height: 1.35;
+      font-weight: 500;
+      /* clear of the corner icon */
+      padding-right: 34px
+    }
+
+    .kc-s .inv-val-wrap { white-space: nowrap }
+
+    /* Decorative corner icon - kept wholly inside the card (it used to hang off the
+       corner and get clipped). */
+    .kc-bg {
+      position: absolute;
+      right: 14px;
+      bottom: 12px;
+      font-size: 30px;
+      line-height: 1;
+      opacity: .16;
+      pointer-events: none
+    }
+
+    .k1 {
+      background: linear-gradient(135deg, color-mix(in srgb,#0ea5e9 15%,#fff), color-mix(in srgb,#06b6d4 15%,#fff))
+    }
+
+    .k2 {
+      background: linear-gradient(135deg, color-mix(in srgb,#059669 15%,#fff), color-mix(in srgb,#10b981 15%,#fff))
+    }
+
+    .k3 {
+      background: linear-gradient(135deg, color-mix(in srgb,#dc2626 15%,#fff), color-mix(in srgb,#ef4444 15%,#fff))
+    }
+
+    .k4 {
+      background: linear-gradient(135deg, color-mix(in srgb,#d97706 15%,#fff), color-mix(in srgb,#f59e0b 15%,#fff))
+    }
+
+    .k5 {
+      background: linear-gradient(135deg, color-mix(in srgb,#e11d48 15%,#fff), color-mix(in srgb,#f43f5e 15%,#fff))
+    }
+
+    .note {
+      background: #fefce8;
+      border: 1.5px solid #fde047;
+      border-radius: 12px;
+      padding: 12px var(--sp);
+      font-size: 13px;
+      color: #854d0e;
+      margin-bottom: var(--sp-lg);
+      line-height: 1.6;
+      font-weight: 500
+    }
+
+    .note b {
+      color: #713f12;
+      font-weight: 800
+    }
+
+    /* ── CHARTS ── */
+    .cg {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--sp);
+      margin-bottom: var(--sp-lg)
+    }
+
+    /* full width on its own row. Its canvas is shorter than the two above, because a
+       donut only uses the middle of the card - a tall box just adds empty space. */
+    .cb-wide {
+      grid-column: 1 / -1
+    }
+
+    .cb-wide .cw {
+      height: 210px
+    }
+
+    .cb {
+      min-width: 0;
+      background: var(--card);
+      border-radius: var(--r);
+      padding: 18px 20px;
+      border: 1px solid var(--bd);
+      box-shadow: var(--sh)
+    }
+
+    .ch {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--tx);
+      margin-bottom: 12px
+    }
+
+    .cw {
+      position: relative;
+      height: 260px
+    }
+
+    /* ── TABLES ── */
+    .tc {
+      background: var(--card);
+      border-radius: var(--r);
+      border: 1px solid var(--bd);
+      box-shadow: var(--sh);
+      overflow: hidden;
+      margin-bottom: var(--sp-lg)
+    }
+
+    .tc:last-child { margin-bottom: 0 }
+
+    .tb {
+      min-height: 56px;
+      padding: 10px var(--sp);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--bd);
+      flex-wrap: wrap
+    }
+
+    .tb h3 {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 800;
+      margin-right: auto
+    }
+
+    .tb h3 .ic { font-size: 16px; vertical-align: 0 }
+
+    .sr {
+      height: var(--ctl-h);
+      padding: 0 12px;
+      font-size: 12px;
+      border: 1.5px solid var(--bd);
+      border-radius: 10px;
+      width: 180px;
+      font-family: var(--font);
+      font-weight: 500;
+      outline: none;
+      background: var(--bg);
+      transition: .15s
+    }
+
+    .sr:focus {
+      border-color: var(--ac);
+      background: #fff
+    }
+
+    .cnt {
+      font-size: 11px;
+      color: var(--mt);
+      font-weight: 700;
+      white-space: nowrap
+    }
+
+    /* Table body: scrolls INSIDE its card in both directions, header stays put.
+       Its height follows the window (not a fixed 430px), so a table uses the room
+       there is and the card only scrolls when the rows really do not fit. */
+    .ts {
+      max-height: max(320px, calc(100vh - var(--ts-off)));
+      overflow: auto;
+      overscroll-behavior-x: contain
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12px
+    }
+
+    td.m, td .m { font-size: 12px }
+
+    thead {
+      position: sticky;
+      top: 0;
+      z-index: 2
+    }
+
+    th {
+      padding: 9px 7px;
+      text-align: left;
+      vertical-align: bottom;
+      line-height: 1.25;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: var(--mt);
+      background: #fafafa;
+      border-bottom: 2px solid var(--bd)
+    }
+
+    td {
+      padding: 8px 7px;
+      vertical-align: middle;
+      line-height: 1.35;
+      border-bottom: 1px solid #f2f2f5;
+      font-weight: 500
+    }
+
+    th:first-child, td:first-child { padding-left: 14px }
+    th:last-child, td:last-child { padding-right: 14px }
+
+    /* Figures never break across lines (no more "₹6.67 / Cr"), line up in their
+       column, and sit right-aligned. */
+    td.R, td.m, .inv-val-wrap, .nw {
+      white-space: nowrap
+    }
+
+    td.R, td.m {
+      font-variant-numeric: tabular-nums
+    }
+
+    /* Item names take the width that is left, wrapping to two lines at most in
+       normal data; everything else is sized by its content. */
+    td.nm {
+      min-width: 160px;
+      max-width: 340px
+    }
+
+    td.sg {
+      min-width: 72px
+    }
+
+    tr:hover td {
+      background: #fafaff
+    }
+
+    .m {
+      font-size: 13px;
+      font-weight: 700
+    }
+
+    .R {
+      text-align: right
+    }
+
+    .bd {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 22px;
+      padding: 0 9px;
+      border-radius: 7px;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .2px;
+      line-height: 1;
+      white-space: nowrap;
+      vertical-align: middle
+    }
+
+    .b-ok {
+      background: #d1fae5;
+      color: #059669
+    }
+
+    .b-w {
+      background: #fef3c7;
+      color: #d97706
+    }
+
+    .b-d {
+      background: #fee2e2;
+      color: #dc2626
+    }
+
+    .b-i {
+      background: #e0f2fe;
+      color: #0369a1
+    }
+
+    .b-p {
+      background: #fce7f3;
+      color: #9d174d
+    }
+
+    .b-c {
+      background: #dbeafe;
+      color: #1e40af
+    }
+
+    .dr {
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      padding: 0 12px;
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--ac);
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+      font-family: var(--font)
+    }
+
+    /* ── WAREHOUSE MERGED TABLE ── */
+    .wh-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px
+    }
+
+    .wh-row {
+      cursor: pointer;
+      transition: .15s
+    }
+
+    .wh-row:hover td {
+      background: #f5f5ff
+    }
+
+    .wh-row td {
+      padding: 11px 10px;
+      border-bottom: 1px solid var(--bd);
+      font-weight: 600
+    }
+
+    .wh-row .wh-chevron {
+      transition: transform .2s;
+      display: inline-block;
+      font-size: 12px;
+      color: var(--mt);
+      margin-right: 6px
+    }
+
+    .wh-row.open .wh-chevron {
+      transform: rotate(90deg)
+    }
+
+    .wh-items-row {
+      display: none
+    }
+
+    .wh-items-row.open {
+      display: table-row
+    }
+
+    .wh-items-row td {
+      padding: 0;
+      border-bottom: 1px solid var(--bd)
+    }
+
+    /* The item list under an expanded row is sized to the row and scrolls on its
+       own, so opening a warehouse never stretches the columns of the table above.
+       (contain:inline-size stops the inner table's width leaking into the outer one.) */
+    .wh-items-inner,
+    .cat-items-inner {
+      contain: inline-size;
+      overflow-x: auto
+    }
+
+    .wh-items-inner thead,
+    .cat-items-inner thead {
+      position: static
+    }
+
+    .wh-items-inner {
+      background: #fafbff;
+      padding: 0 0 6px 0
+    }
+
+    .wh-items-inner table {
+      font-size: 12px
+    }
+
+    .wh-items-inner th {
+      background: #f0f4ff;
+      font-size: 9px
+    }
+
+    .wh-items-inner td {
+      border-bottom: 1px solid #eff0f5;
+      padding: 7px 12px
+    }
+
+    .wh-search-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center
+    }
+
+    .wh-search-wrap input {
+      height: var(--ctl-h);
+      padding: 0 12px 0 32px;
+      font-size: 12px;
+      border: 1.5px solid var(--bd);
+      border-radius: 10px;
+      font-family: var(--font);
+      font-weight: 500;
+      outline: none;
+      background: var(--bg);
+      width: 220px;
+      max-width: 100%;
+      transition: .15s
+    }
+
+    .wh-search-wrap input:focus {
+      border-color: var(--ac);
+      background: #fff
+    }
+
+    .wh-search-wrap .si {
+      position: absolute;
+      left: 10px;
+      display: inline-flex;
+      font-size: 15px;
+      color: var(--mt);
+      pointer-events: none
+    }
+
+    /* ── EXPANDABLE CATEGORY TABLE ── */
+    .cat-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px
+    }
+
+    .cat-row {
+      cursor: pointer;
+      transition: .15s
+    }
+
+    .cat-row:hover td {
+      background: #f5f5ff
+    }
+
+    .cat-row td {
+      padding: 11px 10px;
+      border-bottom: 1px solid var(--bd);
+      font-weight: 600
+    }
+
+    .cat-row .cat-chevron {
+      transition: transform .2s;
+      display: inline-block;
+      font-size: 12px;
+      color: var(--mt)
+    }
+
+    .cat-row.open .cat-chevron {
+      transform: rotate(90deg)
+    }
+
+    .cat-items-row {
+      display: none
+    }
+
+    .cat-items-row.open {
+      display: table-row
+    }
+
+    .cat-items-row td {
+      padding: 0;
+      border-bottom: 1px solid var(--bd)
+    }
+
+    .cat-items-inner {
+      background: #fafbff;
+      padding: 0 0 4px 0
+    }
+
+    .cat-items-inner table {
+      font-size: 12px
+    }
+
+    .cat-items-inner th {
+      background: #f0f4ff;
+      font-size: 9px
+    }
+
+    .cat-items-inner td {
+      border-bottom: 1px solid #eff0f5;
+      padding: 7px 12px
+    }
+
+    /* ── TOOLTIP ── */
+    .tip {
+      position: relative;
+      display: inline-block
+    }
+
+    .tip .tip-txt {
+      visibility: hidden;
+      background: #1e293b;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 8px;
+      padding: 7px 10px;
+      position: absolute;
+      z-index: 99;
+      bottom: 130%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 220px;
+      line-height: 1.5;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, .2);
+      opacity: 0;
+      transition: .15s
+    }
+
+    .tip:hover .tip-txt {
+      visibility: visible;
+      opacity: 1
+    }
+
+    .tip-icon {
+      color: var(--mt);
+      font-size: 12px;
+      cursor: help;
+      margin-left: 3px
+    }
+
+    /* ── MODAL ── */
+    .mo {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, .4);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+      backdrop-filter: blur(4px)
+    }
+
+    .mo.sh {
+      display: flex
+    }
+
+    .md {
+      background: var(--card);
+      border-radius: 18px;
+      width: 900px;
+      max-width: 92vw;
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, .15)
+    }
+
+    .md-h {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--bd);
+      display: flex;
+      align-items: center
+    }
+
+    .md-h h3 {
+      font-size: 14px;
+      font-weight: 800;
+      flex: 1
+    }
+
+    .md-x {
+      background: #f4f4f5;
+      border: 0;
+      width: 28px;
+      height: 28px;
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--mt);
+      font-weight: 700
+    }
+
+    .md-x:hover {
+      background: #e5e5e5
+    }
+
+    /* The table box inside the modal does the scrolling (both ways), so its
+       header stays visible; the body just hands it the height. */
+    .md-b {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden
+    }
+
+    .md-b > .ts {
+      flex: 1;
+      min-height: 0;
+      max-height: none
+    }
+
+    /* ── CHAT ── */
+    .cf:hover {
+      transform: scale(1.1)
+    }
+
+    .cp-i input:focus {
+      border-color: var(--ac)
+    }
+
+    .ld {
+      text-align: center;
+      padding: 28px;
+      color: var(--mt);
+      font-size: 13px;
+      font-weight: 600
+    }
+
+    .ld::before {
+      content: '';
+      display: block;
+      width: 32px;
+      height: 32px;
+      margin: 0 auto 12px;
+      border: 3px solid var(--bd);
+      border-top-color: var(--ac);
+      border-radius: 50%;
+      animation: spin .8s linear infinite
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg)
+      }
+    }
+
+    .em {
+      text-align: center;
+      padding: 22px;
+      color: var(--mt);
+      font-size: 13px;
+      font-weight: 500
+    }
+
+    /* ── TRACE ── */
+    .pt-list-item {
+      padding: 9px 14px;
+      border-bottom: 1px solid #f5f5f5;
+      cursor: pointer;
+      transition: .1s
+    }
+
+    .pt-list-item:hover {
+      background: #f0f0ff
+    }
+
+    .pt-list-item.active {
+      background: #eef2ff
+    }
+
+    /* ── TABS ── */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 2px solid var(--bd);
+      margin-bottom: var(--sp);
+      overflow-x: auto;
+      scrollbar-width: none
+    }
+
+    .tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      padding: 10px 18px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--mt);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: .15s
+    }
+
+    .tab:hover {
+      color: var(--tx)
+    }
+
+    .tab.on {
+      color: var(--ac);
+      border-bottom-color: var(--ac)
+    }
+
+    .tab-pane {
+      display: none
+    }
+
+    .tab-pane.on {
+      display: block
+    }
+
+    /* ── ABC-XYZ ── */
+    .combo-kpi {
+      min-width: 0;
+      border-radius: var(--r);
+      padding: 14px 16px;
+      color: #0f172a;
+      cursor: pointer;
+      transition: .2s;
+      border: 3px solid transparent
+    }
+
+    .combo-kpi:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, .12)
+    }
+
+    .combo-kpi.active {
+      border-color: rgba(15, 23, 42, .28);
+      box-shadow: 0 0 0 3px rgba(15, 23, 42, .07)
+    }
+
+    .combo-kpi .ck-combo {
+      font-size: 22px;
+      font-weight: 800
+    }
+
+    .combo-kpi .ck-label {
+      font-size: 9px;
+      font-weight: 700;
+      opacity: .62;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-top: 2px
+    }
+
+    .combo-kpi .ck-skus {
+      font-size: 12px;
+      font-weight: 700;
+      margin-top: 7px
+    }
+
+    .combo-kpi .ck-val {
+      font-size: 11px;
+      opacity: .62;
+      font-weight: 600
+    }
+
+    .ck-ax {
+      background: linear-gradient(135deg, color-mix(in srgb,#059669 15%,#fff), color-mix(in srgb,#10b981 15%,#fff))
+    }
+
+    .ck-az {
+      background: linear-gradient(135deg, color-mix(in srgb,#dc2626 15%,#fff), color-mix(in srgb,#ef4444 15%,#fff))
+    }
+
+    .ck-bx {
+      background: linear-gradient(135deg, color-mix(in srgb,#d97706 15%,#fff), color-mix(in srgb,#f59e0b 15%,#fff))
+    }
+
+    .ck-cx {
+      background: linear-gradient(135deg, color-mix(in srgb,#7c3aed 15%,#fff), color-mix(in srgb,#8b5cf6 15%,#fff))
+    }
+
+    .ck-cz {
+      background: linear-gradient(135deg, color-mix(in srgb,#6d28d9 15%,#fff), color-mix(in srgb,#a78bfa 15%,#fff))
+    }
+
+    .matrix-wrap {
+      background: var(--card);
+      border-radius: var(--r);
+      border: 1px solid var(--bd);
+      padding: 18px 20px;
+      margin-bottom: 16px
+    }
+
+    .matrix-grid {
+      display: grid;
+      grid-template-columns: 48px 1fr 1fr 1fr;
+      gap: 5px
+    }
+
+    .mx-corner {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding-bottom: 4px;
+      font-size: 9px;
+      font-weight: 800;
+      color: var(--mt)
+    }
+
+    .mx-col-hd {
+      text-align: center;
+      padding: 6px 4px;
+      border-radius: 7px;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase
+    }
+
+    .mx-col-x {
+      background: #d1fae5;
+      color: #065f46
+    }
+
+    .mx-col-y {
+      background: #fef3c7;
+      color: #92400e
+    }
+
+    .mx-col-z {
+      background: #fee2e2;
+      color: #991b1b
+    }
+
+    .mx-row-hd {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 800
+    }
+
+    .mx-row-a {
+      background: #fee2e2;
+      color: #991b1b
+    }
+
+    .mx-row-b {
+      background: #fef3c7;
+      color: #92400e
+    }
+
+    .mx-row-c {
+      background: #d1fae5;
+      color: #065f46
+    }
+
+    .mx-cell {
+      border-radius: 9px;
+      padding: 8px 10px;
+      cursor: pointer;
+      transition: .2s;
+      border: 2px solid transparent;
+      min-height: 70px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px
+    }
+
+    .mx-cell:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, .1)
+    }
+
+    .mx-cell.highlight {
+      box-shadow: 0 0 0 3px rgba(0, 0, 0, .08)
+    }
+
+    .mx-cell .mc-combo {
+      font-size: 14px;
+      font-weight: 800
+    }
+
+    .mx-cell .mc-skus {
+      font-size: 10px;
+      font-weight: 700;
+      opacity: .7
+    }
+
+    .mx-cell .mc-val {
+      font-size: 10px;
+      font-weight: 800;
+      margin-top: auto
+    }
+
+    .cell-ax {
+      background: #d1fae5;
+      color: #065f46
+    }
+
+    .cell-ay {
+      background: #ecfdf5;
+      color: #065f46
+    }
+
+    .cell-az {
+      background: #f0fdf4;
+      color: #065f46
+    }
+
+    .cell-bx {
+      background: #fef3c7;
+      color: #92400e
+    }
+
+    .cell-by {
+      background: #fffbeb;
+      color: #92400e
+    }
+
+    .cell-bz {
+      background: #fefce8;
+      color: #92400e
+    }
+
+    .cell-cx {
+      background: #ede9fe;
+      color: #4c1d95
+    }
+
+    .cell-cy {
+      background: #f5f3ff;
+      color: #4c1d95
+    }
+
+    .cell-cz {
+      background: #faf5ff;
+      color: #4c1d95
+    }
+
+    .cell-ax.highlight {
+      border-color: #059669
+    }
+
+    .cell-az.highlight {
+      border-color: #dc2626
+    }
+
+    .cell-bx.highlight {
+      border-color: #d97706
+    }
+
+    .cell-cx.highlight {
+      border-color: #7c3aed
+    }
+
+    .cell-cz.highlight {
+      border-color: #9333ea
+    }
+
+    .matrix-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px
+    }
+
+    .ml-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--tx2)
+    }
+
+    .ml-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px
+    }
+
+    .CC {
+      background: var(--card);
+      border: 1px solid var(--bd);
+      border-radius: 12px;
+      padding: 12px var(--sp);
+      margin-bottom: var(--sp-lg);
+      font-size: 12px;
+      line-height: 1.8;
+      color: var(--tx2)
+    }
+
+    .CC b {
+      color: var(--tx)
+    }
+
+    /* ── PLANNING ── */
+    /* Alert pill: icon and label on ONE line, the same height for every state. */
+    .alert-red,
+    .alert-amber,
+    .alert-green {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 24px;
+      padding: 0 8px 0 6px;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap
+    }
+
+    .alert-red .ic,
+    .alert-amber .ic,
+    .alert-green .ic {
+      font-size: 14px;
+      vertical-align: 0
+    }
+
+    .alert-red {
+      background: #fee2e2;
+      color: #991b1b
+    }
+
+    .alert-amber {
+      background: #fef3c7;
+      color: #92400e
+    }
+
+    .alert-green {
+      background: #d1fae5;
+      color: #065f46
+    }
+
+    /* fixed-width alert column, so the pills line up whatever the state */
+    th.c-alert,
+    td.c-alert {
+      width: 92px;
+      min-width: 92px
+    }
+
+    .trend-r,
+    .trend-f,
+    .trend-s,
+    .trend-flat {
+      white-space: nowrap
+    }
+
+    .trend-r {
+      color: #059669;
+      font-weight: 800
+    }
+
+    .trend-f {
+      color: #dc2626;
+      font-weight: 800
+    }
+
+    .trend-s {
+      color: #4f46e5;
+      font-weight: 700
+    }
+
+    .trend-flat {
+      color: #8b8fa3;
+      font-weight: 700
+    }
+
+    /* ── TRACE BUTTON ── */
+    .trace-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 28px;
+      padding: 0 10px;
+      line-height: 1;
+      font-size: 10.5px;
+      font-weight: 700;
+      background: #ede9fe;
+      color: #6d28d9;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: var(--font);
+      transition: .15s;
+      white-space: nowrap
+    }
+
+    .trace-btn:hover {
+      background: #f5f3ff;
+      color: #6d28d9;
+      border-color: #ddd6fe
+    }
+
+    /* ── DATE RANGE ── */
+    .date-inp {
+      height: var(--ctl-h);
+      padding: 0 10px;
+      font-size: 12px;
+      border: 2px solid var(--bd);
+      border-radius: 10px;
+      font-family: var(--font);
+      outline: none;
+      color: var(--tx);
+      background: #fff
+    }
+
+    .date-inp:focus {
+      border-color: var(--ac)
+    }
+
+    select.filter-sel {
+      height: var(--ctl-h);
+      max-width: 100%;
+      padding: 0 10px;
+      border: 2px solid var(--bd);
+      border-radius: 10px;
+      font-size: 12px;
+      font-family: var(--font);
+      font-weight: 700;
+      outline: none;
+      background: #fff;
+      color: var(--mt);
+      cursor: pointer
+    }
+
+    /* ── INVENTORY VALUE BLUR (AUTH) ── */
+    .inv-val-wrap{display:inline-block;position:relative;cursor:default}
+    .inv-lock{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:13px;pointer-events:none}
+    .inv-dashboard.locked .inv-val{filter:blur(7px);user-select:none}
+    .inv-dashboard.locked .inv-val-wrap{cursor:pointer}
+    .inv-dashboard.locked .inv-lock{display:block}
+  
+    .schema-badge{margin:8px 8px 0;padding:8px 10px;border-radius:10px;background:#f9fafb;border:1px solid var(--bd);white-space:nowrap}
+    .schema-badge label{font-size:9px;font-weight:800;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:5px}
+    /* Database picker as a sliding switch: one pill-shaped track, and a white
+       thumb that slides to whichever side is selected. The buttons stay real
+       buttons (so setSchema keeps working) - they just sit on top of the thumb. */
+    .schema-btns{position:relative;display:flex;gap:0;padding:3px;border-radius:999px;
+      background:#eef2f7;border:1px solid var(--bd)}
+    .schema-btns::before{content:"";position:absolute;z-index:0;top:3px;bottom:3px;left:3px;
+      width:calc(50% - 3px);border-radius:999px;background:#fff;
+      box-shadow:0 1px 3px rgba(15,23,42,.14);transition:transform .22s ease}
+    .schema-btns.at-right::before{transform:translateX(100%)}
+    @media (prefers-reduced-motion:reduce){.schema-btns::before{transition:none}}
+    .schema-btn{position:relative;z-index:1;flex:1;padding:5px 0;font-size:10px;font-weight:700;border:0;border-radius:999px;cursor:pointer;background:transparent;color:#6b7280;font-family:var(--font);transition:.15s;text-align:center}
+    .schema-btn:hover:not(.on){color:var(--side-solid)}
+    .schema-btn.on{color:var(--side-solid);font-weight:800}
+    .oil-only.pls{display:none}
+    .oil-only.sep{display:none}
+    .oil-only{display:none}
+
+    /* ══════════════════════════════════════════════════════════════════════
+       LAYOUT PASS - toolbars, trace layout, and the responsive steps.
+       ══════════════════════════════════════════════════════════════════════ */
+
+    /* Section toolbar (filters above a section's cards). Controls are grouped, so a
+       narrow screen wraps BETWEEN groups ("From [date] To [date] Apply Clear" stays
+       together) instead of in the middle of one. */
+    .tbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: var(--sp)
+    }
+
+    .tgrp {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: nowrap;
+      min-width: 0
+    }
+
+    .tl {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--mt);
+      white-space: nowrap
+    }
+
+    .tbar-end { margin-left: auto }
+
+    /* warehouse lists can have long names - the select must not stretch the row */
+    .tbar select.filter-sel { max-width: 260px }
+
+    /* a toolbar whose only control is hidden (the Oil-only type filter on
+       Beverages) should not leave an empty gap */
+    .tbar:has(> .oil-only:only-child[style*="none"]) { display: none }
+
+    /* Apply / Clear. #id prefix: the shell outlines every button with a hairline,
+       and these two were drawn borderless. */
+    #inventoryDashboard .abtn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: var(--ctl-h);
+      padding: 0 14px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+      white-space: nowrap;
+      background: #fff;
+      color: var(--mt);
+      border: 1px solid var(--bd);
+      border-radius: 10px;
+      cursor: pointer;
+      font-family: var(--font)
+    }
+
+    #inventoryDashboard .abtn-p {
+      background: var(--ac);
+      border-color: var(--ac);
+      color: #fff
+    }
+
+    #inventoryDashboard .days-inp {
+      width: 70px;
+      height: var(--ctl-h);
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1.5px solid var(--bd);
+      border-radius: 10px;
+      font-family: var(--font)
+    }
+
+    /* ── Item Trace: item list on the left, detail on the right ── */
+    .trace-grid {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      gap: var(--sp);
+      align-items: start
+    }
+
+    .trace-side {
+      background: var(--card);
+      border-radius: var(--r);
+      border: 1px solid var(--bd);
+      box-shadow: var(--sh);
+      overflow: hidden;
+      position: sticky;
+      top: 0
+    }
+
+    .trace-side-hd {
+      padding: 14px var(--sp);
+      border-bottom: 1px solid var(--bd);
+      background: #fafafa
+    }
+
+    .trace-side-hd .pls { margin-bottom: 10px }
+
+    .trace-side-hd select:not(.pls-dd select),
+    .trace-side-hd input {
+      display: block;
+      width: 100%;
+      height: var(--ctl-h);
+      padding: 0 10px;
+      border: 2px solid var(--bd);
+      border-radius: 9px;
+      font-size: 12px;
+      font-family: var(--font);
+      outline: none;
+      background: #fff;
+      color: var(--tx)
+    }
+
+    .trace-side-hd select:not(.pls-dd select) { font-weight: 600; margin-bottom: 8px }
+    .trace-side-hd input { font-weight: 500 }
+
+    .trace-list {
+      max-height: max(280px, calc(100vh - 330px));
+      overflow-y: auto
+    }
+
+    #traceRight { min-width: 0 }
+
+    /* mid-size desktop (e.g. 1440 with the OMS sidebar): a little less gutter so
+       wide tables keep their last columns in view */
+    @media (max-width: 1500px) and (min-width: 901px) {
+      .inv-dashboard { --sp-lg: 20px }
+    }
+
+    /* ── Responsive: KPI rows by content width ── */
+    /* 5 cards in a mid-size area: a row of 3 over a row of 2, both full width. */
+    @container (520px <= width < 880px) {
+      .kg:has(> :nth-child(5)),
+      .combo-kpis:has(> :nth-child(5)) { grid-template-columns: repeat(6, minmax(0, 1fr)) }
+      .kg:has(> :nth-child(5)) > *,
+      .combo-kpis:has(> :nth-child(5)) > * { grid-column: span 2 }
+      .kg:has(> :nth-child(5)) > :nth-child(n+4),
+      .combo-kpis:has(> :nth-child(5)) > :nth-child(n+4) { grid-column: span 3 }
+    }
+
+    /* Once a toolbar has to wrap, its divider lines end up dangling at line ends -
+       below this width the gaps between groups do the separating instead. */
+    @container (width < 1100px) {
+      .tbar .sep { display: none !important }
+    }
+
+    /* 4 cards: 2 x 2 */
+    @container (width < 700px) {
+      .kg:has(> :nth-child(4)) { --kn: 2 }
+    }
+
+    /* Phone width: two columns; an odd last card takes the whole row. */
+    @container (width < 520px) {
+      .kg,
+      .combo-kpis,
+      .kg:has(> :nth-child(5)),
+      .combo-kpis:has(> :nth-child(5)),
+      .kg:not(:has(> :nth-child(4))) { --kn: 2 }
+      .kg > :last-child:nth-child(odd),
+      .combo-kpis > :last-child:nth-child(odd) { grid-column: 1 / -1 }
+      .kc-v { font-size: 22px }
+    }
+
+    @container (width < 760px) {
+      .cg { grid-template-columns: minmax(0, 1fr) }
+      .trace-grid { grid-template-columns: minmax(0, 1fr) }
+      .trace-side { position: static }
+      .trace-list { max-height: 300px }
+    }
+
+    /* ── Phone / small tablet: the inventory panel stops being a column beside the
+       content and becomes a compact block ABOVE it - company and database switch in
+       one row, the section nav as a scrollable pill row - and the page scrolls as a
+       whole. ── */
+    @media (max-width: 900px) {
+      .inv-dashboard {
+        display: block;
+        height: auto;
+        min-height: 100vh;
+        overflow: visible;
+        --sp-lg: 16px;
+        --ts-off: 150px
+      }
+
+      .side-toggle { display: none }
+
+      .side,
+      .side.collapsed {
+        width: auto;
+        min-width: 0;
+        border-right: 0;
+        border-bottom: 1px solid var(--bd);
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        align-content: flex-start;
+        gap: 10px;
+        padding: 12px var(--sp) 10px;
+        overflow: visible;
+        position: relative;
+        z-index: 30
+      }
+
+      #inventoryDashboard .side-hd,
+      #inventoryDashboard .side.collapsed .side-hd {
+        flex: 1 1 150px;
+        min-width: 0;
+        height: 48px;
+        padding: 0 12px 0 8px;
+        gap: 10px;
+        justify-content: flex-start;
+        border: 1px solid var(--bd);
+        border-radius: 12px;
+        background: #fff
+      }
+
+      .side-logo,
+      .side.collapsed .side-logo {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        font-size: 16px !important
+      }
+
+      .side.collapsed .side-nm { display: block !important }
+      .side.collapsed .cs-caret { display: inline-block !important }
+
+      .cs-pop {
+        left: 0;
+        right: auto;
+        top: calc(100% + 4px);
+        min-width: 240px
+      }
+
+      .schema-badge {
+        flex: 0 1 160px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: transparent
+      }
+
+      .schema-badge label { display: none }
+      .schema-btn { min-height: 32px; font-size: 11px }
+
+      .side-nav,
+      .side.collapsed .side-nav {
+        flex: 1 1 100%;
+        min-width: 0;
+        display: flex;
+        gap: 6px;
+        margin: 0 calc(var(--sp) * -1);
+        padding: 2px var(--sp);
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        scroll-snap-type: x proximity
+      }
+
+      .side-nav::-webkit-scrollbar { display: none }
+      .side-nav .ng { display: none }
+
+      .side-nav .ni,
+      .side.collapsed .ni {
+        flex: 0 0 auto;
+        min-height: 0;
+        height: 36px;
+        margin: 0;
+        padding: 0 14px 0 11px;
+        gap: 7px;
+        justify-content: flex-start;
+        font-size: 12.5px;
+        border: 1px solid var(--bd);
+        border-radius: 999px;
+        background: #fff;
+        scroll-snap-align: start
+      }
+
+      .side-nav .ni.on { background: #eef2ff; border-color: #e0e7ff }
+      .side-nav .ni .i,
+      .side.collapsed .ni .i { width: auto; font-size: 15px }
+
+      .main { overflow: visible }
+
+      .top {
+        padding: 10px var(--sp);
+        row-gap: 8px
+      }
+
+      .top-t { flex: 1 1 auto; order: 0 }
+      .top > .btn { order: 1 }
+      .top > .sep { display: none }
+      .top > #cpls { order: 2; flex: 1 1 100% }
+
+      .ct {
+        overflow: visible;
+        padding: var(--sp)
+      }
+
+      /* separators only make sense on one long line */
+      .tbar .sep,
+      .tb .sep { display: none !important }
+
+      .tbar { gap: 8px }
+      .tbar .sr,
+      .tbar .wh-search-wrap,
+      .tbar select.filter-sel { flex: 1 1 180px; min-width: 0; width: 100%; max-width: none }
+      .tbar .wh-search-wrap input { width: 100% }
+      .tbar-end { margin-left: 0; flex-basis: 100% }
+
+      .tb h3 { flex: 1 1 100%; margin-right: 0 }
+      .tb .sr { flex: 1 1 140px; width: auto }
+
+      .md { max-width: calc(100vw - 24px); max-height: 88vh }
+    }
+
+    @media (max-width: 480px) {
+      .top-t { font-size: 15px }
+      .tbar .tgrp { flex-wrap: wrap }
+      .kc { padding: 14px }
+    }
+
+    /* ── Inside OMS ────────────────────────────────────────────────────────
+       The section list is the OMS sidebar (Control Panel > Inventory), so this
+       page's own side panel and its collapse arrow are hidden. The nav items
+       stay in the DOM, hidden: `goTo()` reads the section title from them and
+       the OMS sidebar follows their clicks. The company switcher and the
+       database toggle moved into the top bar above; these make them compact
+       top-bar controls. */
+    #inventoryDashboard > .side,
+    #inventoryDashboard > .side-toggle { display: none !important }
+    #inventoryDashboard .top { gap: 10px }
+    #inventoryDashboard .top .side-hd {
+      height: 38px; padding: 0 10px 0 4px; gap: 8px; flex: 0 0 auto;
+      border: 1px solid var(--bd) !important; border-radius: 10px !important; background: var(--card)
+    }
+    #inventoryDashboard .top .side-hd:hover { background: #f7f7fb }
+    #inventoryDashboard .top .side-logo { width: 30px; height: 30px; border-radius: 8px; font-size: 14px }
+    #inventoryDashboard .top .side-nm { flex: 0 1 auto }
+    #inventoryDashboard .top .side-hd div h1 { font-size: 13.5px }
+    #inventoryDashboard .top .side-hd .cs-caret { margin-left: 4px }
+    #inventoryDashboard .top .cs-pop { left: 0; right: auto; min-width: 250px; top: calc(100% + 6px) }
+    #inventoryDashboard .top .schema-badge {
+      margin: 0; padding: 0; background: none; border: 0;
+      display: flex; align-items: center; gap: 8px; flex: 0 0 auto
+    }
+    #inventoryDashboard .top .schema-badge label { margin: 0 }
+    /* The toggle sized itself to the side panel; in the bar it gets its own
+       width, two equal halves, so the sliding thumb (50%) lines up. */
+    #inventoryDashboard .top .schema-btns { width: 170px }
+    #inventoryDashboard .top .schema-btn { padding: 6px 8px; font-size: 11px; white-space: nowrap }
+    #inventoryDashboard .top-t { padding-left: 6px; border-left: 1px solid var(--bd) }
+    /* Every chip group (.pls) shows as one dropdown; the chips stay in the DOM,
+       hidden, and the dropdown clicks them (script at the end of the page). */
+    #inventoryDashboard .pls.has-dd > .pl { display: none }
+    #inventoryDashboard .pls-dd {
+      display: inline-flex; align-items: center; gap: 6px; height: var(--ctl-h); margin: 0;
+      padding: 0 0 0 11px; border: 1px solid #e3e6ec; border-radius: 10px; background: #fff;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .08); font-family: var(--font); font-size: 12px; cursor: pointer
+    }
+    #inventoryDashboard .pls-dd:focus-within { border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, .15) }
+    #inventoryDashboard .pls-dd > span { color: var(--mt); font-weight: 600; white-space: nowrap }
+    #inventoryDashboard .pls-dd select {
+      appearance: none; -webkit-appearance: none; border: 0; outline: 0; background: transparent no-repeat right 10px center / 10px
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+      height: 100%; padding: 0 28px 0 0; font: inherit; font-weight: 700; color: #4338ca; cursor: pointer
+    }
+    #inventoryDashboard .pls-dd > span:empty { display: none }
+    #inventoryDashboard .pls-dd:not(:has(> span:not(:empty))) { padding-left: 0 }
+    #inventoryDashboard .pls-dd:not(:has(> span:not(:empty))) select { padding-left: 11px }
+    @media (max-width: 900px) {
+      #inventoryDashboard .top-t { flex-basis: 100%; order: -1; padding-left: 0; border-left: 0 }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="inv-dashboard" id="inventoryDashboard"><!-- Collapse arrow: a child of the shell, not of the sidebar, so it can straddle
+       the divider line. .side / .main both clip their own children. -->
+  <button class="side-toggle" onclick="toggleSide()" title="Close sidebar"
+          aria-label="Close or open the sidebar"><i class="ic ic-chevron-right"></i></button>
+  <div class="side" id="sidebar">
+<nav class="side-nav">
+      <div class="ng">Overview</div>
+      {% if 'dash' in cp_inventory_tabs %}<div class="ni on" data-s="dash"><span class="i"><i class="ic ic-chart-column"></i></span>Dashboard</div>{% endif %}
+      <div class="ng">Stock</div>
+      {% if 'stock' in cp_inventory_tabs %}<div class="ni" data-s="stock"><span class="i"><i class="ic ic-factory"></i></span>Stock & Warehouses</div>{% endif %}
+      {% if 'move' in cp_inventory_tabs %}<div class="ni" data-s="move"><span class="i"><i class="ic ic-trending-up"></i></span>Stock Movement</div>{% endif %}
+      <div class="ng">Analysis</div>
+      {% if 'movers' in cp_inventory_tabs %}<div class="ni" data-s="movers"><span class="i"><i class="ic ic-zap"></i></span>Moving / Non-Moving</div>{% endif %}
+      {% if 'billing' in cp_inventory_tabs %}<div class="ni" data-s="billing"><span class="i"><i class="ic ic-receipt-text"></i></span>FG Not Billed</div>{% endif %}
+      {% if 'abc' in cp_inventory_tabs %}<div class="ni" data-s="abc"><span class="i"><i class="ic ic-tag"></i></span>ABC-XYZ Analysis</div>{% endif %}
+      {% if 'aging' in cp_inventory_tabs %}<div class="ni" data-s="aging"><span class="i"><i class="ic ic-clipboard-clock"></i></span>Aging Analysis</div>{% endif %}
+      <div class="ng">Traceability</div>
+      {% if 'trace' in cp_inventory_tabs %}<div class="ni" data-s="trace"><span class="i"><i class="ic ic-search"></i></span>Item Trace</div>{% endif %}
+      <div class="ng">Planning</div>
+      {% if 'planning' in cp_inventory_tabs %}<div class="ni" data-s="planning"><span class="i"><i class="ic ic-brain"></i></span>Inventory Planning</div>{% endif %}
+    </nav>
+  </div>
+
+  <div class="main">
+    <div class="top">
+      {% comment %}
+        Inside OMS the section list is OMS's sidebar, so the side panel is hidden
+        and the two switches it carried live here, unchanged: same ids, same handlers.
+      {% endcomment %}
+    <div class="side-hd" id="csHead" role="button" tabindex="0" aria-haspopup="true"
+           aria-expanded="false" aria-label="Switch company">
+        <div class="side-logo" id="divLogo">J</div>
+        <div class="side-nm">
+          <h1 id="divTitle">Jivo Oil</h1><span>Inventory Control</span>
+        </div>
+        <i class="ic ic-chevron-down cs-caret"></i>
+        <div class="cs-pop" id="csPop" role="menu">
+          <button type="button" class="cs-item" id="csOils" role="menuitem">
+            <span class="cs-ic" style="background:#eef2ff;color:#5b21b6">J</span>
+            <span><span class="cs-nm">Jivo Oil</span><br><span class="cs-sub">Inventory Control</span></span>
+            <i class="ic ic-check cs-on"></i>
+          </button>
+          <button type="button" class="cs-item" id="csBev" role="menuitem">
+            <span class="cs-ic" style="background:#e0f2fe;color:#0369a1"><i class="ic ic-cup-soda"></i></span>
+            <span><span class="cs-nm">Jivo Beverages</span><br><span class="cs-sub">Inventory Control</span></span>
+            <i class="ic ic-check cs-on"></i>
+          </button>
+        </div>
+      </div>
+    <div class="schema-badge oil-only" id="schemaBadge">
+        <label>Database</label>
+        <div class="schema-btns">
+          <button class="schema-btn on" onclick="setSchema('jivo_oil',this)">Jivo Oil</button>
+          <button class="schema-btn" onclick="setSchema('jivo_mart',this)">Jivo Mart</button>
+        </div>
+      </div>
+      <div class="top-t" id="pt">Dashboard</div>
+      <div class="pls" id="cpls">
+        <button class="pl on" data-c="">All</button>
+        <button class="pl" data-c="FINISHED">Finished</button>
+        <button class="pl" data-c="RAW MATERIAL">Raw Material</button>
+        <button class="pl" data-c="PACKAGING MATERIAL">Packaging</button>
+      </div>
+      <button class="btn" onclick="load()"><i class="ic ic-refresh-cw"></i>Refresh</button>
+      <div class="sep"></div>
+      <button class="btn" id="lockBtn" onclick="toggleLock()" title="Toggle value visibility"><i class="ic ic-lock-open"></i></button>
+    </div>
+
+    <div class="ct">
+
+      <!-- DASHBOARD -->
+      <div class="sec on" id="s-dash">
+        <div id="dK"></div>
+        <div id="dN" class="note" style="display:none"></div>
+        <div class="cg">
+          <div class="cb">
+            <div class="ch">Movement Classification (30d)</div>
+            <div class="cw"><canvas id="cMov"></canvas></div>
+          </div>
+          <div class="cb">
+            <div class="ch">FG Not Billed — Risk</div>
+            <div class="cw"><canvas id="cBill"></canvas></div>
+          </div>
+          <!-- The donut goes on its own line underneath, so the two value charts
+               above get half the width each and their figures have room. -->
+          <div class="cb cb-wide">
+            <div class="ch">Inventory by Category</div>
+            <div class="cw"><canvas id="cPie"></canvas></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STOCK + WAREHOUSE MERGED -->
+      <div class="sec" id="s-stock">
+        <!-- Top controls -->
+        <div class="tbar">
+          <div class="wh-search-wrap">
+            <span class="si"><i class="ic ic-search"></i></span>
+            <input id="whSearch" placeholder="Search warehouse..." oninput="_idbDeb(whFilterTable)">
+          </div>
+          <select id="whOwnerFilter" class="filter-sel" onchange="whFilterTable()">
+            <option value="">All Owners</option>
+          </select>
+          <span class="tl tbar-end" id="whTotalKPIs"></span>
+        </div>
+        <div class="tc">
+          <div class="tb">
+            <h3><i class="ic ic-factory"></i> Warehouses — click to expand items</h3>
+            <span class="cnt" id="whC"></span>
+          </div>
+          <div class="ts" id="whT">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MOVEMENT -->
+      <div class="sec" id="s-move">
+        <div class="tbar">
+          <div class="pls" id="mvD">
+            <button class="pl" data-v="7">7d</button><button class="pl" data-v="15">15d</button>
+            <button class="pl on" data-v="30">30d</button><button class="pl" data-v="60">60d</button><button class="pl"
+              data-v="90">90d</button>
+          </div>
+          <div class="sep"></div>
+          <div class="tgrp">
+            <span class="tl">From:</span>
+            <input type="date" id="mvDateFrom" class="date-inp">
+            <span class="tl">To:</span>
+            <input type="date" id="mvDateTo" class="date-inp">
+          </div>
+          <div class="tgrp">
+            <button class="abtn abtn-p" onclick="mvApplyDate()">Apply</button>
+            <button class="abtn" onclick="mvClearDate()">Clear</button>
+          </div>
+          <div class="sep"></div>
+          <div class="tgrp">
+            <span class="tl">Days:</span>
+            <input type="number" id="mvDaysInput" class="days-inp" min="1" max="999" placeholder="N" onkeydown="if(event.key==='Enter')mvApplyDaysInput()">
+          </div>
+          <select id="mvWhsFilter" class="filter-sel" onchange="rMV()">
+            <option value="">All Warehouses</option>
+          </select>
+          <input class="sr" id="mvS" placeholder="Search item/category..." oninput="_idbDeb(rMV)" style="width:200px">
+        </div>
+        <div id="mvN" class="note" style="display:none"></div>
+        <div class="tc">
+          <div class="tb">
+            <h3 id="mvH">Daily Movement</h3><span class="cnt" id="mvC"></span>
+          </div>
+          <div class="ts" id="mvT">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MOVERS -->
+      <div class="sec" id="s-movers">
+        <div class="tbar">
+          <div class="pls" id="moP"><button class="pl on" data-v="30">30d</button><button class="pl"
+              data-v="60">60d</button><button class="pl" data-v="90">90d</button></div>
+          <div class="sep"></div>
+          <div class="pls" id="moStatus"><button class="pl on" data-v="all">All</button><button class="pl"
+              data-v="NON-MOVING">Non-Moving</button><button class="pl" data-v="SLOW">Slow</button><button class="pl"
+              data-v="MEDIUM">Medium</button><button class="pl" data-v="FAST">Fast</button></div><div class="sep oil-only"></div><div class="pls oil-only" id="moTF"><button class="pl on" data-v="all">All Types</button><button class="pl premium" data-v="PREMIUM">Premium</button><button class="pl commodity" data-v="COMMODITY">Commodity</button></div>
+          <div class="sep"></div>
+          <div class="tgrp">
+            <span class="tl">From:</span>
+            <input type="date" id="moDateFrom" class="date-inp">
+            <span class="tl">To:</span>
+            <input type="date" id="moDateTo" class="date-inp">
+          </div>
+          <div class="tgrp">
+            <button class="abtn abtn-p" onclick="moApplyDate()">Apply</button>
+            <button class="abtn" onclick="moClearDate()">Clear</button>
+          </div>
+          <div class="sep"></div>
+          <div class="tgrp">
+            <span class="tl">Days:</span>
+            <input type="number" id="moDaysInput" class="days-inp" min="1" max="999" placeholder="N" onkeydown="if(event.key==='Enter')moApplyDaysInput()">
+          </div>
+        </div>
+        <div id="moK"></div>
+        <div id="moN" class="note" style="display:none"></div>
+        <div class="tc">
+          <div class="tb">
+            <h3>Category Breakdown</h3><input class="sr" id="moS" placeholder="Search items..."
+              oninput="_idbDeb(moSearchItems)"><span class="cnt" id="moC"></span>
+          </div>
+          <div class="ts" id="moTableWrap">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BILLING -->
+      <div class="sec" id="s-billing">
+        <div class="tbar">
+          <div class="pls" id="biP"><button class="pl on" data-v="30">30d</button><button class="pl"
+              data-v="60">60d</button><button class="pl" data-v="90">90d</button></div>
+          <div class="sep"></div>
+          <div class="pls oil-only" id="biTF"><button class="pl on" data-v="all">All Types</button><button class="pl premium" data-v="PREMIUM">Premium</button><button class="pl commodity" data-v="COMMODITY">Commodity</button></div><div class="sep"></div>
+          <div class="tgrp">
+            <span class="tl">Custom range:</span>
+            <input type="date" id="biDateFrom" class="date-inp">
+            <input type="date" id="biDateTo" class="date-inp">
+          </div>
+          <div class="tgrp">
+            <button class="abtn abtn-p" onclick="biApplyCustomDate()">Apply</button>
+            <button class="abtn" onclick="biClearCustomDate()">Clear</button>
+          </div>
+          <div class="sep"></div>
+          <div class="tgrp">
+            <span class="tl">Days:</span>
+            <input type="number" id="biDaysInput" class="days-inp" min="1" max="999" placeholder="N" onkeydown="if(event.key==='Enter')biApplyDaysInput()">
+          </div>
+        </div>
+        <div id="biK"></div>
+        <div id="biN" class="note" style="display:none"></div>
+        <div class="tc">
+          <div class="tb">
+            <h3>Category Breakdown</h3><input class="sr" id="biS" placeholder="Search items..."
+              oninput="_idbDeb(biSearchItems)"><span class="cnt" id="biC"></span>
+          </div>
+          <div class="ts" id="biTableWrap">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ABC-XYZ -->
+      <div class="sec" id="s-abc">
+        <div class="tbar"><div class="pls oil-only" id="abTF"><button class="pl on" data-v="all">All Types</button><button class="pl premium" data-v="PREMIUM">Premium</button><button class="pl commodity" data-v="COMMODITY">Commodity</button></div>
+        </div>
+        <!-- Column explanation -->
+        <div class="CC">
+          <b><i class="ic ic-book-open"></i> Column Guide:</b>&nbsp;&nbsp;
+          <b>AVG/MO</b> = Average units sold per month (last 3 months) &nbsp;·&nbsp;
+          <b>COV</b> = Coefficient of Variation — how erratic demand is (0 = perfectly stable, &gt;1 = very erratic)
+          &nbsp;·&nbsp;
+          <b>CUM%</b> = Cumulative % of total stock value — used to classify A (0–80%), B (80–95%), C (95–100%)
+        </div>
+        <div class="combo-kpis">
+          <div class="combo-kpi ck-ax" id="kpi-AX" onclick="abFilterCombo('AX',this)">
+            <div class="ck-combo">AX</div>
+            <div class="ck-label">Star Products</div>
+            <div class="ck-skus" id="kAX-s">–</div>
+            <div class="ck-val" id="kAX-v">–</div>
+          </div>
+          <div class="combo-kpi ck-az" id="kpi-AZ" onclick="abFilterCombo('AZ',this)">
+            <div class="ck-combo">AZ</div>
+            <div class="ck-label">Critical Risk</div>
+            <div class="ck-skus" id="kAZ-s">–</div>
+            <div class="ck-val" id="kAZ-v">–</div>
+          </div>
+          <div class="combo-kpi ck-bx" id="kpi-BX" onclick="abFilterCombo('BX',this)">
+            <div class="ck-combo">BX</div>
+            <div class="ck-label">Stable Mid-Tier</div>
+            <div class="ck-skus" id="kBX-s">–</div>
+            <div class="ck-val" id="kBX-v">–</div>
+          </div>
+          <div class="combo-kpi ck-cx" id="kpi-CX" onclick="abFilterCombo('CX',this)">
+            <div class="ck-combo">CX</div>
+            <div class="ck-label">Low-Value Stable</div>
+            <div class="ck-skus" id="kCX-s">–</div>
+            <div class="ck-val" id="kCX-v">–</div>
+          </div>
+          <div class="combo-kpi ck-cz" id="kpi-CZ" onclick="abFilterCombo('CZ',this)">
+            <div class="ck-combo">CZ</div>
+            <div class="ck-label">Review / Eliminate</div>
+            <div class="ck-skus" id="kCZ-s">–</div>
+            <div class="ck-val" id="kCZ-v">–</div>
+          </div>
+        </div>
+        <div id="abN" class="note" style="display:none"></div>
+        <div class="tc">
+          <div class="tb">
+            <h3>Category Breakdown</h3>
+            <div class="pls" id="abF"><button class="pl on" data-v="all">All</button><button class="pl"
+                data-v="AX">AX</button><button class="pl" data-v="AY">AY</button><button class="pl"
+                data-v="AZ">AZ</button><button class="pl" data-v="BX">BX</button><button class="pl"
+                data-v="BY">BY</button><button class="pl" data-v="BZ">BZ</button><button class="pl"
+                data-v="CX">CX</button><button class="pl" data-v="CY">CY</button><button class="pl"
+                data-v="CZ">CZ</button></div>
+            <input class="sr" id="abS" placeholder="Search items..." oninput="_idbDeb(abSearchItems)"><span class="cnt"
+              id="abC"></span>
+          </div>
+          <div class="ts" id="abTableWrap">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AGING -->
+      <div class="sec" id="s-aging">
+        <div class="note" style="display:block"><b><i class="ic ic-info"></i> Aging = how long stock has been sitting</b> — based on the first
+          receipt date per item per warehouse from OINM. 0-30d = recently received · 90+d = sitting over 3 months.</div>
+        <div class="tc">
+          <div class="tb">
+            <h3>Aging Analysis</h3><span class="cnt" id="agC"></span>
+          </div>
+          <div class="ts" id="agT">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ITEM TRACE -->
+      <div class="sec" id="s-trace">
+        <div class="trace-grid">
+          <div class="trace-side">
+            <div class="trace-side-hd">
+              <div style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:800;margin-bottom:10px"><i class="ic ic-search" style="font-size:16px"></i> Item Trace</div>
+              <div class="pls" id="traceCatF">
+                <button class="pl on" onclick="traceCatChanged('FINISHED',this)">FG</button>
+                <button class="pl" onclick="traceCatChanged('PACKAGING MATERIAL',this)">PM</button>
+                <button class="pl" onclick="traceCatChanged('RAW MATERIAL',this)">RM</button>
+              </div>
+              <select id="traceSGSelect" onchange="traceSGChanged()">
+                <option value="">All Sub-Groups</option>
+              </select>
+              <input id="traceBrowse" placeholder="Filter items..."
+                oninput="_idbDeb(traceFilterList)">
+              <div style="margin-top:8px;font-size:11px;color:var(--mt);font-weight:600" id="traceListCount"></div>
+            </div>
+            <div id="traceList" class="trace-list">
+              <div class="ld">Loading...</div>
+            </div>
+          </div>
+          <div id="traceRight">
+            <div style="text-align:center;padding:60px 20px;color:var(--mt)">
+              <div style="font-size:48px;margin-bottom:12px"><i class="ic ic-search"></i></div>
+              <div style="font-size:15px;font-weight:700;margin-bottom:6px">Select an Item</div>
+              <div style="font-size:13px">Choose FG / PM / RM, pick a sub-group, then click any item</div>
+              <div
+                style="margin-top:16px;background:#fefce8;border:1.5px solid #fde047;border-radius:10px;padding:10px 14px;font-size:12px;color:#854d0e;text-align:left;line-height:1.7">
+                <b><i class="ic ic-info"></i> What is Inventory Adj.?</b><br>
+                Inventory Adjustments (TransType 162) are manual corrections — e.g. <b>stock revaluation</b> (price
+                changes without qty movement), <b>year-end COGS journals</b>, or <b>discrepancy corrections</b>. They
+                appear in OINM but do not represent physical goods movement.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PLANNING -->
+      <div class="sec" id="s-planning">
+        <div class="tbar"><div class="pls oil-only" id="plTF"><button class="pl on" data-v="all">All Types</button><button class="pl premium" data-v="PREMIUM">Premium</button><button class="pl commodity" data-v="COMMODITY">Commodity</button></div>
+          <div class="sep oil-only"></div>
+          <select id="plSG" class="filter-sel" onchange="lPlan()">
+            <option value="">All Categories</option>
+          </select>
+        </div>
+        <div id="planKPIs"></div>
+        <div class="tc">
+          <div class="tb">
+            <h3>30-Day Inventory Plan</h3>
+            <div class="pls" id="plAlert"><button class="pl on" data-v="all">All</button><button class="pl"
+                data-v="critical"><i class="ic ic-circle-alert"></i>Critical</button><button class="pl" data-v="warning"><i class="ic ic-circle-alert"></i>Warning</button><button
+                class="pl" data-v="ok"><i class="ic ic-circle-check"></i>OK</button></div>
+            <input class="sr" id="plS" placeholder="Search..." oninput="_idbDeb(rPlan)"><span class="cnt" id="plC"></span>
+          </div>
+          <div class="ts" id="plT">
+            <div class="ld">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="mo" id="modal">
+    <div class="md">
+      <div class="md-h">
+        <h3 id="mT">Detail</h3><button class="md-x" onclick="xM()"><i class="ic ic-x"></i></button>
+      </div>
+      <div class="md-b">
+        <div class="ts" id="mB"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{% static 'vendor/js/chart.umd.min.js' %}"></script>
+<script src="{% static 'vendor/js/chartjs-plugin-datalabels.min.js' %}"></script>
+<script>window.inventoryUser = window.loginUser || {{ login_user_json|safe }};
+    // Debounce search inputs: rebuild the table only after the user pauses typing
+    // (~200ms) instead of on every keystroke. Keyed by function name.
+    var _idbT = {};
+    function _idbDeb(fn){ clearTimeout(_idbT[fn.name]); _idbT[fn.name] = setTimeout(fn, 200); }
+    window.inventoryUser.can_manage = !!(
+      window.inventoryUser.inventory_can_edit ||
+      (window.inventoryUser.permissions && window.inventoryUser.permissions.inventory_can_edit)
+    );
+
+    Chart.register(ChartDataLabels);
+    Chart.defaults.set('plugins.datalabels', { display: false });
+    Chart.defaults.font.family = 'Inter'; Chart.defaults.font.weight = 600; Chart.defaults.font.size = 13;
+
+    // ── STATE ──
+    let S = 'dash', C = '', SCH = 'jivo_oil', ch = {}, DIVISION = 'oils';
+    let moDays = 30, moType = 'all', moStatusF = 'all', moSGData = [], moItemCache = {}, moDateFrom = '', moDateTo = '';
+    let biDays = 30, biType = 'all', biSGData = [], biItemCache = {}, biCustomFrom = '', biCustomTo = '', biCustomApplied = false;
+    let abType = 'all', abComboF = 'all', abSGData = [], abItemCache = {};
+    let plD = [], plType = 'all', plAlertF = 'all';
+    let whAllData = [], whItemCache = {};
+    let traceCategory = 'FINISHED', traceSG = null, traceAllItems = [], traceCode = '', traceName = '', traceDays = 0, traceMonth = '', traceTypeFilter = [];
+    let mvD_data = [], mvDays = 30, mvCustomFrom = '', mvCustomTo = '', mvCustomApplied = false;
+
+    // ── FORMATTERS ──
+    function F(n) { if (n == null) return '–'; n = +n; if (isNaN(n)) return '–'; let s = n < 0 ? '-' : ''; n = Math.abs(n); if (n >= 1e7) return s + '₹' + (n / 1e7).toFixed(2) + ' Cr'; if (n >= 1e5) return s + '₹' + (n / 1e5).toFixed(2) + ' L'; if (n >= 1e3) return s + '₹' + (n / 1e3).toFixed(1) + 'K'; return s + '₹' + n.toLocaleString('en-IN') }
+    function Fs(n) { if (!n) return '0'; n = +n; if (n >= 1e7) return (n / 1e7).toFixed(1) + 'Cr'; if (n >= 1e5) return (n / 1e5).toFixed(1) + 'L'; if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'; return n + '' }
+    function N(n) { if (n == null) return '–'; return (+n).toLocaleString('en-IN') }
+    /* Charts shorten their labels (25.7Cr) so they fit. On hover we show the whole
+       figure instead, because that is when you actually want the exact number. */
+    function Ffull(n) { return (n == null || isNaN(+n)) ? '–' : '₹' + (+n).toLocaleString('en-IN') }
+    function FV(n){return`<span class="inv-val-wrap" onclick="showLockedMessage()"><span class="inv-val">${F(n)}</span><span class="inv-lock"><i class="ic ic-lock"></i></span></span>`}
+    function FsV(n){return`<span class="inv-val-wrap" onclick="showLockedMessage()"><span class="inv-val">${Fs(n)}</span><span class="inv-lock"><i class="ic ic-lock"></i></span></span>`}
+    const RECLASSIFY_RULES = [
+      { keyword: 'YELLOW MUSTARD', type: 'PREMIUM' }, { keyword: 'EXTRA VIRGIN COCONUT', type: 'PREMIUM' },
+      { keyword: 'EXTRA VIRGIN', type: 'PREMIUM' }, { keyword: 'SLICED OLIVE', type: 'PREMIUM' },
+      { keyword: 'LE CHEF', type: 'PREMIUM' }, { keyword: 'COLD PRESS', type: 'PREMIUM' },
+      { keyword: 'EXTRA LIGHT', type: 'PREMIUM' }, { keyword: 'POMACE', type: 'PREMIUM' },
+      { keyword: 'OLIVE', type: 'PREMIUM' }, { keyword: 'GROUNDNUT', type: 'PREMIUM' },
+      { keyword: 'COCONUT', type: 'PREMIUM' }, { keyword: 'SESAME', type: 'PREMIUM' }, { keyword: 'GHEE', type: 'PREMIUM' },
+    ];
+    function reclassifyType(t, n) { if (!n) return t; const u = n.toUpperCase(); for (const r of RECLASSIFY_RULES) { if (u.includes(r.keyword)) return r.type; } return t; }
+    function typBadge(t, n) { const e = reclassifyType(t, n); if (!e || e === '–') return ''; return e === 'PREMIUM' ? `<span class="bd b-p">Premium</span>` : `<span class="bd b-c">Commodity</span>` }
+    function moBadge(s) { const m = { 'NON-MOVING': 'b-d', 'SLOW': 'b-w', 'MEDIUM': 'b-i', 'FAST': 'b-ok' }; return `<span class="bd ${m[s] || 'b-i'}">${s}</span>` }
+    function trendBadge(t) { if (!t) return ''; const m = { RISING: 'trend-r', FALLING: 'trend-f', STABLE: 'trend-s', FLAT: 'trend-flat' }; const i = { RISING: '↑', FALLING: '↓', STABLE: '→', FLAT: '—' }; return `<span class="${m[t] || 'trend-flat'}">${i[t] || ''} ${t}</span>` }
+
+        function getCSRF() { return document.querySelector('meta[name="csrf-token"]').content; }
+    function api(u) {
+      let url = '/inventory/' + DIVISION + u;
+      const qIdx0 = url.indexOf('?');
+      let path0 = qIdx0 >= 0 ? url.slice(0, qIdx0) : url;
+      let qs0 = qIdx0 >= 0 ? url.slice(qIdx0 + 1) : '';
+      path0 = path0.replace(/_/g, '-');
+      if (!path0.endsWith('/')) path0 += '/';
+      if (DIVISION === 'oils') qs0 += (qs0 ? '&' : '') + 'schema=' + encodeURIComponent(SCH);
+      return fetch(path0 + (qs0 ? '?' + qs0 : '')).then(r => r.json()).then(d => d.data || []).catch(() => []);
+    }
+    function dc(i) { if (ch[i]) { ch[i].destroy(); delete ch[i] } }
+    function mc(i, c) { dc(i); const x = document.getElementById(i); if (!x) return; ch[i] = new Chart(x.getContext('2d'), c) }
+    function oM(t) { document.getElementById('mT').textContent = t; document.getElementById('modal').classList.add('sh') }
+    function xM() { document.getElementById('modal').classList.remove('sh') }
+    function toggleSide() {
+      const s = document.getElementById('sidebar'), btn = document.querySelector('.side-toggle');
+      s.classList.toggle('collapsed');
+      const shut = s.classList.contains('collapsed');
+      // one icon, turned round - no swapping innerHTML
+      btn.classList.toggle('is-collapsed', shut);
+      btn.title = shut ? 'Open sidebar' : 'Close sidebar';
+    }
+    function setOilOnlyVisible(show) {
+      document.querySelectorAll('.oil-only').forEach(el => {
+        if (!show) { el.style.display = 'none'; return; }
+        // 'flex': inside OMS the badge is a one-row top-bar control (label + toggle).
+        if (el.classList.contains('schema-badge')) el.style.display = 'flex';
+        else if (el.classList.contains('pls')) el.style.display = 'flex';
+        else if (el.classList.contains('sep')) el.style.display = 'block';
+        else el.style.display = '';
+      });
+    }
+    function switchDivision(div) {
+      const changed = div !== DIVISION;
+      DIVISION = div;
+      const logo = document.getElementById('divLogo');
+      const title = document.getElementById('divTitle');
+      // The company is picked from the name at the top now; the old OILS / BEVERAGES
+      // pair is gone, so there are no buttons left to repaint here.
+      if (div === 'oils') { setOilOnlyVisible(true);
+        logo.textContent = 'J'; logo.style.background = '#eef2ff'; logo.style.color = '#5b21b6'; logo.style.fontSize = '17px';
+        title.textContent = 'Jivo Oil';
+      } else { setOilOnlyVisible(false);
+        logo.innerHTML = '<i class="ic ic-cup-soda"></i>'; logo.style.background = '#e0f2fe'; logo.style.color = '#0369a1'; logo.style.fontSize = '20px';
+        title.textContent = 'Jivo Beverages';
+      }
+      csMark();
+      if (!changed) return;
+      moItemCache = {}; biItemCache = {}; abItemCache = {}; whItemCache = {}; mvD_data = []; whAllData = [];
+      load();
+    }
+
+    /* ── Company switcher ────────────────────────────────────────────────────
+       Click the company name to drop open a short list of the companies and pick
+       one. It calls the same switchDivision() the OILS / BEVERAGES buttons use,
+       so there is one code path and the two controls can never disagree.
+       The tick is drawn from DIVISION, never from which row was clicked, so it
+       stays right even if the switch is made from somewhere else. */
+    function csMark() {
+      var oils = document.getElementById('csOils'), bev = document.getElementById('csBev');
+      if (!oils || !bev) return;
+      oils.classList.toggle('on', DIVISION === 'oils');
+      bev.classList.toggle('on', DIVISION !== 'oils');
+    }
+    function csOpen(open) {
+      var head = document.getElementById('csHead'), pop = document.getElementById('csPop');
+      if (!head || !pop) return;
+      pop.classList.toggle('open', open);
+      head.classList.toggle('open', open);
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    (function () {
+      var head = document.getElementById('csHead'), pop = document.getElementById('csPop');
+      if (!head || !pop) return;
+      head.addEventListener('click', function (e) {
+        // A click on a row inside the panel is handled by that row, not by the header.
+        if (e.target.closest('.cs-item')) return;
+        e.stopPropagation();
+        csOpen(!pop.classList.contains('open'));
+      });
+      head.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); csOpen(!pop.classList.contains('open')); }
+      });
+      // On the collapsed rail the panel is hidden (there is no room for it), so a
+      // click has nothing to show. Double-click the logo there and it just flips to
+      // the other company - the same switchDivision() the panel calls, so nothing
+      // can drift apart. Only on the rail: while the sidebar is open the panel
+      // works, and a stray double-click should not change company behind your back.
+      head.addEventListener('dblclick', function (e) {
+        var side = document.getElementById('sidebar');
+        if (!side || !side.classList.contains('collapsed')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        csOpen(false);
+        switchDivision(DIVISION === 'oils' ? 'beverages' : 'oils');
+      });
+      function pick(div) {
+        return function (e) { e.stopPropagation(); csOpen(false); switchDivision(div); };
+      }
+      document.getElementById('csOils').addEventListener('click', pick('oils'));
+      document.getElementById('csBev').addEventListener('click', pick('beverages'));
+      document.addEventListener('click', function () { csOpen(false); });
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') csOpen(false); });
+      csMark();
+    })();
+
+    document.querySelectorAll('.ni').forEach(n => n.onclick = () => {
+      document.querySelectorAll('.ni').forEach(x => x.classList.remove('on')); n.classList.add('on');
+      document.querySelectorAll('.sec').forEach(x => x.classList.remove('on')); S = n.dataset.s;
+      document.getElementById('s-' + S).classList.add('on');
+      document.getElementById('pt').textContent = n.textContent.trim();
+      load();
+    });
+    document.querySelectorAll('#cpls .pl').forEach(p => p.onclick = () => {
+      document.querySelectorAll('#cpls .pl').forEach(x => x.classList.remove('on')); p.classList.add('on'); C = p.dataset.c;
+      moItemCache = {}; biItemCache = {}; abItemCache = {}; whItemCache = {}; load()
+    });
+    function setSchema(s, btn) { SCH = s; document.querySelectorAll('.schema-btn').forEach(b => b.classList.remove('on')); btn.classList.add('on');
+      // move the white thumb: 'at-right' when the second option is the live one
+      const track = btn.parentNode;
+      if (track) track.classList.toggle('at-right', btn === track.lastElementChild); moItemCache = {}; biItemCache = {}; abItemCache = {}; whItemCache = {}; mvD_data = []; whAllData = []; load(); }
+    function pg(id, cb) { document.querySelectorAll(`#${id} .pl`).forEach(p => p.onclick = () => { document.querySelectorAll(`#${id} .pl`).forEach(x => x.classList.remove('on')); p.classList.add('on'); cb(p.dataset.v) }) }
+    function load() { ({ dash: lD, stock: lWHStock, move: lMV, movers: lMO, billing: lBI, abc: lABCXYZ, aging: lAG, trace: lTrace, planning: lPlan })[S]?.() }
+
+    // ════ DASHBOARD ════
+    async function lD() {
+      // These four do not depend on each other, so ask for them all at once.
+      // One after another they cost the SUM of the four waits; together they
+      // cost only the slowest one.
+      const catQS = C ? '?category=' + encodeURIComponent(C) : '';
+      const [kRows, cat, ms, bi] = await Promise.all([
+        api('/api/kpi' + catQS),
+        api('/api/categories' + catQS),
+        api('/api/movers_summary?days=30' + (C ? '&category=' + encodeURIComponent(C) : '')),
+        api('/api/not_billed_summary'),
+      ]);
+      const k = kRows[0] || {};
+      const nm = ms.find(x => x.Status === 'NON-MOVING') || { Count: 0, Value: 0 };
+      const b30 = bi.find(x => x.Period === '30 Days') || { NotBilledSKUs: 0, NotBilledValue: 0 };
+      document.getElementById('dK').innerHTML = `<div class="kg">
+   <div class="kc k1" onclick="drillStock()"><div class="kc-l">Total Inventory Value</div><div class="kc-v">${FV(k.TotalValue)}</div><div class="kc-s">${N(k.TotalSKUs)} items in stock · Click to drill</div><div class="kc-bg"><i class="ic ic-indian-rupee"></i></div></div>
+   <div class="kc k2" onclick="drillStock()"><div class="kc-l">Total Stock Quantity</div><div class="kc-v">${N(k.TotalQty)}</div><div class="kc-s">Units across all warehouses</div><div class="kc-bg"><i class="ic ic-package"></i></div></div>
+   <div class="kc k3" onclick="drillOOS()"><div class="kc-l">Out of Stock SKUs</div><div class="kc-v">${N(k.OutOfStockSKUs)}</div><div class="kc-s">Zero stock · Click for list</div><div class="kc-bg"><i class="ic ic-triangle-alert"></i></div></div>
+   <div class="kc k4" onclick="goTo('movers')"><div class="kc-l">Non-Moving (30d)</div><div class="kc-v">${N(nm.Count)}</div><div class="kc-s">${FsV(nm.Value)} capital stuck</div><div class="kc-bg"><i class="ic ic-lock"></i></div></div>
+   <div class="kc k5" onclick="goTo('billing')"><div class="kc-l">FG Not Billed (30d)</div><div class="kc-v">${N(b30.NotBilledSKUs)}</div><div class="kc-s">${FsV(b30.NotBilledValue)} unbilled</div><div class="kc-bg"><i class="ic ic-receipt-text"></i></div></div>
+  </div>`;
+      const nt = document.getElementById('dN'); let ins = [];
+      if (nm.Count > 0) ins.push(`<b>${N(nm.Count)} items (${FV(nm.Value)})</b> — zero movement in 30 days`);
+      if (b30.NotBilledSKUs > 0) ins.push(`<b>${N(b30.NotBilledSKUs)} finished goods (${FV(b30.NotBilledValue)})</b> — not invoiced in 30 days`);
+      if (ins.length) { nt.style.display = ''; nt.innerHTML = '<b><i class="ic ic-triangle-alert"></i> Attention Required:</b><br>' + ins.join('<br>') } else { nt.style.display = 'none' }
+      mc('cPie', {
+        type: 'doughnut', data: { labels: cat.map(c => c.Category), datasets: [{ data: cat.map(c => c.Value || 0), backgroundColor: ['#c7d2fe', '#fde68a', '#a5f3fc'], borderWidth: 3, borderColor: '#fff', borderRadius: 6, hoverOffset: 8 }] },
+        options: { responsive: true, maintainAspectRatio: false, cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 12, weight: 700, family: 'Inter' }, padding: 12, usePointStyle: true } }, datalabels: { display: true, color: '#334155', font: { weight: 800, size: 13, family: 'Inter' }, formatter: (v, c) => { const t = c.dataset.data.reduce((a, b) => a + b, 0); return t > 0 ? Math.round(v / t * 100) + '%' : '' } },
+          tooltip: { callbacks: { label: c => ' ' + c.label + ': ' + Ffull(c.parsed) } } } }
+      });
+      // Light palette. Dot rings stay a touch stronger than a flat fill would be,
+      // otherwise a 6px circle outline disappears.
+      const mC = { 'FAST': '#6ee7b7', 'MEDIUM': '#a5b4fc', 'SLOW': '#fcd34d', 'NON-MOVING': '#fca5a5' };
+      /* Movement Classification is a LINE chart: the four statuses run along the bottom,
+         value up the side, one dot per status with its value written above it.
+         Order is the natural movement order (fast -> dead), not value order, so the line
+         always reads the same way whichever channel you are on. Anything the API sends
+         that is not in that list is appended, so nothing can be dropped silently. */
+      const MOV_ORDER = ['FAST', 'MEDIUM', 'SLOW', 'NON-MOVING'];
+      const mS = [...ms].sort((a, b) => {
+        const ia = MOV_ORDER.indexOf(a.Status), ib = MOV_ORDER.indexOf(b.Status);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      });
+      mc('cMov', {
+        type: 'line',
+        data: {
+          labels: mS.map(s => s.Status),
+          datasets: [{
+            data: mS.map(s => s.Value || 0),
+            borderColor: '#a5b4fc', borderWidth: 3, tension: .4,
+            fill: true, backgroundColor: 'rgba(165,180,252,.16)',
+            pointBackgroundColor: '#fff',
+            pointBorderColor: mS.map(s => mC[s.Status] || '#94a3b8'),
+            pointBorderWidth: 3, pointRadius: 6, pointHoverRadius: 8
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          layout: { padding: { top: 26, right: 14, left: 4 } },   // room for the value labels
+          plugins: {
+            legend: { display: false },
+            datalabels: { display: true, align: 'top', offset: 6, clip: false, color: '#334155', font: { weight: 800, size: 12, family: 'Inter' }, formatter: v => Fs(v) },
+            tooltip: { callbacks: { label: c => ' ' + c.label + ': ' + Ffull(c.parsed.y) } }
+          },
+          scales: {
+            y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { callback: v => Fs(v), font: { family: 'Inter', size: 11, weight: 700 } } },
+            x: { grid: { display: false }, ticks: { font: { size: 11, weight: 800, family: 'Inter' } } }
+          }
+        }
+      });
+      mc('cBill', {
+        type: 'bar', data: { labels: bi.map(b => b.Period), datasets: [{ data: bi.map(b => b.NotBilledValue || 0), backgroundColor: ['#fca5a5', '#fcd34d', '#a5b4fc'], borderRadius: 8, barThickness: 40 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, datalabels: { display: true, anchor: 'end', align: 'top', color: '#374151', font: { weight: 800, size: 12, family: 'Inter' }, formatter: v => Fs(v) },
+            tooltip: { callbacks: { label: c => ' ' + c.label + ': ' + Ffull(c.parsed.y) } } },
+          scales: { y: { beginAtZero: true, grid: { color: '#f4f4f5' }, ticks: { callback: v => Fs(v), font: { family: 'Inter', size: 11, weight: 700 } } }, x: { grid: { display: false }, ticks: { font: { size: 12, weight: 700, family: 'Inter' } } } }
+        }
+      });
+    }
+    function goTo(s) { document.querySelectorAll('.ni').forEach(x => { x.classList.remove('on'); if (x.dataset.s === s) x.classList.add('on') }); document.querySelectorAll('.sec').forEach(x => x.classList.remove('on')); S = s; document.getElementById('s-' + s).classList.add('on'); document.getElementById('pt').textContent = document.querySelector(`.ni[data-s="${s}"]`).textContent.trim(); load() }
+    async function drillStock() {
+      const label = C || 'All Categories';
+      oM('Stock Position — ' + label);
+      document.getElementById('mB').innerHTML = '<div class="ld">⏳ Fetching from SAP... please wait</div>';
+      const d = await api('/api/stock_position' + (C ? '?category=' + encodeURIComponent(C) : ''));
+      document.getElementById('mB').innerHTML = d.length ? mkT(d) : '<div class="em">No items found for ' + label + ' — check if items exist in SAP with U_Unit=BEVERAGES</div>';
+    }
+    async function drillOOS() {
+      oM('Out of Stock SKUs');
+      document.getElementById('mB').innerHTML = '<div class="ld">⏳ Fetching from SAP... please wait</div>';
+      const d = await api('/api/out_of_stock' + (C ? '?category=' + encodeURIComponent(C) : ''));
+      document.getElementById('mB').innerHTML = d.length ?
+        `<table><thead><tr><th>Category</th><th>Item Code</th><th>Item Name</th><th class="R">On Hand</th></tr></thead><tbody>` +
+        d.map(r => `<tr><td>${r.Category}</td><td class="m">${r.ItemCode}</td><td class="nm">${r.ItemName}</td><td class="R m">${N(r.TotalOnHand)}</td></tr>`).join('') + '</tbody></table>' :
+        '<div class="em">No out of stock items</div>';
+    }
+    function mkT(d) { return `<table><thead><tr><th>Category</th><th>Item Code</th><th>Item Name</th><th>WH</th><th>Owner</th><th class="R">On Hand</th><th class="R">On Order</th><th class="R">Available</th><th class="R">Value</th></tr></thead><tbody>` + d.map(r => `<tr><td>${r.Category || ''}</td><td class="m">${r.ItemCode}</td><td class="nm">${r.ItemName}</td><td class="m">${r.WhsCode}</td><td>${r.OwnerName || '–'}</td><td class="R m">${N(r.OnHand)}</td><td class="R m">${N(r.OnOrder)}</td><td class="R m">${N(r.Available)}</td><td class="R m">${FV(r.StockValue)}</td></tr>`).join('') + '</tbody></table>' }
+
+    // ════ MERGED WAREHOUSE + STOCK ════
+    async function lWHStock() {
+      whItemCache = {};
+      const cat = C ? `?category=${encodeURIComponent(C)}` : '';
+      const mvWhsSel = document.getElementById('mvWhsFilter');
+      const needWarehouses = mvWhsSel.options.length <= 1;
+
+      // Independent of one another - fetch together, not one after the other.
+      const [owners, whs, summary] = await Promise.all([
+        api('/api/warehouse_owners'),
+        needWarehouses ? api('/api/warehouses') : Promise.resolve([]),
+        api(`/api/warehouse_summary${cat}`),
+      ]);
+
+      const ownerSel = document.getElementById('whOwnerFilter');
+      ownerSel.innerHTML = '<option value="">All Owners</option>';
+      owners.forEach(o => { const op = document.createElement('option'); op.value = o.OwnerName; op.textContent = o.OwnerName; ownerSel.appendChild(op) });
+
+      if (needWarehouses) {
+        whs.forEach(w => { const o = document.createElement('option'); o.value = w.WhsCode; o.textContent = `${w.WhsCode} — ${w.WhsName}`; mvWhsSel.appendChild(o) });
+      }
+
+      whAllData = summary;
+      whFilterTable();
+    }
+    function whFilterTable() {
+      const q = (document.getElementById('whSearch').value || '').toLowerCase();
+      const owner = (document.getElementById('whOwnerFilter').value || '');
+      let d = whAllData;
+      if (q) d = d.filter(r => r.WhsCode.toLowerCase().includes(q) || r.WhsName.toLowerCase().includes(q) || r.OwnerName.toLowerCase().includes(q));
+      if (owner) d = d.filter(r => r.OwnerName === owner);
+      const totalVal = d.reduce((s, r) => s + (r.Value || 0), 0);
+      const totalSKUs = d.reduce((s, r) => s + (r.SKUs || 0), 0);
+      document.getElementById('whTotalKPIs').innerHTML = `<span class="nw">${d.length} warehouses</span> · <span class="nw">${N(totalSKUs)} SKUs</span> · <span class="nw">${F(totalVal)}</span>`;
+      document.getElementById('whC').textContent = d.length + ' warehouses';
+      renderWhTable(d);
+    }
+    function renderWhTable(data) {
+      const wrap = document.getElementById('whT');
+      if (!data.length) { wrap.innerHTML = '<div class="em">No warehouses found</div>'; return }
+      let html = `<table class="wh-table"><thead><tr>
+   <th style="width:20px"></th>
+   <th>Warehouse Code</th><th>Warehouse Name</th><th>Owner</th>
+   <th class="R">SKUs</th><th class="R">Qty</th><th class="R">On Order</th>
+   <th class="R">Value</th>
+  </tr></thead><tbody>`;
+      data.forEach((v, idx) => {
+        const vid = `wh-${v.WhsCode.replace(/[^a-z0-9]/gi, '_')}`;
+        html += `<tr class="wh-row" onclick="whToggle('${v.WhsCode}','${vid}',this)">
+     <td><span class="wh-chevron">›</span></td>
+     <td><span class="m" style="color:var(--ac)">${v.WhsCode}</span></td>
+     <td style="font-weight:700;min-width:180px">${v.WhsName || '–'}</td>
+     <td style="font-size:12px;color:var(--tx2)">${v.OwnerName || '–'}</td>
+     <td class="R m">${N(v.SKUs)}</td>
+     <td class="R m">${N(v.Qty)}</td>
+     <td class="R m" style="color:#4f46e5">${N(v.OnOrder)}</td>
+     <td class="R m" style="font-weight:800;color:#059669">${FV(v.Value)}</td>
+    </tr>
+    <tr class="wh-items-row" id="${vid}-items"><td colspan="8">
+     <div class="wh-items-inner" id="${vid}-inner"><div class="ld" style="padding:10px">Loading items...</div></div>
+    </td></tr>`;
+      });
+      html += '</tbody></table>';
+      wrap.innerHTML = html;
+    }
+    async function whToggle(whsCode, vid, row) {
+      const itemRow = document.getElementById(`${vid}-items`);
+      const inner = document.getElementById(`${vid}-inner`);
+      const isOpen = row.classList.contains('open');
+      // close all
+      document.querySelectorAll('#whT .wh-row').forEach(r => r.classList.remove('open'));
+      document.querySelectorAll('#whT .wh-items-row').forEach(r => r.classList.remove('open'));
+      if (isOpen) return;
+      row.classList.add('open'); itemRow.classList.add('open');
+      if (whItemCache[whsCode]) { inner.innerHTML = whItemCache[whsCode]; return }
+      const cat = C ? `&category=${encodeURIComponent(C)}` : '';
+      const d = await api(`/api/warehouse_items?whs=${encodeURIComponent(whsCode)}${cat}`);
+      const html = d.length ? `
+   <div style="padding:8px 14px;font-size:11px;font-weight:700;color:var(--mt)">
+    ${d.length} items in ${whsCode}
+   </div>
+   <table><thead><tr>
+    <th>Category</th><th>Item Code</th><th>Item Name</th><th>Sub-Group</th><th>Type</th>
+    <th class="R">On Hand</th><th class="R">On Order</th>
+    <th class="R">Available</th><th class="R">Value</th>
+   </tr></thead><tbody>`+
+        d.map(r => `<tr>
+    <td><span class="bd b-i" style="font-size:9px">${r.Category || '–'}</span></td>
+    <td class="m" style="color:var(--ac)">${r.ItemCode}</td>
+    <td class="nm">${r.ItemName || ''}</td>
+    <td class="sg" style="font-size:11px;color:var(--mt)">${r.SubGroup || '–'}</td>
+    <td>${typBadge(r.ItemType, r.ItemName)}</td>
+    <td class="R m">${N(r.OnHand)}</td>
+    <td class="R m" style="color:#4f46e5">${N(r.OnOrder)}</td>
+    <td class="R m" style="color:${(r.Available || 0) < 0 ? '#dc2626' : '#059669'}">${N(r.Available)}</td>
+    <td class="R m" style="font-weight:800">${FV(r.StockValue)}</td>
+   </tr>`).join('') + '</tbody></table>' :
+        '<div class="em" style="padding:12px">No items in this warehouse</div>';
+      whItemCache[whsCode] = html; inner.innerHTML = html;
+    }
+
+    // ════ MOVEMENT ════
+    async function lMV() {
+      pg('mvD', v => { if (!mvCustomApplied) { mvDays = +v; lMVFetch() } });
+      // init warehouse dropdown if needed
+      const sel = document.getElementById('mvWhsFilter');
+      if (sel.options.length <= 1) {
+        const whs = await api('/api/warehouses');
+        whs.forEach(w => { const o = document.createElement('option'); o.value = w.WhsCode; o.textContent = `${w.WhsCode} — ${w.WhsName}`; sel.appendChild(o) });
+      }
+      lMVFetch();
+    }
+    async function lMVFetch() {
+      let url = `/api/movement?days=${mvDays}`;
+      if (C) url += `&category=${encodeURIComponent(C)}`;
+      if (mvCustomFrom && mvCustomTo) url += `&date_from=${mvCustomFrom}&date_to=${mvCustomTo}`;
+      mvD_data = await api(url);
+      const label = mvCustomFrom && mvCustomTo ? `${mvCustomFrom} → ${mvCustomTo}` : `${mvDays} Days`;
+      document.getElementById('mvH').textContent = `Daily Movement — ${label}`;
+      const tI = mvD_data.reduce((s, x) => s + (x.InValue || 0), 0), tO = mvD_data.reduce((s, x) => s + (x.OutValue || 0), 0);
+      const nt = document.getElementById('mvN'); nt.style.display = '';
+      nt.innerHTML = mvD_data.length ? `<b>Summary:</b> In: ${FV(tI)} · Out: ${FV(tO)} · Net: ${FV(tI - tO)}` : '<b>No data</b>';
+      rMV();
+    }
+    function mvApplyDate() {
+      mvCustomFrom = document.getElementById('mvDateFrom').value;
+      mvCustomTo = document.getElementById('mvDateTo').value;
+      if (mvCustomFrom && mvCustomTo) { mvCustomApplied = true; lMVFetch() }
+    }
+    function mvClearDate() {
+      mvCustomFrom = ''; mvCustomTo = ''; mvCustomApplied = false;
+      document.getElementById('mvDateFrom').value = ''; document.getElementById('mvDateTo').value = '';
+      lMVFetch();
+    }
+    // ── Big tables: paint only as many rows as a person can actually look at ──
+    // The Movement tab holds 5,000+ rows. Painting every <tr> again on each
+    // keystroke is what makes the search box feel slow - the browser has to lay
+    // the whole table out before it can show the next character you typed.
+    // Filtering still runs over ALL rows, so the count and the search results
+    // stay complete; we just stop painting past ROW_CAP and offer a button.
+    var ROW_CAP = 400;
+    var _showAllRows = {};
+    var _rerenderFor = {};
+    function cappedRows(id, rows, rerender) {
+      _rerenderFor[id] = rerender;
+      return _showAllRows[id] ? rows : rows.slice(0, ROW_CAP);
+    }
+    function cappedNote(id, shown, total) {
+      if (shown >= total) return '';
+      // No inline onclick here on purpose - the delegated listener below
+      // handles the click, which keeps this string free of nested quotes.
+      return '<div class="em" style="margin-top:8px">Showing the first ' + N(shown) +
+             ' of ' + N(total) + ' matching rows. Narrow it down with the search box, or ' +
+             '<button type="button" class="show-all-rows" data-target="' + id + '" ' +
+             'style="border:0;background:none;color:var(--ac);cursor:pointer;font:inherit;' +
+             'text-decoration:underline;padding:0">show all ' + N(total) + '</button>.</div>';
+    }
+    document.addEventListener('click', function (e) {
+      var b = e.target && e.target.closest ? e.target.closest('.show-all-rows') : null;
+      if (b) showAllRows(b.getAttribute('data-target'));
+    });
+    function showAllRows(id) {
+      _showAllRows[id] = true;
+      if (_rerenderFor[id]) _rerenderFor[id]();
+    }
+
+    function rMV() {
+      const q = (document.getElementById('mvS').value || '').toLowerCase();
+      const whsF = (document.getElementById('mvWhsFilter').value || '');
+      let d = mvD_data;
+      if (whsF) d = d.filter(r => r.WhsCode === whsF);
+      if (q) d = d.filter(r => String(r.ItemCode || '').toLowerCase().includes(q) || String(r.ItemName || '').toLowerCase().includes(q) || String(r.Category || '').toLowerCase().includes(q) || String(r.SubGroup || '').toLowerCase().includes(q) || String(r.Date || '').includes(q) || String(r.WhsCode || '').toLowerCase().includes(q));
+      const mvShown = cappedRows('mvT', d, rMV);
+      document.getElementById('mvC').textContent = d.length + ' rows';
+      document.getElementById('mvT').innerHTML = d.length ?
+        `<table><thead><tr><th>Date</th><th>WH Code</th><th>Warehouse</th><th>Category</th><th>Sub-Group</th><th>Item Code</th><th>Item Name</th><th class="R">In Qty</th><th class="R">Out Qty</th><th class="R">In Value</th><th class="R">Out Value</th><th class="R">Net</th></tr></thead><tbody>` +
+        mvShown.map(r => `<tr>
+    <td class="m">${r.Date || ''}</td>
+    <td class="m" style="color:var(--ac)">${r.WhsCode || ''}</td>
+    <td style="font-size:12px;color:var(--tx2);min-width:140px">${r.WhsName || ''}</td>
+    <td><span class="bd b-i" style="font-size:9px">${r.Category || '–'}</span></td>
+    <td class="sg">${r.SubGroup || '–'}</td>
+    <td class="m">${r.ItemCode || ''}</td>
+    <td class="nm">${r.ItemName || ''}</td>
+    <td class="R m">${N(r.InQty)}</td><td class="R m">${N(r.OutQty)}</td>
+    <td class="R m">${FV(r.InValue)}</td><td class="R m">${FV(r.OutValue)}</td>
+    <td class="R m" style="color:${(r.InValue || 0) - (r.OutValue || 0) >= 0 ? '#059669' : '#ef4444'}">${FV((r.InValue || 0) - (r.OutValue || 0))}</td>
+   </tr>`).join('') + '</tbody></table>' + cappedNote('mvT', mvShown.length, d.length) :
+        '<div class="em">No data</div>';
+    }
+
+    // ════ MOVERS ════
+    async function lMO() {
+      pg('moP', v => { moDays = +v; moItemCache = {}; moDateFrom = ''; moDateTo = ''; if (document.getElementById('moDateFrom')) document.getElementById('moDateFrom').value = ''; if (document.getElementById('moDateTo')) document.getElementById('moDateTo').value = ''; lMOSGs(); });
+      pg('moStatus', v => { moStatusF = v; moItemCache = {}; renderMoTable(); }); if(document.getElementById('moTF')) pg('moTF', v => { moType = v; moItemCache = {}; lMOSGs(); });
+
+      const sum = await api(`/api/movers_summary?days=${moDays}` + (C ? '&category=' + encodeURIComponent(C) : ''));
+      const g = s => sum.find(x => x.Status === s) || { Count: 0, Value: 0 };
+      const nm = g('NON-MOVING'), sl = g('SLOW'), md = g('MEDIUM'), fa = g('FAST');
+      document.getElementById('moK').innerHTML = `<div class="kg">
+   <div class="kc k3"><div class="kc-l">Non-Moving (${moDays}d)</div><div class="kc-v">${N(nm.Count)}</div><div class="kc-s">${FsV(nm.Value)} stuck</div><div class="kc-bg"><i class="ic ic-lock"></i></div></div>
+   <div class="kc k4"><div class="kc-l">Slow</div><div class="kc-v">${N(sl.Count)}</div><div class="kc-s">${FsV(sl.Value)}</div><div class="kc-bg"><i class="ic ic-snail"></i></div></div>
+   <div class="kc k1"><div class="kc-l">Medium</div><div class="kc-v">${N(md.Count)}</div><div class="kc-s">${FsV(md.Value)}</div><div class="kc-bg"><i class="ic ic-zap"></i></div></div>
+   <div class="kc k2"><div class="kc-l">Fast</div><div class="kc-v">${N(fa.Count)}</div><div class="kc-s">${FsV(fa.Value)}</div><div class="kc-bg"><i class="ic ic-rocket"></i></div></div>
+  </div>`;
+      const nt = document.getElementById('moN');
+      if (nm.Count > 0) { nt.style.display = ''; nt.innerHTML = `<b><i class="ic ic-triangle-alert"></i> ${N(nm.Count)} items</b> — ZERO movement in ${moDays} days — <b>${FV(nm.Value)}</b> stuck.` } else { nt.style.display = 'none' }
+      await lMOSGs();
+    }
+    async function lMOSGs() {
+      const cat = C || 'FINISHED';
+      const t = '';
+      const moDtP = moDateFrom && moDateTo ? `&date_from=${moDateFrom}&date_to=${moDateTo}` : ''; moSGData = await api(`/api/movers_by_subgroup?days=${moDays}&category=${encodeURIComponent(cat)}${moDtP}`);
+      moItemCache = {}; renderMoTable();
+    }
+    function renderMoTable() {
+      const wrap = document.getElementById('moTableWrap');
+      if (!moSGData.length) { wrap.innerHTML = '<div class="em">No data</div>'; document.getElementById('moC').textContent = '0'; return }
+      const openRows = [];
+      document.querySelectorAll('#moTableWrap .cat-row.open').forEach(row => {
+        const onclickAttr = row.getAttribute('onclick');
+        if (onclickAttr) {
+          const match = onclickAttr.match(/moToggleSG\('(.*?)',\s*\d+,\s*this\)/);
+          if (match) openRows.push(match[1]);
+        }
+      });
+
+      let h = `<table class="cat-table"><thead><tr>
+   <th style="width:24px"></th>
+   <th>Sub-Group</th>
+   <th class="R">Total SKUs</th><th class="R" style="color:#ef4444">Non-Moving</th>
+   <th class="R" style="color:#f59e0b">Slow</th><th class="R" style="color:#0ea5e9">Medium</th>
+   <th class="R" style="color:#10b981">Fast</th>
+   <th class="R">Stock Value</th><th class="R" style="color:#dc2626">Stuck Value</th>
+  </tr></thead><tbody>`;
+      moSGData.forEach((v, idx) => {
+        const sgSafe = v.SubGroup.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        h += `<tr class="cat-row" onclick="moToggleSG('${sgSafe}',${idx},this)">
+     <td><span class="cat-chevron">›</span></td>
+     <td style="font-weight:700">${v.SubGroup}</td>
+     <td class="R m">${N(v.TotalSKUs)}</td>
+     <td class="R m" style="color:#ef4444">${N(v.NonMovingSKUs)}</td>
+     <td class="R m" style="color:#f59e0b">${N(v.SlowSKUs)}</td>
+     <td class="R m" style="color:#0ea5e9">${N(v.MediumSKUs)}</td>
+     <td class="R m" style="color:#10b981">${N(v.FastSKUs)}</td>
+     <td class="R m">${FsV(v.StockValue)}</td>
+     <td class="R m" style="color:${v.StuckValue > 0 ? '#dc2626' : 'var(--mt)'}">
+      ${v.StuckValue > 0 ? FsV(v.StuckValue) : '–'}
+     </td>
+    </tr>
+    <tr class="cat-items-row" id="mo-items-${idx}"><td colspan="9"><div class="cat-items-inner" id="mo-inner-${idx}"><div class="ld" style="padding:12px">Loading...</div></div></td></tr>`;
+      });
+      h += '</tbody></table>';
+      wrap.innerHTML = h;
+      document.getElementById('moC').textContent = moSGData.reduce((s, v) => s + v.TotalSKUs, 0) + ' SKUs';
+      if (openRows.length > 0) {
+        setTimeout(() => {
+          const rows = document.querySelectorAll('#moTableWrap .cat-row');
+          rows.forEach(row => {
+            const onclickAttr = row.getAttribute('onclick');
+            if (onclickAttr && onclickAttr.includes(`moToggleSG('${openRows[0]}'`)) {
+              row.click();
+            }
+          });
+        }, 10);
+      }
+    }
+    async function moToggleSG(sg, idx, row) {
+      const itemRow = document.getElementById(`mo-items-${idx}`);
+      const inner = document.getElementById(`mo-inner-${idx}`);
+      const isOpen = row.classList.contains('open');
+      document.querySelectorAll('#moTableWrap .cat-row').forEach(r => r.classList.remove('open'));
+      document.querySelectorAll('#moTableWrap .cat-items-row').forEach(r => r.classList.remove('open'));
+      if (isOpen) return;
+      row.classList.add('open'); itemRow.classList.add('open');
+
+      const cacheKey = sg + '|' + (moStatusF || 'all') + '|' + (typeof moDateFrom !== 'undefined' ? moDateFrom : '');
+      if (moItemCache[cacheKey]) { inner.innerHTML = moItemCache[cacheKey]; return }
+      const cat = C || 'FINISHED';
+      const dateP = (typeof moDateFrom !== 'undefined' && moDateFrom && moDateTo) ? `&date_from=${moDateFrom}&date_to=${moDateTo}` : '';
+      const statusP = (moStatusF && moStatusF !== 'all') ? `&status=${encodeURIComponent(moStatusF)}` : '';
+      const d = await api(`/api/movers?days=${moDays}&category=${encodeURIComponent(cat)}&subgroup=${encodeURIComponent(sg)}${dateP}${statusP}`);
+      const html = buildMoItemsHtml(d);
+      moItemCache[cacheKey] = html;
+      inner.innerHTML = html;
+    }
+    function buildMoItemsHtml(d) {
+      if (!d || !d.length) return '<div class="em" style="padding:16px">No items found</div>';
+      return '<table><thead><tr><th>Status</th><th>Sub-Group</th><th>Item Code</th><th>Item Name</th><th class="R">Stock</th><th class="R">' + moDays + 'd Out</th><th class="R">Value</th><th class="R">Days Left</th><th>Last Move</th><th>Action</th></tr></thead><tbody>' +
+        d.map(function (r) {
+          var nm = r.ItemName || '';
+          var code = r.ItemCode || '';
+          var safeName = nm.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+          var lastMove = r.LastMoveDate ? r.LastMoveDate : '<span style="color:#dc2626">Never</span>';
+          var dsl = r.DaysOfStockLeft < 0 ? '∞' : N(r.DaysOfStockLeft);
+          var outKey = 'Out' + moDays + 'd';
+          return '<tr>' +
+            '<td>' + moBadge(r.MovementStatus) + '</td>' +
+            '<td style="font-size:12px;color:var(--mt)">' + (r.SubGroup || '–') + '</td>' +
+            '<td class="m">' + code + '</td>' +
+            '<td class="nm">' + nm + '</td>' +
+            '<td class="R m">' + N(r.TotalOnHand) + '</td>' +
+            '<td class="R m">' + N(r[outKey]) + '</td>' +
+            '<td class="R m">' + FV(r.StockValue) + '</td>' +
+            '<td class="R m">' + dsl + '</td>' +
+            '<td class="m">' + lastMove + '</td>' +
+            '<td><button class="trace-btn" onclick="goToTrace(this.dataset.code,this.dataset.name)" data-code="' + code + '" data-name="' + safeName + '"><i class="ic ic-search"></i> Trace</button></td>' +
+            '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+
+    function goToTrace(code, name) {
+      traceCode = code; traceName = name; traceCategory = 'FINISHED';
+      goTo('trace');
+      setTimeout(async () => {
+        document.querySelectorAll('#traceCatF .pl').forEach(p => { p.classList.remove('on'); if (p.textContent.trim() === 'FG') p.classList.add('on'); });
+        await traceLoadSGDropdown(); await traceLoadList();
+        setTimeout(() => {
+          const match = Array.from(document.querySelectorAll('#traceList .pt-list-item')).find(e => e.querySelector('.item-code')?.textContent === code);
+          if (match) { match.classList.add('active'); match.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+          tracePickItem(code, name, null);
+        }, 500);
+      }, 200);
+    }
+
+    // ════ BILLING ════
+    async function lBI() {
+      pg('biP', v => { biDays = +v; biCustomFrom = ''; biCustomTo = ''; biItemCache = {}; lBI() }); if(document.getElementById('biTF')) pg('biTF', v => { biType = v; biItemCache = {}; lBISGs(); });
+
+      const sum = await api('/api/not_billed_summary');
+      document.getElementById('biK').innerHTML = `<div class="kg">` + sum.map((s, i) => `<div class="kc k${i === 0 ? 3 : i === 1 ? 4 : 1}"><div class="kc-l">FG Not Billed · ${s.Period}</div><div class="kc-v">${N(s.NotBilledSKUs)}</div><div class="kc-s">${FsV(s.NotBilledValue)}</div><div class="kc-bg"><i class="ic ic-receipt-text"></i></div></div>`).join('') + '</div>';
+      const c = sum.find(s => s.Period === biDays + ' Days') || {};
+      const nt = document.getElementById('biN');
+      if (c.NotBilledSKUs > 0) { nt.style.display = ''; nt.innerHTML = `<b><i class="ic ic-triangle-alert"></i> ${N(c.NotBilledSKUs)} finished goods</b> worth <b>${FV(c.NotBilledValue)}</b> — not invoiced in ${biDays} days <i style="font-size:11px">(items created &lt;30d excluded)</i>` } else { nt.style.display = 'none' }
+      await lBISGs();
+    }
+    function biApplyCustomDate() { biCustomFrom = document.getElementById('biDateFrom').value; biCustomTo = document.getElementById('biDateTo').value; if (biCustomFrom && biCustomTo) { biItemCache = {}; lBISGs() } }
+    function biClearCustomDate() { biCustomFrom = ''; biCustomTo = ''; document.getElementById('biDateFrom').value = ''; document.getElementById('biDateTo').value = ''; biItemCache = {}; lBISGs() }
+    async function lBISGs() {
+      const biDtP = biCustomFrom && biCustomTo ? `&date_from=${biCustomFrom}&date_to=${biCustomTo}` : '';
+      biSGData = await api(`/api/not_billed_by_subgroup?days=${biDays}${biDtP}`);
+      biItemCache = {}; renderBiTable();
+    }
+    function renderBiTable() {
+      const wrap = document.getElementById('biTableWrap');
+      if (!biSGData.length) { wrap.innerHTML = '<div class="em">No data</div>'; document.getElementById('biC').textContent = '0'; return }
+      let html = `<table class="cat-table"><thead><tr><th style="width:24px"></th><th>Sub-Group</th><th class="R">Total SKUs</th><th class="R" style="color:#ef4444">Not Billed</th><th class="R">Total Value</th><th class="R" style="color:#dc2626">Unbilled Value</th></tr></thead><tbody>`;
+      biSGData.forEach((v, idx) => {
+        html += `<tr class="cat-row" onclick="biToggleSG('${v.SubGroup.replace(/'/g, "\\'")}',${idx},this)">
+     <td><span class="cat-chevron">›</span></td>
+     <td style="font-weight:700">${v.SubGroup}</td>
+     <td class="R m">${N(v.TotalSKUs)}</td>
+     <td class="R m" style="color:#ef4444">${N(v.NotBilledSKUs)}</td>
+     <td class="R m">${FsV(v.TotalValue)}</td>
+     <td class="R m" style="color:#dc2626">${FsV(v.NotBilledValue)}</td>
+    </tr>
+    <tr class="cat-items-row" id="bi-items-${idx}"><td colspan="6"><div class="cat-items-inner" id="bi-inner-${idx}"><div class="ld" style="padding:12px">Loading...</div></div></td></tr>`;
+      });
+      html += '</tbody></table>';
+      wrap.innerHTML = html;
+      document.getElementById('biC').textContent = biSGData.reduce((s, v) => s + v.NotBilledSKUs, 0) + ' unbilled';
+    }
+    async function biToggleSG(sg, idx, row) {
+      const itemRow = document.getElementById(`bi-items-${idx}`);
+      const inner = document.getElementById(`bi-inner-${idx}`);
+      const isOpen = row.classList.contains('open');
+      document.querySelectorAll('#biTableWrap .cat-row').forEach(r => r.classList.remove('open'));
+      document.querySelectorAll('#biTableWrap .cat-items-row').forEach(r => r.classList.remove('open'));
+      if (isOpen) return;
+      row.classList.add('open'); itemRow.classList.add('open');
+      if (biItemCache[sg]) { inner.innerHTML = biItemCache[sg]; return }
+      const t = '';
+      const dateP = biCustomFrom && biCustomTo ? `&date_from=${biCustomFrom}&date_to=${biCustomTo}` : '';
+      const d = await api(`/api/not_billed?days=${biDays}&subgroup=${encodeURIComponent(sg)}${dateP}`);
+      const html = d.length ? `<table><thead><tr><th>Type</th><th>Item Code</th><th>Item Name</th><th class="R">Stock</th><th class="R">Value</th><th>Last Bill Date</th><th>Days Since Billed</th><th>Customer</th><th></th></tr></thead><tbody>` +
+        d.map(r => `<tr><td>${typBadge(r.ItemType)}</td><td class="m">${r.ItemCode}</td><td class="nm">${r.ItemName || ''}</td><td class="R m">${N(r.CurrentStock)}</td><td class="R m">${FV(r.StockValue)}</td><td class="m">${r.LastBillDate || '<span style="color:#dc2626">Never</span>'}</td><td class="m">${r.LastBilledAgo || '–'}</td><td style="min-width:160px">${r.LastCustomer || '–'}</td><td><button class="trace-btn" onclick="goToTrace(this.dataset.code,this.dataset.name)" data-code="${r.ItemCode}" data-name="${r.ItemName || ''}"><i class="ic ic-search"></i> Trace</button></td></tr>`).join('') + '</tbody></table>' : '<div class="em" style="padding:12px">All billed <i class="ic ic-check"></i></div>';
+      biItemCache[sg] = html; inner.innerHTML = html;
+    }
+    function biSearchItems() { }
+
+    // ════ ABC-XYZ ════
+    const CC = { AX: '#d1fae5', AY: '#ecfdf5', AZ: '#fee2e2', BX: '#fef3c7', BY: '#fffbeb', BZ: '#fefce8', CX: '#ede9fe', CY: '#f5f3ff', CZ: '#faf5ff' };
+    const CT = { AX: '#065f46', AY: '#065f46', AZ: '#991b1b', BX: '#92400e', BY: '#92400e', BZ: '#92400e', CX: '#4c1d95', CY: '#4c1d95', CZ: '#4c1d95' };
+
+    async function lABCXYZ() {
+
+      const sum = await api('/api/abcxyz_summary');
+      const sm = {}; sum.forEach(r => { sm[r.ABCXYZClass] = { skus: r.SKUs || 0, value: r.Value || 0 } });
+      ['AX', 'AZ', 'BX', 'CX', 'CZ'].forEach(c => { const d = sm[c] || { skus: 0, value: 0 }; document.getElementById(`k${c}-s`).textContent = `${N(d.skus)} SKUs`; document.getElementById(`k${c}-v`).textContent = F(d.value) });
+      const ax = sm['AX'] || {}, az = sm['AZ'] || {}, cz = sm['CZ'] || {};
+      const nt = document.getElementById('abN'); const ins = [];
+      if (ax.skus > 0) ins.push(`<b>${N(ax.skus)} AX items (${FV(ax.value)})</b> — high-value stable demand`);
+      if (az.skus > 0) ins.push(`<b>${N(az.skus)} AZ items (${FV(az.value)})</b> — high-value erratic: review urgently`);
+      if (cz.skus > 0) ins.push(`<b>${N(cz.skus)} CZ items (${FV(cz.value)})</b> — elimination candidates`);
+      if (ins.length) { nt.style.display = ''; nt.innerHTML = '<b><i class="ic ic-triangle-alert"></i> Insights:</b><br>' + ins.join('<br>') } else { nt.style.display = 'none' }
+      await lABSGs();
+    }
+    async function lABSGs() {
+      const t = '';
+      abSGData = await api('/api/abcxyz_by_subgroup' + (DIVISION === 'oils' && abType !== 'all' ? '?item_type=' + abType : ''));
+      abItemCache = {}; abComboF = 'all';
+      // reset pill filter
+      document.querySelectorAll('#abF .pl').forEach(p => { p.classList.remove('on'); if (p.dataset.v === 'all') p.classList.add('on') });
+      // reset kpi card active
+      document.querySelectorAll('.combo-kpi').forEach(el => el.classList.remove('active'));
+      renderAbTable();
+    }
+    function abFilterCombo(combo, el) {
+      const openRow = document.querySelector('#abTableWrap .cat-row.open');
+      const openIdx = openRow ? parseInt(openRow.dataset.idx) : null;
+      const wasActive = el?.classList.contains('active');
+      document.querySelectorAll('.combo-kpi').forEach(e => e.classList.remove('active'));
+      document.querySelectorAll('#abF .pl').forEach(p => { p.classList.remove('on'); if (p.dataset.v === 'all') p.classList.add('on') });
+      if (!wasActive && el) {
+        el.classList.add('active');
+        document.querySelectorAll('#abF .pl').forEach(p => { p.classList.remove('on'); if (p.dataset.v === combo) p.classList.add('on') });
+        abComboF = combo;
+      } else {
+        abComboF = 'all';
+      }
+      abItemCache = {};
+      renderAbTable();
+      if (openIdx !== null) { setTimeout(() => { const r = document.querySelector(`#abTableWrap .cat-row[data-idx="${openIdx}"]`); if (r) r.click() }, 50); }
+    }
+
+    // pill filter also triggers combo reset
+    if(document.getElementById('abTF')) pg('abTF', v => { abType = v; abItemCache = {}; lABCXYZ(); });
+    function pg_ab(v) {
+      document.querySelectorAll('.combo-kpi').forEach(el => el.classList.remove('active'));
+      abComboF = v; abItemCache = {}; renderAbTable();
+    }
+    // Override abF pills
+    function setupAbPills() {
+      document.querySelectorAll('#abF .pl').forEach(p => p.onclick = () => {
+        const openRow = document.querySelector('#abTableWrap .cat-row.open');
+        const openIdx = openRow ? parseInt(openRow.dataset.idx) : null;
+        document.querySelectorAll('#abF .pl').forEach(x => x.classList.remove('on')); p.classList.add('on');
+        document.querySelectorAll('.combo-kpi').forEach(el => el.classList.remove('active'));
+        abComboF = p.dataset.v; abItemCache = {}; renderAbTable();
+        if (openIdx !== null) { setTimeout(() => { const r = document.querySelector(`#abTableWrap .cat-row[data-idx="${openIdx}"]`); if (r) r.click() }, 50); }
+      });
+    }
+
+    function renderAbTable() {
+      const wrap = document.getElementById('abTableWrap');
+      if (!abSGData.length) { wrap.innerHTML = '<div class="em">No data</div>'; document.getElementById('abC').textContent = '0'; return }
+      let html = `<table class="cat-table"><thead><tr><th style="width:24px"></th><th>Sub-Group</th><th class="R">SKUs</th><th class="R" style="color:#ef4444">A (Top 80%)</th><th class="R" style="color:#f59e0b">B</th><th class="R" style="color:#10b981">C</th><th class="R" style="color:#059669">X (Stable)</th><th class="R" style="color:#d97706">Y</th><th class="R" style="color:#dc2626">Z (Erratic)</th><th class="R">Value</th></tr></thead><tbody>`;
+      abSGData.forEach((v, idx) => {
+        html += `<tr class="cat-row" data-idx="${idx}" data-sg="${v.SubGroup}" onclick="abToggleSG('${v.SubGroup.replace(/'/g, "\\'")}',${idx},this)">
+     <td><span class="cat-chevron">›</span></td>
+     <td style="font-weight:700">${v.SubGroup}</td>
+     <td class="R m">${N(v.TotalSKUs)}</td>
+     <td class="R m" style="color:#ef4444">${N(v.A_Count)}</td>
+     <td class="R m" style="color:#f59e0b">${N(v.B_Count)}</td>
+     <td class="R m" style="color:#10b981">${N(v.C_Count)}</td>
+     <td class="R m" style="color:#059669">${N(v.X_Count)}</td>
+     <td class="R m" style="color:#d97706">${N(v.Y_Count)}</td>
+     <td class="R m" style="color:#dc2626">${N(v.Z_Count)}</td>
+     <td class="R m">${FsV(v.StockValue)}</td>
+    </tr>
+    <tr class="cat-items-row" id="ab-items-${idx}"><td colspan="10"><div class="cat-items-inner" id="ab-inner-${idx}"><div class="ld" style="padding:12px">Loading...</div></div></td></tr>`;
+      });
+      html += '</tbody></table>';
+      wrap.innerHTML = html;
+      document.getElementById('abC').textContent = abSGData.reduce((s, v) => s + v.TotalSKUs, 0) + ' SKUs';
+      setupAbPills();
+    }
+    async function abToggleSG(sg, idx, row) {
+      const itemRow = document.getElementById(`ab-items-${idx}`);
+      const inner = document.getElementById(`ab-inner-${idx}`);
+      const isOpen = row.classList.contains('open');
+      document.querySelectorAll('#abTableWrap .cat-row').forEach(r => r.classList.remove('open'));
+      document.querySelectorAll('#abTableWrap .cat-items-row').forEach(r => r.classList.remove('open'));
+      if (isOpen) return;
+      row.classList.add('open'); itemRow.classList.add('open');
+      const cacheKey = sg + '|' + abComboF;
+      if (abItemCache[cacheKey]) { inner.innerHTML = abItemCache[cacheKey]; return }
+      const t = '';
+      const comboP = abComboF !== 'all' ? `&combo=${encodeURIComponent(abComboF)}` : '';
+      const d = await api(`/api/abcxyz?subgroup=${encodeURIComponent(sg)}${comboP}`);
+      const html = d.length ? `<table><thead><tr><th>ABC</th><th>XYZ</th><th>Combo</th><th>Type</th><th title="Value rank">Rank</th><th>Item Code</th><th>Item Name</th><th class="R">Stock</th><th class="R">Value</th>
+   <th class="R"><span class="tip">AVG/MO<span class="tip-txt">Average units sold per month over last 3 months</span></span></th>
+   <th class="R"><span class="tip">COV<span class="tip-txt">Coefficient of Variation — demand variability. 0 = perfectly stable, &gt;1 = very erratic</span></span></th>
+   <th class="R"><span class="tip">CUM%<span class="tip-txt">Cumulative % of total stock value. A = 0–80%, B = 80–95%, C = 95–100%</span></span></th>
+   <th></th>
+  </tr></thead><tbody>`+
+        d.map(r => {
+          const aC = r.ABCClass === 'A' ? 'b-d' : r.ABCClass === 'B' ? 'b-w' : 'b-ok'; const xC = r.XYZClass === 'X' ? 'b-ok' : r.XYZClass === 'Y' ? 'b-w' : 'b-d'; const cov = r.CoV >= 9000 ? '–' : r.CoV != null ? r.CoV.toFixed(2) : '–';
+          return `<tr><td><span class="bd ${aC}">${r.ABCClass}</span></td><td><span class="bd ${xC}">${r.XYZClass}</span></td>
+     <td><span class="bd" style="background:${CC[r.ABCXYZClass] || '#f3f4f6'};color:${CT[r.ABCXYZClass] || '#374151'}">${r.ABCXYZClass}</span></td>
+     <td>${typBadge(r.ItemType, r.ItemName)}</td><td class="m">${r.Rank}</td>
+     <td class="m">${r.ItemCode}</td><td class="nm">${r.ItemName || ''}</td>
+     <td class="R m">${N(r.TotalOnHand)}</td><td class="R m">${FV(r.StockValue)}</td>
+     <td class="R m">${N(r.AvgMonthlyOut)}</td><td class="R m">${cov}</td><td class="R m">${r.CumulativePct}%</td>
+     <td><button class="trace-btn" onclick="goToTrace(this.dataset.code,this.dataset.name)" data-code="${r.ItemCode}" data-name="${(r.ItemName || '')}"><i class="ic ic-search"></i> Trace</button></td></tr>`
+        }).join('') + '</tbody></table>' : '<div class="em" style="padding:12px">No data for this filter</div>';
+      abItemCache[cacheKey] = html; inner.innerHTML = html;
+    }
+    function abSearchItems() { }
+
+    // ════ AGING ════
+    async function lAG() {
+      const d = await api('/api/aging' + (C ? '?category=' + encodeURIComponent(C) : '')); document.getElementById('agC').textContent = d.length;
+      document.getElementById('agT').innerHTML = d.length ?
+        `<table><thead><tr><th>Category</th><th>Bucket</th><th class="R">Items</th><th class="R">Qty</th><th class="R">Value</th><th></th></tr></thead><tbody>` +
+        d.map(r => {
+          const cl = r.Bucket === '0-30' ? 'b-ok' : r.Bucket === '90+' ? 'b-d' : 'b-w';
+          return `<tr><td>${r.Category}</td><td><span class="bd ${cl}">${r.Bucket}d sitting</span></td><td class="R m">${N(r.Items)}</td><td class="R m">${N(r.Qty)}</td><td class="R m">${FV(r.Value)}</td>
+    <td><button class="dr" onclick="drAg('${r.Bucket}','${r.Category}')">View →</button></td></tr>`
+        }).join('') + '</tbody></table>' :
+        '<div class="em">No data</div>'
+    }
+    async function drAg(b, c) {
+      oM(`Aging: ${b}d — ${c}`); document.getElementById('mB').innerHTML = '<div class="ld">Loading...</div>';
+      const d = await api(`/api/aging_drill?bucket=${b}&category=${encodeURIComponent(c)}`);
+      document.getElementById('mB').innerHTML = d.length ?
+        `<table><thead><tr><th>Item Code</th><th>Item Name</th><th>WH</th><th>First Receipt</th><th class="R">Days Sitting</th><th class="R">Qty</th><th class="R">Value</th><th></th></tr></thead><tbody>` +
+        d.map(r => `<tr><td class="m">${r.ItemCode}</td><td class="nm">${r.ItemName || ''}</td><td class="m">${r.WhsCode || ''}</td><td class="m">${r.FirstReceiptDate || ''}</td>
+   <td class="R m" style="color:${r.DaysSitting > 90 ? '#dc2626' : r.DaysSitting > 60 ? '#d97706' : '#059669'}">${N(r.DaysSitting)}d</td>
+   <td class="R m">${N(r.Qty)}</td><td class="R m">${FV(r.Value)}</td>
+   <td><button class="trace-btn" onclick="goToTrace(this.dataset.code,this.dataset.name)" data-code="${r.ItemCode}" data-name="${r.ItemName || ''}"><i class="ic ic-search"></i> Trace</button></td></tr>`).join('') + '</tbody></table>' :
+        '<div class="em">No items</div>'
+    }
+
+    // ════ ITEM TRACE ════
+    const TRACE_TYPES = {
+      13: { label: 'Sales', icon: 'indian-rupee', color: '#065f46', bg: '#d1fae5' },
+      20: { label: 'Purchase Delivery', icon: 'package', color: '#1e40af', bg: '#dbeafe' },
+      60: { label: 'Issued to Production', icon: 'factory', color: '#92400e', bg: '#fef3c7' },
+      67: { label: 'Goods Receipt', icon: 'inbox', color: '#065f46', bg: '#d1fae5' },
+      59: { label: 'WH Transfer', icon: 'shuffle', color: '#4c1d95', bg: '#ede9fe' },
+      101: { label: 'Production Receipt', icon: 'hard-hat', color: '#1e40af', bg: '#dbeafe' },
+      202: { label: 'Production Issue', icon: 'settings', color: '#92400e', bg: '#fef3c7' },
+      18: { label: 'AP Invoice', icon: 'receipt-text', color: '#374151', bg: '#f3f4f6' },
+      162: { label: 'Inventory Adj.', icon: 'settings', color: '#4c1d95', bg: '#ede9fe' },
+      15: { label: 'Vendor Return', icon: 'undo-2', color: '#991b1b', bg: '#fee2e2' },
+      14: { label: 'AR Return', icon: 'undo-2', color: '#991b1b', bg: '#fee2e2' },
+      16: { label: 'AR Credit Note', icon: 'clipboard-list', color: '#374151', bg: '#f3f4f6' },
+    };
+    function tType(t) { return TRACE_TYPES[+t] || { label: 'Txn (' + t + ')', icon: 'clipboard-list', color: '#374151', bg: '#f3f4f6' } }
+
+    async function lTrace() { await traceLoadSGDropdown(); await traceLoadList() }
+    async function traceLoadSGDropdown() {
+      const sel = document.getElementById('traceSGSelect');
+      sel.innerHTML = '<option value="">All Sub-Groups</option>';
+      const sgs = await api(`/api/trace_subgroups?category=${encodeURIComponent(traceCategory || 'FINISHED')}`);
+      sgs.forEach(v => { const o = document.createElement('option'); o.value = v.SubGroup; o.textContent = `${v.SubGroup} (${N(v.SKUs)})`; sel.appendChild(o) });
+      if (traceSG) sel.value = traceSG;
+    }
+    async function traceCatChanged(cat, btn) {
+      traceCategory = cat; traceSG = null;
+      document.querySelectorAll('#traceCatF .pl').forEach(p => p.classList.remove('on')); btn.classList.add('on');
+      await traceLoadSGDropdown(); await traceLoadList();
+    }
+    async function traceSGChanged() { traceSG = document.getElementById('traceSGSelect').value || null; await traceLoadList() }
+    async function traceLoadList() {
+      const sg = traceSG ? `&subgroup=${encodeURIComponent(traceSG)}` : '';
+      const items = await api(`/api/trace_items?category=${encodeURIComponent(traceCategory)}${sg}`);
+      traceAllItems = items; traceRenderList(items);
+    }
+    function traceRenderList(items) {
+      const el = document.getElementById('traceList');
+      document.getElementById('traceListCount').textContent = items.length + ' items';
+      if (!items.length) { el.innerHTML = '<div class="em">No items</div>'; return }
+      el.innerHTML = items.map(r => `
+   <div class="pt-list-item" onclick="tracePickItem('${r.ItemCode}','${r.ItemName.replace(/'/g, "\\'").replace(/"/g, '&quot;')}',this)">
+    <div class="item-code" style="font-size:12px;font-weight:800;color:var(--ac)">${r.ItemCode}</div>
+    <div style="font-size:12px;font-weight:600;color:var(--tx);margin-top:2px;line-height:1.3">${r.ItemName}</div>
+    <div style="display:flex;gap:6px;margin-top:3px;flex-wrap:wrap">
+     ${+r.OnHand > 0 ? `<span style="font-size:11px;color:#059669;font-weight:700"><i class="ic ic-package"></i> ${N(r.OnHand)}</span>` : `<span style="font-size:11px;color:#dc2626;font-weight:700"><i class="ic ic-triangle-alert"></i> Zero</span>`}
+     ${r.SubGroup && r.SubGroup !== '–' ? `<span style="font-size:11px;color:var(--mt)">${r.SubGroup}</span>` : ''}
+     ${r.ItemType && r.ItemType !== '–' ? typBadge(r.ItemType) : ''}
+    </div>
+   </div>`).join('');
+      // if traceCode is set (from redirect), auto-select
+      if (traceCode) {
+        const el2 = document.querySelector(`#traceList .pt-list-item`);
+        const match = Array.from(document.querySelectorAll('#traceList .pt-list-item')).find(e => e.querySelector('.item-code')?.textContent === traceCode);
+        if (match) { match.classList.add('active'); match.scrollIntoView({ behavior: 'smooth', block: 'center' }); traceLoadDetail(); }
+      }
+    }
+    function traceFilterList() { const q = document.getElementById('traceBrowse').value.toLowerCase(); traceRenderList(q ? traceAllItems.filter(r => r.ItemCode.toLowerCase().includes(q) || r.ItemName.toLowerCase().includes(q)) : traceAllItems) }
+    function tracePickItem(code, name, el) {
+      traceCode = code; traceName = name; traceTypeFilter = []; traceMonth = '';
+      document.querySelectorAll('#traceList .pt-list-item').forEach(x => x.classList.remove('active'));
+      if (el) el.classList.add('active');
+      traceLoadDetail();
+    }
+
+    async function traceLoadDetail() {
+      const code = traceCode; if (!code) return;
+      document.getElementById('traceRight').innerHTML = '<div class="ld">Loading trace...</div>';
+      const isFG = traceCategory === 'FINISHED';
+      let logUrl = `/api/trace_log?item=${encodeURIComponent(code)}`;
+      if (traceMonth) logUrl += `&month=${traceMonth}`;
+      else if (traceDays > 0) logUrl += `&days=${traceDays}`;
+      const [hdr, log, returns, disasm] = await Promise.all([
+        api(`/api/trace_header?item=${encodeURIComponent(code)}`),
+        api(logUrl),
+        isFG ? api(`/api/trace_returns?item=${encodeURIComponent(code)}` + (traceMonth ? `&month=${traceMonth}` : traceDays > 0 ? `&days=${traceDays}` : '')) : Promise.resolve([]),
+        isFG ? api(`/api/trace_disassembly?item=${encodeURIComponent(code)}&days=${traceDays}` + (traceMonth ? `&month=${traceMonth}` : '')) : Promise.resolve([])
+      ]);
+      const h = hdr[0] || {};
+      const totalIn = log.reduce((s, r) => s + (+r.InQty || 0), 0);
+      const totalOut = log.reduce((s, r) => s + (+r.OutQty || 0), 0);
+      const totalRet = returns.reduce((s, r) => s + (+r.ReturnQty || 0), 0);
+      const uniqueTypes = [...new Set(log.map(r => r.TransType))];
+
+      // Build month options (last 24 months)
+      const monthOpts = buildMonthOptions();
+
+      document.getElementById('traceRight').innerHTML = `
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--bd);padding:16px 20px;margin-bottom:12px">
+   <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">
+    <div style="flex:1;min-width:180px">
+     <div style="font-size:12px;font-weight:800;color:var(--ac);margin-bottom:2px">${h.ItemCode || code}</div>
+     <div style="font-size:16px;font-weight:800;letter-spacing:-.3px;margin-bottom:7px">${h.ItemName || traceName}</div>
+     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span class="bd b-i">${h.Category || traceCategory}</span>
+      ${h.SubGroup ? `<span class="bd b-w">${h.SubGroup}</span>` : ''}
+      ${h.ItemType && h.ItemType !== '–' ? typBadge(h.ItemType) : ''}
+      <span style="font-size:11px;font-weight:700;color:var(--mt)"><i class="ic ic-calendar-days"></i> Created: <b style="color:var(--tx)">${h.CreateDate || '–'}</b></span>
+     </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+     <div style="background:#d1fae5;color:#065f46;border-radius:9px;padding:10px 16px;text-align:center;min-width:80px"><div style="font-size:18px;font-weight:800">${N(h.TotalOnHand)}</div><div style="font-size:9px;font-weight:800;text-transform:uppercase;margin-top:2px;opacity:.7">On Hand</div></div>
+     ${isFG ? `<div style="background:#fee2e2;color:#991b1b;border-radius:9px;padding:10px 16px;text-align:center;min-width:80px"><div style="font-size:18px;font-weight:800">${N(Math.round(totalRet))}</div><div style="font-size:9px;font-weight:800;text-transform:uppercase;margin-top:2px;opacity:.7">Returned</div></div>` : ''}
+     ${isFG ? `<div style="background:#ede9fe;color:#4c1d95;border-radius:9px;padding:10px 16px;text-align:center;min-width:80px"><div style="font-size:18px;font-weight:800">${disasm.length}</div><div style="font-size:9px;font-weight:800;text-transform:uppercase;margin-top:2px;opacity:.7">Disassembled</div></div>` : ''}
+     <div style="background:#dbeafe;color:#1e40af;border-radius:9px;padding:10px 16px;text-align:center;min-width:80px"><div style="font-size:18px;font-weight:800">${FV(h.StockValue)}</div><div style="font-size:9px;font-weight:800;text-transform:uppercase;margin-top:2px;opacity:.7">Value</div></div>
+    </div>
+   </div>
+  </div>
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--bd);padding:12px 20px;margin-bottom:12px">
+   <div style="font-size:10px;font-weight:800;color:var(--mt);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">Summary — ${log.length} transactions shown</div>
+   <div style="display:flex;gap:20px;flex-wrap:wrap">
+    <div><span style="font-size:12px;color:var(--mt);font-weight:600">Total In: </span><span style="font-size:15px;font-weight:800;color:#059669">+${N(Math.round(totalIn))}</span></div>
+    <div><span style="font-size:12px;color:var(--mt);font-weight:600">Total Out: </span><span style="font-size:15px;font-weight:800;color:#dc2626">-${N(Math.round(totalOut))}</span></div>
+    <div><span style="font-size:12px;color:var(--mt);font-weight:600">Net Balance: </span><span style="font-size:15px;font-weight:800;color:#4f46e5">${N(Math.round(totalIn - totalOut))}</span></div>
+   </div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+   <span style="font-size:12px;font-weight:700;color:var(--mt)">Period:</span>
+   <div class="pls" id="tracePeriodPls">
+    <button class="pl ${!traceMonth && traceDays === 0 ? 'on' : ''}" onclick="traceSetDays(0,null)">All Time</button>
+    <button class="pl ${!traceMonth && traceDays === 7 ? 'on' : ''}" onclick="traceSetDays(7,null)">7d</button>
+    <button class="pl ${!traceMonth && traceDays === 30 ? 'on' : ''}" onclick="traceSetDays(30,null)">30d</button>
+    <button class="pl ${!traceMonth && traceDays === 90 ? 'on' : ''}" onclick="traceSetDays(90,null)">90d</button>
+    <button class="pl ${!traceMonth && traceDays === 180 ? 'on' : ''}" onclick="traceSetDays(180,null)">180d</button>
+   </div>
+   <span style="font-size:12px;font-weight:700;color:var(--mt)">Month:</span>
+   <select id="traceMonthSel" class="filter-sel" onchange="traceSetMonth(this.value)" style="padding:4px 10px;border-radius:10px;font-size:12px">
+    <option value="">Select Month</option>
+    ${monthOpts}
+   </select>
+  </div>
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+   <span style="font-size:12px;font-weight:700;color:var(--mt)">Type:</span>
+   <div class="pls" id="traceTypePls" data-dd="toggle">
+   <button class="pl on" id="ttAll" onclick="traceSetAllTypes()">All</button>
+   ${uniqueTypes.map(t => { const tp = tType(t); return `<button class="pl" onclick="traceToggleType(${t},this)"><i class="ic ic-${tp.icon}"></i> ${tp.label}</button>` }).join('')}
+   </div>
+  </div>
+  <div class="tabs">
+   <div class="tab on" onclick="traceTab('log',this)"><i class="ic ic-clipboard-list"></i> Transaction Log (${log.length})</div>
+   ${isFG ? `<div class="tab" onclick="traceTab('returns',this)"><i class="ic ic-undo-2"></i> Returns (${returns.length})</div>` : ''}
+   ${isFG ? `<div class="tab" onclick="traceTab('disasm',this)"><i class="ic ic-wrench"></i> Disassembly (${disasm.length})</div>` : ''}
+  </div>
+  <div class="tab-pane on" id="trace-tab-log">
+   <div class="tc">
+    <div class="tb"><h3>Transaction Log</h3><input class="sr" id="traceLogS" placeholder="Search..." oninput="_idbDeb(traceFilterLog)"><span class="cnt" id="traceLogC">${log.length} rows</span></div>
+    <div class="ts" id="traceLogT">${traceBuildTable(log)}</div>
+   </div>
+  </div>
+  ${isFG ? `
+  <div class="tab-pane" id="trace-tab-returns">
+   <div class="tc"><div class="tb"><h3><i class="ic ic-undo-2"></i> Returns After Sale</h3><span class="cnt">${returns.length} returns · ${N(Math.round(totalRet))} units</span></div>
+   <div class="ts">${returns.length ?
+            `<table><thead><tr><th>Date</th><th>Type</th><th>Customer</th><th>Warehouse</th><th class="R">Qty</th><th class="R">Value</th><th>Memo</th></tr></thead><tbody>` +
+            returns.map(r => `<tr><td class="m">${r.DocDate || '–'}</td><td><span style="padding:2px 7px;border-radius:6px;font-size:10px;font-weight:800;background:#fee2e2;color:#991b1b">${r.ReturnType}</span></td><td>${r.CardName || '–'}</td><td class="m">${r.Warehouse || '–'}</td><td class="R m" style="color:#dc2626;font-weight:800">+${N(r.ReturnQty)}</td><td class="R m">${FV(r.TransValue)}</td><td style="font-size:12px;color:var(--tx2)">${r.JrnlMemo || '–'}</td></tr>`).join('') + '</tbody></table>' :
+            '<div class="em">No returns found</div>'}
+   </div></div>
+  </div>
+  <div class="tab-pane" id="trace-tab-disasm">
+   <div class="tc"><div class="tb"><h3><i class="ic ic-wrench"></i> Disassembly Orders</h3><span class="cnt">${disasm.length} orders</span></div>
+   <div class="ts">${disasm.length ?
+            `<table><thead><tr><th>WO#</th><th>Status</th><th>Start</th><th>Due</th><th>Close</th><th class="R">Planned</th><th class="R">Actual</th><th>Comments</th></tr></thead><tbody>` +
+            disasm.map(r => {
+              const st = r.Status === 'R' ? 'Released' : r.Status === 'L' ? 'Closed' : 'Planned'; const sc = r.Status === 'L' ? 'b-ok' : r.Status === 'R' ? 'b-i' : 'b-w';
+              return `<tr><td class="m">${r.DocNum}</td><td><span class="bd ${sc}">${st}</span></td><td class="m">${r.StartDate || '–'}</td><td class="m">${r.DueDate || '–'}</td><td class="m">${r.CloseDate || '–'}</td><td class="R m">${N(r.PlannedQty)}</td><td class="R m" style="color:#059669;font-weight:800">${N(r.ActualQty)}</td><td style="font-size:11px;color:var(--mt)">${r.Comments || '–'}</td></tr>`
+            }).join('') + '</tbody></table>' :
+            '<div class="em">No disassembly orders</div>'}
+   </div></div>
+  </div>`: ''}`;
+      window._traceLog = log;
+      // restore month select value
+      if (traceMonth) { const sel = document.getElementById('traceMonthSel'); if (sel) sel.value = traceMonth; }
+    }
+
+    function buildMonthOptions() {
+      const opts = []; const now = new Date();
+      for (let i = 0; i < 24; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const y = d.getFullYear(); const m = String(d.getMonth() + 1).padStart(2, '0');
+        const label = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const selected = traceMonth === `${y}-${m}` ? 'selected' : '';
+        opts.push(`<option value="${y}-${m}" ${selected}>${label}</option>`);
+      }
+      return opts.join('');
+    }
+    function traceSetMonth(val) {
+      traceMonth = val;
+      if (val) { traceDays = 0; document.querySelectorAll('#tracePeriodPls .pl').forEach(p => p.classList.remove('on')); }
+      traceLoadDetail();
+    }
+    function traceSetDays(d, _) { traceDays = d; traceMonth = ''; const sel = document.getElementById('traceMonthSel'); if (sel) sel.value = ''; traceLoadDetail() }
+
+    function traceBuildTable(rows) {
+      if (!rows.length) return '<div class="em">No transactions found</div>';
+      return `<table><thead><tr><th>Date</th><th>Type</th><th>Warehouse</th><th>Journal Memo</th><th>Party/Ref</th><th class="R" style="color:#059669">In Qty</th><th class="R" style="color:#dc2626">Out Qty</th><th class="R">Value</th><th>Comments</th></tr></thead>
+  <tbody>${rows.map(r => {
+        const tp = tType(r.TransType); const isIn = (+r.InQty || 0) > 0, isOut = (+r.OutQty || 0) > 0; const ref = [r.CardName, r.BaseRef].filter(Boolean).join(' · ') || '–';
+        return `<tr><td class="m" style="white-space:nowrap">${r.DocDate || '–'}</td>
+    <td><span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:6px;font-size:10px;font-weight:800;background:${tp.bg};color:${tp.color};white-space:nowrap"><i class="ic ic-${tp.icon}"></i> ${tp.label}</span></td>
+    <td style="min-width:140px"><div class="m">${r.Warehouse || '–'}</div><div style="font-size:11px;color:var(--mt)">${r.WhsName || ''}</div></td>
+    <td style="font-size:12px;color:var(--tx2);min-width:140px;max-width:200px">${r.JrnlMemo || '–'}</td>
+    <td style="font-size:11px;color:var(--mt);min-width:140px;max-width:200px">${ref}</td>
+    <td class="R m" style="color:${isIn ? '#059669' : 'var(--mt)'}">${isIn ? '+' + N(r.InQty) : '–'}</td>
+    <td class="R m" style="color:${isOut ? '#dc2626' : 'var(--mt)'}">${isOut ? '-' + N(r.OutQty) : '–'}</td>
+    <td class="R m">${r.TransValue ? FV(r.TransValue) : '–'}</td>
+    <td style="font-size:11px;color:var(--mt);min-width:140px;max-width:220px">${r.Comments || '–'}</td></tr>`
+      }).join('')}</tbody></table>`;
+    }
+    function traceTab(name, el) { document.querySelectorAll('.tab').forEach(t => t.classList.remove('on')); document.querySelectorAll('.tab-pane').forEach(t => t.classList.remove('on')); el.classList.add('on'); document.getElementById('trace-tab-' + name).classList.add('on') }
+    function traceSetAllTypes() { traceTypeFilter = []; document.querySelectorAll('#traceTypePls .pl').forEach(p => { if (p.id === 'ttAll') p.classList.add('on'); else p.classList.remove('on') }); applyTraceFilter() }
+    function traceToggleType(t, btn) {
+      document.getElementById('ttAll').classList.remove('on');
+      btn.classList.toggle('on');
+      const idx = traceTypeFilter.indexOf(+t);
+      if (idx >= 0) traceTypeFilter.splice(idx, 1); else traceTypeFilter.push(+t);
+      if (traceTypeFilter.length === 0) document.getElementById('ttAll').classList.add('on');
+      applyTraceFilter();
+    }
+    function applyTraceFilter() {
+      const log = window._traceLog || [];
+      const f = traceTypeFilter.length > 0 ? log.filter(r => traceTypeFilter.includes(+r.TransType)) : log;
+      document.getElementById('traceLogC').textContent = f.length + ' rows';
+      document.getElementById('traceLogT').innerHTML = traceBuildTable(f);
+    }
+    function traceFilterLog() {
+      const q = (document.getElementById('traceLogS').value || '').toLowerCase();
+      const log = window._traceLog || [];
+      const byType = traceTypeFilter.length > 0 ? log.filter(r => traceTypeFilter.includes(+r.TransType)) : log;
+      const rows = q ? byType.filter(r => Object.values(r).some(v => String(v || '').toLowerCase().includes(q))) : byType;
+      document.getElementById('traceLogC').textContent = rows.length + ' rows';
+      document.getElementById('traceLogT').innerHTML = traceBuildTable(rows);
+    }
+
+    // ════ PLANNING ════
+    async function lPlan() {
+
+      pg('plAlert', v => { plAlertF = v; rPlan() }); if(document.getElementById('plTF')) pg('plTF', v => { plType = v; lPlan(); });
+      if (document.getElementById('plSG').options.length <= 1) {
+        const sgs = await api('/api/trace_subgroups?category=FINISHED');
+        const sel = document.getElementById('plSG');
+        sgs.forEach(v => { const o = document.createElement('option'); o.value = v.SubGroup; o.textContent = v.SubGroup; sel.appendChild(o) });
+      }
+      const sg = document.getElementById('plSG').value;
+      const t = '';
+      const s = sg ? `subgroup=${encodeURIComponent(sg)}` : '';
+      plD = await api('/api/planning' + (s ? '?' + s.slice(1) : ''));
+      const critical = plD.filter(r => r.DaysOfStockLeft >= 0 && r.DaysOfStockLeft < 7);
+      const warning = plD.filter(r => r.DaysOfStockLeft >= 7 && r.DaysOfStockLeft < 30);
+      const ok = plD.filter(r => r.DaysOfStockLeft >= 30 || r.DaysOfStockLeft === -1);
+      const rising = plD.filter(r => r.Trend === 'RISING');
+      document.getElementById('planKPIs').innerHTML = `<div class="kg">
+   <div class="kc k3"><div class="kc-l">Critical (&lt;7d left)</div><div class="kc-v">${N(critical.length)}</div><div class="kc-s">Reorder immediately</div><div class="kc-bg"><i class="ic ic-siren"></i></div></div>
+   <div class="kc k4"><div class="kc-l">Warning (&lt;30d left)</div><div class="kc-v">${N(warning.length)}</div><div class="kc-s">Plan reorder soon</div><div class="kc-bg"><i class="ic ic-triangle-alert"></i></div></div>
+   <div class="kc k2"><div class="kc-l">Stock OK</div><div class="kc-v">${N(ok.length)}</div><div class="kc-s">≥30 days coverage</div><div class="kc-bg"><i class="ic ic-circle-check"></i></div></div>
+   <div class="kc k1"><div class="kc-l">Rising Demand</div><div class="kc-v">${N(rising.length)}</div><div class="kc-s">Trending upward</div><div class="kc-bg"><i class="ic ic-trending-up"></i></div></div>
+   <div class="kc k5"><div class="kc-l">Total SKUs</div><div class="kc-v">${N(plD.length)}</div><div class="kc-s">In plan view</div><div class="kc-bg"><i class="ic ic-package"></i></div></div>
+  </div>`;
+      rPlan();
+    }
+    function rPlan() {
+      const q = (document.getElementById('plS').value || '').toLowerCase();
+      let d = plD;
+      if (plAlertF === 'critical') d = d.filter(r => r.DaysOfStockLeft >= 0 && r.DaysOfStockLeft < 7);
+      else if (plAlertF === 'warning') d = d.filter(r => r.DaysOfStockLeft >= 7 && r.DaysOfStockLeft < 30);
+      else if (plAlertF === 'ok') d = d.filter(r => r.DaysOfStockLeft >= 30 || r.DaysOfStockLeft === -1);
+      if (q) d = d.filter(r => String(r.ItemCode || '').toLowerCase().includes(q) || String(r.ItemName || '').toLowerCase().includes(q) || String(r.SubGroup || '').toLowerCase().includes(q));
+      document.getElementById('plC').textContent = d.length + ' items';
+      if (!d.length) { document.getElementById('plT').innerHTML = '<div class="em">No items found</div>'; return }
+      document.getElementById('plT').innerHTML = `<table><thead><tr>
+   <th class="c-alert">Alert</th><th>Type</th><th>Item Code</th><th>Item Name</th><th>Sub-Group</th>
+   <th class="R">On Hand</th><th class="R">Avg Daily Out</th><th class="R">Days Left</th>
+   <th class="R">Suggested Order</th><th>Trend</th><th class="R">Stock Value</th>
+  </tr></thead><tbody>`+
+        d.map(r => {
+          const dsl = r.DaysOfStockLeft;
+          let alertBadge = '';
+          if (dsl >= 0 && dsl < 7) alertBadge = '<span class="alert-red"><i class="ic ic-circle-alert"></i> Critical</span>';
+          else if (dsl >= 7 && dsl < 30) alertBadge = '<span class="alert-amber"><i class="ic ic-circle-alert"></i> Warning</span>';
+          else alertBadge = '<span class="alert-green"><i class="ic ic-circle-check"></i> OK</span>';
+          const dslDisplay = dsl === -1 ? '<span style="color:var(--mt)">∞</span>' : `<span style="color:${dsl < 7 ? '#dc2626' : dsl < 30 ? '#d97706' : '#059669'};font-weight:800">${N(dsl)}d</span>`;
+          return `<tr>
+     <td class="c-alert">${alertBadge}</td><td>${typBadge(r.ItemType)}</td>
+     <td class="m">${r.ItemCode || ''}</td><td class="nm">${r.ItemName || ''}</td>
+     <td class="sg" style="font-size:12px;color:var(--mt)">${r.SubGroup || '–'}</td>
+     <td class="R m">${N(r.TotalOnHand)}</td>
+     <td class="R m">${r.AvgDailyOut != null ? (+r.AvgDailyOut).toFixed(1) : '–'}</td>
+     <td class="R">${dslDisplay}</td>
+     <td class="R m" style="color:#0ea5e9;font-weight:800">${r.SuggestedOrder > 0 ? N(r.SuggestedOrder) : '–'}</td>
+     <td>${trendBadge(r.Trend)}</td><td class="R m">${FV(r.StockValue)}</td>
+    </tr>`;
+        }).join('') + '</tbody></table>';
+    }
+
+    // ── DATE HELPERS ──
+    function moApplyDate() {
+      moDateFrom = document.getElementById('moDateFrom').value;
+      moDateTo = document.getElementById('moDateTo').value;
+      if (moDateFrom && moDateTo) { moItemCache = {}; lMOSGs(); }
+    }
+    function moClearDate() {
+      moDateFrom = ''; moDateTo = '';
+      document.getElementById('moDateFrom').value = ''; document.getElementById('moDateTo').value = '';
+      moItemCache = {}; lMOSGs();
+    }
+    function mvApplyDaysInput() {
+      const n = parseInt(document.getElementById('mvDaysInput').value);
+      if (!n || n < 1) return;
+      const to = new Date(); const from = new Date(); from.setDate(from.getDate() - n);
+      const fmt = d => d.toISOString().slice(0, 10);
+      document.getElementById('mvDateFrom').value = fmt(from);
+      document.getElementById('mvDateTo').value = fmt(to);
+      mvApplyDate();
+    }
+    function moApplyDaysInput() {
+      const n = parseInt(document.getElementById('moDaysInput').value);
+      if (!n || n < 1) return;
+      const to = new Date(); const from = new Date(); from.setDate(from.getDate() - n);
+      const fmt = d => d.toISOString().slice(0, 10);
+      document.getElementById('moDateFrom').value = fmt(from);
+      document.getElementById('moDateTo').value = fmt(to);
+      moApplyDate();
+    }
+    function biApplyDaysInput() {
+      const n = parseInt(document.getElementById('biDaysInput').value);
+      if (!n || n < 1) return;
+      const to = new Date(); const from = new Date(); from.setDate(from.getDate() - n);
+      const fmt = d => d.toISOString().slice(0, 10);
+      document.getElementById('biDateFrom').value = fmt(from);
+      document.getElementById('biDateTo').value = fmt(to);
+      biApplyCustomDate();
+    }
+
+    // ── AUTH ──
+    const ADMIN_USER = 'admin', ADMIN_PASS = 'jivoadmin';
+    const body = document.getElementById('inventoryDashboard');
+    function initAuth() {
+      if (sessionStorage.getItem('adminAuth') === 'true') {
+        body.classList.remove('locked');
+        const btn = document.getElementById('lockBtn');
+        if (btn) { btn.innerHTML = '<i class="ic ic-lock-open"></i>'; btn.title = 'Logged in as admin · Click to lock'; }
+      } else {
+        body.classList.add('locked');
+      }
+    }
+    function showLoginModal() {
+      if (!body.classList.contains('locked')) return;
+      document.getElementById('loginModal').style.display = 'flex';
+      setTimeout(() => document.getElementById('loginUser').focus(), 50);
+    }
+    function closeLoginModal() {
+      document.getElementById('loginModal').style.display = 'none';
+      document.getElementById('loginErr').style.display = 'none';
+      document.getElementById('loginUser').value = '';
+      document.getElementById('loginPass').value = '';
+    }
+    function doLogin() {
+      const u = document.getElementById('loginUser').value.trim();
+      const p = document.getElementById('loginPass').value;
+      if (u === ADMIN_USER && p === ADMIN_PASS) {
+        sessionStorage.setItem('adminAuth', 'true');
+        body.classList.remove('locked');
+        const btn = document.getElementById('lockBtn');
+        if (btn) { btn.innerHTML = '<i class="ic ic-lock-open"></i>'; btn.title = 'Logged in as admin · Click to lock'; }
+        closeLoginModal();
+      } else {
+        document.getElementById('loginErr').style.display = 'block';
+      }
+    }
+    function toggleLock() {
+      if (body.classList.contains('locked')) { showLoginModal(); }
+      else {
+        sessionStorage.removeItem('adminAuth');
+        body.classList.add('locked');
+        const btn = document.getElementById('lockBtn');
+        if (btn) { btn.innerHTML = '<i class="ic ic-lock"></i>'; btn.title = 'Click to login'; }
+      }
+    }
+    body.classList.remove('locked');
+    showLockedMessage = function () {};
+    toggleLock = function () {
+      if (!window.inventoryUser.can_manage) return;
+      const locked = !body.classList.contains('locked');
+      body.classList.toggle('locked', locked);
+      const btn = document.getElementById('lockBtn');
+      if (btn) {
+        btn.innerHTML = '<i class="ic ic-' + (locked ? 'lock' : 'lock-open') + '"></i>';
+        btn.title = locked ? 'Values hidden - click to show' : 'Values visible - click to hide';
+      }
+    };
+    function applyPermissionLock() {
+      const btn = document.getElementById('lockBtn');
+      if (window.inventoryUser.can_manage) {
+        body.classList.remove('locked');
+        if (btn) {
+          btn.innerHTML = '<i class="ic ic-lock-open"></i>';
+          btn.title = 'Values visible - click to hide';
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+        }
+      } else {
+        body.classList.add('locked');
+        if (btn) {
+          btn.innerHTML = '<i class="ic ic-lock"></i>';
+          btn.title = 'View access: values are locked';
+          btn.disabled = true;
+          btn.style.opacity = '0.65';
+          btn.style.cursor = 'not-allowed';
+        }
+      }
+    }
+    switchDivision(DIVISION);
+    applyPermissionLock();
+    // ── LAYOUT ──
+    // Tablet widths: start with the panel as a slim rail so the content gets the
+    // room. The arrow opens it as usual.
+    if (window.innerWidth > 900 && window.innerWidth < 1180) toggleSide();
+    // Phone widths: the section nav is a scrolling pill row - keep the current
+    // section's pill in view when the section changes (also from goTo()).
+    (function () {
+      var nav = document.querySelector('.side-nav');
+      if (!nav || !window.MutationObserver) return;
+      new MutationObserver(function () {
+        if (window.innerWidth > 900) return;
+        var on = nav.querySelector('.ni.on'); if (!on) return;
+        var d = on.getBoundingClientRect().left - nav.getBoundingClientRect().left;
+        if (d < 0 || d + on.offsetWidth > nav.clientWidth) nav.scrollTo({ left: nav.scrollLeft + d - 16, behavior: 'smooth' });
+      }).observe(nav, { subtree: true, attributes: true, attributeFilter: ['class'] });
+    })();
+    // ── CHIP GROUPS AS DROPDOWNS (OMS) ──
+    // Each chip group (.pls) gets a <select> listing its chips; the chips stay,
+    // hidden, and picking an option clicks the chip, so every filter runs its
+    // own handler exactly as before. Groups the page re-renders (Item Trace) are
+    // picked up again by the observer. data-dd="toggle" (trace Type) is a
+    // multi-toggle row: the dropdown resets it to its first chip ("All") and
+    // then toggles the one picked.
+    (function () {
+      var root = document.getElementById('inventoryDashboard');
+      if (!root || !window.MutationObserver) return;
+      // Groups whose row already has its own "Period:" / "Type:" caption get no prefix.
+      var LABEL = { cpls: 'Category', mvD: 'Period', moP: 'Period', moStatus: 'Movement', biP: 'Period',
+        moTF: 'Type', biTF: 'Type', abTF: 'Type', plTF: 'Type', abF: 'Class', traceCatF: 'Item', plAlert: 'Alert' };
+      var esc = function (t) { return String(t).replace(/[&<>"]/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); };
+      function chips(g) { return [].filter.call(g.children, function (c) { return c.classList.contains('pl'); }); }
+      function sync(g) {
+        var list = chips(g); if (!list.length) return;
+        var dd = g.querySelector(':scope > .pls-dd'), sel;
+        if (!dd) {
+          dd = document.createElement('label'); dd.className = 'pls-dd';
+          dd.innerHTML = '<span>' + esc(LABEL[g.id] || '') + '</span><select></select>';
+          sel = dd.querySelector('select');
+          sel.setAttribute('aria-label', LABEL[g.id] || (g.previousElementSibling && g.previousElementSibling.textContent.replace(':', '').trim()) || 'Filter');
+          sel.addEventListener('change', function () {
+            var all = chips(g), pick = all[+sel.value]; if (!pick) return;
+            if (g.dataset.dd === 'toggle' && pick !== all[0]) { all[0].click(); pick.click(); }
+            else pick.click();
+          });
+          g.appendChild(dd); g.classList.add('has-dd');
+        }
+        sel = dd.querySelector('select');
+        var on = list.findIndex(function (c) { return c.classList.contains('on'); });
+        var html = (on < 0 ? '<option value="" hidden>Custom</option>' : '') + list.map(function (c, i) {
+          return '<option value="' + i + '">' + esc(c.textContent.replace(/\s+/g, ' ').trim()) + '</option>';
+        }).join('');
+        if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; }
+        sel.value = on < 0 ? '' : String(on);
+      }
+      var queued = false;
+      function run() { queued = false; root.querySelectorAll('.pls').forEach(sync); }
+      new MutationObserver(function () { if (!queued) { queued = true; requestAnimationFrame(run); } })
+        .observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+      run();
+    })();
+    // ── SUB-TABS THE USER HOLDS ──
+    // The server leaves out the nav items of sections the user does not hold;
+    // goTo() (also called by KPI cards and Trace links) refuses those, and the
+    // page opens on the first held section.
+    const INV_ALLOWED = {{ cp_inventory_tabs|safe }};
+    {
+      const goToAny = goTo;
+      goTo = function (s) { if (INV_ALLOWED.includes(s)) goToAny(s); };
+    }
+    // ── INIT ──
+    if (!INV_ALLOWED.includes(S) && INV_ALLOWED.length) goTo(INV_ALLOWED[0]);
+    else load();
+  </script>
+{% endblock %}

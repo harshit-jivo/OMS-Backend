@@ -1,0 +1,36 @@
+{% load static %}
+{% comment %}
+  The numeric face: Spline Sans Mono, applied to DIGITS ONLY.
+
+  `CPNum` is declared with a unicode-range covering 0-9 and the characters that
+  sit inside figures (. , - + % ₹ /), so a font stack that starts with CPNum
+  (`--rz-num` in base.html) draws the digits in the monospace and falls through
+  to the next font for every letter. Every digit is the same width, so columns
+  of figures line up.
+
+  Served from core/static/fonts, never a CDN: the panel must work with no
+  internet. Included in <head> by base.html, base_legacy.html, the login page
+  and the embedded person-targets view.
+
+  Recreated: this file was excluded by the `_*.html` rule in .gitignore and so
+  never reached the repository.
+{% endcomment %}
+<link rel="preload" href="{% static 'fonts/splinesansmono-latin.woff2' %}" as="font" type="font/woff2" crossorigin>
+<style>
+  @font-face {
+    font-family: 'CPNum';
+    font-style: normal;
+    font-weight: 300 700;
+    font-display: swap;
+    src: url("{% static 'fonts/splinesansmono-latin.woff2' %}") format('woff2');
+    unicode-range: U+0025, U+002B-002F, U+0030-0039;
+  }
+  @font-face {
+    font-family: 'CPNum';
+    font-style: normal;
+    font-weight: 300 700;
+    font-display: swap;
+    src: url("{% static 'fonts/splinesansmono-latin-ext.woff2' %}") format('woff2');
+    unicode-range: U+20B9;
+  }
+</style>

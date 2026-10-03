@@ -1,0 +1,902 @@
+{% extends base_template %}
+{% block title %}OIH vs Stock — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important}
+  .ois-wrap{max-width:1120px;margin:0 auto}
+  .ois-topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  .ois-h1{font-size:30px;font-weight:800;color:var(--rz-ink);margin:0;letter-spacing:-.5px}
+  .ois-drill{display:flex;align-items:center;gap:10px;padding-top:6px;flex-wrap:wrap}
+  .ois-drill-lbl{font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  /* Oil / Beverages company toggle — swaps the whole report between companies. */
+  .ois-cof{display:inline-flex;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff}
+  .ois-cf{border:0;border-left:1px solid #eef2f6;background:#fff;color:var(--rz-muted);font-family:inherit;font-size:12px;font-weight:800;padding:8px 14px;cursor:pointer}
+  .ois-cf:first-child{border-left:0}
+  .ois-cf:hover:not(.on){background:var(--rz-soft)}
+  .ois-cf.on{background:var(--rz-soft);color:var(--rz-indigo-deep);box-shadow:inset 0 0 0 1px var(--rz-soft-brd)}
+  /* Premium / Commodity filter — segmented control beside the Group-by driller. */
+  .ois-typef{display:inline-flex;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff}
+  .ois-tf{border:0;border-left:1px solid #eef2f6;background:#fff;color:var(--rz-muted);font-family:inherit;font-size:12px;font-weight:700;padding:8px 13px;cursor:pointer}
+  .ois-tf:first-child{border-left:0}
+  .ois-tf:hover:not(.on){background:var(--rz-soft)}
+  .ois-tf.on{background:var(--rz-soft);color:var(--rz-indigo-deep);box-shadow:inset 0 0 0 1px var(--rz-soft-brd)}
+  /* Export Excel button */
+  .ois-exp{display:inline-flex;align-items:center;gap:7px;background:#fff;border:1px solid #e2e8f0;color:var(--rz-indigo-deep);font-family:inherit;font-size:12px;font-weight:700;padding:8px 13px;border-radius:10px;cursor:pointer;box-shadow:0 1px 2px rgba(15,23,42,.05)}
+  .ois-exp:hover{background:var(--rz-soft);border-color:var(--rz-soft-brd)}
+  .ois-exp:disabled{opacity:.55;cursor:default}
+  .ois-exp .ic{font-size:16px}
+
+  /* Dynamic driller — same look as the Realise dashboard's Group-by control. */
+  .com-drill-box{position:relative}
+  .com-drill-btn{display:inline-flex;align-items:center;gap:10px;min-width:190px;justify-content:space-between;background:#fff;border:1px solid #e2e8f0;color:var(--rz-indigo-deep);font-weight:700;font-size:12px;padding:8px 10px;border-radius:10px;cursor:pointer;font-family:inherit;box-shadow:0 1px 2px rgba(15,23,42,.05)}
+  .com-drill-btn .com-caret{color:var(--rz-muted);font-size:10px}
+  .com-drill-panel{display:none;position:absolute;top:calc(100% + 6px);right:0;z-index:40;width:240px;background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:12px;box-shadow:var(--rz-shadow-lg)}
+  .com-drill-panel.open{display:block}
+  .com-dp-head{display:flex;justify-content:space-between;padding:9px 12px;border-bottom:1px solid #eef2f6}
+  .com-dp-head a{color:var(--rz-indigo-deep);font-size:12px;font-weight:700;cursor:pointer}
+  .com-dp-list{padding:4px 0}
+  .com-dp-item{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:13px}
+  .com-dp-item:hover{background:var(--rz-soft)}
+  .com-dp-item input{width:16px;height:16px;cursor:pointer}
+  .com-dp-item .com-dp-name{flex:1 1 auto;font-weight:600;color:var(--rz-body)}
+  .com-dp-foot{padding:9px 12px;border-top:1px solid #eef2f6}
+  .com-dp-foot button{width:100%;background:var(--rz-indigo-deep);color:#fff;border:none;border-radius:8px;padding:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit}
+  /* Item-first refine bar: Product (U_Sub_Group) + SKU (U_SKU) multi-select filters. */
+  .cd-refine{display:none;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;position:relative;z-index:60}
+  .cd-refine.show{display:flex}
+  .cd-refine .ir-cap{font-size:11px;font-weight:800;letter-spacing:.4px;color:var(--rz-muted);text-transform:uppercase}
+  .cd-refine .com-drill-btn{min-width:150px;padding:7px 10px}
+  .cd-refine .com-drill-panel{left:0;right:auto;width:220px;max-height:340px;overflow:auto;z-index:120}
+  /* Main Group / Person multi-select filters - same control as Compare Sales. */
+  .ois-fltr{display:inline-flex;align-items:center;gap:10px}
+  .ois-fltr .com-drill-panel{max-height:340px;overflow:auto}
+
+  /* KPI strip */
+  .ois-kpis{display:flex;gap:14px;margin:18px 0 16px;flex-wrap:wrap}
+  .ois-kpi{position:relative;overflow:hidden;flex:1;min-width:200px;background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:14px;padding:15px 20px;box-shadow:var(--rz-shadow);color:var(--rz-ink)}
+  .ois-kpi::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--kpi-acc,var(--rz-acc-indigo))}
+  .ois-kpi.oih{--kpi-acc:var(--rz-acc-amber)}
+  .ois-kpi.stock{--kpi-acc:var(--rz-acc-teal)}
+  .ois-kpi.req{--kpi-acc:var(--rz-acc-indigo)}
+  .ois-kpi-l{font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--rz-muted)}
+  .ois-kpi-v{font-size:28px;font-weight:800;color:var(--rz-ink);line-height:1.1;margin-top:4px;font-variant-numeric:tabular-nums;font-family:'CPNum',system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+
+  /* Tree table */
+  .ois-table-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow)}
+  .ois-table-wrap{overflow:auto;max-height:70vh}
+  table.ois-table{width:100%;border-collapse:collapse;font-size:13px}
+  table.ois-table thead th{position:sticky;top:0;z-index:2;background:var(--rz-head-bg);color:var(--rz-head-ink);text-align:left;font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:12px 16px;border-bottom:1px solid var(--rz-line)}
+  table.ois-table th.num,table.ois-table td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:'CPNum',system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+  table.ois-table tbody td{padding:10px 16px;border-bottom:1px solid #eef2f6;color:var(--rz-body);white-space:nowrap}
+  table.ois-table tbody tr:nth-child(even) td{background:#fafcff}
+  table.ois-table tbody tr:hover td{background:var(--rz-soft)}
+  table.ois-table tbody tr.ois-total td{background:var(--rz-total-bg);color:var(--rz-ink);font-weight:800;position:sticky;bottom:0;border-top:2px solid var(--rz-total-brd)}
+  .ois-empty{padding:36px;text-align:center;color:var(--rz-faint)}
+  .ois-tw{display:inline-block;width:13px;font-size:9px;color:var(--rz-muted);margin-right:8px;cursor:pointer;transition:transform .12s;vertical-align:middle}
+  .ois-tw.open{transform:rotate(90deg)}
+  .ois-tw-empty{display:inline-block;width:13px;margin-right:8px}
+  .ois-short{color:#dc2626;font-weight:700}    /* OIH > stock → must produce/procure */
+  .ois-surplus{color:#0d9488}                    /* stock covers OIH → surplus */
+  table.ois-table tbody tr.ois-total td.ois-short{color:var(--rz-neg)}
+  table.ois-table tbody tr.ois-total td.ois-surplus{color:var(--rz-pos)}
+  /* Clicking a product row opens the detail behind it. */
+  table.ois-table tbody tr.ois-clk{cursor:pointer}
+  table.ois-table tbody tr.ois-clk:hover td{background:var(--rz-soft)}
+
+  /* Row-detail popup: the open-order rows behind one product, broken by a 2nd dimension. */
+  .ois-modal{display:none;position:fixed;inset:0;z-index:900}
+  .ois-modal.open{display:block}
+  .ois-mbd{position:absolute;inset:0;background:rgba(15,23,42,.45)}
+  /* Fills the window but keeps a 50px gap on all four sides, so the page stays visible
+     around it and the backdrop is still clickable to close. */
+  .ois-mcard{position:absolute;inset:50px;display:flex;flex-direction:column;background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;box-shadow:var(--rz-shadow-lg);overflow:hidden}
+  .ois-mhead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 26px;border-bottom:1px solid #eef2f6}
+  .ois-mtitle{font-size:18px;font-weight:800;color:var(--rz-ink);letter-spacing:-.3px}
+  .ois-mx{border:0;background:transparent;color:var(--rz-muted);font-size:24px;line-height:1;cursor:pointer;padding:0 4px}
+  .ois-mx:hover{color:var(--rz-ink)}
+  .ois-mkpis{display:flex;gap:10px;flex-wrap:wrap;padding:14px 26px 0}
+  .ois-mkpi{flex:1;min-width:150px;background:var(--rz-soft);border:1px solid var(--rz-soft-brd);border-radius:12px;padding:10px 14px}
+  .ois-mkpi-l{font-size:10px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .ois-mkpi-v{font-size:20px;font-weight:800;color:var(--rz-ink);margin-top:2px;font-variant-numeric:tabular-nums;font-family:'CPNum',system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+  .ois-mtabs{display:flex;gap:7px;flex-wrap:wrap;padding:14px 26px 12px}
+  .ois-mtab{border:1px solid #e2e8f0;background:#fff;color:var(--rz-muted);font-family:inherit;font-size:12px;font-weight:700;padding:6px 11px;border-radius:9px;cursor:pointer}
+  .ois-mtab:hover:not(.on){background:var(--rz-soft)}
+  .ois-mtab.on{background:var(--rz-soft);color:var(--rz-indigo-deep);border-color:var(--rz-soft-brd)}
+  .ois-mbody{flex:1 1 auto;overflow:auto;border-top:1px solid #eef2f6}
+  /* Drill path: Product > Item > Customer ... click a crumb to step back up. */
+  .ois-mcrumbs{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:6px}
+  .ois-mcrumbs:empty{display:none}
+  .ois-crumb{font-size:12px;font-weight:700;color:var(--rz-indigo-deep);cursor:pointer;border-bottom:1px dashed var(--rz-soft-brd)}
+  .ois-crumb:hover{color:var(--rz-ink)}
+  .ois-crumb.on{color:var(--rz-muted);cursor:default;border-bottom:0}
+  .ois-crumb-sep{font-size:12px;color:var(--rz-faint)}
+  /* A popup row that can be opened one level deeper. */
+  table.ois-table tbody tr.ois-mclk{cursor:pointer}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ois-wrap">
+  <div class="ois-topbar">
+    <div>
+      <h1 class="ois-h1">OIH vs Stock</h1>
+    </div>
+    <div class="ois-drill">
+      <div class="ois-cof" id="oisCo">
+        <button type="button" class="ois-cf on" data-co="oil">Oil</button>
+        <button type="button" class="ois-cf" data-co="bev">Beverages</button>
+      </div>
+      <div class="ois-typef" id="oisTypeF">
+        <button type="button" class="ois-tf on" data-type="all">All</button>
+        <button type="button" class="ois-tf" data-type="premium">Premium</button>
+        <button type="button" class="ois-tf" data-type="commodity">Commodity</button>
+      </div>
+      <div class="ois-typef" id="oisUnitF">
+        <button type="button" class="ois-tf on" data-unit="ltr">LTR</button>
+        <button type="button" class="ois-tf" data-unit="pcs">PCS</button>
+      </div>
+      <!-- Group the table by product family or by the individual item. The first
+           button is labelled from the active company: U_Sub_Group for oil, Variety
+           for beverages. -->
+      <div class="ois-typef" id="oisViewF" title="Group the table by">
+        <button type="button" class="ois-tf on" data-view="group">Variety</button>
+        <button type="button" class="ois-tf" data-view="item">Item Name</button>
+      </div>
+      <div class="ois-fltr" id="oisMgWrap">
+        <span class="ois-drill-lbl">Main Group</span>
+        <div class="com-drill-box">
+          <button type="button" class="com-drill-btn" id="oisMgBtn" style="min-width:150px"><span id="oisMgLabel">All groups</span><span class="com-caret">&#9662;</span></button>
+          <div class="com-drill-panel" id="oisMgPanel">
+            <div class="com-dp-head"><a id="oisMgSelAll">Select All</a><a id="oisMgClrAll">Clear All</a></div>
+            <div class="com-dp-list" id="oisMgList"></div>
+            <div class="com-dp-foot"><button type="button" id="oisMgApply">Apply</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="ois-fltr" id="oisPsWrap">
+        <span class="ois-drill-lbl">Person</span>
+        <div class="com-drill-box">
+          <button type="button" class="com-drill-btn" id="oisPsBtn" style="min-width:150px"><span id="oisPsLabel">All persons</span><span class="com-caret">&#9662;</span></button>
+          <div class="com-drill-panel" id="oisPsPanel">
+            <div class="com-dp-head"><a id="oisPsSelAll">Select All</a><a id="oisPsClrAll">Clear All</a></div>
+            <div class="com-dp-list" id="oisPsList"></div>
+            <div class="com-dp-foot"><button type="button" id="oisPsApply">Apply</button></div>
+          </div>
+        </div>
+      </div>
+      <button type="button" class="ois-exp" id="oisExport"><i class="ic ic-download"></i>Export Excel</button>
+    </div>
+  </div>
+
+  <div class="ois-kpis">
+    <div class="ois-kpi oih"><div class="ois-kpi-l" id="oisKpiOihL">Total OIH (L)</div><div class="ois-kpi-v" id="oisKpiOih">&mdash;</div></div>
+    <div class="ois-kpi stock"><div class="ois-kpi-l" id="oisKpiStockL">Total Stock Avl (L)</div><div class="ois-kpi-v" id="oisKpiStock">&mdash;</div></div>
+    <div class="ois-kpi req"><div class="ois-kpi-l" id="oisKpiReqL">Total Required (L)</div><div class="ois-kpi-v" id="oisKpiReq">&mdash;</div></div>
+  </div>
+
+  <div class="cd-refine" id="oisRefine"></div>
+
+  <div class="ois-table-card">
+    <div class="ois-table-wrap">
+      <table class="ois-table">
+        <thead><tr><th id="oisColProduct">U_Sub_Group</th><th class="num" id="oisHOih">OIH (L)</th><th class="num" id="oisHStock">Stock Avl (L)</th><th class="num" id="oisHReq">Required (L)</th></tr></thead>
+        <tbody id="oisBody"><tr><td colspan="4" class="ois-empty">Loading&hellip;</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Row detail: what sits behind one product row (items, customers, SOs, ...). -->
+  <div class="ois-modal" id="oisModal">
+    <div class="ois-mbd" id="oisMbd"></div>
+    <div class="ois-mcard">
+      <div class="ois-mhead">
+        <div>
+          <div class="ois-mtitle" id="oisMTitle">&mdash;</div>
+          <div class="ois-mcrumbs" id="oisMCrumbs"></div>
+        </div>
+        <button type="button" class="ois-mx" id="oisMClose" title="Close">&times;</button>
+      </div>
+      <div class="ois-mkpis" id="oisMKpis"></div>
+      <div class="ois-mtabs" id="oisMTabs"></div>
+      <div class="ois-mbody">
+        <table class="ois-table"><thead id="oisMHead"></thead><tbody id="oisMBody"></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function(){
+  function csrf(){var m=document.querySelector('meta[name=csrf-token]');return m?m.content:'';}
+  // Only one toolbar dropdown (Main Group / Person / Warehouse / Group by) stays open at a time.
+  function closeToolbarPanels(){
+    Array.prototype.forEach.call(document.querySelectorAll('.ois-drill .com-drill-panel.open'),
+      function(p){p.classList.remove('open');});
+  }
+
+  // Move the mouse off a dropdown card and it shuts itself - no need to click away.
+  //
+  // Two details make it feel right instead of twitchy:
+  //   * a short delay, so brushing past the edge on the way to a checkbox does not
+  //     slam it shut; moving back inside cancels the pending close;
+  //   * it listens on the document rather than on each card, so the refine dropdowns
+  //     that are built later in JS get the same behaviour without extra wiring.
+  // Clicking outside still closes them as before - this only adds a second way out.
+  (function(){
+    var CLOSE_DELAY = 350, timer = null;
+    function cancelClose(){ if(timer){ clearTimeout(timer); timer = null; } }
+    function cardOf(el){ return (el && el.closest) ? el.closest('.com-drill-box') : null; }
+
+    document.addEventListener('mouseover', function(e){
+      if(cardOf(e.target)) cancelClose();          // pointer is back on a card
+    });
+    document.addEventListener('mouseout', function(e){
+      var card = cardOf(e.target);
+      if(!card) return;
+      // relatedTarget is where the pointer went. Still inside the same card (button ->
+      // panel -> checkbox) means it has not really left. null = it left the window.
+      if(e.relatedTarget && card.contains(e.relatedTarget)) return;
+      cancelClose();
+      timer = setTimeout(function(){
+        timer = null;
+        var panel = card.querySelector('.com-drill-panel.open');
+        if(panel) panel.classList.remove('open');
+      }, CLOSE_DELAY);
+    });
+  })();
+  function num(n){return (Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:0});}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  var EXPORT_URL = "{% url 'realise:api_export_xlsx' %}";
+  var OIL_URL = "{% url 'realise:api_oih_breakdown' %}";
+  var BEV_URL = "{% url 'realise:api_oih_breakdown_beverages' %}";
+
+  // Product dimensions own each item cleanly, so their Stock (warehouse on-hand per item)
+  // and 'Required = OIH − Stock' add up at every level. Customer is orthogonal — one item
+  // can sit under many customers — so a customer's Stock is the shared on-hand of the items
+  // that customer has on order (not reserved per customer) and customer rows won't sum back
+  // to a product parent; the order-independent TOTAL still counts each item once.
+  // Oil is litres + Premium/Commodity; Beverages is boxes + families (DRINKS/WATER/…) → variety.
+  // The dimension list, segment control and headline unit switch with the company.
+  var OIL_DIMS=[{key:'main_group',label:'Main Group'},{key:'sub_group',label:'U_Sub_Group'},{key:'packtype',label:'PackType'},{key:'item',label:'Item Name'},{key:'customer',label:'Customer'},{key:'sales_person',label:'Sales Person'},{key:'so_no',label:'SO No'}];
+  var BEV_DIMS=[{key:'variety',label:'Variety'},{key:'family',label:'Family'},{key:'item',label:'Item Name'},{key:'customer',label:'Customer'},{key:'state',label:'State'},{key:'sales_person',label:'Sales Person'},{key:'so_no',label:'SO No'}];
+  var OIL_TYPES=[{key:'all',label:'All'},{key:'premium',label:'Premium'},{key:'commodity',label:'Commodity'}];
+  function buildDimName(dims){var m={}; dims.forEach(function(d){m[d.key]=d.label;}); return m;}
+  // Keep only drill keys valid for the active DIMS; fall back to the company's default card.
+  function validOrder(ord){
+    var keys={}; DIMS.forEach(function(d){keys[d.key]=1;});
+    var o=(ord||[]).filter(function(k){return keys[k];});
+    return o.length?o:[(company==='bev'?'variety':'sub_group')];
+  }
+  function typeInList(k){ for(var i=0;i<TYPES.length;i++){if(TYPES[i].key===k)return true;} return false; }
+
+  var company='oil';          // 'oil' | 'bev'
+  var DIMS=OIL_DIMS.slice(), DIM_NAME=buildDimName(OIL_DIMS), TYPES=OIL_TYPES.slice();
+  var order=['sub_group'];   // what the table groups by right now
+  // 'group' = the company's product family (oil U_Sub_Group / beverages Variety);
+  // 'item'  = one row per item name. The View By buttons flip between the two, and
+  // the choice survives switching company or unit.
+  var viewBy='group';
+  function groupKey(){ return company==='bev' ? 'variety' : 'sub_group'; }
+  function viewKey(){ return viewBy==='item' ? 'item' : groupKey(); }
+  // Label the first button with whatever that company actually calls the family.
+  function renderViewBtns(){
+    var box=document.getElementById('oisViewF'); if(!box) return;
+    var btns=box.querySelectorAll('.ois-tf');
+    if(btns[0]) btns[0].textContent=DIM_NAME[groupKey()]||'Variety';
+    if(btns[1]) btns[1].textContent=DIM_NAME['item']||'Item Name';
+    Array.prototype.forEach.call(btns,function(b){
+      b.classList.toggle('on', b.getAttribute('data-view')===viewBy);
+    });
+  }
+  var rows=[], itemStock={}, itemStockPcs={}, whs=[], err=null, expanded={}, loaded=false;
+  var NODEREG=[];   // nodes of the last render, so a row click can find its source rows
+  var typeFilter='all';   // 'all' | (oil) 'premium'/'commodity' | (bev) a family key like 'DRINKS'
+  var unit='ltr';         // 'ltr' = headline unit (litres for oil, boxes for bev); 'pcs' = raw pieces
+  // Headline-unit label: litres for oil, boxes for beverages; PCS in either when pieces is picked.
+  function unitLbl(){ return unit==='pcs' ? 'PCS' : (company==='bev' ? 'Box' : 'L'); }
+
+  // OIH a row contributes in the active unit under the current segment filter. Oil rows carry
+  // premium/commodity (+_pcs); beverages rows carry a single boxes/pcs plus their family.
+  function segVal(r,seg){ return Number(unit==='pcs' ? r[seg+'_pcs'] : r[seg])||0; }
+  function rowOih(r){
+    if(company==='bev'){
+      if(typeFilter!=='all' && r.family!==typeFilter) return 0;
+      return Number(unit==='pcs' ? r.pcs : r.boxes)||0;
+    }
+    var p=segVal(r,'premium'),c=segVal(r,'commodity');
+    return typeFilter==='premium'?p:(typeFilter==='commodity'?c:p+c);
+  }
+  // Whether a row belongs to the current filter (so its item's stock is counted too).
+  function rowIn(r){
+    if(company==='bev') return typeFilter==='all' || r.family===typeFilter;
+    if(typeFilter==='premium')return segVal(r,'premium')>0;
+    if(typeFilter==='commodity')return segVal(r,'commodity')>0;
+    return true;
+  }
+
+  // Total on-hand stock for an item in the active unit, summed across every stock warehouse.
+  function itemStockTotal(name){var a=(unit==='pcs'?itemStockPcs:itemStock)[name]; if(!a)return 0; var t=0; for(var i=0;i<a.length;i++){t+=Number(a[i])||0;} return t;}
+
+  // Nest OIH rows by the chosen product order. OIH sums each row's filtered contribution
+  // (rowOih); Stock sums each UNIQUE item once (an item shows in many rows across
+  // customers/states), so it never multi-counts. Required = Stock − OIH.
+  function buildTree(subset,level){
+    if(level>=order.length)return [];
+    var dim=order[level],map={};
+    for(var i=0;i<subset.length;i++){var r=subset[i],v=r[dim]||'—';
+      var n=map[v]; if(!n){n=map[v]={name:v,dim:dim,oih:0,_rows:[],_items:{}};}
+      n.oih+=rowOih(r);
+      if(r.item)n._items[r.item]=1;
+      n._rows.push(r);
+    }
+    return Object.keys(map).map(function(k){var n=map[k];
+      var st=0; for(var it in n._items)st+=itemStockTotal(it);
+      n.stock=Math.round(st*100)/100; n.oih=Math.round(n.oih*100)/100; n.req=Math.round((n.stock-n.oih)*100)/100;
+      n.kids=buildTree(n._rows,level+1);
+      n.srcRows=n._rows;             // kept for the row-detail popup
+      delete n._rows; delete n._items; return n;
+    }).sort(sortNodes);
+  }
+  // Shortfalls (Required < 0) first, biggest shortfall on top; then surpluses, biggest on top.
+  function sortNodes(a,b){
+    var an=a.req<0, bn=b.req<0;
+    if(an!==bn)return an?-1:1;
+    var d=an?(a.req-b.req):(b.req-a.req);
+    return d||String(a.name).localeCompare(String(b.name));
+  }
+
+  // Required = Stock − OIH: negative = shortfall (red), positive = surplus (green).
+  function reqCell(v){var cls=v<0?'ois-short':(v>0?'ois-surplus':''); return '<td class="num '+cls+'">'+(v>0?'+':'')+num(v)+'</td>';}
+
+  function treeRows(nodes,level,prefix){
+    var html='';
+    for(var i=0;i<nodes.length;i++){var n=nodes[i];
+      var path=prefix+'>'+n.dim+':'+n.name, hasKids=n.kids&&n.kids.length>0, open=!!expanded[path];
+      var tw=hasKids?'<span class="ois-tw'+(open?' open':'')+'" data-oispath="'+esc(path)+'">&#9654;</span>':'<span class="ois-tw-empty"></span>';
+      var idx=NODEREG.push(n)-1;
+      html+='<tr class="ois-clk" data-oisnode="'+idx+'" title="Click to see what is behind this row">'
+        +'<td style="padding-left:'+(14+level*20)+'px">'+tw+esc(n.name)+'</td>'
+        +'<td class="num">'+num(n.oih)+'</td><td class="num">'+num(n.stock)+'</td>'+reqCell(n.req)+'</tr>';
+      if(hasKids&&open)html+=treeRows(n.kids,level+1,path);
+    }
+    return html;
+  }
+
+  /* ── Item-first refine filters ──────────────────────────────────────────────
+     Dormant: with the Group-by control removed the grouping never starts at the Item, so
+     nothing here renders. Kept intact for the day an Item-first grouping comes back.
+     When the FIRST drill dimension is the Item, expose two multi-select dropdowns —
+     Product (U_Sub_Group / Variety) and SKU (U_SKU pack size) — that narrow the rows
+     before the tree is built. Selections auto-clear when Item is no longer first.
+     opts: {mountId, itemKey, prodField, skuField, getRows, getOrder, onChange}. */
+  function makeItemRefine(opts){
+    var selProd={}, selSku={}, sig='', built=false;
+    function norm(v){return String(v==null?'':v).trim().toUpperCase()||'—';}
+    function fP(){return typeof opts.prodField==='function'?opts.prodField():opts.prodField;}
+    function fS(){return typeof opts.skuField==='function'?opts.skuField():opts.skuField;}
+    function firstIsItem(){var o=opts.getOrder()||[];return o.length>0 && o[0]===opts.itemKey;}
+    function distinct(field){var seen={},rs=opts.getRows()||[];for(var i=0;i<rs.length;i++)seen[norm(rs[i][field])]=1;return Object.keys(seen).sort();}
+    function filterRows(rs){
+      if(!firstIsItem())return rs;
+      var hp=Object.keys(selProd).length, hs=Object.keys(selSku).length;
+      if(!hp&&!hs)return rs;
+      var pf=fP(), sf=fS();
+      return (rs||[]).filter(function(r){return (!hp||selProd[norm(r[pf])])&&(!hs||selSku[norm(r[sf])]);});
+    }
+    function lbl(name,sel){var n=Object.keys(sel).length;return n?name+' ('+n+')':name;}
+    function syncChecks(list,sel){list.querySelectorAll('.com-dp-item').forEach(function(it){var v=it.querySelector('.com-dp-name').textContent;var on=!!sel[v];it.querySelector('input').checked=on;it.classList.toggle('checked',on);});}
+    function buildOne(name,field,sel){
+      var vals=distinct(field);
+      var box=document.createElement('div');box.className='com-drill-box';
+      var btn=document.createElement('button');btn.type='button';btn.className='com-drill-btn ir-btn';
+      btn.innerHTML='<span class="ir-lbl"></span><span class="com-caret">&#9662;</span>';
+      btn.querySelector('.ir-lbl').textContent=lbl(name,sel);
+      var panel=document.createElement('div');panel.className='com-drill-panel';
+      var head=document.createElement('div');head.className='com-dp-head';
+      var aAll=document.createElement('a');aAll.textContent='Select All';
+      var aClr=document.createElement('a');aClr.textContent='Clear All';
+      head.appendChild(aAll);head.appendChild(aClr);
+      var list=document.createElement('div');list.className='com-dp-list';
+      vals.forEach(function(v){
+        var it=document.createElement('label');it.className='com-dp-item'+(sel[v]?' checked':'');
+        it.innerHTML='<input type="checkbox" '+(sel[v]?'checked':'')+'><span class="com-dp-name">'+esc(v)+'</span>';
+        it.querySelector('input').addEventListener('change',function(){
+          if(this.checked)sel[v]=1;else delete sel[v];
+          it.classList.toggle('checked',this.checked);
+          btn.querySelector('.ir-lbl').textContent=lbl(name,sel);
+          opts.onChange&&opts.onChange();
+        });
+        list.appendChild(it);
+      });
+      aAll.addEventListener('click',function(e){e.stopPropagation();vals.forEach(function(v){sel[v]=1;});syncChecks(list,sel);btn.querySelector('.ir-lbl').textContent=lbl(name,sel);opts.onChange&&opts.onChange();});
+      aClr.addEventListener('click',function(e){e.stopPropagation();Object.keys(sel).forEach(function(k){delete sel[k];});syncChecks(list,sel);btn.querySelector('.ir-lbl').textContent=lbl(name,sel);opts.onChange&&opts.onChange();});
+      btn.addEventListener('click',function(e){e.stopPropagation();var open=panel.classList.contains('open');var wrap=document.getElementById(opts.mountId);if(wrap)wrap.querySelectorAll('.com-drill-panel').forEach(function(p){p.classList.remove('open');});if(!open){var r=btn.getBoundingClientRect();panel.style.position='fixed';panel.style.top=(r.bottom+6)+'px';panel.style.left=r.left+'px';panel.style.zIndex='4000';panel.classList.add('open');}});
+      panel.addEventListener('click',function(e){e.stopPropagation();});
+      panel.appendChild(head);panel.appendChild(list);
+      box.appendChild(btn);box.appendChild(panel);
+      return box;
+    }
+    function sync(){
+      var wrap=document.getElementById(opts.mountId);if(!wrap)return;
+      if(!firstIsItem()){if(built||wrap.classList.contains('show')){wrap.classList.remove('show');wrap.innerHTML='';selProd={};selSku={};built=false;sig='';}return;}
+      var newSig=(opts.getRows()||[]).length+'|'+distinct(fP()).join(',')+'|'+distinct(fS()).join(',');
+      wrap.classList.add('show');
+      if(built&&newSig===sig)return;
+      sig=newSig;built=true;wrap.innerHTML='';
+      var cap=document.createElement('span');cap.className='ir-cap';cap.textContent='Filter items ›';wrap.appendChild(cap);
+      wrap.appendChild(buildOne('Product',fP(),selProd));
+      wrap.appendChild(buildOne('SKU',fS(),selSku));
+    }
+    function reset(){selProd={};selSku={};built=false;sig='';var wrap=document.getElementById(opts.mountId);if(wrap){wrap.classList.remove('show');wrap.innerHTML='';}}
+    return {sync:sync, filterRows:filterRows, reset:reset};
+  }
+  document.addEventListener('click',function(){document.querySelectorAll('.cd-refine .com-drill-panel.open').forEach(function(p){p.classList.remove('open');});});
+  /* -- Main Group / Person filters - the same multi-select control as Compare Sales --
+     Values are read from the loaded rows. Every value ticked (or none) = no filtering.
+     A filter hides itself when the company's rows don't carry its field (Beverages rows
+     have no Main Group). Picks survive the 90s background refresh. */
+  function makeRowFilter(o){
+    var all=[], sel=[], selSet=null, chosen={};          // selSet null = "all" (no filter)
+    var wrap=document.getElementById(o.wrapId), btn=document.getElementById(o.btnId),
+        panel=document.getElementById(o.panelId), list=document.getElementById(o.listId),
+        lbl=document.getElementById(o.labelId);
+    function norm(r){var v=r[o.field]; return (v==null||v==='')?'—':String(v).trim().toUpperCase();}
+    // '—' is the bucket for rows the field is empty on; show what that means, not a dash.
+    function show(v){return v==='—'?(o.blankLabel||v):v;}
+    function hasField(){for(var i=0;i<rows.length;i++){if(rows[i][o.field]!==undefined)return true;} return false;}
+    function setSel(vals){
+      sel=vals.slice();
+      if(!sel.length||sel.length===all.length){selSet=null;}
+      else {selSet={}; sel.forEach(function(v){selSet[v]=1;});}
+    }
+    function renderLabel(){
+      lbl.textContent = selSet ? (sel.length===1?show(sel[0]):sel.length+' '+o.manyLabel) : o.allLabel;
+    }
+    function rebuild(){
+      if(!hasField()){wrap.style.display='none'; all=[]; setSel([]); renderLabel(); return;}
+      wrap.style.display='';
+      var keep=selSet, seen={}; all=[];
+      rows.forEach(function(r){var v=norm(r); if(!seen[v]){seen[v]=1; all.push(v);}});
+      all.sort();
+      setSel(keep ? all.filter(function(v){return keep[v];}) : all.slice());
+      renderLabel();
+    }
+    function renderList(){
+      list.innerHTML='';
+      all.forEach(function(v){
+        var on=!!chosen[v];
+        var item=document.createElement('label');
+        item.className='com-dp-item'+(on?' checked':'');
+        item.innerHTML='<input type="checkbox" '+(on?'checked':'')+'><span class="com-dp-name">'+esc(show(v))+'</span>';
+        item.querySelector('input').addEventListener('change',function(){
+          if(this.checked)chosen[v]=1; else delete chosen[v];
+          item.classList.toggle('checked',this.checked);
+        });
+        list.appendChild(item);
+      });
+    }
+    btn.addEventListener('click',function(e){
+      e.stopPropagation();
+      var was=panel.classList.contains('open');
+      chosen={}; (selSet?sel:all).forEach(function(v){chosen[v]=1;});
+      renderList(); closeToolbarPanels();
+      if(!was)panel.classList.add('open');
+    });
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.getElementById(o.allId).addEventListener('click',function(){chosen={}; all.forEach(function(v){chosen[v]=1;}); renderList();});
+    document.getElementById(o.clrId).addEventListener('click',function(){chosen={}; renderList();});
+    document.getElementById(o.applyId).addEventListener('click',function(){
+      setSel(all.filter(function(v){return chosen[v];}));
+      panel.classList.remove('open'); expanded={}; renderLabel(); render();
+    });
+    function reset(){setSel([]); renderLabel(); panel.classList.remove('open');}   // back to "all"
+    return {rebuild:rebuild, reset:reset, ok:function(r){return !selSet||!!selSet[norm(r)];}};
+  }
+  var mgFilter=makeRowFilter({wrapId:'oisMgWrap',btnId:'oisMgBtn',labelId:'oisMgLabel',panelId:'oisMgPanel',
+    listId:'oisMgList',allId:'oisMgSelAll',clrId:'oisMgClrAll',applyId:'oisMgApply',
+    field:'main_group',allLabel:'All groups',manyLabel:'group(s)',blankLabel:'No main group'});
+  var psFilter=makeRowFilter({wrapId:'oisPsWrap',btnId:'oisPsBtn',labelId:'oisPsLabel',panelId:'oisPsPanel',
+    listId:'oisPsList',allId:'oisPsSelAll',clrId:'oisPsClrAll',applyId:'oisPsApply',
+    field:'sales_person',allLabel:'All persons',manyLabel:'persons',
+    blankLabel:'No person mapped'});
+
+  // Rows feeding the tree, KPIs and export: Premium/Commodity segment + Main Group + Person.
+  function baseRows(){return rows.filter(function(r){return rowIn(r)&&mgFilter.ok(r)&&psFilter.ok(r);});}
+  function refineBase(){return baseRows();}   // rows the item-refine dropdowns list values from
+  var refine=makeItemRefine({mountId:'oisRefine',itemKey:'item',
+    prodField:function(){return company==='bev'?'variety':'sub_group';},skuField:'sku',
+    getRows:refineBase,getOrder:function(){return order;},onChange:render});
+
+  function render(){
+    var label=order.map(function(k){return DIM_NAME[k]||k;}).join(' › ')||'Dimension';
+    document.getElementById('oisColProduct').textContent=label;
+    // Unit labels (L / PCS) on the KPI strip and numeric column headers.
+    var u=unitLbl();
+    document.getElementById('oisKpiOihL').textContent='Total OIH ('+u+')';
+    document.getElementById('oisKpiStockL').textContent='Total Stock Avl ('+u+')';
+    document.getElementById('oisKpiReqL').textContent='Total Required ('+u+')';
+    document.getElementById('oisHOih').textContent='OIH ('+u+')';
+    document.getElementById('oisHStock').textContent='Stock Avl ('+u+')';
+    document.getElementById('oisHReq').textContent='Required ('+u+')';
+    var body=document.getElementById('oisBody');
+    // Order-independent totals, scoped to the current Premium/Commodity filter.
+    refine.sync();
+    var fr=refine.filterRows(baseRows());   // + Product/SKU narrowing when Item is first
+    var tOih=0; for(var i=0;i<fr.length;i++)tOih+=rowOih(fr[i]);
+    var allItems={}; for(var j=0;j<fr.length;j++){if(fr[j].item)allItems[fr[j].item]=1;}
+    var tStock=0; for(var it in allItems)tStock+=itemStockTotal(it);
+    tOih=Math.round(tOih*100)/100; tStock=Math.round(tStock*100)/100; var tReq=Math.round((tStock-tOih)*100)/100;
+    document.getElementById('oisKpiOih').textContent=num(tOih);
+    document.getElementById('oisKpiStock').textContent=num(tStock);
+    var kr=document.getElementById('oisKpiReq'); kr.textContent=(tReq>0?'+':'')+num(tReq);
+    kr.className='ois-kpi-v '+(tReq<0?'ois-short':(tReq>0?'ois-surplus':''));
+    if(err){body.innerHTML='<tr><td colspan="4" class="ois-empty">Could not load ('+esc(err)+').</td></tr>';return;}
+    if(!loaded){body.innerHTML='<tr><td colspan="4" class="ois-empty">Loading…</td></tr>';return;}
+    if(!order.length){body.innerHTML='<tr><td colspan="4" class="ois-empty">Select at least one dimension.</td></tr>';return;}
+    if(!rows.length){body.innerHTML='<tr><td colspan="4" class="ois-empty">No open orders.</td></tr>';return;}
+    if(!fr.length){body.innerHTML='<tr><td colspan="4" class="ois-empty">No '+typeFilter+' open orders.</td></tr>';return;}
+    NODEREG=[];
+    var html=treeRows(buildTree(fr,0),0,'');
+    html+='<tr class="ois-total"><td>TOTAL</td><td class="num">'+num(tOih)+'</td><td class="num">'+num(tStock)+'</td>'+reqCell(tReq)+'</tr>';
+    body.innerHTML=html;
+  }
+
+  // ── Export (current Group By + Premium/Commodity filter) ──
+  // Mirrors the on-screen tree: one row per node (full tree, all levels), the drill path
+  // spread across one column per dimension, then OIH / Stock / Required, then a TOTAL row.
+  function buildSheet(){
+    var dims=order.slice(), dimLabels=dims.map(function(k){return DIM_NAME[k]||k;});
+    var fr=refine.filterRows(baseRows()), tree=buildTree(fr,0), body=[];
+    (function walk(nodes,ancestors){
+      for(var i=0;i<nodes.length;i++){var n=nodes[i], path=ancestors.concat([n.name]);
+        var cells=dims.map(function(_,ci){return ci<path.length?path[ci]:'';});
+        body.push(cells.concat([Math.round(n.oih), Math.round(n.stock), Math.round(n.req)]));
+        if(n.kids&&n.kids.length)walk(n.kids,path);
+      }
+    })(tree,[]);
+    // order-independent totals, scoped to the active filter (matches the KPI strip)
+    var tOih=0; for(var i=0;i<fr.length;i++)tOih+=rowOih(fr[i]);
+    var allItems={}; for(var j=0;j<fr.length;j++){if(fr[j].item)allItems[fr[j].item]=1;}
+    var tStock=0; for(var it in allItems)tStock+=itemStockTotal(it);
+    var totals=dims.map(function(_,ci){return ci===0?'TOTAL':'';})
+      .concat([Math.round(tOih), Math.round(tStock), Math.round(tStock-tOih)]);
+    var u=unitLbl();
+    return {headers:dimLabels.concat(['OIH ('+u+')','Stock Avl ('+u+')','Required ('+u+')']), body:body, totals:totals};
+  }
+  function exportFilename(ext){ return 'OIH_vs_Stock'+(company==='bev'?'_Beverages':'')+(typeFilter!=='all'?'_'+typeFilter:'')+(unit==='pcs'?'_PCS':'')+'.'+ext; }
+  function exportCSV(S){
+    S=S||buildSheet();
+    function cell(v){v=String(v==null?'':v);return /[",\r\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v;}
+    var lines=[S.headers.map(cell).join(',')];
+    S.body.forEach(function(r){lines.push(r.map(cell).join(','));});
+    lines.push(S.totals.map(cell).join(','));
+    var blob=new Blob(['\uFEFF'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+    var url=URL.createObjectURL(blob); var a=document.createElement('a');
+    a.href=url; a.download=exportFilename('csv'); a.click();
+    setTimeout(function(){URL.revokeObjectURL(url);},1000);
+  }
+  function exportXLSX(){
+    if(!loaded || !rows.length) return;
+    var S=buildSheet();
+    function H(v){return {value:v, style:1};}   // bold header
+    function G(v){return {value:v, style:3};}   // total row
+    var out=[S.headers.map(H)].concat(S.body).concat([S.totals.map(G)]);
+    var fn=exportFilename('xlsx'), btn=document.getElementById('oisExport'); if(btn)btn.disabled=true;
+    fetch(EXPORT_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({filename:fn, sheets:[{name:'OIH vs Stock', rows:out}]})})
+      .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.blob(); })
+      .then(function(blob){
+        var url=URL.createObjectURL(blob); var a=document.createElement('a');
+        a.href=url; a.download=fn; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){URL.revokeObjectURL(url);},1500);
+      })
+      .catch(function(){ exportCSV(S); })       // fallback: CSV
+      .then(function(){ if(btn)btn.disabled=false; });
+  }
+  document.getElementById('oisExport').addEventListener('click', exportXLSX);
+
+  var CACHE_TTL=90000;   // ms; matches the 90s server cache
+  function cacheKey(){ return 'ois_breakdown_v3_'+company; }   // per-company session cache
+  function endpoint(){ return company==='bev' ? BEV_URL : OIL_URL; }
+
+  // Adopt a payload: rows/stock and — for beverages — the data-driven dims and segment types.
+  // Oil keeps its fixed dims/types (the payload's are ignored) so the oil view is unchanged.
+  function applyPayload(p){
+    company=(p.company==='bev')?'bev':'oil';
+    rows=p.rows||[]; itemStock=p.item_stock||{}; itemStockPcs=p.item_stock_pcs||{};
+    whs=p.warehouses||[];
+    if(company==='bev'){
+      if(p.dims&&p.dims.length){ DIMS=p.dims.slice(); DIM_NAME=buildDimName(DIMS); }
+      TYPES=(p.types&&p.types.length)?p.types.slice():[{key:'all',label:'All'}];
+    }else{
+      DIMS=OIL_DIMS.slice(); DIM_NAME=buildDimName(OIL_DIMS); TYPES=OIL_TYPES.slice();
+    }
+    order=validOrder(order);
+    if(!typeInList(typeFilter)) typeFilter='all';
+    err=p.error||null; loaded=true;
+    mgFilter.rebuild(); psFilter.rebuild();
+    renderTypes(); render();
+  }
+  function fetchFresh(){
+    var comp=company;   // guard against a slow response arriving after the user toggles company
+    fetch(endpoint(),{headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{};})
+      .then(function(p){
+        if(comp!==company) return;
+        applyPayload(p);
+        try{ if(p&&p.rows)sessionStorage.setItem(cacheKey(),JSON.stringify({t:Date.now(),p:p})); }catch(e){}
+      })
+      .catch(function(){ if(comp===company && !loaded){err='load failed'; loaded=true; render();} });
+  }
+  // Paint instantly from a recent pull (this browser session) so flipping companies/tabs feels
+  // immediate, then refresh in the background. Grouping and the Main Group / Person filters are
+  // applied client-side, so a cached payload is valid whatever the reader has picked.
+  function load(){
+    try{
+      var raw=sessionStorage.getItem(cacheKey());
+      if(raw){var c=JSON.parse(raw); if(c&&c.p&&(Date.now()-c.t)<CACHE_TTL)applyPayload(c.p);}
+    }catch(e){}
+    fetchFresh();
+  }
+
+  // Expand / collapse tree nodes.
+  document.getElementById('oisBody').addEventListener('click',function(e){
+    var t=e.target&&e.target.closest?e.target:null; if(!t)return;
+    var b=t.closest('.ois-tw');
+    if(b){var p=b.getAttribute('data-oispath'); expanded[p]=!expanded[p]; render(); return;}
+    var tr=t.closest('tr.ois-clk'); if(!tr)return;
+    var n=NODEREG[Number(tr.getAttribute('data-oisnode'))]; if(n)openDetail(n);
+  });
+
+  document.addEventListener('click',function(){closeToolbarPanels();});
+
+  // Segment filter — Premium/Commodity for oil, or the beverages families (data-driven).
+  var tf=document.getElementById('oisTypeF');
+  function renderTypes(){
+    tf.innerHTML=TYPES.map(function(t){
+      return '<button type="button" class="ois-tf'+(t.key===typeFilter?' on':'')+'" data-type="'+esc(t.key)+'">'+esc(t.label)+'</button>';
+    }).join('');
+  }
+  tf.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('.ois-tf'):null; if(!b)return;
+    typeFilter=b.getAttribute('data-type'); expanded={};
+    Array.prototype.forEach.call(tf.querySelectorAll('.ois-tf'),function(x){x.classList.toggle('on',x===b);});
+    render();
+  });
+
+  // Headline-unit / PCS toggle — flips OIH, Stock and Required between the headline unit
+  // (litres for oil, boxes for beverages) and raw pieces. The 'ltr' button relabels per company.
+  var uf=document.getElementById('oisUnitF');
+  function renderUnitBtns(){
+    var l=uf.querySelector('[data-unit="ltr"]'); if(l)l.textContent=(company==='bev'?'BOX':'LTR');
+  }
+  uf.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('.ois-tf'):null; if(!b)return;
+    unit=b.getAttribute('data-unit'); expanded={};
+    Array.prototype.forEach.call(uf.querySelectorAll('.ois-tf'),function(x){x.classList.toggle('on',x===b);});
+    render();
+  });
+
+  // Oil / Beverages company toggle — reset the view state for the new company, then fetch it.
+  function setCompany(c){
+    if(c===company) return;
+    company=c;
+    typeFilter='all'; unit='ltr'; expanded={}; loaded=false; err=null;
+    mgFilter.reset(); psFilter.reset();
+    rows=[]; itemStock={}; itemStockPcs={}; whs=[]; closeDetail();
+    if(company==='bev'){ DIMS=BEV_DIMS.slice(); TYPES=[{key:'all',label:'All'}]; }
+    else { DIMS=OIL_DIMS.slice(); TYPES=OIL_TYPES.slice(); }
+    DIM_NAME=buildDimName(DIMS);
+    order=[viewKey()];          // keep the user's View By choice across the company switch
+    Array.prototype.forEach.call(uf.querySelectorAll('.ois-tf'),function(x){x.classList.toggle('on',x.getAttribute('data-unit')==='ltr');});
+    renderTypes(); renderUnitBtns(); renderViewBtns(); render(); load();
+  }
+  // View By: regroup the whole table. Open rows are reset because the row paths
+  // change completely between the two groupings.
+  document.getElementById('oisViewF').addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('.ois-tf'):null; if(!b)return;
+    var v=b.getAttribute('data-view'); if(v===viewBy)return;
+    viewBy=v; order=[viewKey()]; expanded={}; closeDetail();
+    renderViewBtns(); render();
+  });
+  document.getElementById('oisCo').addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('.ois-cf'):null; if(!b)return;
+    var c=b.getAttribute('data-co'); if(c===company)return;
+    Array.prototype.forEach.call(this.querySelectorAll('.ois-cf'),function(x){x.classList.toggle('on',x===b);});
+    refine.reset();
+    setCompany(c);
+  });
+
+  /* -- Row detail popup ------------------------------------------------------
+     Clicking a product row opens the open-order rows behind it, broken by a second
+     dimension the reader picks (Item / PackType / SKU / Customer / Sales Person /
+     State / Main Group / SO No). Same math as the tree: OIH sums each row's filtered
+     contribution, Stock counts each item once, Required = Stock - OIH. On the Item
+     break, one extra column per stock warehouse shows where that stock sits. */
+  var OIL_BREAK=[{key:'item',label:'Item Name'},{key:'packtype',label:'PackType'},{key:'sku',label:'SKU'},
+                 {key:'customer',label:'Customer'},{key:'sales_person',label:'Sales Person'},
+                 {key:'state',label:'State'},{key:'main_group',label:'Main Group'},{key:'so_no',label:'SO No'}];
+  var BEV_BREAK=[{key:'item',label:'Item Name'},{key:'variety',label:'Variety'},{key:'family',label:'Family'},
+                 {key:'customer',label:'Customer'},{key:'sales_person',label:'Sales Person'},
+                 {key:'state',label:'State'},{key:'so_no',label:'SO No'}];
+  var BREAK_NAME={item:'Item Name',packtype:'PackType',sku:'SKU',customer:'Customer',
+                  sales_person:'Sales Person',state:'State',main_group:'Main Group',
+                  so_no:'SO No',variety:'Variety',family:'Family'};
+  var detail=null;   // {node, path:[{dim,value}], breaks:[{key,label}], breakKey}
+
+  // A row's value on one dimension, using the same blank placeholder as the tree.
+  function dimVal(r,dim){ var v=r[dim]; return (v==null||v==='')?'—':String(v); }
+  function dimTest(dim,val){ return function(r){ return dimVal(r,dim)===val; }; }
+
+  // The rows still in view after following the drill path (each step pins one dimension
+  // to one value - e.g. Item = FG0000030, so only that item's orders remain).
+  function detailRows(){
+    var rows=detail.node.srcRows||[];
+    for(var i=0;i<detail.path.length;i++){
+      rows=rows.filter(dimTest(detail.path[i].dim, detail.path[i].value));
+    }
+    return rows;
+  }
+
+  // Dimensions still worth breaking by: not already fixed (by the page's grouping or by a
+  // crumb above) and actually carried by these rows.
+  function availBreaks(rows){
+    var used={}; order.forEach(function(k){used[k]=1;});
+    detail.path.forEach(function(p){used[p.dim]=1;});
+    return (company==='bev'?BEV_BREAK:OIL_BREAK).filter(function(d){
+      if(used[d.key])return false;
+      for(var i=0;i<rows.length;i++){var v=rows[i][d.key]; if(v!==undefined&&v!==null&&v!=='')return true;}
+      return false;
+    });
+  }
+
+  // OIH / Stock / Required for any set of rows - the tree's rules: OIH adds each row's
+  // filtered contribution, Stock counts each item once (never per customer or per SO).
+  function subTotals(rows){
+    var oih=0, items={};
+    for(var i=0;i<rows.length;i++){ oih+=rowOih(rows[i]); if(rows[i].item)items[rows[i].item]=1; }
+    var st=0; for(var it in items)st+=itemStockTotal(it);
+    oih=Math.round(oih*100)/100; st=Math.round(st*100)/100;
+    return {oih:oih, stock:st, req:Math.round((st-oih)*100)/100};
+  }
+
+  // Aggregate rows by one dimension - the popup's table body.
+  function groupRows(list,dim){
+    var map={};
+    for(var i=0;i<list.length;i++){var r=list[i],v=dimVal(r,dim);
+      var n=map[v]; if(!n){n=map[v]={name:v,oih:0,_items:{}};}
+      n.oih+=rowOih(r); if(r.item)n._items[r.item]=1;
+    }
+    return Object.keys(map).map(function(k){var n=map[k];
+      var st=0; for(var it in n._items)st+=itemStockTotal(it);
+      n.stock=Math.round(st*100)/100; n.oih=Math.round(n.oih*100)/100;
+      n.req=Math.round((n.stock-n.oih)*100)/100; return n;
+    }).sort(sortNodes);
+  }
+
+  function openDetail(n){
+    var src=n.srcRows||[]; if(!src.length)return;
+    detail={node:n, path:[], breaks:[], breakKey:null};
+    var b=availBreaks(src);
+    if(!b.length){ detail=null; return; }
+    detail.breakKey=b[0].key;
+    document.getElementById('oisModal').classList.add('open');
+    document.body.style.overflow='hidden';       // full screen - freeze the page behind it
+    renderDetail();
+  }
+  function closeDetail(){
+    detail=null;
+    var m=document.getElementById('oisModal'); if(m)m.classList.remove('open');
+    document.body.style.overflow='';
+  }
+
+  // Clicking a popup row pins that value and opens the next level. Customer is preferred
+  // when it is still free, so clicking an item answers "which customers ordered THIS item"
+  // - only those customers, because the rows are filtered down to that item first.
+  function drillInto(value){
+    if(!detail||value==null)return;
+    var saved=detail.path;
+    detail.path=saved.concat([{dim:detail.breakKey, value:value}]);
+    var rows=detailRows(), b=availBreaks(rows);
+    if(!rows.length||!b.length){ detail.path=saved; return; }   // nothing deeper to show
+    var pick=b[0].key;
+    for(var i=0;i<b.length;i++){ if(b[i].key==='customer'){ pick='customer'; break; } }
+    detail.breakKey=pick;
+    renderDetail();
+  }
+  // Breadcrumb click: back to a shallower level, reopening the break that was shown there.
+  function goLevel(L){
+    if(!detail||L>=detail.path.length)return;
+    detail.breakKey=detail.path[L].dim;
+    detail.path=detail.path.slice(0,L);
+    renderDetail();
+  }
+
+  function renderDetail(){
+    if(!detail)return;
+    var u=unitLbl(), rows=detailRows(), t=subTotals(rows);
+    var breaks=availBreaks(rows);
+    if(!breaks.length) breaks=[{key:detail.breakKey, label:BREAK_NAME[detail.breakKey]||detail.breakKey}];
+    var valid=false;
+    for(var i=0;i<breaks.length;i++){ if(breaks[i].key===detail.breakKey){valid=true;break;} }
+    if(!valid) detail.breakKey=breaks[0].key;
+    detail.breaks=breaks;
+
+    document.getElementById('oisMTitle').textContent=detail.node.name;
+    // Breadcrumb: Product > Item > Customer ... click a crumb to step back up.
+    var cr=detail.path.length
+      ? '<span class="ois-crumb" data-mlevel="0">'+esc(detail.node.name)+'</span>' : '';
+    detail.path.forEach(function(p,idx){
+      cr+='<span class="ois-crumb-sep">&rsaquo;</span>'
+        + '<span class="ois-crumb'+(idx===detail.path.length-1?' on':'')+'" data-mlevel="'+(idx+1)+'">'
+        + esc(p.value)+'</span>';
+    });
+    document.getElementById('oisMCrumbs').innerHTML=cr;
+
+    function kpi(l,v,cls){return '<div class="ois-mkpi"><div class="ois-mkpi-l">'+esc(l)+'</div>'+
+      '<div class="ois-mkpi-v '+cls+'">'+esc(v)+'</div></div>';}
+    document.getElementById('oisMKpis').innerHTML=
+      kpi('OIH ('+u+')',num(t.oih),'')+
+      kpi('Stock Avl ('+u+')',num(t.stock),'')+
+      kpi('Required ('+u+')',(t.req>0?'+':'')+num(t.req),t.req<0?'ois-short':(t.req>0?'ois-surplus':''));
+    document.getElementById('oisMTabs').innerHTML=breaks.map(function(d){
+      return '<button type="button" class="ois-mtab'+(d.key===detail.breakKey?' on':'')+
+             '" data-mbreak="'+esc(d.key)+'">'+esc(d.label)+'</button>';
+    }).join('');
+
+    // Warehouse split only makes sense on item rows, and only when the godown list is short.
+    var showW=(detail.breakKey==='item' && whs.length>0 && whs.length<=6);
+    var stockMap=(unit==='pcs'?itemStockPcs:itemStock);
+    document.getElementById('oisMHead').innerHTML=
+      '<tr><th>'+esc(BREAK_NAME[detail.breakKey]||detail.breakKey)+'</th>'
+      +'<th class="num">OIH ('+u+')</th>'
+      +(showW?whs.map(function(w){return '<th class="num">'+esc(w)+'</th>';}).join(''):'')
+      +'<th class="num">Stock Avl ('+u+')</th><th class="num">Required ('+u+')</th></tr>';
+    var span=4+(showW?whs.length:0);
+    var list=groupRows(rows,detail.breakKey);
+    var canDrill=breaks.length>1;      // something is still free to open underneath
+    function label(v){
+      if(v!=='—')return v;
+      if(detail.breakKey==='sales_person')return 'No person mapped';
+      if(detail.breakKey==='main_group')return 'No main group';
+      return v;
+    }
+    var body=list.map(function(g){
+      var w=''; if(showW){var a=stockMap[g.name]||[];
+        w=whs.map(function(_,i){return '<td class="num">'+num(a[i]||0)+'</td>';}).join('');}
+      var open=canDrill?' class="ois-mclk" data-mval="'+esc(g.name)+'" title="Click to open this row"':'';
+      return '<tr'+open+'><td>'+esc(label(g.name))+'</td><td class="num">'+num(g.oih)+'</td>'+w
+        +'<td class="num">'+num(g.stock)+'</td>'+reqCell(g.req)+'</tr>';
+    }).join('');
+    if(!body)body='<tr><td colspan="'+span+'" class="ois-empty">Nothing to show.</td></tr>';
+    // Level totals, not the column sum: Stock counts each item once, so per-row stock
+    // (shared across customers/SOs) does not add up on customer-style breaks.
+    var wt=showW?whs.map(function(){return '<td class="num"></td>';}).join(''):'';
+    body+='<tr class="ois-total"><td>TOTAL</td><td class="num">'+num(t.oih)+'</td>'+wt
+      +'<td class="num">'+num(t.stock)+'</td>'+reqCell(t.req)+'</tr>';
+    document.getElementById('oisMBody').innerHTML=body;
+  }
+
+  document.getElementById('oisMTabs').addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('.ois-mtab'):null; if(!b||!detail)return;
+    detail.breakKey=b.getAttribute('data-mbreak'); renderDetail();
+  });
+  document.getElementById('oisMBody').addEventListener('click',function(e){
+    var tr=e.target&&e.target.closest?e.target.closest('tr.ois-mclk'):null; if(!tr)return;
+    drillInto(tr.getAttribute('data-mval'));
+  });
+  document.getElementById('oisMCrumbs').addEventListener('click',function(e){
+    var c=e.target&&e.target.closest?e.target.closest('.ois-crumb'):null; if(!c)return;
+    goLevel(Number(c.getAttribute('data-mlevel'))||0);
+  });
+  document.getElementById('oisMClose').addEventListener('click',closeDetail);
+  document.getElementById('oisMbd').addEventListener('click',closeDetail);
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')closeDetail();});
+
+  renderTypes(); renderUnitBtns(); renderViewBtns(); render(); load();
+})();
+</script>
+{% endblock %}

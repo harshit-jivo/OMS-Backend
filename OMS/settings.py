@@ -174,6 +174,17 @@ INSTALLED_APPS = [
     # employee advance accounts). It gains a model when it has an OMS fact of
     # its own to store — the request, who approved it, what it produced.
     'advance_payment',
+    # Control Panel — production C_Panel's pages, part of OMS: `control_panel`
+    # holds the OMS permission keys and the sign-in ticket endpoint; `cpanel.*`
+    # is C_Panel's code itself (pages, scripts, SAP reads), moved in from its
+    # production branch. See cpanel/urls.py and cpanel/core/oms_access.py.
+    'control_panel',
+    'cpanel.core',
+    'cpanel.home',
+    'cpanel.realise',
+    'cpanel.sales',
+    'cpanel.inventory',
+    'cpanel.dashboard',
 ]
 
 MIDDLEWARE = [
@@ -193,6 +204,11 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # After XFrameOptions on purpose: lets the OMS app frame the Control Panel
+    # pages (and only those). See cpanel/core/framing.py.
+    'cpanel.core.framing.ControlPanelFramingMiddleware',
+    # Per-page OMS keys for the Control Panel pages (needs request.user).
+    'cpanel.core.page_guard.ControlPanelPageGuard',
     'audit.middleware.AuditMiddleware',
     # Mobile Version Policy: blocks out-of-date ANDROID/IOS clients with HTTP
     # 426. Placed AFTER CorsMiddleware so it never interferes with the browser
@@ -213,6 +229,8 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                # Control Panel pages only (no-op elsewhere): cpanel/core/context.py.
+                'cpanel.core.context.cpanel_context',
             ],
         },
     },
@@ -411,6 +429,20 @@ EXTERNAL_SSL_VERIFY = _parse_bool(config('EXTERNAL_SSL_VERIFY', default='true'),
                                   default=True)
 HANA_CONNECT_TIMEOUT = config('HANA_CONNECT_TIMEOUT', default=15, cast=int)
 HANA_READ_TIMEOUT = config('HANA_READ_TIMEOUT', default=120, cast=int)
+
+# Control Panel (cpanel/) — C_Panel's SAP connector settings. Same HANA server
+# and account as OMS's own (`DATABASES['hana']`), overridable with CP_HANA_*.
+# No SCHEMA on purpose: C_Panel's queries name its production company
+# databases (JIVO_OIL_HANADB ...) themselves, which is what makes the figures
+# identical to production C_Panel's even where OMS reads a TEST company.
+SAP_HANA = {
+    'HOST': config('CP_HANA_HOST', default=DATABASES['hana']['HOST']),
+    'PORT': config('CP_HANA_PORT', default=DATABASES['hana']['PORT'], cast=int),
+    'USER': config('CP_HANA_USER', default=DATABASES['hana']['USER']),
+    'PASSWORD': config('CP_HANA_PASSWORD', default=DATABASES['hana']['PASSWORD']),
+}
+# The Inventory page's AI assistant (Groq). Blank disables it.
+GROQ_API_KEY = config('GROQ_API_KEY', default='')
 
 # DSR credit-limit service (external project; proxied because it has no CORS)
 DSR_API_BASE = config('JSAP_API_BASE')

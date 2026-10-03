@@ -176,6 +176,39 @@ REGISTRY: dict[str, dict[str, str]] = {
         'Advance_Payment_Dispatch':  'Advance Payment — send bills & POs to users',
     },
 
+    # --- Control Panel -----------------------------------------------------
+    # Four pages — Oils Sale, Sales, Inventory, Finance — granted per sub-tab:
+    # holding any sub-tab opens its page, which then shows only the sub-tabs
+    # held. The two `segment` keys narrow the Realise-based pages to one
+    # segment (C_Panel's Premium-only / Commodity-only roles); without them the
+    # holder sees all segments and edits targets. Structure, labels and the
+    # C_Panel mapping: control_panel/permissions.py (its TREE must list exactly
+    # these keys — control_panel/tests checks it).
+    'control_panel': {
+        'control_panel.oils_sale.overview':     'Control Panel — Oils Sale › Overview',
+        'control_panel.oils_sale.map':          'Control Panel — Oils Sale › Map',
+        'control_panel.oils_sale.realise':      'Control Panel — Oils Sale › Realise',
+        'control_panel.sales.channel':          'Control Panel — Sales › Sales Channel Dashboard',
+        'control_panel.sales.beverages':        'Control Panel — Sales › Beverages Sale',
+        'control_panel.sales.realise_dashboard': 'Control Panel — Sales › Realise Dashboard',
+        'control_panel.sales.sales':            'Control Panel — Sales › Sales',
+        'control_panel.sales.targets':          'Control Panel — Sales › Targets',
+        'control_panel.inventory.dashboard':    'Control Panel — Inventory › Dashboard',
+        'control_panel.inventory.stock':        'Control Panel — Inventory › Stock & Warehouses',
+        'control_panel.inventory.movement':     'Control Panel — Inventory › Stock Movement',
+        'control_panel.inventory.movers':       'Control Panel — Inventory › Moving / Non-Moving',
+        'control_panel.inventory.billing':      'Control Panel — Inventory › FG Not Billed',
+        'control_panel.inventory.abc':          'Control Panel — Inventory › ABC-XYZ Analysis',
+        'control_panel.inventory.aging':        'Control Panel — Inventory › Aging Analysis',
+        'control_panel.inventory.trace':        'Control Panel — Inventory › Item Trace',
+        'control_panel.inventory.planning':     'Control Panel — Inventory › Inventory Planning',
+        'control_panel.inventory.chat':         'Control Panel — Inventory › AI assistant',
+        'control_panel.finance.expenses':       'Control Panel — Finance › Expenses',
+        'control_panel.finance.salaries':       'Control Panel — Finance › Salaries',
+        'control_panel.segment.premium_only':   'Control Panel — Oils Sale & Sales: Premium segment only',
+        'control_panel.segment.commodity_only': 'Control Panel — Oils Sale & Sales: Commodity segment only',
+    },
+
     # --- Payments actions (legacy keys, verbatim from
     # --- payments/permissions.py; the mobile app checks these strings) ------
     'payments': {
