@@ -1,0 +1,430 @@
+{% extends base_template %}
+{% block title %}Beverages GST Data — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important}
+  .bg-wrap{max-width:1500px;margin:0 auto}
+  .bg-h1{font-size:30px;font-weight:800;color:var(--rz-ink);margin:0;letter-spacing:-.5px}
+  .bg-psub{margin:6px 0 0;font-size:13px;color:var(--rz-muted)}
+
+  /* ── KPI cards ── */
+  .bg-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:16px 0}
+  .bg-kpi{position:relative;overflow:hidden;border-radius:16px;padding:18px 20px;
+          background:var(--rz-card);border:1px solid var(--rz-card-brd);box-shadow:var(--rz-shadow)}
+  .bg-kpi::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--kpi-acc,var(--rz-acc-indigo))}
+  .bg-kpi-l{font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--rz-muted);display:flex;align-items:center;gap:7px}
+  .bg-kpi-l .ic{color:var(--kpi-ic,#6366f1)}
+  .bg-kpi-v{font-size:27px;font-weight:900;margin-top:8px;letter-spacing:-.5px;line-height:1;color:var(--rz-ink);font-variant-numeric:tabular-nums}
+  .bg-kpi-m{font-size:12px;font-weight:600;color:var(--rz-muted);margin-top:6px}
+  .bg-kpi .ic.bg-kpi-bg{position:absolute;right:-8px;bottom:-14px;font-size:96px;color:var(--kpi-ic,#6366f1);opacity:.08}
+  .k-box{--kpi-acc:var(--rz-acc-indigo);--kpi-ic:#6366f1}
+  .k-inv{--kpi-acc:var(--rz-acc-teal);--kpi-ic:#0d9488}
+  .k-cus{--kpi-acc:var(--rz-acc-amber);--kpi-ic:#d97706}
+  .k-gst{--kpi-acc:var(--rz-acc-red);--kpi-ic:#e11d48}
+
+  /* ── filter bar ── */
+  .bg-bar{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin:0 0 14px;background:var(--rz-card);
+          border:1px solid var(--rz-card-brd);border-radius:14px;padding:14px 16px;box-shadow:var(--rz-shadow)}
+  .bg-fld{display:flex;flex-direction:column;gap:5px}
+  .bg-lbl{font-size:10px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .bg-bar input[type=date],.bg-bar input[type=search],.bg-bar select{font-family:inherit;font-size:13px;font-weight:600;
+          color:var(--rz-ink);border:1px solid #e2e8f0;border-radius:9px;padding:8px 10px;background:#fff;outline:none}
+  .bg-bar input[type=search]{min-width:230px}
+  .bg-bar select{min-width:200px;cursor:pointer}
+  .bg-bar input:focus,.bg-bar select:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .bg-fetch{background:var(--rz-soft);color:var(--rz-indigo-deep);border:1px solid var(--rz-soft-brd);border-radius:9px;
+            padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+  .bg-fetch:hover{background:#e0e7ff;border-color:#c7d2fe}
+  .bg-export{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;
+             padding:9px 14px;font-size:12px;font-weight:700;color:#047857;cursor:pointer;font-family:inherit}
+  .bg-export:hover{background:#ecfdf5;border-color:#a7f3d0}
+  .bg-export[disabled]{opacity:.55;cursor:default}
+  .bg-seg{display:inline-flex;background:#fff;border:1px solid #e2e8f0;border-radius:11px;padding:3px;
+          box-shadow:0 1px 2px rgba(15,23,42,.05)}
+  .bg-seg button{border:0;background:transparent;font-family:inherit;font-size:12px;font-weight:700;
+          color:#64748b;padding:6px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
+  .bg-seg button.on{background:var(--rz-soft);color:var(--rz-indigo-deep);box-shadow:inset 0 0 0 1px var(--rz-soft-brd)}
+  .bg-chk{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;color:var(--rz-ink);
+          cursor:pointer;user-select:none;padding-bottom:9px}
+  .bg-chk input{width:15px;height:15px;accent-color:var(--rz-indigo);cursor:pointer}
+  .bg-count{font-size:12px;font-weight:700;color:var(--rz-muted);align-self:center;margin-left:auto}
+
+  /* ── table ── */
+  .bg-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow)}
+  /* Height is measured at runtime by fitTable(). A flat value cannot work: the filter bar
+     wraps to a second line on narrower screens and pushes the table down. */
+  .bg-tw{overflow:auto;max-height:70vh;min-height:260px}
+  table.bg-t{width:100%;border-collapse:collapse;font-size:13px}
+  table.bg-t thead th{position:sticky;top:0;z-index:3;background:var(--rz-head-bg);color:var(--rz-head-ink);
+        font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:12px 14px;
+        white-space:nowrap;border-bottom:1px solid var(--rz-line);text-align:right;cursor:pointer;user-select:none}
+  table.bg-t thead th:first-child,table.bg-t thead th.bg-lft{text-align:left}
+  table.bg-t thead th .bg-sort{font-size:9px;color:var(--rz-muted);margin-left:5px}
+  table.bg-t tbody td{padding:9px 14px;border-bottom:1px solid #eef2f6;color:var(--rz-body);
+        text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+  table.bg-t tbody td:first-child,table.bg-t tbody td.bg-lft{text-align:left}
+  /* Sales-person row: the roll-up. Shaded so it reads as a heading, not another customer. */
+  tr.bg-grp td{background:#f6f7fb;font-weight:800;color:var(--rz-ink);cursor:pointer}
+  tr.bg-grp:hover td{background:#eef1fb}
+  tr.bg-grp .bg-chev{display:inline-block;width:14px;font-size:10px;color:var(--rz-muted);transition:transform .13s}
+  tr.bg-grp.open .bg-chev{transform:rotate(90deg)}
+  tr.bg-grp .bg-n{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:19px;padding:0 6px;
+        margin-left:9px;border-radius:999px;background:#e5e9f7;color:#4b5aa8;font-size:10px;font-weight:800}
+  tr.bg-sub td{background:#fff}
+  tr.bg-sub:hover td{background:#f7faff}
+  tr.bg-sub td:first-child{padding-left:38px;color:var(--rz-ink);font-weight:600}
+  .bg-code{font-size:10px;color:var(--rz-faint);font-weight:700;margin-left:6px}
+  /* GSTIN is a 15-character code — monospaced so the columns line up and a wrong
+     character is easy to spot when checking against a bill. */
+  .bg-gstin{font-family:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+            font-size:12px;font-weight:700;letter-spacing:.2px;color:var(--rz-ink)}
+  .bg-multi{font-size:11px;font-weight:800;color:#b45309;background:#fef3c7;border-radius:6px;padding:2px 7px}
+  .bg-miss{font-size:11px;font-weight:800;color:#b45309}
+  .bg-v0{color:#cbd5e1}
+  /* Grand total pinned to the bottom of the scroll box, so it is readable at any scroll position. */
+  table.bg-t tfoot td{position:sticky;bottom:0;z-index:3;background:var(--rz-ink);color:#fff;font-weight:800;
+        padding:12px 14px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:13px}
+  table.bg-t tfoot td:first-child,table.bg-t tfoot td.bg-lft{text-align:left}
+  table.bg-t tfoot td:first-child{letter-spacing:.4px;text-transform:uppercase;font-size:11px}
+  .bg-empty{padding:40px;text-align:center;color:var(--rz-muted)}
+  .bg-note{margin:10px 2px 0;font-size:11.5px;color:var(--rz-faint);line-height:1.55}
+
+  @media (max-width:760px){
+    .bg-bar input[type=search],.bg-bar select{min-width:0;width:100%}
+    .bg-fld{flex:1 1 160px}
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bg-wrap">
+  <h1 class="bg-h1">Beverages GST Data</h1>
+  <p class="bg-psub">Customer GST numbers and boxes sold, by sales person.</p>
+
+  <div class="bg-kpis" id="bgKpis"></div>
+
+  <div class="bg-bar">
+    <div class="bg-fld"><span class="bg-lbl">From</span><input type="date" id="bgStart" value="{{ gst_month_start }}"></div>
+    <div class="bg-fld"><span class="bg-lbl">To</span><input type="date" id="bgEnd" value="{{ gst_today }}"></div>
+    <button class="bg-fetch" id="bgFetch">&#9654; Fetch</button>
+    <div class="bg-fld"><span class="bg-lbl">Sales person</span>
+      <select id="bgPerson"><option value="">All sales persons</option></select>
+    </div>
+    <div class="bg-fld"><span class="bg-lbl">Search</span>
+      <input type="search" id="bgSearch" placeholder="Customer, code or GST number…" autocomplete="off">
+    </div>
+    <div class="bg-fld"><span class="bg-lbl">GST number</span>
+      <div class="bg-seg" id="bgGstSeg" title="Show every customer, only those that have a GST number, or only those missing one">
+        <button type="button" data-gst="" class="on">Both</button>
+        <button type="button" data-gst="has">With GST No.</button>
+        <button type="button" data-gst="none">No GST No.</button>
+      </div>
+    </div>
+    <label class="bg-chk" title="Subtract boxes returned on credit notes in the same period">
+      <input type="checkbox" id="bgNetCn">Net of credit notes
+    </label>
+    <div class="bg-fld"><span class="bg-lbl">&nbsp;</span>
+      <button class="bg-export" id="bgExport"><i class="ic ic-download" style="font-size:16px"></i>Export Excel</button>
+    </div>
+    <span class="bg-count" id="bgCount"></span>
+  </div>
+
+  <div class="bg-card">
+    <div class="bg-tw">
+      <table class="bg-t">
+        <thead>
+          <tr>
+            <th data-sort="name">Sales Person / Customer<span class="bg-sort">↕</span></th>
+            <th data-sort="gstin" class="bg-lft">GST Number<span class="bg-sort">↕</span></th>
+            <th data-sort="boxes">Boxes<span class="bg-sort">↕</span></th>
+            <th data-sort="invoices">Invoices<span class="bg-sort">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="bgBody"><tr><td class="bg-empty" colspan="4">Loading…</td></tr></tbody>
+        <tfoot id="bgFoot"></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <p class="bg-note">
+    A/R invoices from the Jivo Beverages company, not cancelled, finished goods only and excluding
+    inter-company documents — the same rule every other Beverages report uses.
+    <b>GST Number</b> is the registration the invoice was billed under (the bill-to address in SAP),
+    not merely any address on the customer — a customer holding several registrations shows
+    <b>Multiple</b>. <b>Boxes</b> = pieces sold divided by the pieces-per-box on the item master.
+  </p>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function(){
+  function csrf(){var m=document.querySelector('meta[name=csrf-token]');return m?m.content:'';}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function fI(n){return (Number(n)||0).toLocaleString('en-IN');}
+  // Boxes: no forced decimals. 1,950 reads better than 1,950.00, but a part box
+  // still shows its .5 rather than being rounded away.
+  function fB(n){return (Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:2});}
+  function boxCell(n){n=Number(n)||0;return n===0?'<span class="bg-v0">—</span>':fB(n);}
+  function debounce(fn,ms){var t;return function(){clearTimeout(t);t=setTimeout(fn,ms);};}
+
+  var rows=[], people=[], loaded=false, err=null;
+  // gstF: '' = both, 'has' = only customers that have a GST number, 'none' = only those missing one.
+  var personF='', searchF='', gstF='', netCn=false, open={};
+  var sortKey='boxes', sortDir=-1;
+
+  // One customer row's figures, with the credit-note toggle applied. Credit notes come
+  // back from SAP as positive numbers, so netting means subtracting them here.
+  function val(r){
+    if(!netCn)return {invoices:r.invoices, boxes:r.boxes};
+    return {invoices:r.invoices, boxes:r.boxes-r.cn_boxes};
+  }
+  // What to show in the GST Number cell. Guard on the VALUE: a blank is a real finding
+  // (the customer has no registration in SAP), not a loading state.
+  function gstCell(r){
+    if(r.gstins>1)return '<span class="bg-multi">Multiple ('+fI(r.gstins)+')</span>';
+    if(!r.gstin)return '<span class="bg-miss">No GST number</span>';
+    return '<span class="bg-gstin">'+esc(r.gstin)+'</span>';
+  }
+
+  function rowMatches(r){
+    if(personF && r.person!==personF)return false;
+    if(gstF==='none' && r.gstin)return false;
+    if(gstF==='has' && !r.gstin)return false;
+    if(searchF && (r.name+' '+r.code+' '+r.gstin).toLowerCase().indexOf(searchF)===-1)return false;
+    return true;
+  }
+  function activeRows(){var o=[],i;for(i=0;i<rows.length;i++){if(rowMatches(rows[i]))o.push(rows[i]);}return o;}
+
+  // Group the visible customers under their sales person.
+  function groups(){
+    var map={}, a=activeRows(), i, r, v, g;
+    for(i=0;i<a.length;i++){
+      r=a[i]; v=val(r);
+      g=map[r.person]||(map[r.person]={person:r.person,kids:[],invoices:0,boxes:0,missing:0});
+      g.kids.push({r:r,v:v});
+      g.invoices+=v.invoices; g.boxes+=v.boxes;
+      if(!r.gstin)g.missing++;
+    }
+    var out=[],k;
+    for(k in map){if(map.hasOwnProperty(k))out.push(map[k]);}
+    return out;
+  }
+
+  function sortGroups(gs){
+    return gs.slice().sort(function(x,y){
+      var c;
+      if(sortKey==='name')c=String(x.person).localeCompare(String(y.person));
+      else if(sortKey==='gstin')c=x.missing-y.missing;   // most gaps first when descending
+      else c=(x[sortKey]||0)-(y[sortKey]||0);
+      return c*sortDir||String(x.person).localeCompare(String(y.person));
+    });
+  }
+  function sortKids(kids){
+    return kids.slice().sort(function(x,y){
+      var c;
+      if(sortKey==='name')c=String(x.r.name).localeCompare(String(y.r.name));
+      // '￿' sorts the blanks last when ascending, so real numbers come first.
+      else if(sortKey==='gstin')c=String(x.r.gstin||'￿').localeCompare(String(y.r.gstin||'￿'));
+      else c=(x.v[sortKey]||0)-(y.v[sortKey]||0);
+      return c*sortDir||String(x.r.name).localeCompare(String(y.r.name));
+    });
+  }
+
+  function arrow(k){
+    return sortKey!==k?'<span class="bg-sort">↕</span>'
+                      :'<span class="bg-sort">'+(sortDir>0?'▲':'▼')+'</span>';
+  }
+  function paintHead(){
+    var ths=document.querySelectorAll('table.bg-t thead th');
+    for(var i=0;i<ths.length;i++){
+      var k=ths[i].getAttribute('data-sort'), t=ths[i].childNodes[0].nodeValue;
+      ths[i].innerHTML=esc(t)+arrow(k);
+    }
+  }
+
+  // Keep the sticky grand-total row on screen: give the scroll box exactly the space
+  // left below it, so the footer lands just above the bottom of the window.
+  function fitTable(){
+    var tw=document.querySelector('.bg-tw');
+    if(!tw)return;
+    var top=tw.getBoundingClientRect().top;   // already relative to the window
+    var h=window.innerHeight-top-22;          // 22px = breathing room under the card
+    tw.style.maxHeight=Math.max(260,h)+'px';  // never so short that it is unusable
+  }
+
+  function renderKpis(gs){
+    var inv=0,box=0,custs=0,withGst=0,i,j;
+    for(i=0;i<gs.length;i++){
+      inv+=gs[i].invoices; box+=gs[i].boxes; custs+=gs[i].kids.length;
+      for(j=0;j<gs[i].kids.length;j++){if(gs[i].kids[j].r.gstin)withGst++;}
+    }
+    var miss=custs-withGst;
+    var cards=[
+      {c:'k-box',ic:'boxes',       l:'Boxes',      v:fB(box),  m:'Boxes sold'},
+      {c:'k-inv',ic:'receipt-text',l:'Invoices',   v:fI(inv),  m:'A/R invoices'},
+      {c:'k-cus',ic:'store',       l:'Customers',  v:fI(custs),
+       m:fI(gs.length)+' sales person'+(gs.length===1?'':'s')},
+      {c:'k-gst',ic:'landmark',    l:'GST Numbers',v:fI(withGst),
+       m:miss?(fI(miss)+' customer'+(miss===1?'':'s')+' missing'):'every customer covered'}
+    ];
+    document.getElementById('bgKpis').innerHTML=cards.map(function(k){
+      return '<div class="bg-kpi '+k.c+'"><div class="bg-kpi-l"><i class="ic ic-'+k.ic+'" style="font-size:15px"></i>'+k.l+'</div>'
+        +'<div class="bg-kpi-v">'+k.v+'</div><div class="bg-kpi-m">'+esc(k.m)+'</div>'
+        +'<i class="ic bg-kpi-bg ic-'+k.ic+'"></i></div>';
+    }).join('');
+  }
+
+  function render(){
+    var body=document.getElementById('bgBody'), foot=document.getElementById('bgFoot'),
+        cnt=document.getElementById('bgCount');
+    if(err){
+      body.innerHTML='<tr><td class="bg-empty" colspan="4">Could not load ('+esc(err)+').</td></tr>';
+      foot.innerHTML='';cnt.textContent='';document.getElementById('bgKpis').innerHTML='';return;
+    }
+    if(!loaded){
+      body.innerHTML='<tr><td class="bg-empty" colspan="4">Loading…</td></tr>';
+      foot.innerHTML='';cnt.textContent='';return;
+    }
+    paintHead();
+    var gs=groups();
+    renderKpis(gs);
+    if(!gs.length){
+      body.innerHTML='<tr><td class="bg-empty" colspan="4">Nothing in this selection.</td></tr>';
+      foot.innerHTML='';cnt.textContent='';fitTable();return;
+    }
+    var html=[], inv=0,box=0, custs=0;
+    sortGroups(gs).forEach(function(g){
+      inv+=g.invoices;box+=g.boxes;custs+=g.kids.length;
+      // A single sales person is always expanded — there is nothing to collapse into.
+      var isOpen=personF?true:!!open[g.person];
+      html.push('<tr class="bg-grp'+(isOpen?' open':'')+'" data-p="'+esc(g.person)+'">'
+        +'<td><span class="bg-chev">▶</span>'+esc(g.person)
+        +'<span class="bg-n">'+fI(g.kids.length)+'</span></td>'
+        +'<td class="bg-lft">'+(g.missing?'<span class="bg-miss">'+fI(g.missing)+' missing</span>'
+                                         :'<span class="bg-v0">—</span>')+'</td>'
+        +'<td>'+boxCell(g.boxes)+'</td>'
+        +'<td>'+fI(g.invoices)+'</td></tr>');
+      if(!isOpen)return;
+      sortKids(g.kids).forEach(function(k){
+        html.push('<tr class="bg-sub"><td>'+esc(k.r.name)
+          +(k.r.code?'<span class="bg-code">'+esc(k.r.code)+'</span>':'')+'</td>'
+          +'<td class="bg-lft">'+gstCell(k.r)+'</td>'
+          +'<td>'+boxCell(k.v.boxes)+'</td>'
+          +'<td>'+fI(k.v.invoices)+'</td></tr>');
+      });
+    });
+    body.innerHTML=html.join('');
+    foot.innerHTML='<tr><td>Total'+(netCn?' (net of credit notes)':'')+'</td>'
+      +'<td class="bg-lft">'+fI(custs)+' customer'+(custs===1?'':'s')+'</td>'
+      +'<td>'+fB(box)+'</td><td>'+fI(inv)+'</td></tr>';
+    cnt.textContent=fI(gs.length)+' sales person'+(gs.length===1?'':'s')+' · '+fI(custs)+' customer'+(custs===1?'':'s');
+    fitTable();
+  }
+
+  function fillPeople(){
+    var sel=document.getElementById('bgPerson'), had=personF;
+    sel.innerHTML='<option value="">All sales persons</option>'
+      +people.map(function(p){return '<option value="'+esc(p)+'">'+esc(p)+'</option>';}).join('');
+    // Keep the chosen person across a refetch, but only if they still have data.
+    sel.value=(people.indexOf(had)!==-1)?had:'';
+    personF=sel.value;
+  }
+
+  function load(){
+    var sd=document.getElementById('bgStart').value, ed=document.getElementById('bgEnd').value;
+    if(!sd||!ed){window.alert('Pick both a From and a To date.');return;}
+    var btn=document.getElementById('bgFetch');
+    btn.disabled=true;btn.textContent='Loading…';
+    loaded=false;err=null;render();
+    fetch('/realise/api/beverages-gst/',{method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({start_date:sd,end_date:ed})})
+      .then(function(r){return r.ok?r.json():{status:'error',error:'HTTP '+r.status};})
+      .then(function(p){
+        rows=p.rows||[];people=p.people||[];
+        err=(p.status==='error')?(p.error||'error'):null;
+        loaded=true;open={};fillPeople();render();
+      })
+      .catch(function(){err='load failed';loaded=true;render();})
+      // .finally, not .then: if render() throws the button must still come back.
+      .finally(function(){btn.disabled=false;btn.innerHTML='&#9654; Fetch';});
+  }
+
+  function exportXlsx(){
+    var gs=groups();
+    if(!gs.length){window.alert('Nothing to export — click Fetch first.');return;}
+    var btn=document.getElementById('bgExport');
+    btn.disabled=true;btn.textContent='Building…';
+    var head=['Sales Person','Customer Code','Customer','GST Number','Boxes','Invoices'];
+    var out=[head.map(function(h){return {value:h,bold:true,fill:'0F172A',color:'FFFFFF'};})];
+    var inv=0,box=0;
+    sortGroups(gs).forEach(function(g){
+      inv+=g.invoices;box+=g.boxes;
+      sortKids(g.kids).forEach(function(k){
+        // The sheet spells the gap out in words — an empty cell in Excel reads as
+        // "not exported yet" rather than "this customer has no registration".
+        var gn=k.r.gstins>1?('Multiple ('+k.r.gstins+')'):(k.r.gstin||'No GST number');
+        out.push([g.person,k.r.code,k.r.name,gn,+k.v.boxes.toFixed(2),k.v.invoices]);
+      });
+    });
+    out.push([{value:'TOTAL'+(netCn?' (net of credit notes)':''),bold:true},'','','',
+              +box.toFixed(2),inv]);
+    var fn='Beverages_GST_'+document.getElementById('bgStart').value+'_to_'+document.getElementById('bgEnd').value;
+    fetch('/realise/api/export-xlsx/',{method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({filename:fn,sheets:[{name:'Beverages GST',rows:out}]})})
+      .then(function(r){return r.ok?r.blob():null;})
+      .then(function(b){
+        if(!b){window.alert('Export failed.');return;}
+        var u=URL.createObjectURL(b),el=document.createElement('a');
+        el.href=u;el.download=fn+'.xlsx';document.body.appendChild(el);el.click();el.remove();
+        URL.revokeObjectURL(u);
+      })
+      .catch(function(){window.alert('Export failed.');})
+      // A FIXED label, not the button's live text: capturing the live text means one
+      // stuck build leaves "Building…" there for good.
+      .finally(function(){btn.disabled=false;btn.innerHTML='<i class="ic ic-download" style="font-size:16px"></i>Export Excel';});
+  }
+
+  // ── wiring ──
+  document.getElementById('bgFetch').addEventListener('click',load);
+  document.getElementById('bgExport').addEventListener('click',exportXlsx);
+  document.getElementById('bgStart').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  document.getElementById('bgEnd').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  document.getElementById('bgPerson').addEventListener('change',function(){personF=this.value;render();});
+  document.getElementById('bgNetCn').addEventListener('change',function(){netCn=this.checked;render();});
+  document.getElementById('bgGstSeg').addEventListener('click',function(e){
+    var btn=e.target&&e.target.closest?e.target.closest('button[data-gst]'):null;
+    if(!btn)return;
+    gstF=btn.getAttribute('data-gst');
+    var all=this.querySelectorAll('button');
+    for(var i=0;i<all.length;i++)all[i].classList.toggle('on',all[i]===btn);
+    // Open every group once a side is picked: a filtered list is useless while the
+    // customers are still folded away. "Both" leaves the groups as the user had them.
+    if(gstF)groups().forEach(function(g){open[g.person]=true;});
+    render();
+  });
+  var deb=debounce(render,120);
+  document.getElementById('bgSearch').addEventListener('input',function(){searchF=this.value.trim().toLowerCase();deb();});
+  document.getElementById('bgBody').addEventListener('click',function(e){
+    var tr=e.target&&e.target.closest?e.target.closest('tr.bg-grp'):null;
+    if(!tr)return;
+    var p=tr.getAttribute('data-p');
+    open[p]=!open[p];
+    render();
+  });
+  document.querySelector('table.bg-t thead').addEventListener('click',function(e){
+    var th=e.target&&e.target.closest?e.target.closest('th[data-sort]'):null;
+    if(!th)return;
+    var k=th.getAttribute('data-sort');
+    if(sortKey===k)sortDir=-sortDir; else{sortKey=k;sortDir=(k==='name'||k==='gstin')?1:-1;}
+    render();
+  });
+  window.addEventListener('resize',fitTable);
+
+  load();
+})();
+</script>
+{% endblock %}

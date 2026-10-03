@@ -89,6 +89,8 @@ api_urlpatterns = [
     path('credit-limit/', include('credit_limit.urls')),
     # Advance Payment — SAP lookups only for now (no models, no migration).
     path('advance-payments/', include('advance_payment.urls')),
+    # Control Panel — sign-on to production C_Panel for its embedded pages.
+    path('control-panel/', include('control_panel.urls')),
 ]
 
 urlpatterns = [
@@ -113,6 +115,11 @@ urlpatterns = [
     path('api/', include(api_urlpatterns)),
 ]
 
+
+# Control Panel — C_Panel's pages and APIs at their original paths (/realise/,
+# /sales/, /inventory/, /expenses/, /salaries/ ...). Appended LAST so any OMS
+# route of the same path wins. See cpanel/urls.py.
+urlpatterns += [path('', include('cpanel.urls'))]
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

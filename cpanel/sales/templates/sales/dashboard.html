@@ -1,0 +1,1172 @@
+{% extends base_template %}
+{% block title %}Sales Dashboard — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+/* ===========================================================================
+   Sales - warm "oil" palette.
+   The company sells edible oil, so the page takes its colours from the product
+   itself: golden amber for litres, olive for revenue, warm ivory paper. Three
+   radii and six type sizes only, on purpose - the old sheet had drifted to 40+
+   sizes and that inconsistency is what made the page look unfinished.
+   =========================================================================== */
+:root{
+  --sx-paper:#fbf7f0;        /* page ground - warm ivory, not grey        */
+  --sx-card:#ffffff;
+  --sx-sunk:#f6f0e6;         /* recessed strips, table head               */
+  --sx-line:#ebe2d4;         /* hairline                                  */
+  --sx-line2:#ddd0ba;        /* stronger divider                          */
+  --sx-ink:#2c2318;          /* warm near-black - headings and numbers    */
+  --sx-body:#5c4f3f;
+  --sx-muted:#948570;
+
+  --sx-gold:#c2872c;         /* the oil itself - primary accent           */
+  --sx-gold-deep:#8a5c14;
+  --sx-gold-soft:#fdf3e0;
+  --sx-gold-brd:#f0dcb4;
+
+  --sx-olive:#6e8b3f;        /* olive oil green - revenue, premium        */
+  --sx-olive-deep:#4e6528;
+  --sx-olive-soft:#f1f5e7;
+  --sx-olive-brd:#d7e3bd;
+
+  --sx-clay:#b0523a;         /* reserved for genuinely negative states    */
+  --sx-clay-soft:#fcede8;
+  --sx-clay-brd:#f2d3c8;
+
+  /* three radii, no more */
+  --sx-r-sm:8px; --sx-r-md:14px; --sx-r-pill:999px;
+
+  /* six type sizes, no more */
+  --sx-t-xs:11px; --sx-t-sm:12.5px; --sx-t-md:14px;
+  --sx-t-lg:18px; --sx-t-xl:26px; --sx-t-xxl:40px;
+
+  --sx-shadow:0 1px 2px rgba(64,45,18,.05), 0 8px 24px rgba(64,45,18,.06);
+  --sx-shadow-lift:0 2px 4px rgba(64,45,18,.07), 0 14px 34px rgba(64,45,18,.11);
+
+  /* the old names stay alive: JS-generated markup still references them */
+  --border:var(--sx-line); --border2:var(--sx-line2);
+  --text:var(--sx-ink); --text2:var(--sx-body); --text3:var(--sx-muted);
+  --bg:var(--sx-paper); --bg2:var(--sx-card); --surface:var(--sx-sunk);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+.cp-main{padding:0!important}
+body.cp-sidebar-collapsed .cp-main{padding-left:64px!important}
+
+.rd-wrap{
+  display:flex;flex-direction:column;height:100%;width:100%;
+  overflow-y:auto;overflow-x:hidden;background:var(--sx-paper);
+  font-family:'Inter',system-ui,sans-serif;font-size:var(--sx-t-md);
+  color:var(--sx-body);max-width:none;min-width:0;
+}
+
+/* ---- page head ---------------------------------------------------------- */
+.sx-top{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:16px;
+  flex-wrap:wrap;padding:22px 24px 16px;
+}
+.sx-top h1{
+  font-family:var(--font-display,Georgia,serif);font-weight:400;
+  font-size:var(--sx-t-xxl);line-height:1.05;color:var(--sx-ink);letter-spacing:-.01em;
+}
+.sx-top p{font-size:var(--sx-t-sm);color:var(--sx-muted);margin-top:4px}
+.sx-status{
+  display:inline-flex;align-items:center;gap:7px;font-size:var(--sx-t-xs);
+  font-weight:600;padding:6px 12px;border-radius:var(--sx-r-pill);
+  border:1px solid var(--sx-line);background:var(--sx-card);color:var(--sx-body);
+}
+.dot{width:7px;height:7px;border-radius:50%}
+.dot-green{background:var(--sx-olive);box-shadow:0 0 0 3px var(--sx-olive-soft)}
+.dot-red{background:var(--sx-clay);box-shadow:0 0 0 3px var(--sx-clay-soft)}
+
+/* ---- filters ------------------------------------------------------------ */
+.sx-filters{
+  margin:0 24px;padding:12px 14px;background:var(--sx-card);
+  border:1px solid var(--sx-line);border-radius:var(--sx-r-md);
+  display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;
+  box-shadow:var(--sx-shadow);position:relative;z-index:20;
+}
+.cg{display:flex;flex-direction:column;gap:5px;flex:0 0 auto}
+.cg label{font-size:var(--sx-t-xs);font-weight:600;color:var(--sx-muted)}
+.rd-wrap input[type="date"],.rd-wrap select{
+  background:var(--sx-card);border:1px solid var(--sx-line2);color:var(--sx-ink);
+  padding:7px 10px;border-radius:var(--sx-r-sm);font-size:var(--sx-t-sm);
+  font-family:inherit;outline:none;transition:border-color .15s,box-shadow .15s;
+}
+.rd-wrap input[type="date"]{width:160px}
+#fType{width:140px}#fMonth{width:126px}#fYear{width:110px}#fDrill{width:140px}
+.rd-wrap input[type="date"]:focus,.rd-wrap select:focus{
+  border-color:var(--sx-gold);box-shadow:0 0 0 3px var(--sx-gold-soft);
+}
+select.drill-sel{
+  border-color:var(--sx-olive-brd);background:var(--sx-olive-soft);
+  color:var(--sx-olive-deep);font-weight:600;
+}
+.sep{width:1px;height:30px;background:var(--sx-line);margin:0 3px}
+.btn{
+  padding:8px 15px;border:1px solid transparent;border-radius:var(--sx-r-sm);
+  font-size:var(--sx-t-sm);font-weight:600;font-family:inherit;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;
+  transition:background .15s,border-color .15s,color .15s;
+}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-primary{background:var(--sx-gold);color:#fff;border-color:var(--sx-gold)}
+.btn-primary:hover:not(:disabled){background:var(--sx-gold-deep);border-color:var(--sx-gold-deep)}
+.btn-ghost{background:var(--sx-card);color:var(--sx-body);border-color:var(--sx-line2)}
+.btn-ghost:hover:not(:disabled){background:var(--sx-sunk);color:var(--sx-ink)}
+.controls-right{margin-left:auto;display:flex;gap:8px;align-items:flex-end;flex:0 0 auto}
+
+/* ---- KPI strip ---------------------------------------------------------- */
+.sx-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:18px 24px 0}
+.sx-kpi{
+  background:var(--sx-card);border:1px solid var(--sx-line);
+  border-radius:var(--sx-r-md);padding:16px 18px 18px;position:relative;
+  overflow:hidden;box-shadow:var(--sx-shadow);
+}
+/* the coloured cap tells the four tiles apart at a glance */
+.sx-kpi::before{content:"";position:absolute;inset:0 0 auto 0;height:3px}
+.sx-kpi-gold::before{background:linear-gradient(90deg,var(--sx-gold),#e6b45f)}
+.sx-kpi-olive::before{background:linear-gradient(90deg,var(--sx-olive),#a3bd6d)}
+.sx-kpi-ink::before{background:linear-gradient(90deg,#7a6647,#c3ae86)}
+.sx-kpi-clay::before{background:linear-gradient(90deg,var(--sx-clay),#d98d76)}
+.sx-kpi-label{font-size:var(--sx-t-xs);font-weight:600;color:var(--sx-muted)}
+.sx-kpi-val{
+  font-family:'CPNum',ui-monospace,system-ui,sans-serif;
+  font-size:var(--sx-t-xl);font-weight:700;color:var(--sx-ink);
+  line-height:1.15;margin-top:7px;font-variant-numeric:tabular-nums;
+}
+.sx-kpi-val small{font-size:var(--sx-t-sm);font-weight:600;color:var(--sx-muted);margin-left:5px}
+.sx-kpi-sub{font-size:var(--sx-t-xs);color:var(--sx-muted);margin-top:6px}
+
+/* ---- map ---------------------------------------------------------------- */
+.sx-map-card{
+  margin:18px 24px 0;background:var(--sx-card);border:1px solid var(--sx-line);
+  border-radius:var(--sx-r-md);box-shadow:var(--sx-shadow);overflow:hidden;
+  display:grid;grid-template-columns:1fr 250px;
+}
+.sx-card-head{
+  grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;
+  gap:12px;flex-wrap:wrap;padding:16px 18px 14px;border-bottom:1px solid var(--sx-line);
+}
+.sx-card-head h2{
+  font-family:var(--font-display,Georgia,serif);font-weight:400;
+  font-size:var(--sx-t-lg);color:var(--sx-ink);
+}
+.sx-card-head p{font-size:var(--sx-t-xs);color:var(--sx-muted);margin-top:3px}
+.sx-chip{
+  font-size:var(--sx-t-xs);font-weight:600;color:var(--sx-gold-deep);
+  background:var(--sx-gold-soft);border:1px solid var(--sx-gold-brd);
+  padding:5px 11px;border-radius:var(--sx-r-pill);
+}
+.sx-map-wrap{position:relative;padding:8px 8px 14px;min-height:420px}
+.sx-map-svg{width:100%;height:auto;max-height:560px;display:block;overflow:visible}
+/* The raised look is nine stacked copies of the same paths, each nudged one
+   step down, sitting under the real map - plus one soft shadow beneath the
+   stack. No 3D library involved; this is ordinary SVG. */
+.sx-extrude{filter:drop-shadow(0 12px 14px rgba(90,58,20,.26));pointer-events:none}
+.sx-wall{fill:#9a6a22;stroke:none}
+.sx-state{
+  stroke:#fffdf8;stroke-width:.6;cursor:pointer;
+  transform-box:fill-box;transform-origin:center;
+  transition:fill .25s ease,filter .2s ease,transform .2s ease;
+}
+.sx-state:hover{filter:brightness(1.08);transform:scale(1.015)}
+.sx-state.is-on{filter:brightness(1.1) drop-shadow(0 0 4px rgba(194,135,44,.6))}
+/* one orchestrated reveal, only on the first paint */
+.sx-map-svg.is-entering .sx-state{animation:sxRise .5s cubic-bezier(.2,.7,.3,1) backwards}
+@keyframes sxRise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+.sx-map-tip{
+  position:absolute;pointer-events:none;z-index:8;display:none;
+  transform:translate(-50%,calc(-100% - 14px));
+  background:var(--sx-ink);color:#fdf8ef;padding:8px 12px;
+  border-radius:var(--sx-r-sm);box-shadow:0 8px 20px rgba(44,35,24,.3);white-space:nowrap;
+}
+.sx-map-tip.show{display:block}
+.sx-map-tip b{display:block;font-size:var(--sx-t-sm);font-weight:600}
+.sx-map-tip span{font-size:var(--sx-t-xs);color:#d9c9a8;font-variant-numeric:tabular-nums}
+.sx-map-empty{
+  display:flex;align-items:center;justify-content:center;height:100%;min-height:380px;
+  color:var(--sx-muted);font-size:var(--sx-t-sm);text-align:center;padding:0 24px;line-height:1.7;
+}
+.sx-scale{display:flex;align-items:center;gap:9px;font-size:var(--sx-t-xs);color:var(--sx-muted);padding:0 10px 2px}
+.sx-scale i{
+  flex:1;max-width:190px;height:7px;border-radius:var(--sx-r-pill);
+  background:linear-gradient(90deg,#f6ecd7,#c2872c,#8a5c14);
+}
+/* states list beside the map */
+.sx-states{
+  border-left:1px solid var(--sx-line);padding:12px 6px 14px 14px;
+  max-height:560px;overflow-y:auto;
+  background:linear-gradient(180deg,var(--sx-card),var(--sx-paper));
+}
+.sx-states h3{
+  font-size:var(--sx-t-xs);font-weight:600;color:var(--sx-muted);
+  padding-bottom:9px;border-bottom:1px solid var(--sx-line);margin-bottom:4px;
+}
+.sx-state-row{
+  display:grid;grid-template-columns:1fr auto;gap:3px 10px;align-items:center;
+  padding:8px 10px 8px 0;border-bottom:1px solid var(--sx-line);
+}
+.sx-state-row:last-child{border-bottom:0}
+.sx-state-row:hover,.sx-state-row.is-on{background:var(--sx-gold-soft);border-radius:var(--sx-r-sm)}
+.sx-state-name{
+  font-size:var(--sx-t-sm);color:var(--sx-ink);font-weight:500;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.sx-state-val{
+  font-family:'CPNum',system-ui,sans-serif;font-size:var(--sx-t-sm);font-weight:600;
+  color:var(--sx-gold-deep);font-variant-numeric:tabular-nums;
+}
+.sx-state-bar{grid-column:1/-1;height:4px;border-radius:var(--sx-r-pill);background:var(--sx-sunk);overflow:hidden}
+.sx-state-bar i{
+  display:block;height:100%;border-radius:var(--sx-r-pill);
+  background:linear-gradient(90deg,#d9a44e,var(--sx-gold-deep));
+  transform-origin:left;animation:sxGrow .6s cubic-bezier(.2,.7,.3,1) backwards;
+}
+@keyframes sxGrow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+.sx-states-empty{font-size:var(--sx-t-sm);color:var(--sx-muted);padding:20px 10px 0;line-height:1.7}
+
+/* ---- table -------------------------------------------------------------- */
+.sx-table-card{
+  margin:18px 24px 26px;background:var(--sx-card);border:1px solid var(--sx-line);
+  border-radius:var(--sx-r-md);box-shadow:var(--sx-shadow);overflow:hidden;
+}
+.twrap{overflow-x:auto;background:var(--sx-card)}
+.rd-wrap table{
+  width:100%;border-collapse:collapse;font-size:var(--sx-t-sm);
+  background:var(--sx-card);table-layout:auto;
+}
+.grp-row th{
+  padding:7px 10px;font-size:var(--sx-t-xs);font-weight:700;text-align:center;
+  border-bottom:1px solid var(--sx-line);
+}
+.grp-sap{background:var(--sx-gold-soft);color:var(--sx-gold-deep)}
+.rd-wrap thead th{
+  background:var(--sx-sunk);padding:10px;text-align:left;font-weight:600;
+  font-size:var(--sx-t-xs);color:var(--sx-muted);border-bottom:1px solid var(--sx-line2);
+  white-space:nowrap;position:sticky;top:0;z-index:5;
+}
+.rd-wrap thead th.th-sap{color:var(--sx-gold-deep)}
+.rd-wrap tbody tr{transition:background .12s}
+.rd-wrap tbody tr:hover{background:var(--sx-gold-soft)}
+.rd-wrap tbody td{
+  padding:9px 10px;border-bottom:1px solid var(--sx-line);
+  font-variant-numeric:tabular-nums;
+  font-family:'CPNum',system-ui,-apple-system,"Segoe UI",Arial,sans-serif;white-space:nowrap;
+}
+.num{text-align:right}
+.badge{display:inline-block;padding:2px 9px;border-radius:var(--sx-r-pill);font-size:var(--sx-t-xs);font-weight:700}
+.badge-prem{background:var(--sx-olive-soft);color:var(--sx-olive-deep);border:1px solid var(--sx-olive-brd)}
+.badge-comm{background:var(--sx-gold-soft);color:var(--sx-gold-deep);border:1px solid var(--sx-gold-brd)}
+.sub-cell{font-weight:500;color:var(--sx-ink)}
+.empty-sap{color:var(--sx-muted);text-align:center;font-style:italic}
+.total-row td{
+  background:var(--sx-sunk)!important;font-weight:700;color:var(--sx-ink);
+  border-top:2px solid var(--sx-gold);padding:11px 10px;
+}
+.drill-btn{
+  width:24px;height:24px;border:1px solid var(--sx-line2);border-radius:var(--sx-r-sm);
+  background:var(--sx-card);color:var(--sx-olive-deep);font-size:14px;font-weight:700;
+  cursor:pointer;display:inline-flex;align-items:center;justify-content:center;
+  transition:background .15s,border-color .15s,color .15s;line-height:1;
+  margin-right:6px;vertical-align:middle;
+}
+.drill-btn:hover{background:var(--sx-olive-soft);border-color:var(--sx-olive)}
+.drill-btn.open{background:var(--sx-olive);color:#fff;border-color:var(--sx-olive)}
+.sub-row td{border-bottom:1px solid var(--sx-line);font-size:var(--sx-t-sm)}
+.sub-row:hover td{background:var(--sx-olive-soft)!important}
+.sub-dim{font-weight:600;color:var(--sx-olive-deep)}
+.depth-0 td{background:#fbf8f1!important}
+.depth-1 td{background:#f7f2e7!important}
+.depth-2 td{background:#f2ebdb!important}
+
+/* ---- overlay, toast, scrollbar ------------------------------------------ */
+.overlay{
+  display:none;position:fixed;inset:0;background:rgba(251,247,240,.86);z-index:100;
+  justify-content:center;align-items:center;flex-direction:column;gap:14px;backdrop-filter:blur(4px);
+}
+.overlay.show{display:flex}
+.spin{
+  width:30px;height:30px;border:3px solid var(--sx-line);border-top-color:var(--sx-gold);
+  border-radius:50%;animation:sp .7s linear infinite;
+}
+@keyframes sp{to{transform:rotate(360deg)}}
+.toast{
+  position:fixed;bottom:18px;right:18px;padding:10px 18px;border-radius:var(--sx-r-sm);
+  font-size:var(--sx-t-sm);font-weight:500;z-index:200;transform:translateX(420px);
+  transition:transform .3s ease;box-shadow:var(--sx-shadow-lift);border:1px solid var(--sx-line);
+}
+.toast.show{transform:translateX(0)}
+.toast-ok{background:var(--sx-olive-soft);color:var(--sx-olive-deep);border-color:var(--sx-olive-brd)}
+.toast-err{background:var(--sx-clay-soft);color:var(--sx-clay);border-color:var(--sx-clay-brd)}
+.toast-info{background:var(--sx-gold-soft);color:var(--sx-gold-deep);border-color:var(--sx-gold-brd)}
+.rd-wrap ::-webkit-scrollbar{width:7px;height:7px}
+.rd-wrap ::-webkit-scrollbar-track{background:var(--sx-paper)}
+.rd-wrap ::-webkit-scrollbar-thumb{background:var(--sx-line2);border-radius:var(--sx-r-pill)}
+
+/* ---- product filter dropdown -------------------------------------------- */
+.prod-filter-wrap{position:relative;display:inline-block}
+.prod-filter-btn{
+  background:var(--sx-card);border:1px solid var(--sx-line2);color:var(--sx-body);
+  padding:7px 10px;border-radius:var(--sx-r-sm);font-size:var(--sx-t-sm);cursor:pointer;
+  font-family:inherit;display:inline-flex;align-items:center;gap:6px;min-width:138px;
+}
+.prod-filter-btn:hover{border-color:var(--sx-gold);background:var(--sx-gold-soft)}
+.prod-filter-btn .pf-count{
+  background:var(--sx-gold);color:#fff;border-radius:var(--sx-r-pill);
+  padding:0 6px;font-size:var(--sx-t-xs);font-weight:700;
+}
+.prod-filter-drop{
+  display:none;position:absolute;top:100%;left:0;margin-top:6px;background:var(--sx-card);
+  border:1px solid var(--sx-line);border-radius:var(--sx-r-md);box-shadow:var(--sx-shadow-lift);
+  z-index:50;width:232px;max-height:340px;overflow-y:auto;
+}
+.prod-filter-drop.show{display:block}
+.pf-header{padding:8px 12px;border-bottom:1px solid var(--sx-line);display:flex;justify-content:space-between}
+.pf-header button{
+  background:none;border:none;color:var(--sx-gold-deep);font-size:var(--sx-t-xs);
+  font-weight:600;cursor:pointer;font-family:inherit;padding:2px 4px;
+}
+.pf-header button:hover{text-decoration:underline}
+.pf-item{display:flex;align-items:center;gap:9px;padding:7px 12px;cursor:pointer;font-size:var(--sx-t-sm);transition:background .12s}
+.pf-item:hover{background:var(--sx-gold-soft)}
+.pf-item input{accent-color:var(--sx-gold);cursor:pointer}
+.pf-item label{cursor:pointer;flex:1;color:var(--sx-ink)}
+.pf-item .pf-badge{font-size:var(--sx-t-xs);padding:1px 7px;border-radius:var(--sx-r-pill);font-weight:700}
+.pf-apply{padding:9px 12px;border-top:1px solid var(--sx-line)}
+.pf-apply button{
+  width:100%;padding:8px;background:var(--sx-gold);color:#fff;border:none;
+  border-radius:var(--sx-r-sm);font-size:var(--sx-t-sm);font-weight:600;cursor:pointer;font-family:inherit;
+}
+.pf-apply button:hover{background:var(--sx-gold-deep)}
+
+/* ---- keyboard focus ----------------------------------------------------- */
+.rd-wrap button:focus-visible,.rd-wrap select:focus-visible,.rd-wrap input:focus-visible{
+  outline:2px solid var(--sx-gold);outline-offset:2px;
+}
+
+/* ---- narrow screens ----------------------------------------------------- */
+@media (max-width:1100px){
+  .sx-kpis{grid-template-columns:repeat(2,1fr)}
+  .sx-map-card{grid-template-columns:1fr}
+  .sx-states{border-left:0;border-top:1px solid var(--sx-line);max-height:300px}
+}
+@media (max-width:640px){
+  .sx-top{padding:18px 16px 14px}
+  .sx-top h1{font-size:var(--sx-t-xl)}
+  .sx-filters,.sx-map-card,.sx-table-card{margin-left:16px;margin-right:16px}
+  .sx-kpis{grid-template-columns:1fr;padding-left:16px;padding-right:16px}
+  .controls-right{margin-left:0;width:100%}
+}
+@media (prefers-reduced-motion:reduce){
+  .sx-map-svg.is-entering .sx-state,.sx-state-bar i{animation:none}
+  .sx-state{transition:none}
+}
+</style>
+{% endblock %}
+
+{% block content %}
+{% load static %}
+<div class="rd-wrap" data-geo-url="{% static 'core/geo/india_states.geojson' %}">
+
+  <header class="sx-top">
+    <div class="sx-title">
+      <h1>Sales</h1>
+      <p>Litres and revenue by product, month and state, straight from SAP.</p>
+    </div>
+    <div class="sx-status">
+      <span class="dot dot-red" id="sDot"></span><span id="sTxt">Checking...</span>
+    </div>
+  </header>
+
+  <div class="sx-filters">
+    <div class="cg"><label for="dFrom">From</label><input type="date" id="dFrom"></div>
+    <div class="cg"><label for="dTo">To</label><input type="date" id="dTo"></div>
+    <div class="cg"><label>&nbsp;</label>
+      <button class="btn btn-primary" id="fetchBtn" onclick="loadData()">Fetch data</button>
+    </div>
+    <div class="sep"></div>
+    <div class="cg"><label for="fType">Type</label>
+      <select id="fType" onchange="applyFilters()">
+        <option value="">All</option>
+        <option value="PREMIUM">PREMIUM</option>
+        <option value="COMMODITY">COMMODITY</option>
+      </select>
+    </div>
+    <div class="cg"><label for="fMonth">Month</label>
+      <select id="fMonth" onchange="applyFilters()"><option value="">All Months</option></select>
+    </div>
+    <div class="cg"><label for="fYear">Year</label>
+      <select id="fYear" onchange="applyFilters()"><option value="">All Years</option></select>
+    </div>
+    <div class="cg"><label>Product</label>
+      <div class="prod-filter-wrap">
+        <button class="prod-filter-btn" id="pfBtn" onclick="toggleProductFilter()">All Products <span class="pf-count" id="pfCount" style="display:none"></span> &#9662;</button>
+        <div class="prod-filter-drop" id="pfDrop">
+          <div class="pf-header">
+            <button onclick="pfSelectAll()">Select All</button>
+            <button onclick="pfClearAll()">Clear All</button>
+          </div>
+          <div id="pfList"></div>
+          <div class="pf-apply"><button onclick="applyProductFilter()">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="cg"><label for="fDrill">Drill by</label>
+      <select id="fDrill" class="drill-sel" onchange="onDrillChange()">
+        <option value="">--SELECT--</option>
+        <option value="State">State</option>
+        <option value="U_Main_Group">Main Group</option>
+        <option value="U_Chain">Chain</option>
+        <option value="ItemName">Item Name</option>
+        <option value="CardName">Customer</option>
+      </select>
+    </div>
+    <div class="cg"><label>&nbsp;</label>
+      <button class="btn btn-ghost" id="expandAllBtn" onclick="toggleExpandAll()" title="Expand or collapse every product">&#9660; Expand All</button>
+    </div>
+    <div class="controls-right">
+      <button class="btn btn-ghost" onclick="exportCSV()">Export Excel</button>
+    </div>
+  </div>
+
+  <div class="sx-kpis">
+    <article class="sx-kpi sx-kpi-gold">
+      <div class="sx-kpi-label">Litres sold</div>
+      <div class="sx-kpi-val" id="kLitres">&mdash;<small>L</small></div>
+      <div class="sx-kpi-sub" id="kLitresSub">Pick a date range and fetch</div>
+    </article>
+    <article class="sx-kpi sx-kpi-olive">
+      <div class="sx-kpi-label">Revenue</div>
+      <div class="sx-kpi-val" id="kRevenue">&mdash;</div>
+      <div class="sx-kpi-sub" id="kRevenueSub">Across the rows shown below</div>
+    </article>
+    <article class="sx-kpi sx-kpi-ink">
+      <div class="sx-kpi-label">Rate per litre</div>
+      <div class="sx-kpi-val" id="kRate">&mdash;</div>
+      <div class="sx-kpi-sub">Revenue divided by litres</div>
+    </article>
+    <article class="sx-kpi sx-kpi-clay">
+      <div class="sx-kpi-label">States selling</div>
+      <div class="sx-kpi-val" id="kStates">&mdash;</div>
+      <div class="sx-kpi-sub" id="kStatesSub">Top state appears on the map</div>
+    </article>
+  </div>
+
+  <section class="sx-map-card">
+    <div class="sx-card-head">
+      <div>
+        <h2>Where the litres go</h2>
+        <p>Every state shaded by litres sold in the range you picked.</p>
+      </div>
+      <span class="sx-chip" id="mapChip">No data yet</span>
+    </div>
+
+    <div class="sx-map-wrap" id="mapWrap">
+      <div class="sx-map-empty" id="mapEmpty">Fetch a date range and the map fills in.</div>
+      <svg class="sx-map-svg" id="indiaMap" viewBox="0 0 600 680" role="img"
+           aria-label="India map shaded by litres sold per state" hidden></svg>
+      <div class="sx-scale" id="mapScale" hidden><span>Less</span><i></i><span>More</span></div>
+      <div class="sx-map-tip" id="mapTip"></div>
+    </div>
+
+    <aside class="sx-states">
+      <h3>States by litres</h3>
+      <div id="stateList"><p class="sx-states-empty">The list fills in once data loads.</p></div>
+    </aside>
+  </section>
+
+  <section class="sx-table-card">
+    <div class="sx-card-head">
+      <div>
+        <h2>Products</h2>
+        <p>Open a row to break it down by the dimension chosen in Drill by.</p>
+      </div>
+    </div>
+    <div class="twrap">
+      <table id="tbl">
+        <thead>
+          <tr class="grp-row">
+            <th class="grp-sap" colspan="3">From SAP</th>
+            <th class="grp-sap" colspan="2">Actual Sales Data</th>
+          </tr>
+          <tr>
+            <th style="width:24px">#</th>
+            <th class="th-sap">Type</th>
+            <th class="th-sap">Product</th>
+            <th class="th-sap">Act Ltrs</th>
+            <th class="th-sap">Revenue</th>
+          </tr>
+        </thead>
+        <tbody id="tBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="overlay" id="ov">
+    <div class="spin"></div>
+    <div style="color:var(--sx-body);font-weight:500;font-size:13px">Fetching from SAP HANA...</div>
+  </div>
+  <div class="toast" id="toast"></div>
+</div><!-- /rd-wrap -->
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{% static 'vendor/js/d3-array.min.js' %}"></script>
+<script src="{% static 'vendor/js/d3-geo.min.js' %}"></script>
+<script>
+/* ===== INIT FROM DJANGO ===== */
+window.currentUser = window.loginUser || {{ login_user_json|safe }};
+
+function getCSRF() {
+  return document.querySelector('meta[name="csrf-token"]').content;
+}
+
+var API = '/sales';
+var CACHE_KEY = 'cp:sales:dashboard-data:v1';
+
+/* ===== PRODUCTS LIST ===== */
+var PRODUCTS=[
+  {u_type:"COMMODITY",u_sub_group:"BLENDED",ts:30000,tr:130},
+  {u_type:"COMMODITY",u_sub_group:"COTTON SEED",ts:20000,tr:130},
+  {u_type:"COMMODITY",u_sub_group:"MUSTARD",ts:625000,tr:145},
+  {u_type:"COMMODITY",u_sub_group:"RICE BRAN",ts:25000,tr:131},
+  {u_type:"PREMIUM",u_sub_group:"SLICED OLIVE",ts:0,tr:0},
+  {u_type:"COMMODITY",u_sub_group:"SOYABEAN",ts:400000,tr:123},
+  {u_type:"COMMODITY",u_sub_group:"SUNFLOWER",ts:135000,tr:145},
+  {u_type:"PREMIUM",u_sub_group:"BLENDED",ts:10000,tr:190},
+  {u_type:"PREMIUM",u_sub_group:"CANOLA",ts:350000,tr:205},
+  {u_type:"PREMIUM",u_sub_group:"COCONUT",ts:5000,tr:449},
+  {u_type:"PREMIUM",u_sub_group:"EXTRA VIRGIN OLIVE",ts:15000,tr:500},
+  {u_type:"PREMIUM",u_sub_group:"GHEE",ts:15000,tr:536},
+  {u_type:"PREMIUM",u_sub_group:"GROUNDNUT",ts:50000,tr:175},
+  {u_type:"PREMIUM",u_sub_group:"OLIVE",ts:310000,tr:253},
+  {u_type:"PREMIUM",u_sub_group:"SESAME",ts:5000,tr:290},
+  {u_type:"PREMIUM",u_sub_group:"YELLOW MUSTARD",ts:10000,tr:180}
+];
+
+var MONTHS=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+function currentMonth(){return MONTHS[new Date().getMonth()];}
+
+var allData=[],filtered=[],dataFetched=false;
+var drillData={},drillOpen={},drillDim={},rootDrillDim='';
+var selectedProducts={};
+for(var pi=0;pi<PRODUCTS.length;pi++)selectedProducts[PRODUCTS[pi].u_type+'|'+PRODUCTS[pi].u_sub_group]=true;
+function isProdSelected(type,sub){return selectedProducts[type+'|'+sub]!==false;}
+
+function getDrillBy(){return document.getElementById('fDrill').value;}
+function productKey(r){return r.u_type+'|'+r.u_sub_group;}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function onDrillChange(){if(!getDrillBy()){drillData={};drillOpen={};drillDim={};rootDrillDim='';}renderTable();}
+
+var allExpanded=false;
+function toggleExpandAll(){if(allExpanded){collapseAll();}else{expandAll();}}
+
+async function expandAll(){
+  var db=getDrillBy();if(!db){showToast('Select a Drill By option first','info');return;}
+  if(!dataFetched){showToast('Fetch data first','info');return;}
+  var btn=document.getElementById('expandAllBtn');btn.disabled=true;btn.textContent='Expanding...';
+  var useDb=rootDrillDim||db;
+  if(!rootDrillDim)rootDrillDim=useDb;
+  var count=0;
+  for(var i=0;i<filtered.length;i++){
+    var row=filtered[i],pk=productKey(row);
+    if(row._nodata||row.litres<=0)continue;
+    if(drillOpen[pk]&&drillDim[pk]===useDb)continue;
+    clearChildren(pk);delete drillData[pk];delete drillDim[pk];
+    await fetchAndExpand(pk,row.u_type,row.u_sub_group,pk,useDb);
+    count++;
+  }
+  allExpanded=true;btn.disabled=false;btn.innerHTML='&#9650; Collapse All';
+  showToast('Expanded '+count+' products','ok');
+}
+
+function collapseAll(){
+  for(var i=0;i<filtered.length;i++){var pk=productKey(filtered[i]);drillOpen[pk]=false;}
+  allExpanded=false;document.getElementById('expandAllBtn').innerHTML='&#9660; Expand All';
+  renderTable();showToast('All collapsed','ok');
+}
+
+function clearChildren(pp){var pfx=pp+'>';var ks=Object.keys(drillData);for(var i=0;i<ks.length;i++){if(ks[i].indexOf(pfx)===0){delete drillData[ks[i]];delete drillOpen[ks[i]];delete drillDim[ks[i]];}}}
+
+function wasPageReload(){
+  try{
+    var nav=performance.getEntriesByType&&performance.getEntriesByType('navigation')[0];
+    return nav&&nav.type==='reload';
+  }catch(e){return false;}
+}
+function clearCachedDashboardOnReload(){
+  var nocache=new URLSearchParams(window.location.search).get('nocache')==='1';
+  if(wasPageReload()||nocache){try{sessionStorage.removeItem(CACHE_KEY);}catch(e){}}
+}
+function saveDashboardCache(){
+  try{
+    sessionStorage.setItem(CACHE_KEY,JSON.stringify({
+      start_date:document.getElementById('dFrom').value,
+      end_date:document.getElementById('dTo').value,
+      data:allData,
+      saved_at:Date.now()
+    }));
+  }catch(e){console.warn('[SALES CACHE] Could not save dashboard cache:',e);}
+}
+async function restoreDashboardCache(){
+  try{
+    var raw=sessionStorage.getItem(CACHE_KEY);
+    if(!raw)return false;
+    var cached=JSON.parse(raw);
+    if(!cached||!Array.isArray(cached.data))return false;
+    if(cached.start_date)document.getElementById('dFrom').value=cached.start_date;
+    if(cached.end_date)document.getElementById('dTo').value=cached.end_date;
+    hydrateFetchedData(cached.data,{toast:false});
+    return true;
+  }catch(e){
+    console.warn('[SALES CACHE] Could not restore dashboard cache:',e);
+    try{sessionStorage.removeItem(CACHE_KEY);}catch(_e){}
+    return false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  clearCachedDashboardOnReload();
+  var n=new Date();
+  document.getElementById('dFrom').value=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-01';
+  document.getElementById('dTo').value=n.toISOString().split('T')[0];
+  checkHealth();
+  applyRoleRestrictions();
+  restoreDashboardCache().then(function(restored){
+    if(!restored){renderInitialTable();loadData({auto:true});}
+  });
+});
+
+async function checkHealth(){
+  try{
+    var r=await fetch(API+'/api/health/',{headers:{'X-CSRFToken':getCSRF()}});
+    var d=await r.json();
+    document.getElementById('sDot').className=d.sap_connected?'dot dot-green':'dot dot-red';
+    document.getElementById('sTxt').textContent=d.sap_connected?'SAP Connected':'SAP Error';
+  }catch(e){
+    document.getElementById('sDot').className='dot dot-red';
+    document.getElementById('sTxt').textContent='Server Offline';
+  }
+}
+
+function populateFilters(months,years){
+  var ms=document.getElementById('fMonth');ms.innerHTML='<option value="">All Months</option>';
+  var ys=document.getElementById('fYear');ys.innerHTML='<option value="">All Years</option>';
+  for(var i=0;i<months.length;i++){var o=document.createElement('option');o.value=months[i];o.textContent=months[i];ms.appendChild(o);}
+  for(var j=0;j<years.length;j++){var o=document.createElement('option');o.value=years[j];o.textContent=years[j];ys.appendChild(o);}
+}
+
+async function renderInitialTable(){
+  filtered=[];
+  var roleType=currentUser&&currentUser.type_filter?currentUser.type_filter:'';
+  for(var i=0;i<PRODUCTS.length;i++){
+    var p=PRODUCTS[i];
+    if(!isProdSelected(p.u_type,p.u_sub_group))continue;
+    if(roleType&&p.u_type!==roleType)continue;
+    filtered.push({u_type:p.u_type,u_sub_group:p.u_sub_group,month:'',year:'',litres:0,linetotal:0,_nodata:true});
+  }
+  filtered.sort(function(a,b){return (b.u_type.localeCompare(a.u_type))||(a.u_sub_group.localeCompare(b.u_sub_group));});
+  renderTable();
+}
+
+function hydrateFetchedData(rows,opts){
+  opts=opts||{};
+  allData=(rows||[]).filter(function(r){return r.u_type==='COMMODITY'||r.u_type==='PREMIUM';});
+  dataFetched=true;
+  var mSet={},ySet={};
+  for(var mi=0;mi<allData.length;mi++){if(allData[mi].month)mSet[allData[mi].month]=1;if(allData[mi].year)ySet[allData[mi].year]=1;}
+  var mArr=Object.keys(mSet).sort(function(a,b){return MONTHS.indexOf(a)-MONTHS.indexOf(b);});
+  var yArr=Object.keys(ySet).sort();
+  populateFilters(mArr,yArr);
+  var cm=currentMonth(),ms=document.getElementById('fMonth'),found=false;
+  for(var j=0;j<ms.options.length;j++){if(ms.options[j].value===cm){found=true;break;}}
+  if(found)ms.value=cm;else ms.value='';
+  document.getElementById('fType').value=currentUser&&currentUser.type_filter?currentUser.type_filter:'';
+  document.getElementById('fYear').value='';
+  applyFilters();
+  if(opts.toast!==false)showToast(allData.length+' rows loaded - showing '+(found?cm:'All Months'),'ok');
+}
+
+async function loadData(opts){
+  opts=opts||{};
+  var sd=document.getElementById('dFrom').value,ed=document.getElementById('dTo').value;
+  if(!sd||!ed){showToast('Select dates','err');return;}
+  document.getElementById('fetchBtn').disabled=true;document.getElementById('fetchBtn').textContent='Loading...';
+  document.getElementById('ov').classList.add('show');
+  drillData={};drillOpen={};drillDim={};rootDrillDim='';allExpanded=false;
+  document.getElementById('expandAllBtn').innerHTML='&#9660; Expand All';
+  try{
+    var res=await fetch(API+'/api/sales-data/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':getCSRF()},body:JSON.stringify({start_date:sd,end_date:ed})});
+    if(!res.ok){var e=await res.json();throw new Error(e.detail||e.error||'Server error');}
+    var result=await res.json();
+    hydrateFetchedData(result.data||[],{toast:!opts.auto});
+    saveDashboardCache();
+    if(opts.auto)showToast(allData.length+' rows auto-loaded','ok');
+  }catch(e){showToast('Error: '+e.message,'err');}
+  finally{document.getElementById('fetchBtn').disabled=false;document.getElementById('fetchBtn').innerHTML='&#9654; Fetch Data';document.getElementById('ov').classList.remove('show');}
+}
+
+async function applyFilters(){
+  if(!dataFetched){renderInitialTable();return;}
+  drillData={};drillOpen={};drillDim={};rootDrillDim='';allExpanded=false;
+  document.getElementById('expandAllBtn').innerHTML='&#9660; Expand All';
+  var ft=document.getElementById('fType').value,fm=document.getElementById('fMonth').value,fy=document.getElementById('fYear').value;
+  var rows=[];for(var i=0;i<allData.length;i++){var r=allData[i];if(ft&&r.u_type!==ft)continue;if(fm&&r.month!==fm)continue;if(fy&&r.year!==fy)continue;if(!isProdSelected(r.u_type,r.u_sub_group))continue;rows.push(r);}
+  if(!fm){
+    var agg={};for(var i=0;i<rows.length;i++){var r=rows[i],gk=r.u_type+'|'+r.u_sub_group;
+      if(!agg[gk])agg[gk]={u_type:r.u_type,u_sub_group:r.u_sub_group,month:'ALL',year:fy||'',litres:0,linetotal:0,_count:0,_nodata:false};
+      var a=agg[gk];a.litres+=r.litres;a.linetotal+=r.linetotal;a._count++;}
+    var prods=ft?PRODUCTS.filter(function(p){return p.u_type===ft;}):PRODUCTS;
+    prods=prods.filter(function(p){return isProdSelected(p.u_type,p.u_sub_group);});
+    for(var pi=0;pi<prods.length;pi++){var pk=prods[pi].u_type+'|'+prods[pi].u_sub_group;
+      if(!agg[pk]){agg[pk]={u_type:prods[pi].u_type,u_sub_group:prods[pi].u_sub_group,month:'ALL',year:fy||'',litres:0,linetotal:0,_count:0,_nodata:false};}}
+    var vals=[],keys=Object.keys(agg);for(var k=0;k<keys.length;k++){var g=agg[keys[k]];vals.push(g);}
+    filtered=vals.sort(function(a,b){return (b.u_type.localeCompare(a.u_type))||(a.u_sub_group.localeCompare(b.u_sub_group));});
+  }else{
+    for(var ei=0;ei<rows.length;ei++)rows[ei]._nodata=false;
+    var existing={};for(var ei=0;ei<rows.length;ei++)existing[rows[ei].u_type+'|'+rows[ei].u_sub_group]=true;
+    var prods2=ft?PRODUCTS.filter(function(p){return p.u_type===ft;}):PRODUCTS;
+    prods2=prods2.filter(function(p){return isProdSelected(p.u_type,p.u_sub_group);});
+    var rowYear=(rows.length>0)?rows[0].year:'';
+    for(var pi2=0;pi2<prods2.length;pi2++){var pk2=prods2[pi2].u_type+'|'+prods2[pi2].u_sub_group;
+      if(!existing[pk2]){rows.push({u_type:prods2[pi2].u_type,u_sub_group:prods2[pi2].u_sub_group,month:fm,year:rowYear,litres:0,linetotal:0,_nodata:false});}}
+    filtered=rows.sort(function(a,b){return (b.u_type.localeCompare(a.u_type))||(a.u_sub_group.localeCompare(b.u_sub_group));});
+  }
+  renderTable();
+}
+
+function renderTable(){
+  var tbody=document.getElementById('tBody'),html='',db=getDrillBy();
+  for(var i=0;i<filtered.length;i++){
+    var row=filtered[i],nodata=row._nodata;
+    var bc=row.u_type==='PREMIUM'?'badge-prem':'badge-comm';
+    var pk=productKey(row),isOpen=drillOpen[pk];
+    var showBtn=db&&dataFetched&&!nodata&&row.litres>0;
+    html+='<tr data-i="'+i+'">';
+    html+='<td class="num" style="color:var(--text3)">'+(i+1)+'</td>';
+    html+='<td><span class="badge '+bc+'">'+row.u_type+'</span></td>';
+    if(showBtn){html+='<td class="sub-cell"><button class="drill-btn'+(isOpen?' open':'')+'" onclick="toggleDrill('+i+')">'+(isOpen?'−':'+')+'</button>'+row.u_sub_group+'</td>';}
+    else{html+='<td class="sub-cell">'+row.u_sub_group+'</td>';}
+    if(nodata){
+      html+='<td class="empty-sap">&mdash;</td>';
+      html+='<td class="empty-sap">&mdash;</td>';
+    }else{
+      html+='<td class="num">'+fN(row.litres)+'</td>';
+      html+='<td class="num">'+fC(row.linetotal)+'</td>';
+    }
+    html+='</tr>';
+    if(isOpen&&drillData[pk])html+=renderSubRows(pk,row.u_type,row.u_sub_group,pk,0);
+  }
+  var t=computeTotals();
+  html+='<tr class="total-row"><td></td><td colspan="2">TOTAL</td>';
+  if(!dataFetched){
+    html+='<td class="empty-sap">&mdash;</td><td class="empty-sap">&mdash;</td>';
+  }else{
+    html+='<td class="num">'+fN(t.litres)+'</td>';
+    html+='<td class="num">'+fC(t.lt)+'</td>';
+  }
+  html+='</tr>';
+  tbody.innerHTML=html;
+}
+
+function renderSubRows(productPK,uType,uSubGroup,parentPath,depth){
+  var items=drillData[parentPath];if(!items)return'';
+  var html='',db=getDrillBy(),parentDimUsed=drillDim[parentPath]||'';
+  var usedInChain=usedDimsInPath(parentPath);
+  var canExpand=db&&usedInChain.indexOf(db)===-1;
+  var indent=20+(depth*20);
+  for(var i=0;i<items.length;i++){
+    var s=items[i],childPath=parentPath+'>'+parentDimUsed+'='+s.dimension;
+    var isChildOpen=drillOpen[childPath];
+    html+='<tr class="sub-row depth-'+Math.min(depth,2)+'">';
+    html+='<td></td><td></td>';
+    if(canExpand&&s.litres>0){
+      html+='<td style="padding-left:'+indent+'px"><button class="drill-btn'+(isChildOpen?' open':'')+'" onclick="toggleSubDrill(\''+esc(productPK)+'\',\''+esc(uType)+'\',\''+esc(uSubGroup)+'\',\''+esc(childPath)+'\');">'+(isChildOpen?'−':'+')+'</button><span class="sub-dim">'+s.dimension+'</span></td>';
+    }else{
+      html+='<td style="padding-left:'+indent+'px"><span class="sub-dim">'+s.dimension+'</span></td>';
+    }
+    html+='<td class="num">'+fN(s.litres)+'</td>';
+    html+='<td class="num">'+fC(s.linetotal)+'</td>';
+    html+='</tr>';
+    if(isChildOpen&&drillData[childPath])html+=renderSubRows(productPK,uType,uSubGroup,childPath,depth+1);
+  }
+  return html;
+}
+
+function usedDimsInPath(path){var dims=[];var parts=path.split('>');for(var i=1;i<parts.length;i++)dims.push(parts[i].split('=')[0]);if(drillDim[path])dims.push(drillDim[path]);return dims;}
+function filtersFromPath(path){var f={};var parts=path.split('>');for(var i=1;i<parts.length;i++){var eq=parts[i].indexOf('=');f[parts[i].substring(0,eq)]=parts[i].substring(eq+1);}return f;}
+
+async function toggleDrill(idx){
+  var row=filtered[idx],pk=productKey(row),db=getDrillBy();if(!db)return;
+  if(drillOpen[pk]){drillOpen[pk]=false;renderTable();return;}
+  var useDb=rootDrillDim||db;
+  if(drillData[pk]&&drillDim[pk]===useDb){drillOpen[pk]=true;renderTable();return;}
+  clearChildren(pk);delete drillData[pk];delete drillDim[pk];
+  if(!rootDrillDim)rootDrillDim=useDb;
+  await fetchAndExpand(pk,row.u_type,row.u_sub_group,pk,useDb);
+}
+
+async function toggleSubDrill(productPK,uType,uSubGroup,childPath){
+  var db=getDrillBy();if(!db)return;
+  if(drillOpen[childPath]){drillOpen[childPath]=false;renderTable();return;}
+  if(drillData[childPath]&&drillDim[childPath]===db){drillOpen[childPath]=true;renderTable();return;}
+  clearChildren(childPath);delete drillData[childPath];delete drillDim[childPath];
+  await fetchAndExpand(productPK,uType,uSubGroup,childPath,db);
+}
+
+async function fetchAndExpand(productPK,uType,uSubGroup,path,drillBy){
+  var filters=filtersFromPath(path);
+  var fm=document.getElementById('fMonth').value,fy=document.getElementById('fYear').value;
+  var sd=document.getElementById('dFrom').value,ed=document.getElementById('dTo').value;
+  var body={start_date:sd,end_date:ed,u_type:uType,u_sub_group:uSubGroup,drill_by:drillBy,filters:filters};
+  if(fm)body.month=fm;if(fy)body.year=fy;
+  try{
+    var res=await fetch(API+'/api/drill-down/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':getCSRF()},body:JSON.stringify(body)});
+    if(!res.ok){var err=await res.json();throw new Error(err.detail||err.error||'Drill failed');}
+    var result=await res.json();
+    drillData[path]=result.data.sort(function(a,b){return b.litres-a.litres;});
+    drillDim[path]=drillBy;drillOpen[path]=true;renderTable();
+    var dl={'U_Main_Group':'groups','State':'states','U_Chain':'chains','ItemName':'items','CardName':'customers'};
+    showToast(uSubGroup+' → '+result.data.length+' '+(dl[drillBy]||drillBy),'ok');
+  }catch(e){showToast('Drill error: '+e.message,'err');}
+}
+
+function computeTotals(){var litres=0,lt=0;for(var i=0;i<filtered.length;i++){var r=filtered[i];if(r._nodata)continue;litres+=r.litres;lt+=r.linetotal;}return{litres:litres,lt:lt};}
+
+async function exportCSV(){
+  if(!dataFetched){showToast('Fetch data first','info');return;}
+  try{
+    var res=await fetch(API+'/api/export-excel/',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':getCSRF()},
+      body:JSON.stringify({layout_rows:buildExcelLayoutRows('Sales Dashboard')})
+    });
+    if(!res.ok){var err='Export failed';try{var ej=await res.json();err=ej.detail||ej.error||err;}catch(_){}throw new Error(err);}
+    var blob=await res.blob();
+    var cd=res.headers.get('Content-Disposition')||'';
+    var name='Sales_Export_'+document.getElementById('dFrom').value+'_'+document.getElementById('dTo').value+'.xlsx';
+    var m=/filename="([^"]+)"/i.exec(cd);if(m&&m[1])name=m[1];
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');a.href=url;a.download=name;a.click();
+    setTimeout(function(){URL.revokeObjectURL(url);},1000);
+    showToast('Excel export downloaded','ok');
+  }catch(e){showToast(e.message||'Export failed','err');}
+}
+
+function buildExcelLayoutRows(title){
+  var rows=[
+    [{value:title,style:1,colspan:5}],
+    [{value:'From',style:1},{value:document.getElementById('dFrom').value},{value:'To',style:1},{value:document.getElementById('dTo').value}],
+    []
+  ];
+  var table=document.getElementById('tbl');
+  table.querySelectorAll('tr').forEach(function(tr){
+    var style=tr.classList.contains('grp-row')?2:(tr.closest('thead')?1:0);
+    var cells=[];
+    tr.querySelectorAll('th,td').forEach(function(cell){
+      cells.push({value:cell.innerText.trim(),colspan:cell.colSpan||1,style:style});
+    });
+    rows.push(cells);
+  });
+  return rows;
+}
+
+function fN(n,d){d=d||0;if(n===null||n===undefined||isNaN(n))return'&mdash;';return new Intl.NumberFormat('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d}).format(n);}
+function fC(n){if(n===null||n===undefined||isNaN(n))return'&mdash;';return'₹'+new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(Math.round(n));}
+function showToast(msg,type){var el=document.getElementById('toast');el.textContent=msg;el.className='toast toast-'+(type||'info')+' show';setTimeout(function(){el.classList.remove('show');},3500);}
+
+/* ===== PRODUCT FILTER ===== */
+function buildProductFilterList(){
+  var html='';
+  var sorted=PRODUCTS.slice().sort(function(a,b){return b.u_type.localeCompare(a.u_type)||a.u_sub_group.localeCompare(b.u_sub_group);});
+  for(var i=0;i<sorted.length;i++){
+    var p=sorted[i],pk=p.u_type+'|'+p.u_sub_group,checked=selectedProducts[pk]!==false;
+    var bc=p.u_type==='PREMIUM'?'badge-prem':'badge-comm';
+    html+='<div class="pf-item"><input type="checkbox" id="pf_'+i+'" '+(checked?'checked':'')+' data-prod="'+pk+'"><label for="pf_'+i+'"><span class="pf-badge '+bc+'">'+p.u_type+'</span> '+p.u_sub_group+'</label></div>';
+  }
+  document.getElementById('pfList').innerHTML=html;
+}
+
+function toggleProductFilter(){var drop=document.getElementById('pfDrop');if(drop.classList.contains('show')){drop.classList.remove('show');return;}buildProductFilterList();drop.classList.add('show');}
+function pfSelectAll(){var cbs=document.querySelectorAll('#pfList input[type=checkbox]');for(var i=0;i<cbs.length;i++)cbs[i].checked=true;}
+function pfClearAll(){var cbs=document.querySelectorAll('#pfList input[type=checkbox]');for(var i=0;i<cbs.length;i++)cbs[i].checked=false;}
+function applyProductFilter(){
+  var cbs=document.querySelectorAll('#pfList input[type=checkbox]');var count=0;
+  for(var i=0;i<cbs.length;i++){selectedProducts[cbs[i].dataset.prod]=cbs[i].checked;if(cbs[i].checked)count++;}
+  document.getElementById('pfDrop').classList.remove('show');
+  var btn=document.getElementById('pfBtn');
+  if(count===PRODUCTS.length){btn.innerHTML='All Products <span class="pf-count" id="pfCount" style="display:none"></span> &#9662;';}
+  else{btn.innerHTML=count+' Products <span class="pf-count" id="pfCount">'+count+'/'+PRODUCTS.length+'</span> &#9662;';}
+  applyFilters();
+}
+
+document.addEventListener('click',function(e){var wrap=document.querySelector('.prod-filter-wrap');if(wrap&&!wrap.contains(e.target)){document.getElementById('pfDrop').classList.remove('show');}});
+
+/* ===== ROLE RESTRICTIONS (applied on DOMContentLoaded) ===== */
+function applyRoleRestrictions(){
+  if(!currentUser)return;
+  var u=currentUser;
+  var fType=document.getElementById('fType');
+  if(u.type_filter){fType.value=u.type_filter;fType.disabled=true;fType.style.opacity='0.6';}
+  else{fType.value='';fType.disabled=false;fType.style.opacity='1';}
+}
+
+/* ===========================================================================
+   KPI tiles + India state map.
+   Appended on purpose: nothing above this line was changed, so the table,
+   filters and drill-down keep behaving exactly as before. This block only
+   reads what they already produced.
+
+   The map is plain SVG. d3-geo turns the state outlines into <path> data and
+   CSS does the rest; the raised "3D" edge is nine copies of the same paths
+   stacked one step apart underneath the real ones. No 3D library is involved.
+   =========================================================================== */
+(function(){
+  var wrapEl    = document.querySelector('.rd-wrap');
+  var GEO_URL   = wrapEl ? wrapEl.getAttribute('data-geo-url') : '';
+  var svgEl     = document.getElementById('indiaMap');
+  var emptyEl   = document.getElementById('mapEmpty');
+  var scaleEl   = document.getElementById('mapScale');
+  var tipEl     = document.getElementById('mapTip');
+  var chipEl    = document.getElementById('mapChip');
+  var listEl    = document.getElementById('stateList');
+  var mapWrapEl = document.getElementById('mapWrap');
+  if(!svgEl) return;
+
+  var VB_W = 600, VB_H = 680, DEPTH = 9;
+
+  /* SAP spells a few states differently from the map file. Fold both onto one
+     key, otherwise those states silently render as "no data". */
+  var ALIASES = {
+    'ORISSA':'ODISHA', 'PONDICHERRY':'PUDUCHERRY', 'NCT OF DELHI':'DELHI',
+    'NEW DELHI':'DELHI', 'UTTARANCHAL':'UTTARAKHAND', 'TAMILNADU':'TAMIL NADU',
+    /* these two are misspelt in the SAP master data itself */
+    'KERELA':'KERALA', 'CHHATISGARH':'CHHATTISGARH',
+    'ANDAMAN AND NICOBAR':'ANDAMAN AND NICOBAR ISLANDS',
+    'DADRA AND NAGAR HAVELI':'DADRA AND NAGAR HAVELI AND DAMAN AND DIU',
+    'DAMAN AND DIU':'DADRA AND NAGAR HAVELI AND DAMAN AND DIU'
+  };
+  function normState(raw){
+    var s = String(raw||'').trim().toUpperCase().replace(/&/g,' AND ').replace(/\s+/g,' ');
+    return ALIASES[s] || s;
+  }
+  function titleCase(s){
+    return String(s||'').toLowerCase().replace(/\b\w/g,function(c){return c.toUpperCase();});
+  }
+
+  /* Pale wheat to deep amber. Square-rooted so the mid-sized states stay
+     readable instead of all washing out next to the one big leader. */
+  function colorFor(v, max){
+    if(!v || v<=0 || !max) return '#f2ece0';
+    var t = Math.sqrt(v/max);
+    var from=[246,236,215], to=[138,92,20];
+    function mix(a,b){return Math.round(a+(b-a)*t);}
+    return 'rgb('+mix(from[0],to[0])+','+mix(from[1],to[1])+','+mix(from[2],to[2])+')';
+  }
+
+  /* --- geometry: fetched once, kept for the life of the page --- */
+  var geoPaths = null, geoPromise = null;
+  function loadGeo(){
+    if(geoPromise) return geoPromise;
+    geoPromise = fetch(GEO_URL).then(function(r){
+      if(!r.ok) throw new Error('map file '+r.status);
+      return r.json();
+    }).then(function(json){
+      var feats = json.features || [];
+      var proj  = d3.geoMercator().fitSize([VB_W,VB_H],{type:'FeatureCollection',features:feats});
+      var pathGen = d3.geoPath(proj);
+      geoPaths = feats.map(function(f){
+        var p = f.properties||{};
+        return {
+          d: pathGen(f),
+          name: normState(p.ST_NM||p.st_nm||p.NAME_1||p.name||p.State||''),
+          area: pathGen.area(f)
+        };
+      }).filter(function(p){return p.d;});
+      /* Biggest first so the tiny states and UTs paint on top of their
+         neighbours instead of disappearing underneath them. */
+      geoPaths.sort(function(a,b){return b.area-a.area;});
+      return geoPaths;
+    });
+    return geoPromise;
+  }
+
+  var firstPaint = true;
+  function drawMap(valueByState, maxVal){
+    var parts = ['<g class="sx-extrude">'];
+    for(var i=0;i<DEPTH;i++){
+      parts.push('<g transform="translate(0,'+(DEPTH-i)+')">');
+      for(var w=0; w<geoPaths.length; w++) parts.push('<path class="sx-wall" d="'+geoPaths[w].d+'"/>');
+      parts.push('</g>');
+    }
+    parts.push('</g><g class="sx-faces">');
+    for(var s=0; s<geoPaths.length; s++){
+      var p = geoPaths[s], v = valueByState[p.name] || 0;
+      parts.push('<path class="sx-state" data-state="'+p.name+'" fill="'+colorFor(v,maxVal)+
+                 '" style="animation-delay:'+(s*7)+'ms" d="'+p.d+'"/>');
+    }
+    parts.push('</g>');
+    svgEl.innerHTML = parts.join('');
+    svgEl.hidden = false;
+    scaleEl.hidden = false;
+    emptyEl.style.display = 'none';
+    if(firstPaint){
+      svgEl.classList.add('is-entering');
+      setTimeout(function(){svgEl.classList.remove('is-entering');}, 1400);
+      firstPaint = false;
+    }
+  }
+
+  /* --- hover --- */
+  var hoverValues = {};
+  svgEl.addEventListener('mousemove', function(e){
+    var t = e.target;
+    if(!t || !t.classList || !t.classList.contains('sx-state')){ hideTip(); return; }
+    var name = t.getAttribute('data-state');
+    var box  = mapWrapEl.getBoundingClientRect();
+    var v    = hoverValues[name];
+    tipEl.innerHTML = '<b>'+titleCase(name)+'</b><span>'+
+      (v ? fN(v,0)+' L' : 'No sales in this range')+'</span>';
+    tipEl.style.left = (e.clientX-box.left)+'px';
+    tipEl.style.top  = (e.clientY-box.top)+'px';
+    tipEl.classList.add('show');
+    markActive(name);
+  });
+  svgEl.addEventListener('mouseleave', hideTip);
+  function hideTip(){ tipEl.classList.remove('show'); markActive(null); }
+  function markActive(name){
+    var faces = svgEl.querySelectorAll('.sx-state.is-on');
+    for(var i=0;i<faces.length;i++) faces[i].classList.remove('is-on');
+    var rows = listEl.querySelectorAll('.sx-state-row.is-on');
+    for(var r=0;r<rows.length;r++) rows[r].classList.remove('is-on');
+    if(!name) return;
+    var face = svgEl.querySelector('.sx-state[data-state="'+name+'"]');
+    if(face) face.classList.add('is-on');
+    var row = listEl.querySelector('.sx-state-row[data-state="'+name+'"]');
+    if(row) row.classList.add('is-on');
+  }
+
+  function drawList(rows, maxVal){
+    if(!rows.length){
+      listEl.innerHTML = '<p class="sx-states-empty">No state came back for this range.</p>';
+      return;
+    }
+    var html = '';
+    for(var i=0;i<rows.length;i++){
+      var pct = maxVal ? Math.max(2, Math.round(rows[i].value/maxVal*100)) : 0;
+      html += '<div class="sx-state-row" data-state="'+esc(rows[i].name)+'">'+
+                '<span class="sx-state-name">'+esc(titleCase(rows[i].name))+'</span>'+
+                '<span class="sx-state-val">'+fN(rows[i].value,0)+'</span>'+
+                '<span class="sx-state-bar"><i style="width:'+pct+'%;animation-delay:'+(i*28)+'ms"></i></span>'+
+              '</div>';
+    }
+    listEl.innerHTML = html;
+  }
+
+  /* --- KPI tiles: read straight off the table's own totals --- */
+  function paintKpis(stateRows){
+    var t = computeTotals();
+    var el = document.getElementById('kLitres');
+    el.innerHTML = (t.litres ? fN(t.litres,0) : '&mdash;')+'<small>L</small>';
+    document.getElementById('kLitresSub').textContent =
+      dataFetched ? filtered.length+' product rows in view' : 'Pick a date range and fetch';
+    document.getElementById('kRevenue').innerHTML = t.lt ? fC(t.lt) : '&mdash;';
+    document.getElementById('kRate').innerHTML =
+      (t.litres && t.lt) ? fC(t.lt/t.litres) : '&mdash;';
+    var live = stateRows.filter(function(r){return r.value>0;});
+    document.getElementById('kStates').innerHTML = live.length ? fN(live.length,0) : '&mdash;';
+    document.getElementById('kStatesSub').textContent =
+      live.length ? 'Top: '+titleCase(live[0].name) : 'Top state appears on the map';
+  }
+
+  /* --- state data: one call per filter combination, then cached --- */
+  var lastKey = '', lastRows = [], inFlight = false;
+  function filterKey(){
+    return [document.getElementById('dFrom').value,
+            document.getElementById('dTo').value,
+            document.getElementById('fType').value,
+            document.getElementById('fMonth').value,
+            document.getElementById('fYear').value].join('|');
+  }
+
+  function fetchStates(){
+    var sd = document.getElementById('dFrom').value;
+    var ed = document.getElementById('dTo').value;
+    if(!sd || !ed || !dataFetched) return Promise.resolve([]);
+    var key = filterKey();
+    if(key === lastKey) return Promise.resolve(lastRows);
+    if(inFlight) return Promise.resolve(lastRows);
+    inFlight = true;
+    var body = {
+      start_date: sd, end_date: ed, drill_by: 'State',
+      u_type: document.getElementById('fType').value || '',
+      month:  document.getElementById('fMonth').value || null,
+      year:   document.getElementById('fYear').value || null
+    };
+    return fetch(API+'/api/drill-down/',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':getCSRF()},
+      body: JSON.stringify(body)
+    }).then(function(r){
+      if(!r.ok) throw new Error('state data '+r.status);
+      return r.json();
+    }).then(function(j){
+      lastRows = (j.data||[]).map(function(d){
+        return {name: normState(d.dimension), value: Number(d.litres)||0};
+      }).filter(function(d){
+        return d.name && d.name !== 'UNKNOWN';
+      }).sort(function(a,b){return b.value-a.value;});
+      lastKey = key;
+      return lastRows;
+    }).catch(function(){
+      return lastRows;
+    }).finally(function(){ inFlight = false; });
+  }
+
+  /* --- the one entry point the table calls after every render --- */
+  var pending = null;
+  window.sxRefreshPanels = function(){
+    clearTimeout(pending);
+    pending = setTimeout(function(){
+      fetchStates().then(function(rows){
+        paintKpis(rows);
+        if(!rows.length){
+          chipEl.textContent = dataFetched ? 'No state data' : 'No data yet';
+          return;
+        }
+        var byState = {}, maxVal = 0;
+        for(var i=0;i<rows.length;i++){
+          byState[rows[i].name] = rows[i].value;
+          if(rows[i].value > maxVal) maxVal = rows[i].value;
+        }
+        hoverValues = byState;
+        chipEl.textContent = rows.length+' states';
+        drawList(rows, maxVal);
+        loadGeo().then(function(){
+          drawMap(byState, maxVal);
+        }).catch(function(){
+          emptyEl.textContent = 'Map file did not load. The numbers on the right are still correct.';
+        });
+      });
+    }, 120);
+  };
+
+  /* Hover on a list row lights the matching state, and the other way round. */
+  listEl.addEventListener('mouseover', function(e){
+    var row = e.target.closest ? e.target.closest('.sx-state-row') : null;
+    if(row) markActive(row.getAttribute('data-state'));
+  });
+  listEl.addEventListener('mouseleave', function(){ markActive(null); });
+})();
+
+/* Wrap the existing renderTable instead of editing it: every code path that
+   redraws the table now refreshes the tiles and the map too. */
+var _sxOrigRenderTable = renderTable;
+renderTable = function(){
+  _sxOrigRenderTable.apply(this, arguments);
+  if(window.sxRefreshPanels) window.sxRefreshPanels();
+};
+</script>
+{% endblock %}

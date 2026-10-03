@@ -1,0 +1,617 @@
+{% extends base_template %}
+{% block title %}Wellness–Mart Reconciliation — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important;padding:10px 20px !important}
+  .rc-wrap{max-width:1600px;margin:0 auto}
+
+  /* ── Header band (light) — mirrors Customer Aging's hero ── */
+  .rc-hero{margin:0 0 10px}
+  .rc-h1{font-size:30px;font-weight:800;color:var(--rz-ink);margin:0;letter-spacing:-.5px;
+    text-shadow:0 0 26px rgba(99,102,241,.55), 0 4px 14px rgba(79,70,229,.28)}   /* glowing title, no box */
+  .rc-sub{margin:8px 0 0;font-size:13px;color:var(--rz-muted);max-width:900px;line-height:1.5}
+  .rc-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px}
+  /* Oil / Beverages company toggle — swaps the seller company being reconciled. */
+  .rc-co{display:inline-flex;border:1px solid var(--rz-card-brd);border-radius:12px;overflow:hidden;background:#fff;box-shadow:var(--rz-shadow)}
+  .rc-co button{border:0;border-left:1px solid var(--rz-line);background:#fff;color:var(--rz-body);font-family:inherit;font-size:14.5px;font-weight:900;padding:9px 18px;cursor:pointer;transition:.15s}
+  .rc-co button:first-child{border-left:0}
+  .rc-co button:hover:not(.on){background:#f6f2fc}
+  .rc-co button.on{background:var(--rz-soft);color:var(--rz-indigo-deep)}
+
+  /* Reconciliation / Ledgers tabs */
+  .rc-tabs{display:inline-flex;gap:4px;background:#eef1f6;border:1px solid var(--rz-card-brd);border-radius:12px;padding:4px;margin:0}
+  .rc-tabs button{border:0;background:transparent;color:var(--rz-muted);font-family:inherit;font-size:14.5px;font-weight:900;padding:9px 20px;border-radius:9px;cursor:pointer}
+  .rc-tabs button.on{background:#fff;color:var(--rz-indigo-deep);box-shadow:0 1px 2px rgba(15,23,42,.08)}
+
+  /* Ledger pivot cards */
+  .rc-ldg{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow);margin-bottom:22px}
+  .rc-ldg-h{padding:13px 18px;font-weight:800;color:var(--rz-ink);font-size:14px;letter-spacing:.3px;background:var(--rz-head-bg);border-bottom:1px solid var(--rz-line);border-left:4px solid var(--rz-indigo)}
+  .rc-ldg.well .rc-ldg-h{border-left-color:var(--rz-teal)}
+  table.rc-ldg-tb{width:100%;border-collapse:collapse;font-size:13px}
+  table.rc-ldg-tb th{background:var(--rz-head-bg);color:var(--rz-head-ink);text-align:right;font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:11px 16px;white-space:nowrap;border-bottom:1px solid var(--rz-line)}
+  table.rc-ldg-tb th.lbl{text-align:left}
+  table.rc-ldg-tb td{padding:10px 16px;border-bottom:1px solid #eef2f6;color:var(--rz-body);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.rc-ldg-tb td.lbl{text-align:left;font-weight:700;color:var(--rz-ink)}
+  table.rc-ldg-tb tbody tr:hover td{background:#f8fafc}
+  table.rc-ldg-tb tr.rc-ldg-tot td{background:var(--rz-total-bg);color:var(--rz-ink);font-weight:900;border-top:2px solid var(--rz-total-brd)}
+  .rc-ldg-neg{color:var(--rz-neg);font-weight:700}
+  tr.rc-ldg-tot .rc-ldg-neg{color:var(--rz-neg)}
+  .rc-ldg-empty{padding:26px;text-align:center;color:var(--rz-faint)}
+  .rc-dates{display:inline-flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--rz-card-brd);border-radius:12px;padding:7px 12px;box-shadow:var(--rz-shadow)}
+  .rc-dates label{font-size:12.5px;font-weight:900;color:var(--rz-muted);text-transform:uppercase;letter-spacing:.5px}
+  .rc-dates input{border:1px solid var(--rz-line);border-radius:8px;padding:6px 9px;font-size:14px;font-weight:700;font-family:inherit;color:var(--rz-ink);outline:none}
+  .rc-dates input:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .rc-btn{display:inline-flex;align-items:center;gap:7px;border:0;border-radius:10px;padding:9px 17px;font-weight:800;font-size:14.5px;font-family:inherit;cursor:pointer;transition:.15s}
+  .rc-apply{background:var(--rz-indigo-deep);color:#fff}
+  .rc-apply:hover{background:#3730a3}
+  .rc-export{background:#fff;color:var(--rz-indigo-deep);border:1px solid var(--rz-card-brd);margin-left:auto}
+  .rc-export:hover{background:var(--rz-soft);border-color:var(--rz-soft-brd)}
+
+  .rc-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 12px}
+  .rc-kpi{position:relative;overflow:hidden;border-radius:16px;padding:16px 17px 15px;color:var(--rz-ink);cursor:pointer;
+    background:var(--rz-card);border:1px solid var(--rz-card-brd);box-shadow:var(--rz-shadow);transition:transform .12s,box-shadow .12s,border-color .12s}
+  .rc-kpi::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--kpi-acc,var(--rz-acc-indigo))}
+  .rc-kpi:hover{transform:translateY(-3px);box-shadow:var(--rz-shadow-lg);border-color:var(--kpi-acc,var(--rz-soft-brd))}
+  .rc-kpi:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(99,102,241,.28)}
+  .rc-kpi.sel{border-color:var(--kpi-acc,var(--rz-indigo));box-shadow:0 0 0 2px var(--kpi-acc,var(--rz-indigo)) inset,var(--rz-shadow)}
+  .rc-kpi-l{font-size:12.5px;font-weight:900;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .rc-kpi-v{margin-top:8px;font-size:27px;font-weight:900;line-height:1;font-variant-numeric:tabular-nums;color:var(--rz-ink)}
+  .rc-kpi.k-total{--kpi-acc:var(--rz-acc-indigo)}
+  .rc-kpi.k-match{--kpi-acc:var(--rz-acc-green)}
+  .rc-kpi.k-mis{--kpi-acc:var(--rz-acc-red)}
+  .rc-kpi.k-inc{--kpi-acc:var(--rz-acc-amber)}
+  .rc-kpi.k-val{--kpi-acc:var(--rz-acc-teal)}
+  @media(max-width:1100px){.rc-kpis{grid-template-columns:repeat(3,1fr)}}
+
+  .rc-chips{display:flex;gap:8px;flex-wrap:wrap;margin:0}
+  .rc-chip{border:1px solid var(--rz-card-brd);background:#fff;color:var(--rz-body);border-radius:20px;padding:8px 16px;font-weight:800;font-size:14px;font-family:inherit;cursor:pointer;transition:.15s}
+  .rc-chip:hover{border-color:#cbd5e1;background:#f8fafc}
+  .rc-chip.active{background:var(--rz-soft);color:var(--rz-indigo-deep);border-color:var(--rz-soft-brd)}
+  .rc-chip .n{opacity:.7;font-weight:600;margin-left:4px}
+
+  /* Free-text search over the billing chains (PO / vendor / status / any document number). */
+  .rc-searchbar{display:flex;align-items:center;gap:9px;flex:1 1 260px;min-width:220px;background:#fff;border:1px solid var(--rz-card-brd);border-radius:12px;
+    padding:8px 13px;margin:0;box-shadow:var(--rz-shadow)}
+  .rc-searchbar:focus-within{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .rc-searchbar svg{color:var(--rz-faint);flex:none}
+  .rc-searchbar input{border:0;outline:0;flex:1;font-family:inherit;font-size:14.5px;font-weight:600;color:var(--rz-ink);background:transparent}
+  .rc-searchbar .rc-search-x{border:0;background:transparent;color:var(--rz-faint);font-size:18px;line-height:1;cursor:pointer;padding:0 2px;display:none}
+  .rc-searchbar .rc-search-x:hover{color:var(--rz-body)}
+
+  .rc-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow);margin-bottom:22px}
+  .rc-card-h{padding:12px 18px;font-weight:800;color:var(--rz-ink);font-size:14px;border-bottom:1px solid var(--rz-line);display:flex;align-items:center;gap:8px}
+  .rc-tw{overflow:auto;max-height:66vh}
+  table.rc-tbl{width:100%;border-collapse:collapse;font-size:13px}
+  table.rc-tbl th,table.rc-tbl td{padding:9px 13px;text-align:left;border-bottom:1px solid #eef2f6;white-space:nowrap}
+  table.rc-tbl th{position:sticky;top:0;background:var(--rz-head-bg);color:var(--rz-head-ink);font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;z-index:1;border-bottom:1px solid var(--rz-line)}
+  table.rc-tbl td.num,table.rc-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.rc-tbl tbody tr:hover td{background:#f8fafc}
+  td.rc-off{color:var(--rz-neg);font-weight:800}
+  td.rc-miss{color:#cbd5e1}
+  th.rc-sno,td.rc-sno{width:44px;text-align:right;color:var(--rz-faint);font-variant-numeric:tabular-nums;font-weight:700}
+  .rc-badge{display:inline-block;font-size:10.5px;font-weight:800;letter-spacing:.4px;padding:3px 9px;border-radius:20px;text-transform:uppercase}
+  .b-MATCHED{background:#dcfce7;color:#166534}
+  .b-MISMATCH{background:#fee2e2;color:#b91c1c}
+  .b-INCOMPLETE{background:#fef3c7;color:#92400e}
+  .rc-detail{font-size:11.5px;color:var(--rz-muted)}
+  .rc-cnt{font-size:10px;color:var(--rz-faint);font-weight:700}
+  .rc-empty{padding:34px;text-align:center;color:var(--rz-faint);font-size:13px}
+  .rc-po{font-weight:800;color:var(--rz-ink)}
+
+  /* Match driller — pick documents to compare, show equal / not-equal rows. */
+  /* Match drill + search on one compact row — drill takes only its content width, search fills the rest. */
+  .rc-filterrow{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap;margin:0 0 14px}
+  .rc-drill{display:flex;align-items:center;gap:9px;flex-wrap:wrap;flex:0 0 auto;background:#fff;border:1px solid var(--rz-card-brd);border-radius:14px;padding:8px 12px;box-shadow:var(--rz-shadow)}
+  .rc-drill-lbl{font-size:12.5px;font-weight:900;color:var(--rz-body);text-transform:uppercase;letter-spacing:.5px}
+  .rc-drill-nodes,.rc-drill-mode{display:inline-flex;gap:6px}
+  .rc-drill-nodes button{border:1px solid var(--rz-card-brd);background:#f8fafc;color:var(--rz-body);border-radius:9px;padding:7px 14px;font-weight:900;font-size:13.5px;font-family:inherit;cursor:pointer;transition:.12s}
+  .rc-drill-nodes button:hover{border-color:#cbd5e1}
+  .rc-drill-nodes button.on{background:var(--rz-soft);color:var(--rz-indigo-deep);border-color:var(--rz-soft-brd)}
+  .rc-drill-mode{background:#f1f5f9;border-radius:10px;padding:3px}
+  .rc-drill-mode button{border:0;background:transparent;color:var(--rz-muted);border-radius:8px;padding:7px 13px;font-weight:800;font-size:13.5px;font-family:inherit;cursor:pointer}
+  .rc-drill-mode button.active{background:#fff;color:var(--rz-indigo-deep);box-shadow:0 1px 2px rgba(15,23,42,.08)}
+  .rc-drill-hint{font-size:12.5px;color:var(--rz-faint);font-weight:700;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rc-drill-clear{margin-left:2px;border:0;background:transparent;color:var(--rz-indigo-deep);font-weight:700;font-size:12px;font-family:inherit;cursor:pointer}
+
+  /* Clickable amount cells reveal the underlying SAP document numbers. */
+  td.rc-clk{cursor:pointer}
+  td.rc-clk .rc-amt{border-bottom:1px dashed #c7cdd9}
+  td.rc-clk:hover .rc-amt{color:var(--rz-indigo-deep);border-bottom-color:var(--rz-indigo-deep)}
+  td.rc-dsel .rc-amt{background:var(--rz-soft);border-radius:5px;padding:0 4px} /* node picked in driller */
+
+  .rc-pop{position:fixed;z-index:60;min-width:248px;max-width:360px;background:#fff;color:var(--rz-body);border:1px solid var(--rz-card-brd);border-radius:12px;
+          box-shadow:0 18px 44px rgba(15,23,42,.18);padding:11px 13px;font-size:12.5px;display:none}
+  .rc-pop-h{font-size:10.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-indigo-deep);margin-bottom:7px}
+  .rc-pop-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:3px 0;font-variant-numeric:tabular-nums}
+  .rc-pop-row .dn{font-weight:800;color:var(--rz-ink)}
+  .rc-pop-row .dt{color:var(--rz-faint);font-size:11px;margin-left:auto;margin-right:2px}
+  .rc-pop-row .da{color:var(--rz-body);min-width:74px;text-align:right}
+  .rc-pop-tot{border-top:1px solid var(--rz-line);margin-top:6px;padding-top:6px;font-weight:800;color:var(--rz-amber)}
+  .rc-pop-row .mk{font-size:9.5px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;padding:1px 6px;border-radius:9px;margin-left:2px;white-space:nowrap}
+  .rc-pop-row .mk.ok{background:#dcfce7;color:#15803d}
+  .rc-pop-row .mk.no{background:#fee2e2;color:#b91c1c}
+  .rc-pop-row .mk.cn{background:#fef3c7;color:#b45309}
+  .rc-pop-sub{font-size:10.5px;font-weight:700;color:var(--rz-faint);margin:-2px 0 6px}
+  .rc-pop-sub b.no{color:#b91c1c}
+  .rc-pop-sub b.cn{color:#b45309}
+  td.rc-cn .rc-amt{color:#b45309;font-weight:700;border-bottom-color:#e7c88a}
+  td.rc-cn:hover .rc-amt{color:#92400e;border-bottom-color:#b45309}
+  .rc-pop-ref{font-size:10.5px;color:var(--rz-faint);padding:0 0 3px 12px;letter-spacing:.2px}
+  .rc-pop-empty{color:var(--rz-faint)}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="rc-wrap">
+  <div class="rc-hero">
+    <h1 class="rc-h1">Wellness–Mart Reconciliation</h1>
+  </div>
+
+  <!-- KPIs sit above all the filters (company toggle, dates, tabs) per the requested layout. -->
+  <div class="rc-kpis" id="rcKpis"></div>
+
+  <div class="rc-toolbar">
+    <div class="rc-co" id="rcCo">
+      <button data-schema="oil" class="on">Oil</button>
+      <button data-schema="beverages">Beverages</button>
+    </div>
+    <div class="rc-tabs" id="rcTabs">
+      <button type="button" data-tab="recon" class="on">Reconciliation</button>
+      <button type="button" data-tab="ledger">Ledgers</button>
+    </div>
+    <div class="rc-chips" id="rcChips"></div>
+    <div class="rc-dates">
+      <label for="rcFrom">From</label><input type="date" id="rcFrom">
+      <label for="rcTo">To</label><input type="date" id="rcTo">
+    </div>
+    <button class="rc-btn rc-apply" id="rcApply">Apply</button>
+    <button class="rc-btn rc-export" id="rcExport">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Export Excel
+    </button>
+  </div>
+
+  <div id="rcPanelRecon">
+  <!-- Match drill + search share one compact row so they don't eat vertical space. -->
+  <div class="rc-filterrow">
+    <div class="rc-drill">
+      <span class="rc-drill-lbl">Match drill</span>
+      <div class="rc-drill-nodes" id="rcDrill">
+        <button data-node="po">PO</button>
+        <button data-node="so">SO</button>
+        <button data-node="grpo">GRPO</button>
+        <button data-node="ap">A/P</button>
+        <button data-node="ar">A/R</button>
+      </div>
+      <div class="rc-drill-mode" id="rcDrillMode">
+        <button data-mode="eq" class="active">Equal</button>
+        <button data-mode="neq">Not equal</button>
+      </div>
+      <span class="rc-drill-hint" id="rcDrillHint">pick 2+ documents to compare their totals</span>
+      <button class="rc-drill-clear" id="rcDrillClear" style="display:none">Clear</button>
+    </div>
+
+    <div class="rc-searchbar">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="rcSearch" autocomplete="off" placeholder="Search chains — PO, vendor, or any document number…">
+      <button type="button" class="rc-search-x" id="rcSearchClear" title="Clear search">&times;</button>
+    </div>
+  </div>
+
+  <div class="rc-card">
+    <div class="rc-card-h">Billing chains <span class="rc-detail" id="rcRowCount"></span>
+      <span class="rc-detail" style="margin-left:auto;font-weight:600">click any amount to see its document numbers</span></div>
+    <div class="rc-tw">
+      <table class="rc-tbl">
+        <thead><tr>
+          <th class="rc-sno">S.No.</th><th>Mart PO</th><th>Date</th>
+          <th class="num">PO Total</th><th class="num">SO</th><th class="num">GRPO</th>
+          <th class="num">A/P</th><th class="num">A/R</th><th class="num">Credit Note</th><th>Status</th>
+        </tr></thead>
+        <tbody id="rcBody"><tr><td colspan="10" class="rc-empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  </div><!-- /rcPanelRecon -->
+
+  <div id="rcPanelLedger" style="display:none">
+    <p class="rc-sub" style="margin-bottom:14px">Business-partner ledgers behind the reconciliation, pivoted by <b>ORIGIN</b> (document type). Cancellation entries are excluded. Balance = Debit − Credit (LC). Uses the From/To window above.</p>
+    <div class="rc-ldg" id="rcLdgMart"></div>
+    <div class="rc-ldg" id="rcLdgWell"></div>
+  </div>
+
+</div>
+<div class="rc-pop" id="rcPop"></div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function(){
+  var DATA={summary:{},chains:[],tolerance:1};
+  var filter='broken';   // status filter: broken | mismatch | incomplete | matched | all
+  var search='';         // free-text query (lower-cased); when set, spans ALL statuses
+  var schema='oil';      // seller company: oil | beverages
+  // Match driller: pick documents, show rows where they are equal / not equal.
+  var NODE_KEYS={po:'po_total',so:'so',grpo:'grpo',ap:'ap',ar:'ar'};
+  var NODE_LBL={po:'PO',so:'SO',grpo:'GRPO',ap:'A/P',ar:'A/R',cn:'Credit Note'};
+  // What base document each node is cut against — shown as "↳ <base> <num>" under every doc.
+  var REF_LBL={so:'PO',grpo:'PO',ap:'GRPO',ar:'SO',cn:'Invoice'};
+  var drill={po:false,so:false,grpo:false,ap:false,ar:false};
+  var drillMode='eq';    // eq | neq
+  var popCell=null;
+  var LDG=null;          // ledgers payload (lazy-loaded when the Ledgers tab is opened)
+  var activeTab='recon'; // 'recon' | 'ledger'
+  var reconLoaded=false; // has the chains table been fetched in this page life?
+
+  /* ── Remember the view across a refresh ──────────────────────────────────
+     Everything above lives only in memory, so F5 used to drop the reader back on
+     Oil › Reconciliation › Broken with the default dates. We keep the picks in
+     sessionStorage (this browser tab only, cleared when the tab closes - the same
+     rule the sidebar uses for its scroll position) and put them back on load. */
+  var RC_STATE_KEY='rcView_v1';
+  function saveState(){
+    try{
+      sessionStorage.setItem(RC_STATE_KEY, JSON.stringify({
+        schema:schema, tab:activeTab, filter:filter, search:search,
+        from:document.getElementById('rcFrom').value,
+        to:document.getElementById('rcTo').value,
+        drill:drill, drillMode:drillMode
+      }));
+    }catch(e){}
+  }
+  function restoreState(){
+    var st=null;
+    try{ st=JSON.parse(sessionStorage.getItem(RC_STATE_KEY)||'null'); }catch(e){}
+    if(!st) return;
+    if(st.schema==='oil'||st.schema==='beverages'){
+      schema=st.schema;
+      [].forEach.call(document.getElementById('rcCo').children,function(b){
+        b.classList.toggle('on', b.getAttribute('data-schema')===schema);
+      });
+    }
+    if(['broken','mismatch','incomplete','matched','all'].indexOf(st.filter)!==-1) filter=st.filter;
+    if(st.from) document.getElementById('rcFrom').value=st.from;
+    if(st.to) document.getElementById('rcTo').value=st.to;
+    if(st.search){
+      search=st.search;
+      var si=document.getElementById('rcSearch');
+      si.value=st.search;
+      document.getElementById('rcSearchClear').style.display='block';
+    }
+    if(st.drill) for(var k in drill) drill[k]=!!st.drill[k];
+    if(st.drillMode==='eq'||st.drillMode==='neq') drillMode=st.drillMode;
+    if(st.tab==='ledger') paintTab('ledger');   // reloadActive() below does the one fetch
+  }
+
+  function num(n){return (Number(n)||0).toLocaleString('en-IN',{maximumFractionDigits:0});}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function csrf(){var m=document.querySelector('meta[name=csrf-token]');return m?m.content:'';}
+  function tol(){return Number(DATA.tolerance)||1;}
+  function qs(){var f=document.getElementById('rcFrom').value,t=document.getElementById('rcTo').value;
+    var p=['schema='+schema]; if(f)p.push('date_from='+f); if(t)p.push('date_to='+t); return p.join('&');}
+  function findChain(po){var a=DATA.chains||[];for(var i=0;i<a.length;i++){if(String(a[i].po)===String(po))return a[i];}return null;}
+
+  function load(){
+    reconLoaded=true;
+    document.getElementById('rcBody').innerHTML='<tr><td colspan="10" class="rc-empty">Loading…</td></tr>';
+    fetch('/inventory/reconciliation/api/data/?'+qs(),{headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{data:{}};})
+      .then(function(p){ DATA=(p&&p.data)||{summary:{},chains:[]};
+        if(!document.getElementById('rcFrom').value)document.getElementById('rcFrom').value=DATA.date_from||'';
+        if(!document.getElementById('rcTo').value)document.getElementById('rcTo').value=DATA.date_to||'';
+        renderKpis(); renderChips(); renderDrill(); renderTable(); })
+      .catch(function(){document.getElementById('rcBody').innerHTML='<tr><td colspan="10" class="rc-empty">Could not load reconciliation.</td></tr>';});
+  }
+
+  // ── Ledgers tab ────────────────────────────────────────────────────────────
+  function wellTitle(){ return schema==='beverages' ? 'JIVO WELLNESS (Beverages)' : 'JIVO WELLNESS'; }
+  function ldgAmt(n){ n=Number(n)||0; var s=Math.round(n).toLocaleString('en-IN'); return n<0?'<span class="rc-ldg-neg">'+s+'</span>':s; }
+  function renderLedger(elId, title, cls, L){
+    var el=document.getElementById(elId); el.className='rc-ldg'+(cls?' '+cls:'');
+    var rows=(L&&L.rows)||[], tot=(L&&L.total)||{}, body='';
+    if(!rows.length){ body='<tr><td class="rc-ldg-empty" colspan="4">No entries in this window.</td></tr>'; }
+    else{
+      body=rows.map(function(r){
+        return '<tr><td class="lbl">'+esc(r.origin)+'</td><td>'+ldgAmt(r.debit)+'</td><td>'+ldgAmt(r.credit)+'</td><td>'+ldgAmt(r.balance)+'</td></tr>';
+      }).join('');
+      body+='<tr class="rc-ldg-tot"><td class="lbl">Grand Total</td><td>'+ldgAmt(tot.debit)+'</td><td>'+ldgAmt(tot.credit)+'</td><td>'+ldgAmt(tot.balance)+'</td></tr>';
+    }
+    el.innerHTML='<div class="rc-ldg-h">'+esc(title)+'</div>'
+      +'<table class="rc-ldg-tb"><thead><tr><th class="lbl">Origin</th><th>Sum of Debit (LC)</th><th>Sum of Credit (LC)</th><th>Balance (LC)</th></tr></thead><tbody>'+body+'</tbody></table>';
+  }
+  function loadLedgers(){
+    document.getElementById('rcLdgMart').innerHTML='<div class="rc-ldg-h">JIVO MART</div><div class="rc-ldg-empty">Loading…</div>';
+    document.getElementById('rcLdgWell').innerHTML='<div class="rc-ldg-h">'+esc(wellTitle())+'</div><div class="rc-ldg-empty">Loading…</div>';
+    fetch('/inventory/reconciliation/api/ledgers/?'+qs(),{headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{data:{}};})
+      .then(function(p){ LDG=(p&&p.data)||{};
+        renderLedger('rcLdgMart','JIVO MART','', LDG.mart);
+        renderLedger('rcLdgWell', wellTitle(),'well', LDG.wellness); })
+      .catch(function(){ document.getElementById('rcLdgMart').innerHTML='<div class="rc-ldg-empty">Could not load ledgers.</div>'; });
+  }
+  function paintTab(t){          // show a tab; fetches nothing
+    activeTab=t;
+    [].forEach.call(document.getElementById('rcTabs').children,function(b){ b.classList.toggle('on', b.getAttribute('data-tab')===t); });
+    document.getElementById('rcPanelRecon').style.display = t==='recon' ? '' : 'none';
+    document.getElementById('rcPanelLedger').style.display = t==='ledger' ? '' : 'none';
+    document.getElementById('rcKpis').style.display = t==='recon' ? '' : 'none';  // recon-only summary
+    document.getElementById('rcChips').style.display = t==='recon' ? 'flex' : 'none';  // recon-only status filter
+  }
+  function switchTab(t){         // show a tab and load whatever it is missing
+    paintTab(t);
+    if(t==='ledger' && LDG===null) loadLedgers();
+    if(t==='recon' && !reconLoaded) load();     // first visit after a refresh on Ledgers
+    saveState();
+  }
+  // Reload the data behind whichever tab is active (used by Apply and the company toggle);
+  // the other tab is invalidated so it refetches with the new window/company when next shown.
+  function reloadActive(){ LDG=null; reconLoaded=false;
+    if(activeTab==='ledger'){ loadLedgers(); } else { load(); } }
+  function exportLedgersCSV(){
+    if(!LDG) return;
+    function cell(v){v=String(v==null?'':v);return /[",\r\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v;}
+    function rnd(n){return Math.round(Number(n)||0);}
+    var lines=[];
+    [['JIVO MART',LDG.mart],[wellTitle(),LDG.wellness]].forEach(function(pair){
+      var L=pair[1]||{rows:[],total:{}};
+      lines.push([pair[0]].map(cell).join(','));
+      lines.push(['Origin','Sum of Debit (LC)','Sum of Credit (LC)','Balance (LC)'].map(cell).join(','));
+      (L.rows||[]).forEach(function(r){ lines.push([r.origin,rnd(r.debit),rnd(r.credit),rnd(r.balance)].map(cell).join(',')); });
+      var t=L.total||{}; lines.push(['Grand Total',rnd(t.debit),rnd(t.credit),rnd(t.balance)].map(cell).join(','));
+      lines.push('');
+    });
+    var blob=new Blob(['\uFEFF'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+    var url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url; a.download='Wellness-Mart Ledgers '+schema+'.csv'; a.click();
+    setTimeout(function(){URL.revokeObjectURL(url);},1000);
+  }
+
+  function renderKpis(){
+    var s=DATA.summary||{};
+    var cards=[
+      {l:'PO Chains',v:num(s.total||0),c:'k-total',f:'all',t:'Show all PO chains'},
+      {l:'Matched',v:num(s.matched||0),c:'k-match',f:'matched',t:'Show only matched chains'},
+      {l:'Mismatch',v:num(s.mismatch||0),c:'k-mis',f:'mismatch',t:'Show only mismatched chains'},
+      {l:'Incomplete',v:num(s.incomplete||0),c:'k-inc',f:'incomplete',t:'Show only incomplete chains'},
+      {l:'Mismatch Value',v:'₹'+num(s.mismatch_value||0),c:'k-val',f:'mismatch',t:'Total spread across mismatched chains — click to show them'}
+    ];
+    document.getElementById('rcKpis').innerHTML=cards.map(function(k){
+      return '<div class="rc-kpi '+k.c+(filter===k.f?' sel':'')+'" data-f="'+k.f+'" role="button" tabindex="0" title="'+k.t+'">'
+        +'<div class="rc-kpi-l">'+k.l+'</div><div class="rc-kpi-v">'+k.v+'</div></div>';
+    }).join('');
+  }
+
+  function counts(){
+    var c={all:0,broken:0,mismatch:0,incomplete:0,matched:0};
+    (DATA.chains||[]).forEach(function(x){
+      c.all++;
+      if(x.status==='MATCHED')c.matched++;
+      else{ c.broken++; if(x.status==='MISMATCH')c.mismatch++; else c.incomplete++; }
+    });
+    return c;
+  }
+  function renderChips(){
+    var c=counts();
+    var chips=[
+      {k:'broken',l:'Broken',n:c.broken},{k:'mismatch',l:'Mismatch',n:c.mismatch},
+      {k:'incomplete',l:'Incomplete',n:c.incomplete},{k:'matched',l:'Matched',n:c.matched},
+      {k:'all',l:'All',n:c.all}
+    ];
+    document.getElementById('rcChips').innerHTML=chips.map(function(ch){
+      return '<button class="rc-chip'+(filter===ch.k?' active':'')+'" data-f="'+ch.k+'">'+ch.l+'<span class="n">'+ch.n+'</span></button>';
+    }).join('');
+  }
+
+  function statusPass(x){
+    if(filter==='all')return true;
+    if(filter==='matched')return x.status==='MATCHED';
+    if(filter==='mismatch')return x.status==='MISMATCH';
+    if(filter==='incomplete')return x.status==='INCOMPLETE';
+    return x.status!=='MATCHED'; // broken
+  }
+
+  // Searchable text for a chain: PO / date / vendor / status / detail + every underlying document
+  // number and date across all nodes — so looking up a single invoice/GRPO/A-P/A-R doc finds its PO.
+  function haystack(x){
+    var parts=[x.po,x.po_date,x.vendor,x.status,x.detail];
+    ['po','so','grpo','ap','ar','delivery'].forEach(function(node){
+      (x[node+'_docs']||[]).forEach(function(d){ parts.push(d.num); parts.push(d.date); });
+    });
+    return parts.join(' ').toLowerCase();
+  }
+  function searchPass(x){ return !search || haystack(x).indexOf(search)!==-1; }
+
+  function drillNodes(){var o=[];for(var k in NODE_KEYS){if(drill[k])o.push(k);}return o;}
+  // With 2+ documents picked, keep rows where those totals are all equal (eq) or not (neq).
+  function drillPass(x){
+    var nodes=drillNodes(); if(nodes.length<2)return true;
+    var present=[]; for(var i=0;i<nodes.length;i++){var v=x[NODE_KEYS[nodes[i]]]; if(v!=null)present.push(Number(v));}
+    var eq=(present.length===nodes.length) && (Math.max.apply(null,present)-Math.min.apply(null,present))<=tol();
+    return drillMode==='eq'?eq:!eq;
+  }
+  // A non-empty search finds ANY chain by text, ignoring BOTH the status chip (default "Broken")
+  // AND the match-driller. Searching for a specific PO/doc should surface it no matter what filters
+  // are active — otherwise e.g. an "A/P = A/R" driller silently hides an incomplete PO you searched.
+  function passes(x){
+    if(search) return searchPass(x);
+    return statusPass(x)&&drillPass(x);
+  }
+
+  // Amount cell: "off" (red) if it differs from PO total beyond tolerance; clickable to
+  // reveal its document numbers; tinted when its column is picked in the driller.
+  function cell(v,poTotal,cnt,poNum,node){
+    var sel=drill[node]?' rc-dsel':'';
+    if(v==null)return '<td class="num rc-miss'+sel+'">—</td>';
+    var off=Math.abs(Number(v)-Number(poTotal))>tol();
+    var badge=cnt>1?' <span class="rc-cnt">×'+cnt+'</span>':'';
+    return '<td class="num rc-clk'+(off?' rc-off':'')+sel+'" data-po="'+esc(poNum)+'" data-node="'+node+'">'
+      +'<span class="rc-amt">'+num(v)+'</span>'+badge+'</td>';
+  }
+  // Credit Note column (own cell, left of Status): the credit note(s) reversing this PO's A/R
+  // invoices. Informational — no PO-total comparison, so it never shows the mismatch red. Click to
+  // see the credit note numbers (amounts shown negative, since they reverse the invoice).
+  function cnCell(x){
+    if(!x.cn_docs||!x.cn_docs.length) return '<td class="num rc-miss">—</td>';
+    var badge=x.cn_cnt>1?' <span class="rc-cnt">×'+x.cn_cnt+'</span>':'';
+    return '<td class="num rc-clk rc-cn" data-po="'+esc(x.po)+'" data-node="cn">'
+      +'<span class="rc-amt">−₹'+num(x.cn)+'</span>'+badge+'</td>';
+  }
+
+  function renderTable(){
+    hidePop();
+    var rows=(DATA.chains||[]).filter(passes);
+    var meta=document.getElementById('rcRowCount'); if(meta)meta.textContent=rows.length+' row'+(rows.length===1?'':'s');
+    if(!rows.length){document.getElementById('rcBody').innerHTML='<tr><td colspan="10" class="rc-empty">No chains in this view.</td></tr>';return;}
+    document.getElementById('rcBody').innerHTML=rows.map(function(x,i){
+      var st='<span class="rc-badge b-'+x.status+'">'+x.status+'</span>'
+        +(x.detail?' <span class="rc-detail">'+esc(x.detail)+'</span>':'');
+      return '<tr>'
+        +'<td class="rc-sno">'+(i+1)+'</td>'
+        +'<td class="rc-po">'+esc(x.po)+'</td>'
+        +'<td>'+esc(x.po_date)+'</td>'
+        +cell(x.po_total,x.po_total,1,x.po,'po')
+        +cell(x.so,x.po_total,x.so_cnt,x.po,'so')
+        +cell(x.grpo,x.po_total,x.grpo_cnt,x.po,'grpo')
+        +cell(x.ap,x.po_total,x.ap_cnt,x.po,'ap')
+        +cell(x.ar,x.po_total,x.ar_cnt,x.po,'ar')
+        +cnCell(x)
+        +'<td>'+st+'</td></tr>';
+    }).join('');
+  }
+
+  // ── Match driller ──────────────────────────────────────────────────────────
+  function renderDrill(){
+    var box=document.getElementById('rcDrill');
+    [].forEach.call(box.children,function(b){b.classList.toggle('on',!!drill[b.getAttribute('data-node')]);});
+    [].forEach.call(document.getElementById('rcDrillMode').children,function(b){b.classList.toggle('active',b.getAttribute('data-mode')===drillMode);});
+    var n=drillNodes(), hint=document.getElementById('rcDrillHint'), clr=document.getElementById('rcDrillClear');
+    if(n.length<2){ hint.textContent='pick 2+ documents to compare their totals'; }
+    else{ hint.textContent='showing rows where '+n.map(function(k){return NODE_LBL[k];}).join(drillMode==='eq'?' = ':' ≠ '); }
+    clr.style.display=(n.length?'':'none');
+  }
+
+  // ── Document-number popover ────────────────────────────────────────────────
+  function hidePop(){var p=document.getElementById('rcPop');p.style.display='none';popCell=null;}
+  function showPop(td){
+    if(popCell===td){hidePop();return;}
+    var chain=findChain(td.getAttribute('data-po')), node=td.getAttribute('data-node');
+    if(!chain){hidePop();return;}
+    var docs=chain[node+'_docs']||[], pop=document.getElementById('rcPop');
+    var html='<div class="rc-pop-h">'+NODE_LBL[node]+' · PO '+esc(chain.po)+'</div>';
+    if(!docs.length){ html+='<div class="rc-pop-empty">No '+NODE_LBL[node]+' document.</div>'; }
+    else{
+      // A/R: each invoice carries a `matched` flag (a GRPO/A/P of equal amount exists) — ✓ matched /
+      // ↩ credited (reversed by a credit note, see the Credit Note column) / ✗ pending, plus a tally.
+      // The credit note numbers themselves live in the dedicated Credit Note column, not here.
+      var isAr=(node==='ar'), isCn=(node==='cn'), sgn=isCn?'−':'';
+      function stateOf(d){ return d.matched!==false?'ok':((d.credits&&d.credits.length)?'cn':'no'); }
+      if(isAr&&docs.length){
+        var nOk=0,nCn=0,nNo=0;
+        docs.forEach(function(d){ var s=stateOf(d); if(s==='ok')nOk++; else if(s==='cn')nCn++; else nNo++; });
+        var bits=[nOk+' with GRPO/A/P'];
+        if(nCn)bits.push('<b class="cn">'+nCn+' credited</b>');
+        if(nNo)bits.push('<b class="no">'+nNo+' pending</b>');
+        html+='<div class="rc-pop-sub">'+bits.join(' · ')+'</div>';
+      }
+      var reflbl=REF_LBL[node];
+      html+=docs.map(function(d){
+        var mk='';
+        if(isAr){ var s=stateOf(d);
+          mk=s==='ok'?'<span class="mk ok"><i class="ic ic-check"></i> matched</span>':(s==='cn'?'<span class="mk cn"><i class="ic ic-undo-2"></i> credited</span>':'<span class="mk no"><i class="ic ic-x"></i> pending</span>'); }
+        // "kis reference pe kata" — the base document this one was copied from.
+        var refv=d.ref||(node==='so'?chain.po:''), rref='';
+        if(reflbl&&refv){ rref='<div class="rc-pop-ref">↳ '+reflbl+' '+esc(refv)+'</div>'; }
+        return '<div class="rc-pop-row"><span class="dn">'+esc(d.num)+'</span>'+mk+'<span class="dt">'+esc(d.date||'')+'</span><span class="da">'+sgn+'₹'+num(d.amt)+'</span></div>'+rref;
+      }).join('');
+      if(docs.length>1){var t=0;docs.forEach(function(d){t+=Number(d.amt)||0;});
+        html+='<div class="rc-pop-row rc-pop-tot"><span>'+docs.length+' docs</span><span>'+sgn+'₹'+num(t)+'</span></div>';}
+    }
+    pop.innerHTML=html; pop.style.display='block'; popCell=td;
+    var r=td.getBoundingClientRect(), pw=pop.offsetWidth, ph=pop.offsetHeight;
+    var left=Math.max(8,Math.min(r.left, window.innerWidth-pw-12));
+    var top=(r.bottom+6+ph>window.innerHeight-8)?Math.max(8,r.top-ph-6):r.bottom+6;
+    pop.style.left=left+'px'; pop.style.top=top+'px';
+  }
+
+  document.getElementById('rcChips').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    filter=b.getAttribute('data-f'); renderChips(); renderKpis(); renderTable(); saveState();
+  });
+  // KPI cards are clickable filters (mirror the status chips); keep the highlighted card in step.
+  function kpiPick(card){ var f=card&&card.getAttribute('data-f'); if(!f)return;
+    filter=f; renderChips(); renderKpis(); renderTable(); saveState(); }
+  document.getElementById('rcKpis').addEventListener('click',function(e){
+    kpiPick(e.target.closest('.rc-kpi'));
+  });
+  document.getElementById('rcKpis').addEventListener('keydown',function(e){
+    if(e.key==='Enter'||e.key===' '){ var c=e.target.closest('.rc-kpi'); if(c){e.preventDefault();kpiPick(c);} }
+  });
+
+  // Free-text search over the chains (client-side; spans all statuses while non-empty).
+  var rcSearchInput=document.getElementById('rcSearch'), rcSearchClear=document.getElementById('rcSearchClear');
+  function applySearch(){
+    search=(rcSearchInput.value||'').trim().toLowerCase();
+    rcSearchClear.style.display=search?'block':'none';
+    renderTable(); saveState();
+  }
+  rcSearchInput.addEventListener('input',applySearch);
+  rcSearchClear.addEventListener('click',function(){ rcSearchInput.value=''; applySearch(); rcSearchInput.focus(); });
+  document.getElementById('rcDrill').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    var n=b.getAttribute('data-node'); drill[n]=!drill[n]; renderDrill(); renderTable(); saveState();
+  });
+  document.getElementById('rcDrillMode').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    drillMode=b.getAttribute('data-mode'); renderDrill(); renderTable(); saveState();
+  });
+  document.getElementById('rcDrillClear').addEventListener('click',function(){
+    for(var k in drill)drill[k]=false; renderDrill(); renderTable(); saveState();
+  });
+
+  // Clickable amount cells → document-number popover.
+  document.getElementById('rcBody').addEventListener('click',function(e){
+    var td=e.target.closest('td.rc-clk'); if(!td)return;
+    e.stopPropagation(); showPop(td);
+  });
+  document.addEventListener('click',function(e){
+    if(e.target.closest('#rcPop')||e.target.closest('td.rc-clk'))return; hidePop();
+  });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape')hidePop(); });
+  document.querySelector('.rc-tw').addEventListener('scroll',hidePop,true);
+  window.addEventListener('scroll',hidePop,true);
+  window.addEventListener('resize',hidePop);
+
+  // Reconciliation / Ledgers tab switch.
+  document.getElementById('rcTabs').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return; switchTab(b.getAttribute('data-tab'));
+  });
+
+  // Oil / Beverages company toggle — reruns the active tab against the chosen seller.
+  document.getElementById('rcCo').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    var s=b.getAttribute('data-schema'); if(s===schema)return;
+    schema=s;
+    [].forEach.call(this.children,function(x){x.classList.toggle('on',x===b);});
+    saveState(); reloadActive();
+  });
+
+  document.getElementById('rcApply').addEventListener('click',function(){ saveState(); reloadActive(); });
+  // a date typed but not applied is still worth remembering
+  document.getElementById('rcFrom').addEventListener('change',saveState);
+  document.getElementById('rcTo').addEventListener('change',saveState);
+  document.getElementById('rcExport').addEventListener('click',function(){
+    if(activeTab==='ledger'){ exportLedgersCSV(); return; }
+    var only=(filter==='matched'||filter==='all')?'all':'broken';
+    // The chains export ALWAYS combines both seller companies (schema=both), so a PO split across
+    // Oil + Beverages reconciles in one sheet instead of showing a false spread on either toggle.
+    var f=document.getElementById('rcFrom').value, t=document.getElementById('rcTo').value;
+    var p=['schema=both','only='+only]; if(f)p.push('date_from='+f); if(t)p.push('date_to='+t);
+    window.location.href='/inventory/reconciliation/export/?'+p.join('&');
+  });
+
+  restoreState();
+  reloadActive();   // fetches only the tab the reader was last on
+})();
+</script>
+{% endblock %}

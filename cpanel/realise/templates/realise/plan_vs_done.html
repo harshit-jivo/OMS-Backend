@@ -1,0 +1,2165 @@
+{% extends base_template %}
+{% block title %}Plan vs Done — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important;padding:10px 16px !important}
+  .pd-wrap{max-width:1600px;margin:0}
+  .pd-h1{font-size:30px;font-weight:800;color:var(--rz-ink);margin:0;letter-spacing:-.5px;
+    text-shadow:0 0 26px rgba(99,102,241,.55), 0 4px 14px rgba(79,70,229,.28)}   /* glowing title */
+  .pd-bar{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin:10px 0 14px;background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:14px;padding:14px 16px;box-shadow:var(--rz-shadow)}
+  .pd-fld{display:flex;flex-direction:column;gap:5px}
+  .pd-lbl{font-size:10px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .pd-bar select,.pd-bar input{font-family:inherit;font-size:13px;font-weight:600;color:var(--rz-ink);border:1px solid #e2e8f0;border-radius:9px;padding:8px 10px;background:#fff;outline:none}
+  .pd-bar select:focus,.pd-bar input:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  /* Channel view combines the states, so the State filter is switched off there — it has to
+     LOOK off, or it reads as a control that stopped working. */
+  .pd-bar select:disabled{background:#f8fafc;color:#94a3b8;cursor:not-allowed}
+  .pd-count{font-size:12px;font-weight:700;color:var(--rz-muted);align-self:center;margin-left:auto}
+  .pd-export{align-self:center;display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--rz-card-brd);color:var(--rz-indigo-deep);font-family:inherit;font-size:12.5px;font-weight:800;padding:9px 15px;border-radius:10px;cursor:pointer;transition:background .15s,border-color .15s}
+  .pd-export:hover{background:var(--rz-soft);border-color:var(--rz-soft-brd)}
+  .pd-export .ic{font-size:17px}
+  .pd-seg{display:inline-flex;border:1px solid #e2e8f0;border-radius:9px;overflow:hidden;background:#fff}
+  .pd-seg button{font-family:inherit;font-size:12.5px;font-weight:700;color:var(--rz-muted);background:#fff;border:0;padding:8px 12px;cursor:pointer}
+  .pd-seg button+button{border-left:1px solid #e2e8f0}
+  .pd-seg button.on{background:#eef2ff;color:#4338ca;font-weight:800}
+
+  /* Drill By panel — same markup/styles as Sales CN, Claims and Compare Sales. */
+  .com-drill-box{position:relative}
+  .com-drill-btn{display:inline-flex;align-items:center;gap:10px;min-width:180px;justify-content:space-between;background:#fff;border:1px solid #e2e8f0;color:var(--rz-indigo-deep);font-weight:700;font-size:12px;padding:8px 10px;border-radius:9px;cursor:pointer;font-family:inherit}
+  .com-drill-btn .com-caret{color:var(--rz-muted);font-size:10px}
+  .com-drill-panel{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:250px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--rz-card-brd);border-radius:12px;box-shadow:var(--rz-shadow-lg)}
+  .com-drill-panel.open{display:block}
+  .com-dp-head{display:flex;justify-content:space-between;padding:9px 12px;border-bottom:1px solid var(--rz-line);position:sticky;top:0;background:#fff}
+  .com-dp-head a{color:var(--rz-indigo-deep);font-size:12px;font-weight:700;cursor:pointer}
+  .com-dp-list{padding:4px 0}
+  .com-dp-item{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:13px}
+  .com-dp-item:hover{background:var(--rz-head-bg)}
+  .com-dp-item input{width:16px;height:16px;cursor:pointer;flex:0 0 auto}
+  .com-dp-item .com-dp-name{flex:1 1 auto;font-weight:600;color:var(--rz-body)}
+  .com-dp-item .com-dp-sub{font-size:10px;color:var(--rz-faint);font-weight:600}
+  .com-dp-item .com-pos{flex:0 0 auto;width:19px;height:19px;border-radius:50%;background:var(--rz-indigo);color:#fff;font-size:11px;font-weight:800;display:none;align-items:center;justify-content:center}
+  .com-dp-item.checked .com-pos{display:inline-flex}
+  .com-dp-foot{padding:9px 12px;border-top:1px solid var(--rz-line);position:sticky;bottom:0;background:#fff}
+  .com-dp-foot button{width:100%;background:var(--rz-indigo);color:#fff;border:none;border-radius:8px;padding:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit}
+
+
+  .pd-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;box-shadow:var(--rz-shadow);margin:0 0 16px;overflow:hidden}
+  .pd-card-h{display:flex;align-items:center;gap:12px;padding:15px 18px;cursor:pointer;border-bottom:1px solid transparent;flex-wrap:wrap}
+  .pd-card.open .pd-card-h{border-bottom-color:#eef2f6}
+  .pd-card-h .pd-name{font-size:16px;font-weight:800;color:var(--rz-ink)}
+  .pd-chip{font-size:11px;font-weight:800;padding:3px 9px;border-radius:7px;letter-spacing:.3px}
+  .pd-chip.state{background:#eef2ff;color:#4338ca}
+  .pd-guess{margin-left:5px;font-size:9px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;
+    color:#b45309;background:#fef3c7;border-radius:5px;padding:1px 4px}
+  .pd-chip.scope{background:#ecfdf5;color:#047857}
+  /* Not tied to a month, so it shows against every one — amber, because it usually wants fixing */
+  .pd-chip.anymonth{background:#fffbeb;color:#b45309;border:1px solid #fde68a}
+  .pd-chip.tgt{background:#fff7ed;color:#c2410c}
+  /* Billed, but nobody set a target or built a rate list for it — grey, because it is a fact
+     about the territory, not a verdict on it */
+  .pd-chip.sale{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0}
+  .pd-chip.ach{background:#f1f5f9;color:#475569}
+  .pd-chip.ach.good{background:#dcfce7;color:#15803d}
+  .pd-chip.ach.mid{background:#fef3c7;color:#b45309}
+  .pd-chip.ach.bad{background:#ffe4e6;color:#be123c}
+  .pd-meta{font-size:11.5px;color:var(--rz-muted);font-weight:600}
+
+  .pd-card-h .pd-sp{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .pd-chev{font-size:20px;color:#94a3b8;transition:transform .18s}
+  .pd-edit{border:1px solid #fed7aa;background:#fff7ed;color:#c2410c;border-radius:8px;width:30px;height:30px;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;justify-content:center}
+  .pd-edit:hover{background:#ffedd5}
+  .pd-edit.on{background:#c2410c;color:#fff;border-color:#c2410c}
+  .pd-edit .ic{font-size:16px}
+  .pd-add{border:1px solid #bbf7d0;background:#f0fdf4;color:#15803d;border-radius:8px;width:30px;height:30px;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;justify-content:center}
+  .pd-add:hover{background:#dcfce7}
+  .pd-add .ic{font-size:18px}
+  .pd-del{border:1px solid #fecdd6;background:#fff;color:#e11d48;border-radius:8px;width:30px;height:30px;cursor:pointer;font-family:inherit;font-size:15px;display:inline-flex;align-items:center;justify-content:center}
+  .pd-del:hover{background:#fff1f3}
+  .pd-card.open .pd-chev{transform:rotate(180deg)}
+  .pd-body{display:none;padding:6px 18px 18px}
+  .pd-card.open .pd-body{display:block}
+
+  .pd-plan-h{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;color:var(--rz-indigo);margin:14px 0 8px}
+  /* The plan heading doubles as the collapse handle for its rows — same chevron and rotation
+     as the Target rows use for their groups, so one gesture works everywhere on the card. */
+  .pd-plan-h.hdr{cursor:pointer;display:inline-flex;align-items:center;gap:2px;user-select:none;
+    border-radius:8px;padding:3px 9px 3px 4px;margin-left:-4px;transition:background .15s}
+  .pd-plan-h.hdr:hover{background:#eef2ff}
+  .pd-plan-h.hdr .ic{font-size:18px;display:inline-block;transition:transform .18s;transform:rotate(-90deg)}
+  .pd-plan-h.hdr.open .ic{transform:none}
+  .pd-plan-n{margin-left:8px;padding:2px 8px;border-radius:999px;background:#eef2ff;border:1px solid #c7d2fe;
+    color:#4338ca;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:none}
+  /* Scroll box, not the page: the header can only stick to its own scroll container, so the
+     table gets a max-height and owns both axes. border-collapse must be `separate` or the
+     collapsed borders on sticky cells stop painting once they lift off. */
+  .pd-tbl-wrap{max-height:72vh;overflow:auto;border:1px solid #eef2f6;border-radius:12px}
+  table.pd-tbl{width:100%;min-width:1460px;border-collapse:separate;border-spacing:0;font-size:13px}
+  /* EVERY rule below uses child combinators on purpose. The drill-down renders a whole table
+     inside a tbody cell, so a descendant selector like `table.pd-tbl thead th` would also match
+     the nested table's header — which made it sticky and it covered its own first invoice row. */
+  table.pd-tbl>thead>tr>th{position:sticky;top:26px;z-index:3;background:var(--rz-head-bg);color:var(--rz-head-ink);text-align:right;font-size:10.5px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:9px 12px;white-space:nowrap;border-bottom:1px solid var(--rz-line)}
+  table.pd-tbl>thead>tr>th.l{text-align:left}
+  table.pd-tbl>thead>tr>th.sep{border-left:2px solid var(--rz-line)}
+  /* Banner row that splits the saved plan's columns from the month's actuals. Fixed height so
+     the column-name row below it can be offset by exactly that much. */
+  table.pd-tbl>thead>tr.grp>th{position:sticky;top:0;z-index:3;box-sizing:border-box;height:26px;text-align:center;font-size:10px;padding:5px 12px;border-bottom:1px solid var(--rz-line)}
+
+  /* Item column pinned left — with 17 columns you otherwise lose the row's identity the moment
+     you scroll right. Every pinned cell needs its own opaque background or the columns
+     underneath show through. The colspan'd "N more items" cell is excluded: a sticky cell
+     spanning 7 columns would slide over its neighbours. */
+  table.pd-tbl>thead>tr>th.l,
+  table.pd-tbl>tbody>tr>td.l,
+  table.pd-tbl>tfoot>tr>td.l{position:sticky;left:0;z-index:2;background:#fff;box-shadow:inset -1px 0 0 #eef2f6}
+  table.pd-tbl>thead>tr>th.l{z-index:4}
+  table.pd-tbl>tbody>tr:nth-child(even)>td.l{background:#fafcff}
+  table.pd-tbl>tbody.pd-xrows>tr.x>td.l{background:#fcfdff}
+  table.pd-tbl>tfoot>tr>td.l{background:#eef2ff}
+  table.pd-tbl>tbody>tr.pd-more>td.l{position:static;background:#f1f5f9;box-shadow:none}
+  table.pd-tbl>thead>tr.grp>th.pl{background:#eef2ff;color:#4338ca}
+  table.pd-tbl>thead>tr.grp>th.dn{background:#ecfdf5;color:#047857}
+  table.pd-tbl>thead>tr.grp>th.es{background:#fff7ed;color:#c2410c}
+  table.pd-tbl>tbody>tr>td{padding:8px 12px;border-bottom:1px solid #eef2f6;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--rz-body)}
+  table.pd-tbl>tbody>tr>td.l{text-align:left;color:var(--rz-ink);font-weight:600}
+  table.pd-tbl>tbody>tr>td.sep{border-left:2px solid #eef2f6}
+  table.pd-tbl>tbody>tr:nth-child(even)>td{background:#fafcff}
+  /* Plan block keeps the Rate List's colours so the two tabs read the same; Done litres get
+     their own indigo so the eye lands on the column this tab exists for. */
+  table.pd-tbl>tbody>tr>td.pd-rl,table.pd-tbl>tfoot>tr>td.pd-rl{font-weight:800;color:#0e7490}
+  table.pd-tbl>tbody>tr>td.pd-done,table.pd-tbl>tfoot>tr>td.pd-done{font-weight:800;color:#4338ca}
+  table.pd-tbl>tbody>tr>td.g,table.pd-tbl>tfoot>tr>td.g{color:#15803d;font-weight:800}
+  table.pd-tbl>tbody>tr>td.a,table.pd-tbl>tfoot>tr>td.a{color:#b45309;font-weight:800}
+  table.pd-tbl>tbody>tr>td.r,table.pd-tbl>tfoot>tr>td.r{color:#be123c;font-weight:800}
+  table.pd-tbl>tbody>tr>td.mute,table.pd-tbl>tfoot>tr>td.mute{color:var(--rz-faint)}
+  /* the inline "—" spans inside a cell, not the cell itself */
+  table.pd-tbl>tbody>tr>td .mute,table.pd-tbl>tfoot>tr>td .mute{color:var(--rz-faint)}
+  table.pd-tbl>tbody>tr.pd-sub>td{background:#f8fafc;font-weight:900;padding:10px 12px;border-top:2px solid var(--rz-line);text-align:right;font-variant-numeric:tabular-nums}
+  table.pd-tbl>tbody>tr.pd-sub>td.l{text-align:left;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--rz-muted);background:#f8fafc}
+  table.pd-tbl>tbody>tr.pd-sub>td.sep{border-left:2px solid var(--rz-line)}
+  table.pd-tbl>tfoot>tr.pd-tgt>td{background:#fff7ed;border-top:2px solid #fed7aa;color:#9a3412}
+  table.pd-tbl>tfoot>tr.pd-tgt>td.l{background:#fff7ed;color:#c2410c}
+  table.pd-tbl>tfoot>tr.pd-tgt.tot>td{background:#ffedd5;border-top:1px solid #fb923c;font-weight:900}
+  table.pd-tbl>tbody>tr.pd-seg>td{background:#eef2f6;font-weight:800;font-size:11px;letter-spacing:.4px;
+    text-transform:uppercase;color:#475569;border-top:1px solid var(--rz-line)}
+  table.pd-tbl>tbody>tr.pd-seg>td.l{background:#eef2f6;color:#334155}
+  table.pd-tbl>tfoot>tr>td{background:#eef2ff;border-top:2px solid #c7d2fe;font-weight:900;padding:10px 12px;border-top:2px solid var(--rz-line);text-align:right;font-variant-numeric:tabular-nums}
+  table.pd-tbl>tfoot>tr>td.l{text-align:left;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:#4338ca}
+  table.pd-tbl>tfoot>tr>td.sep{border-left:2px solid var(--rz-line)}
+
+  /* "N more items sold, not in this plan" — always visible, rows behind a click. */
+  table.pd-tbl>tbody>tr.pd-more>td{background:#f1f5f9;cursor:pointer;font-weight:800;color:#475569;border-top:2px solid var(--rz-line)}
+  table.pd-tbl>tbody>tr.pd-more:hover>td{background:#e6ecf3}
+  table.pd-tbl>tbody>tr.pd-more>td.l{font-size:12.5px}
+  /* Inline-block, not flex: a flex `td` with colspan collapses the column widths in Safari. */
+  table.pd-tbl>tbody>tr.pd-more>td .ic{font-size:18px;color:#94a3b8;vertical-align:-4px;margin-right:4px;display:inline-block;transition:transform .18s}
+  table.pd-tbl>tbody>tr.pd-more.open>td .ic{transform:rotate(180deg)}
+  /* Target / segment rows that head a collapsible group */
+  table.pd-tbl>tbody>tr.hdr>td{cursor:pointer}
+  table.pd-tbl>tbody>tr.hdr>td .ic{font-size:18px;vertical-align:-4px;margin-right:4px;display:inline-block;transition:transform .18s}
+  table.pd-tbl>tbody>tr.hdr.open>td .ic{transform:rotate(180deg)}
+  table.pd-tbl>tbody>tr.pd-tgt>td{background:#fff7ed;border-top:2px solid #fed7aa;color:#9a3412;font-weight:800;padding:9px 12px;text-align:right;font-variant-numeric:tabular-nums}
+  table.pd-tbl>tbody>tr.pd-tgt>td.l{background:#fff7ed;color:#c2410c;text-align:left;text-transform:uppercase;font-size:11px;letter-spacing:.4px}
+  table.pd-tbl>tbody>tr.pd-tgt>td.sep{border-left:2px solid var(--rz-line)}
+  table.pd-tbl>tbody>tr.pd-tgt:hover>td{background:#ffedd5}
+  table.pd-tbl>tbody.pd-xrows>tr.x>td{background:#fcfdff;color:var(--rz-muted)}
+  table.pd-tbl>tbody.pd-xrows>tr.x>td.l{color:var(--rz-body);font-weight:600}
+  /* A plan item repeated inside its segment, so the group adds up to its Target row. Read-only
+     and tinted so it never reads as a second, separate sale. */
+  table.pd-tbl>tbody.pd-xrows>tr.x.ref>td{background:#f6f7ff}
+  /* An item carrying its own target from Update Targets — its plan cells are a commitment,
+     not blanks, so it reads warm like the Target rows it sits under. */
+  table.pd-tbl>tbody.pd-xrows>tr.x.tgt>td{background:#fffbf4}
+  table.pd-tbl>tbody.pd-xrows>tr.x.tgt>td.l{color:var(--rz-body);font-weight:700}
+  table.pd-tbl>tbody.pd-xrows>tr.x.tgt>td.pd-rl{color:#c2410c}
+  .pd-inplan{margin-left:7px;padding:1px 6px;border-radius:999px;font-size:9.5px;font-weight:800;
+    letter-spacing:.06em;color:#4338ca;background:#e0e7ff;border:1px solid #c7d2fe;vertical-align:1px}
+  table.pd-tbl>tbody>tr>td.pd-bal,table.pd-tbl>tfoot>tr>td.pd-bal{font-weight:700;color:#9a3412}
+  table.pd-tbl>tbody>tr>td.pd-req,table.pd-tbl>tfoot>tr>td.pd-req{font-weight:800;color:#c2410c}
+
+  /* Editable Scheme / To-be-sale on the unplanned rows. */
+  table.pd-tbl>tbody>tr>td.pd-in{padding:4px 6px}
+  table.pd-tbl>tbody>tr>td.pd-in input{width:100%;min-width:86px;box-sizing:border-box;font-family:inherit;
+    font-size:12.5px;font-weight:700;text-align:right;color:var(--rz-ink);background:#fff;
+    border:1px solid #cbd5e1;border-radius:7px;padding:5px 7px;outline:none;font-variant-numeric:tabular-nums}
+  table.pd-tbl>tbody>tr>td.pd-in input:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  table.pd-tbl>tbody>tr>td.pd-in input::placeholder{font-weight:600;color:#cbd5e1}
+
+  /* Item = drill-down handle */
+  table.pd-tbl>tbody>tr>td.pd-item{cursor:pointer}
+  table.pd-tbl>tbody>tr>td.pd-item:hover{color:var(--rz-indigo)}
+  table.pd-tbl>tbody>tr>td.pd-item .pd-ichev{font-size:16px;color:#94a3b8;vertical-align:-3px;margin-right:2px;display:inline-block;transition:transform .18s}
+  table.pd-tbl>tbody>tr>td.pd-item.open .pd-ichev{transform:rotate(90deg);color:var(--rz-indigo)}
+
+  /* Nested party/invoice table. Its cell spans the row, so it is never pinned left, and it
+     resets the inherited numeric alignment the outer table imposes on every td. */
+  table.pd-tbl>tbody>tr.pd-docs>td{padding:0;background:#f8fafc;border-bottom:1px solid #e2e8f0;
+    text-align:left;white-space:normal;position:static}
+  .pd-dwrap{padding:12px 16px;max-width:1100px}
+  .pd-dmsg{font-size:12.5px;font-weight:600;color:var(--rz-muted);padding:6px 2px}
+  table.pd-dtbl{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}
+  table.pd-dtbl th{background:#eef2f6;color:#475569;text-align:right;font-size:10px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:7px 10px;white-space:nowrap}
+  table.pd-dtbl th.l{text-align:left}
+  table.pd-dtbl td{padding:6px 10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;border-top:1px solid #f1f5f9;color:var(--rz-body)}
+  table.pd-dtbl td.l{text-align:left}
+  table.pd-dtbl tbody tr:nth-child(even) td{background:#fafcff}
+  table.pd-dtbl tbody tr.cn td{color:#be123c}
+  .pd-cn{font-size:9px;font-weight:800;background:#ffe4e6;color:#be123c;border-radius:4px;padding:1px 4px;letter-spacing:.3px}
+  table.pd-dtbl tfoot td{background:#f8fafc;font-weight:900;border-top:2px solid #e2e8f0;padding:8px 10px;text-align:right;font-variant-numeric:tabular-nums}
+  table.pd-dtbl tfoot td.l{text-align:left;text-transform:uppercase;font-size:10.5px;color:var(--rz-muted)}
+
+  .pd-save{display:flex;align-items:center;gap:12px;justify-content:flex-end;margin-top:10px}
+  .pd-save-n{font-size:12px;font-weight:700;color:var(--rz-muted)}
+  .pd-save-b{border:1px solid #c7d2fe;background:#eef2ff;color:#4338ca;border-radius:9px;
+    padding:8px 14px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:800}
+  .pd-save-b:hover:not(:disabled){background:#e0e7ff}
+  .pd-save-b:disabled{opacity:.45;cursor:default}
+  .pd-code{font-size:10px;color:var(--rz-faint);font-weight:700;margin-left:6px}
+
+  .pd-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:16px}
+  .pd-kpi{border-radius:12px;padding:12px 14px;background:#f8fafc;border:1px solid #eef2f6}
+  .pd-kpi .k-l{font-size:10px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--rz-muted)}
+  .pd-kpi .k-v{font-size:20px;font-weight:900;color:var(--rz-ink);margin-top:3px;line-height:1;font-variant-numeric:tabular-nums}
+  .pd-kpi.acc{background:linear-gradient(135deg,#eef2ff,#e0e7ff);border-color:#c7d2fe}
+  .pd-kpi.acc .k-l{color:#4338ca}.pd-kpi.acc .k-v{color:#312e81}
+  .pd-kpi.opp{background:linear-gradient(135deg,#ecfdf5,#d1fae5);border-color:#a7f3d0}
+  .pd-kpi.opp .k-l{color:#047857}.pd-kpi.opp .k-v{color:#065f46}
+  .pd-kpi.req{background:linear-gradient(135deg,#fff7ed,#ffedd5);border-color:#fed7aa}
+  .pd-kpi.req .k-l{color:#c2410c}.pd-kpi.req .k-v{color:#9a3412}
+  .pd-note{margin-top:10px;font-size:11.5px;color:var(--rz-muted);font-weight:600}
+
+  /* Item picker — same modal as the Realise Calculator, so picking an item feels identical
+     in both places. Markup, CSS and cascade behaviour are lifted from there unchanged. */
+  .rc-modal{position:fixed;inset:0;z-index:100;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:20px}
+  .rc-modal[hidden]{display:none}
+  .rc-modal-card{background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(2,6,23,.35);width:min(940px,96vw);max-height:82vh;display:flex;flex-direction:column;overflow:hidden}
+  .rc-modal-h{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid #eef2f6}
+  .rc-modal-h .t{font-size:15px;font-weight:800;color:var(--rz-ink)}
+  .rc-modal-h input{margin-left:auto;font-family:inherit;font-size:13px;font-weight:600;border:1px solid #e2e8f0;border-radius:9px;padding:8px 11px;min-width:240px;outline:none}
+  .rc-modal-h input:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .rc-modal-x{border:0;background:#f1f5f9;color:#64748b;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:16px;font-family:inherit}
+  .rc-modal-x:hover{background:#e2e8f0;color:#334155}
+  .rc-modal-clear{border:1px solid #e2e8f0;background:#fff;color:var(--rz-muted);font-family:inherit;font-size:12px;font-weight:700;padding:8px 12px;border-radius:8px;cursor:pointer}
+  .rc-modal-clear:hover{background:#f8fafc;color:var(--rz-ink);border-color:var(--rz-indigo)}
+  .rc-modal-body{display:grid;grid-template-columns:1fr 1fr 1.5fr;height:64vh;max-height:560px;overflow:hidden}
+  .rc-col{overflow-y:auto;min-height:0;border-right:1px solid #eef2f6;padding:6px}   /* min-height:0 lets the column actually scroll inside the grid */
+  .rc-col:last-child{border-right:0}
+  .rc-col-h{position:sticky;top:0;background:#fff;font-size:10px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted);padding:6px 10px 6px;z-index:1}
+  .rc-opt{padding:9px 11px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--rz-body);display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .rc-opt:hover{background:#f1f5ff}
+  .rc-opt.on{background:#eef2ff;color:var(--rz-indigo);font-weight:800}
+  .rc-opt .n{font-size:11px;color:var(--rz-faint);font-weight:700}
+  .rc-opt .tp{font-size:10px;font-weight:800;padding:1px 6px;border-radius:5px}
+  .rc-opt .tp.P{background:#eef2ff;color:#4338ca}.rc-opt .tp.C{background:#fef9c3;color:#854d0e}
+  .rc-col-empty{padding:16px;color:var(--rz-faint);font-size:12px;text-align:center}
+  /* SKU column as grouped chips */
+  .rc-skugrp{margin:2px 8px 16px}
+  .rc-skugrp-l{display:inline-block;font-size:12.5px;font-weight:900;letter-spacing:.9px;text-transform:uppercase;color:#4338ca;background:#eef2ff;padding:4px 11px;border-radius:7px;margin:10px 2px 9px}
+  .rc-skuchips{display:flex;flex-wrap:wrap;gap:7px}
+  .rc-skuchip{display:inline-flex;align-items:baseline;gap:5px;min-width:46px;justify-content:center;padding:9px 13px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;cursor:pointer;font-size:16px;font-weight:800;color:var(--rz-ink)}
+  .rc-skuchip:hover{border-color:var(--rz-indigo);background:#f1f5ff}
+  .rc-skuchip.on{background:#eef2ff;border-color:var(--rz-indigo);color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.12)}
+  .rc-skuchip .n{font-size:10.5px;color:var(--rz-faint);font-weight:700}
+
+  .pk-form{padding:16px;border-top:1px solid #eef2f6}
+  .pk-item{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800;color:var(--rz-ink);margin-bottom:14px}
+  .pk-item .ic{font-size:18px;color:var(--rz-indigo)}
+  .pk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+  .pk-grid label{display:flex;flex-direction:column;gap:5px;font-size:10px;font-weight:800;
+    letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .pk-grid input,.pk-grid output{font-family:inherit;font-size:14px;font-weight:700;text-align:right;
+    color:var(--rz-ink);background:#fff;border:1px solid #cbd5e1;border-radius:9px;padding:9px 11px;
+    outline:none;font-variant-numeric:tabular-nums}
+  .pk-grid input:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .pk-grid output{background:#f8fafc;border-style:dashed;color:var(--rz-muted)}
+  .pk-grid output.calc{color:#0e7490;border-color:#a5f3fc;background:#ecfeff}
+  .pk-foot{display:flex;align-items:center;gap:10px;margin-top:16px}
+  .pk-note{font-size:11.5px;font-weight:600;color:var(--rz-muted);margin-right:auto}
+  .pk-back{border:1px solid #e2e8f0;background:#fff;color:var(--rz-muted);font-family:inherit;
+    font-size:12.5px;font-weight:700;padding:9px 13px;border-radius:9px;cursor:pointer}
+  .pk-back:hover{background:#f8fafc;color:var(--rz-ink)}
+  .pk-save{border:0;background:var(--rz-indigo);color:#fff;font-family:inherit;font-size:12.5px;
+    font-weight:800;padding:9px 16px;border-radius:9px;cursor:pointer}
+  .pk-save:disabled{opacity:.45;cursor:default}
+  .pd-empty{padding:44px;text-align:center;color:var(--rz-muted);background:var(--rz-card);border:1px dashed var(--rz-card-brd);border-radius:16px}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="pd-wrap">
+  <h1 class="pd-h1">Plan vs Done</h1>
+
+  <div class="pd-bar">
+    <div class="pd-fld"><span class="pd-lbl">View by</span>
+      <div class="pd-seg" id="pdScope">
+        <button type="button" data-scope="state" class="on"
+          title="One card per state and channel — Delhi · GT, Punjab · GT, and so on.">State</button>
+        <button type="button" data-scope="all"
+          title="One card per channel, every state combined — the whole of GT on one card.">Channel</button>
+      </div></div>
+    <div class="pd-fld"><span class="pd-lbl">Drill By</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="pdDrillBtn"><span id="pdDrillLabel">No grouping</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="pdDrillPanel">
+          <div class="com-dp-head"><a id="pdDrillAll">Select All</a><a id="pdDrillClr">Clear All</a></div>
+          <div class="com-dp-list" id="pdDrillList"></div>
+          <div class="com-dp-foot"><button type="button" id="pdDrillApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="pd-fld"><span class="pd-lbl">Person</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="pdPersBtn"><span id="pdPersLabel">All persons</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="pdPersPanel">
+          <div class="com-dp-head"><a id="pdPersAll">Select All</a><a id="pdPersClr">Clear All</a></div>
+          <div class="com-dp-list" id="pdPersList"></div>
+          <div class="com-dp-foot"><button type="button" id="pdPersApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="pd-fld"><span class="pd-lbl">Type</span>
+      <select id="pdType">
+        <option value="">All</option>
+        <option value="PREMIUM">Premium</option>
+        <option value="COMMODITY">Commodity</option>
+        <option value="OTHERS">Others</option>
+      </select></div>
+    <div class="pd-fld"><span class="pd-lbl">Month</span><input type="month" id="pdMonth"></div>
+    <div class="pd-fld"><span class="pd-lbl">State</span><select id="pdState"><option value="">All states</option></select></div>
+    <div class="pd-fld"><span class="pd-lbl">Channel</span><select id="pdChannel"><option value="">All channels</option></select></div>
+    <div class="pd-fld"><span class="pd-lbl">Search</span><input type="search" id="pdSearch" placeholder="Result name…" autocomplete="off"></div>
+    <span class="pd-count" id="pdCount"></span>
+    <button type="button" class="pd-export" id="pdExport" title="Download every saved result's Plan vs Done table (Excel)"><i class="ic ic-download"></i>Export Excel</button>
+  </div>
+
+  <div id="pdList"><div class="pd-empty">Loading…</div></div>
+</div>
+
+  <div class="rc-modal" id="pickModal" hidden>
+    <div class="rc-modal-card">
+      <div class="rc-modal-h">
+        <span class="t">Select item</span>
+        <input type="search" id="pkSearch" placeholder="Search item code / name…" autocomplete="off">
+        <button class="rc-modal-clear" id="pkClear" title="Reset size / variety / search">Clear</button>
+        <button class="rc-modal-x" id="pkClose" title="Close"><i class="ic ic-x"></i></button>
+      </div>
+      <div class="rc-modal-body">
+        <div class="rc-col" id="pkVar"></div>
+        <div class="rc-col" id="pkSku"></div>
+        <div class="rc-col" id="pkItem"></div>
+      </div>
+      <!-- step 2: the picked item's plan line. Box Ltrs and Relise are derived, never typed. -->
+      <div class="pk-form" id="pkForm" hidden>
+        <div class="pk-item"><i class="ic ic-package"></i>
+          <span id="pkFormName"></span><span class="pd-code" id="pkFormCode"></span></div>
+        <div class="pk-grid">
+          <label>Retailer ₹<input type="number" step="any" min="0" id="pkRetailer" placeholder="0"></label>
+          <label>Box Ltrs<output id="pkBoxltr">—</output></label>
+          <label>Scheme<input type="number" step="any" min="0" id="pkScheme" placeholder="0"></label>
+          <label>To be sale<input type="number" step="any" min="0" id="pkSell" placeholder="litres"></label>
+          <label>Relise ₹/L<output id="pkRelise" class="calc">—</output></label>
+        </div>
+        <div class="pk-foot">
+          <span class="pk-note" id="pkNote"></span>
+          <button type="button" class="pk-back" id="pkBack">‹ Back to items</button>
+          <button type="button" class="pk-save" id="pkSave" disabled>Add to plan</button>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function(){
+  function csrf(){var m=document.querySelector('meta[name=csrf-token]');return m?m.content:'';}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function fN(n){return (Number(n)||0).toLocaleString('en-IN');}
+  function f2(n){return (Number(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+  function debounce(fn,ms){var t;return function(){clearTimeout(t);t=setTimeout(fn,ms);};}
+  function num(v){var n=parseFloat(v);return isFinite(n)?n:0;}
+
+  var ALL=[], DONE_ALL={}, DONE_BY={}, DONE_SC={}, MONTH_LABEL='', stateF='', chanF='', searchF='', loading=false, UID=0;
+  /* What the reader has opened, by a key that survives a re-render. Every filter rebuilds the
+     whole list, so without this, flipping Done Scope reopened the first three cards and shut
+     everything the reader had opened — the page rearranging itself under them. Everything
+     starts closed: on a screen of 20-odd territories, the reader picks what to look at.
+     Keys: 'c:<id>' saved card · 'c:CHANNEL|STATE' target card · 'p:<rid>|<plan>' planning
+     grid · 'g:<rid>|<plan>|<segment>' one segment's items. */
+  var OPEN={};
+  function isOpen(k){ return !!OPEN[k]; }
+  function openCls(k){ return isOpen(k)?' open':''; }
+  /* SCOPE decides which Done map a card reads: the state it was planned for, or all-India.
+     A saved result with no state tag can only ever be all-India. Ship-to state, matching the
+     sales dashboard's attribution (and its Delhi-GT remap), so the two never disagree. */
+  var SCOPE='state';
+  /* A sale belongs to the CUSTOMER's state, not the ship-to address: a Delhi HORECA account
+     delivering to a hotel in Gurgaon is still Delhi's business. The server settles this, so
+     there is nothing to choose here. Note the Sales dashboard attributes by ship-to, so its
+     per-state figures will differ for accounts that buy in one state and deliver in another. */
+  var DONE_CH={};                       // channel across every state
+  /* Segment filter. Type comes from OITM.U_TYPE for the whole FG master, not just what sold,
+     so a planned item with no sale this month is still filtered correctly instead of vanishing
+     because we could not tell what it was. */
+  var ITEM_TYPES={}, TYPEF='', TARGETS={};
+  /* Item-level targets set in Update Targets: {'CHANNEL|STATE': {ITEMCODE: {...}}}.
+     One level below TARGETS, which is per segment. */
+  var ITEM_TGT={};
+  /* Update Targets holds a target per (channel, state, segment). Honour the Type filter when
+     one is set, else the pooled 'ALL'. No channel on the card means no target to look up:
+     a GT target must not be shown against every channel in the state. */
+  /* The result's OWN territory target, independent of the Done scope: switching to All India
+     widens what counts as Done, it does not change what the territory was asked to do. */
+
+  /* Update Targets is filled per segment, so Plan vs Done shows it per segment: one row for
+     Premium, one for Commodity. Pooling them hid that they carry different rates - 1,00,000 at
+     220 and 2,00,000 at 160 pool to 180, a rate neither target asked for. Only when a territory
+     was given a single undifferentiated target does one combined row appear. */
+  /* Render every segment row, then a total across them when a territory carries more than one.
+     The total's rate is the pooled one from Update Targets, and its Done is the territory's
+     whole figure - which is not necessarily the two segments added up, because items typed
+     OTHERS sell into the territory but have no target. */
+  /* The per-segment Target rows now head their own item groups in the body, so the footer
+     carries only the total across them. Its Done is the territory's whole figure, which is not
+     always the segments added up: items typed OTHERS sell into the territory but have no target. */
+  /* The target for a scope. With a state it is that territory's own bucket. With no state —
+     All India — it is the CHANNEL's target: every state's target for that channel added up,
+     rates volume-weighted the way the server pools them. All India widens the target exactly
+     as it widens Done, so a card's two sides stay comparable and the channel card reads the
+     same total as the Targets dashboard. */
+  function targetBucket(st,ch){
+    if(!ch)return null;
+    if(st)return TARGETS[ch+'|'+normState(st)]||null;
+    var acc={}, any=false;
+    Object.keys(TARGETS).forEach(function(k){
+      if(k.split('|')[0]!==ch)return;
+      var b=TARGETS[k];
+      Object.keys(b).forEach(function(seg){
+        var t=b[seg];
+        if(!t||!(num(t.ltrs)>0))return;
+        var a=acc[seg]||(acc[seg]={ltrs:0,value:0,rate:0});
+        a.ltrs+=num(t.ltrs); a.value+=num(t.ltrs)*num(t.rate); any=true;
+      });
+    });
+    if(!any)return null;
+    Object.keys(acc).forEach(function(s){ acc[s].rate=acc[s].ltrs?(acc[s].value/acc[s].ltrs):0; });
+    return acc;
+  }
+  /* One item's target for a scope — the item twin of targetBucket. With a state it is that
+     territory's own row; without one (All India) it is the CHANNEL's, every state's target
+     for that item added up with the rate re-derived from pooled value over pooled litres.
+     Averaging two states' rates would print a number neither target asked for.
+     Retailer and Scheme are per-state DECISIONS, not item constants, so where states
+     disagree they collapse to -1 and render as a dash rather than a price nobody set;
+     Box Ltrs and Pcs/Box are properties of the pack and pool trivially. */
+  function itemTargetBucket(st,ch){
+    if(!ch)return null;
+    if(st)return ITEM_TGT[ch+'|'+normState(st)]||null;
+    var acc={}, any=false;
+    Object.keys(ITEM_TGT).forEach(function(k){
+      if(k.split('|')[0]!==ch)return;
+      var b=ITEM_TGT[k];
+      Object.keys(b).forEach(function(code){
+        var t=b[code];
+        if(!t||!(num(t.ltrs)>0))return;
+        var a=acc[code];
+        if(!a){
+          a=acc[code]={ltrs:0,value:0,rate:0,name:t.name,seg:t.seg,
+                       boxltr:num(t.boxltr),pcsbox:num(t.pcsbox),
+                       retailer:num(t.retailer),scheme:num(t.scheme)};
+        }else{
+          if(num(t.retailer)!==a.retailer)a.retailer=-1;
+          if(num(t.scheme)!==a.scheme)a.scheme=-1;
+        }
+        a.ltrs+=num(t.ltrs); a.value+=num(t.ltrs)*num(t.rate); any=true;
+      });
+    });
+    if(!any)return null;
+    Object.keys(acc).forEach(function(c){ acc[c].rate=acc[c].ltrs?(acc[c].value/acc[c].ltrs):0; });
+    return acc;
+  }
+
+  /* Channel view leads with the channel — the card IS "the whole of GT", and burying that
+     behind "All India" made it read as a scope note rather than the subject of the card. */
+  function terrLbl(st,ch){ return st ? (st+' · '+ch) : (ch+' · all states'); }
+
+  /* Split on anything that is not a letter or a digit. No regex on purpose — a word-boundary
+     escape has not survived the quoting into this file before, and a pattern that silently
+     matches nothing here would quietly hide chips that carry real information. */
+  function wordsOf(s){
+    var out=[], cur='', u=String(s||'').toUpperCase();
+    for(var i=0;i<u.length;i++){
+      var c=u.charAt(i);
+      if((c>='A'&&c<='Z')||(c>='0'&&c<='9'))cur+=c;
+      else if(cur){ out.push(cur); cur=''; }
+    }
+    if(cur)out.push(cur);
+    return out;
+  }
+  /* The heading already names the territory — "UTTAR PRADESH · CSD" beside a chip reading
+     "UTTAR PRADESH · CSD" is the same thing twice. Keep the chip only when it says something
+     the heading does not: a widened scope ("all states · GT"), or a territory the result's
+     name never mentions. */
+  function chipSaysMore(name,chip){
+    var n=String(name||'').toUpperCase();
+    return wordsOf(chip).some(function(w){ return n.indexOf(w)<0; });
+  }
+
+  function targetTotalRow(st,ch,map){
+    var segs=targetSegs(st,ch);
+    if(!segs.length)return '';
+    var b=targetBucket(st,ch), all=b&&b.ALL;
+    if(!all||all.ltrs<=0)return '';
+    var d=segTotals(map||{},'');
+    /* One segment used to mean "no total needed". It is not the same question: a segment row
+       counts only its own items, this row counts the whole territory. A HORECA card carrying a
+       Premium-only target showed 11,511 and never the channel's 12,759, because Commodity sold
+       into it with no target of its own. Drop the row only when it would repeat the single
+       segment row exactly. */
+    if(segs.length<2){
+      var s=segTotals(map||{},segs[0][0]);
+      if(Math.round(s.ltr)===Math.round(d.ltr)
+         && Math.round(num(all.ltrs))===Math.round(num(segs[0][1].ltrs)))return '';
+    }
+    return targetRowHtml('Target · '+terrLbl(st,ch)+' · TOTAL', all, d.ltr, d.rev);
+  }
+
+  function targetSegs(st,ch){
+    var b=targetBucket(st,ch);
+    if(!b)return [];
+    if(TYPEF)return (b[TYPEF]&&b[TYPEF].ltrs>0)?[[TYPEF,b[TYPEF]]]:[];
+    var segs=Object.keys(b).filter(function(k){return k!=='ALL'&&b[k].ltrs>0;}).sort();
+    if(segs.length)return segs.map(function(k){return [k,b[k]];});
+    return (b.ALL&&b.ALL.ltrs>0)?[['',b.ALL]]:[];
+  }
+  /* Sort the items into Premium / Commodity / Others and hand back the groups in that order,
+     each sorted by litres. Ungrouped, a Premium and a Commodity item sat next to each other
+     with nothing to say which target row they belonged to. */
+  var SEG_ORDER=['PREMIUM','COMMODITY','OTHERS',''];
+  function groupBySegment(rows){
+    var by={};
+    rows.forEach(function(r){ (by[ITEM_TYPES[r.code]||'']=by[ITEM_TYPES[r.code]||'']||[]).push(r); });
+    return SEG_ORDER.filter(function(k){return by[k]&&by[k].length;}).map(function(k){
+      var g=by[k], ltr=0, rev=0;
+      g.sort(function(a,b){ return num(b.doneLtr)-num(a.doneLtr); });
+      g.forEach(function(r){ ltr+=num(r.doneLtr); rev+=num(r.doneRev); });
+      return {seg:k, rows:g, ltr:ltr, rev:rev};
+    });
+  }
+  function segHeadRow(g,moreId,okey){
+    return '<tr class="pd-seg'+(moreId?(isOpen(okey)?' hdr open':' hdr')+'" data-more="'+moreId
+              +'" data-okey="'+esc(okey||''):'')+'"><td class="l" colspan="6">'
+      +(moreId?'<i class="ic ic-chevron-down"></i>':'')
+      +esc(g.seg||'UNCLASSIFIED')
+      +' · '+g.rows.length+' item'+(g.rows.length===1?'':'s')+'</td>'
+      +'<td class="'+(g.ltr<0?'r':'pd-done')+' sep">'+fN(Math.round(g.ltr))+'</td><td></td>'
+      +'<td>'+(g.ltr?f2(g.rev/g.ltr):'<span class="mute">—</span>')+'</td>'
+      +'<td></td><td></td><td class="sep"></td><td></td><td></td></tr>';
+  }
+
+  /* Groups to hang under the Target rows. A territory given ONE undifferentiated target gets a
+     single group holding everything - splitting it by segment there would leave the target row
+     heading an empty group while the items sat under plain headers it does not own.
+     Otherwise: one group per segment, plus an empty one for any targeted segment that sold
+     nothing, so a missed segment is still visible.
+     planRows are the plan's own items repeated inside their segment. They are already listed
+     at the top of the card, but a Target row counts the WHOLE territory - leaving them out
+     made the group's Done read higher than the items under it added up, which read as a
+     missing sale. They carry inPlan so the renderer marks them and skips the inputs. */
+  function buildGroups(rows,tsegs,planRows){
+    var all=rows.concat(planRows||[]);
+    if(tsegs.length===1 && tsegs[0][0]===''){
+      var ltr=0, rev=0;
+      all.forEach(function(r){ ltr+=num(r.doneLtr); rev+=num(r.doneRev); });
+      all.sort(function(a,b){ return num(b.doneLtr)-num(a.doneLtr); });
+      return [{seg:'', rows:all, ltr:ltr, rev:rev}];
+    }
+    var groups=groupBySegment(all), seen={};
+    groups.forEach(function(g){ seen[g.seg]=1; });
+    tsegs.forEach(function(pr){ if(pr[0] && !seen[pr[0]])groups.push({seg:pr[0],rows:[],ltr:0,rev:0}); });
+    var rank={PREMIUM:0,COMMODITY:1,OTHERS:2};
+    groups.sort(function(a,b){ return (rank[a.seg]==null?3:rank[a.seg])-(rank[b.seg]==null?3:rank[b.seg]); });
+    return groups;
+  }
+
+  /* An item that was TARGETED but did not sell has no row in the Done map, so it would be
+     absent from the card entirely and a total miss would look like nothing at all. Push a
+     zero-Done row for it. groupBySegment types these off ITEM_TYPES — the whole FG master,
+     not just what sold — so they land in the right segment with no other change. */
+  function injectTargeted(IT,rows,D){
+    Object.keys(IT||{}).forEach(function(code){
+      if(D[code]||!typeOk(code))return;
+      rows.push({item:IT[code].name||code, code:code, doneLtr:0, doneRev:0, fromTarget:true});
+    });
+  }
+
+  /* One item that carries its own target from Update Targets. The five PLAN cells the
+     target-only card leaves as dashes are exactly the five this fills, so nothing about the
+     14-column shape changes — the columns were always there, waiting for a commitment. */
+  function itemTargetRow(r,it,d,actRl){
+    var tRev=num(it.ltrs)*num(it.rate);
+    var pct=it.ltrs?(r.doneLtr/it.ltrs*100):0;
+    var diff=(actRl&&it.rate)?(actRl-it.rate):0;
+    // -1 means the states disagreed on this price when pooled for All India.
+    var money=function(v){ return v>=0?f2(v):'<span class="mute">—</span>'; };
+    return '<tr class="x tgt">'
+      +itemCell(r.item,r.code,'TARGET')
+      +'<td>'+money(num(it.retailer))+'</td>'
+      +'<td>'+(it.boxltr?f2(it.boxltr):'<span class="mute">—</span>')+'</td>'
+      +'<td>'+money(num(it.scheme))+'</td>'
+      +'<td>'+fN(Math.round(it.ltrs))+'</td>'
+      +'<td class="pd-rl">'+f2(it.rate)+'</td>'
+      +'<td class="'+(r.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(r.doneLtr))+'</td>'
+      +'<td class="'+(it.ltrs?achCls(pct):'mute')+'">'+(it.ltrs?f2(pct)+'%':'—')+'</td>'
+      +'<td>'+(actRl?f2(actRl):'<span class="mute">—</span>')+'</td>'
+      +'<td class="'+(diff?(diff>=0?'g':'r'):'mute')+'">'+(diff?((diff>=0?'+':'')+f2(diff)):'—')+'</td>'
+      +ratePcCell(d)
+      +estCells(num(it.ltrs),tRev,r.doneLtr,r.doneRev,num(it.rate))+'</tr>';
+  }
+
+  /* Pack size for pricing a row, off the month's Done map. Every caller goes through this so
+     an item missing from the map yields zeros rather than throwing on an undefined lookup. */
+  function packOf(code, rid, D){
+    var d=D&&D[code];
+    return {pcsbox:d?num(d.pcsbox):0, boxltr:d?num(d.boxltr):0};
+  }
+
+  /* Done for one segment of a map. Types come from the whole FG master, so an item that had no
+     sale is still classified and cannot drift into the wrong segment. */
+  function segTotals(D,seg){
+    var ltr=0, rev=0;
+    Object.keys(D).forEach(function(c){
+      if(seg && (ITEM_TYPES[c]||'')!==seg)return;
+      ltr+=num(D[c].litres); rev+=num(D[c].revenue);
+    });
+    return {ltr:ltr, rev:rev};
+  }
+  /* One Target row. Shared by the saved cards and the target-only cards so they cannot drift. */
+  function targetRowHtml(label,t,doneLtr,doneRev,moreId,okey){
+    var tRev=t.ltrs*t.rate;
+    var pct=t.ltrs?(doneLtr/t.ltrs*100):0;
+    var aRl=doneLtr?(doneRev/doneLtr):0, diff=(aRl&&t.rate)?(aRl-t.rate):0;
+    return '<tr class="pd-tgt'+(/TOTAL$/.test(label)?' tot':'')
+        +(moreId?(isOpen(okey)?' hdr open':' hdr')+'" data-more="'+moreId
+                 +'" data-okey="'+esc(okey||''):'')+'"><td class="l">'
+      +(moreId?'<i class="ic ic-chevron-down"></i>':'')+esc(label)+'</td>'
+      +'<td></td><td></td><td></td>'
+      +'<td>'+fN(Math.round(t.ltrs))+'</td><td class="pd-rl">'+f2(t.rate)+'</td>'
+      +'<td class="'+(doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(doneLtr))+'</td>'
+      +'<td class="'+(t.ltrs?achCls(pct):'mute')+'">'+(t.ltrs?f2(pct)+'%':'—')+'</td>'
+      +'<td>'+(doneLtr?f2(aRl):'<span class="mute">—</span>')+'</td>'
+      +'<td class="'+(diff?(diff>=0?'g':'r'):'mute')+'">'+(diff?((diff>=0?'+':'')+f2(diff)):'—')+'</td>'
+      +'<td></td>'
+      +estCells(t.ltrs,tRev,doneLtr,doneRev,t.rate)+'</tr>';
+  }
+  function typeOk(code){ return !TYPEF || (ITEM_TYPES[String(code||'').toUpperCase()]||'')===TYPEF; }
+  function normState(x){ return String(x||'').toUpperCase().replace(/&/g,' AND ').replace(/\s+/g,' ').trim(); }
+  function scopeStateOf(o){ return (SCOPE==='all'||!o.state)?'':o.state; }
+  /* Channel comes from the saved tag when there is one. Untagged results fall back to their
+     NAME: "Delhi GT" is a GT plan and measuring it across Corporate and E-Commerce is wrong.
+     Whole-word match only, and an ambiguous name (two channels, or none) guesses nothing
+     rather than picking one. The card flags an inferred channel, and setting the tag on the
+     Rate List tab overrides it — a guess must be visible and correctable. */
+  function channelFromName(name){
+    var toks=String(name||'').toUpperCase().split(/[^A-Z]+/), hits={};
+    var CH={GT:1,MT:1,ROI:1,HORECA:1,CSD:1,REST:1,ECOM:1};
+    toks.forEach(function(t){
+      if(!t)return;
+      if(t==='ECOM'||t==='ECOMMERCE'||t==='COMMERCE')hits.ECOM=1;   // ECOM / E-COM / E-COMMERCE
+      else if(CH[t])hits[t]=1;
+    });
+    var k=Object.keys(hits);
+    return k.length===1?k[0]:'';
+  }
+  /* All India widens the STATE only - the channel stays fixed, so a GT plan is compared with
+     GT everywhere rather than with every channel in the country. */
+  function chanInfo(o){
+    if(o.channel)return {ch:o.channel,guess:false};
+    var g=channelFromName(o.name);
+    return {ch:g,guess:!!g};
+  }
+  function scopeChanOf(o){ return chanInfo(o).ch; }
+  /* No state => all-India. State but no channel tag => every channel in that state. Both => the
+     one bucket, which is what a "Delhi GT" plan should actually be measured against. */
+  function doneMapFor(st,ch){
+    if(!PSEL.length){                                   // fast path: no person filter
+      if(st&&ch)return DONE_SC[normState(st)+'|'+ch]||{};
+      if(st)return DONE_BY[normState(st)]||{};
+      if(ch)return DONE_CH[ch]||{};     // All India, one channel
+      return DONE_ALL;
+    }
+    var want=st?normState(st):'', keep=[];
+    Object.keys(DONE_SC).forEach(function(k){
+      var p=k.split('|'), kst=p[0], kch=p[1];
+      if(want&&kst!==want)return;
+      if(ch&&kch!==ch)return;
+      if(!personOk(kst,kch))return;
+      keep.push(DONE_SC[k]);
+    });
+    return mergeMaps(keep);
+  }
+  /* Person filter. A person owns a (channel, state) cell, so filtering is a question about
+     which by_state_channel buckets to add up — never about individual invoices. An empty
+     selection means no filter rather than "show nothing", so Clear All cannot blank the page. */
+  var PERSONS=[], PSEL=[];
+  function personOf(st,ch){ return assignedPerson(ch,st); }
+  function personOk(st,ch){ return !PSEL.length || PSEL.indexOf(personOf(st,ch))>=0; }
+
+  /* Sum item cells across buckets, then re-derive the rates — averaging the rates would be
+     wrong, they have to come from the pooled revenue and volume. */
+  function mergeMaps(maps){
+    var out={};
+    maps.forEach(function(m){
+      Object.keys(m).forEach(function(code){
+        var src=m[code], c=out[code];
+        if(!c)c=out[code]={item_name:src.item_name,pcsbox:src.pcsbox,ltr_per_pc:src.ltr_per_pc,
+                           boxltr:src.boxltr,litres:0,pcs:0,boxes:0,revenue:0};
+        c.litres+=num(src.litres); c.pcs+=num(src.pcs);
+        c.boxes+=num(src.boxes);   c.revenue+=num(src.revenue);
+      });
+    });
+    Object.keys(out).forEach(function(code){
+      var c=out[code];
+      c.realise_l=c.litres?c.revenue/c.litres:0;
+      c.rate_pc  =c.pcs   ?c.revenue/c.pcs   :0;
+      c.rate_box =c.boxes ?c.revenue/c.boxes :0;
+    });
+    return out;
+  }
+
+  function mapForNode(el){
+    var card=el.closest?el.closest('.pd-card'):null;
+    return doneMapFor(card?card.getAttribute('data-state'):'',
+                      card?card.getAttribute('data-channel'):'');
+  }
+
+  /* Unsaved edits on the unplanned rows, keyed result|plan|item so they survive a re-render
+     (state filter, search) and so two plans can plan the same SKU independently. */
+  var PENDING={}, EDIT={};          // EDIT['CHANNEL|STATE'] = target card is in edit mode
+  function pkey(rid,pidx,code){ return rid+'|'+pidx+'|'+code; }
+
+  /* SS%/DM%/GST%/Disc are not global — they are whatever the person who built THAT plan used
+     (these saved plans run 3/5/5/0; the live Delhi GT plan runs 0/0/5/0). An added row must
+     follow its own plan's commercial terms, so take the most common value across the plan's
+     already-priced rows. Only rows with a retailer price count — a blank row's zeros are not
+     a decision. Mirrors _plan_assumptions() in views.py. */
+  var ASSUME={};
+  function planAssumptions(p){
+    var f=['ss','dm','gst','disc'], tally={ss:{},dm:{},gst:{},disc:{}}, n=0;
+    (p.rows||[]).forEach(function(r){
+      if(num(r.retailer)<=0)return;
+      n++; f.forEach(function(k){ var v=num(r[k]); tally[k][v]=(tally[k][v]||0)+1; });
+    });
+    var out={ss:0,dm:0,gst:5,disc:0};
+    if(!n)return out;
+    f.forEach(function(k){
+      var best=null,bn=-1;
+      Object.keys(tally[k]).forEach(function(v){ if(tally[k][v]>bn){bn=tally[k][v];best=Number(v);} });
+      if(best!==null)out[k]=best;
+    });
+    return out;
+  }
+
+  /* Planned realise for an added row: the calculator's own formula when a retailer price is
+     given, otherwise the month's actual realisation (the fallback agreed for price-less rows). */
+  function addedRealise(retailer,pcsbox,boxltr,scheme,actRl,a){
+    var tot=boxltr+scheme;
+    if(retailer>0 && pcsbox>0 && tot>0){
+      var exgst=retailer/(1+a.ss/100)/(1+a.dm/100)/(1+a.gst/100);
+      return ((exgst*pcsbox)-a.disc)/tot;
+    }
+    return actRl;
+  }
+
+  var MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function monthLabel(m){                       // 'YYYY-MM' -> 'Jul 2026'
+    var p=String(m||'').split('-');
+    return (p.length===2 && MONTHS[+p[1]-1]) ? MONTHS[+p[1]-1]+' '+p[0] : String(m||'');
+  }
+
+  /* Achievement colour band: on/over plan, within 25% short, worse. */
+  function achCls(pct){ return pct>=100?'g':(pct>=75?'a':'r'); }
+  function chipCls(pct){ return pct>=100?'good':(pct>=75?'mid':'bad'); }
+
+  /* Join one saved plan's rows to the month's Done map, keyed by item code. */
+  function joinPlan(p,D){
+    var out={rows:[],codes:{},planLtr:0,planRev:0,doneLtr:0,doneRev:0,pcs:0,boxes:0,nocode:0,nosale:0};
+    (p.rows||[]).forEach(function(r){
+      var code=String(r.code||'').trim().toUpperCase();
+      var d=code?D[code]:null;
+      if(code)out.codes[code]=1;          // claimed by the plan whatever the type filter says
+      if(!typeOk(code))return;
+      var planLtr=num(r.sell), planRev=num(r.revenue);
+      var doneLtr=d?num(d.litres):0, doneRev=d?num(d.revenue):0;
+      if(!code)out.nocode++; else if(!d)out.nosale++;
+      out.rows.push({item:r.item||'',code:code,
+        retailer:num(r.retailer),boxltr:num(r.boxltr),scheme:num(r.scheme),
+        planLtr:planLtr,planRev:planRev,planRl:num(r.realise),
+        doneLtr:doneLtr,doneRev:doneRev,matched:!!d});
+      out.planLtr+=planLtr; out.planRev+=planRev; out.doneLtr+=doneLtr; out.doneRev+=doneRev;
+      if(d){ out.pcs+=num(d.pcs); out.boxes+=num(d.boxes); }
+    });
+    return out;
+  }
+
+  /* Everything that SOLD this month but is absent from this plan. Without these the tab only
+     ever shows the handful of SKUs someone planned, while the company bills far more — so the
+     "how much have we actually sold" question stays unanswered. Zero-net items are dropped. */
+  function extrasFor(codes,D){
+    var out={rows:[],doneLtr:0,doneRev:0,pcs:0,boxes:0};
+    Object.keys(D).forEach(function(code){
+      if(codes[code]||!typeOk(code))return;
+      var d=D[code], lt=num(d.litres), rv=num(d.revenue);
+      if(!Math.round(lt) && !Math.round(rv))return;
+      out.rows.push({item:d.item_name||code,code:code,doneLtr:lt,doneRev:rv});
+      out.doneLtr+=lt; out.doneRev+=rv; out.pcs+=num(d.pcs); out.boxes+=num(d.boxes);
+    });
+    out.rows.sort(function(a,b){return b.doneLtr-a.doneLtr;});
+    return out;
+  }
+
+  /* Rate ₹/Pc sits in the DONE block, next to the other achieved rates (₹/L, Diff ₹/L) — it is
+     a realisation figure, not a quantity. */
+  /* Item cell doubles as the drill-down handle — click it for the parties and invoices behind
+     that item's Done figure. Rows without a code cannot be looked up, so they stay plain. */
+  function itemCell(item,code,badge){
+    if(!code)return '<td class="l">'+esc(item)+'</td>';
+    return '<td class="l pd-item" data-code="'+esc(code)+'">'
+      +'<i class="ic ic-chevron-right pd-ichev"></i>'
+      +esc(item)+'<span class="pd-code">'+esc(code)+'</span>'
+      +(badge?'<span class="pd-inplan">'+esc(badge)+'</span>':'')+'</td>';
+  }
+
+  function ratePcCell(d){
+    return d ? '<td>'+f2(d.rate_pc)+'</td>' : '<td class="mute">—</td>';
+  }
+
+  /* ESTIMATE — what is still needed to land the plan.
+       Bal Ltr  = plan litres  − done litres      (kitna volume bacha)
+       Bal Rev  = plan revenue − done revenue     (kitna paisa bacha)
+       Req ₹/L  = Bal Rev ÷ Bal Ltr               (bachi litres is rate par bechni padengi)
+     Sell the balance at Req ₹/L and the plan's revenue lands exactly. Two states are NOT a
+     rate: revenue target already made ("met"), and revenue short with no planned litres left
+     to earn it on ("no vol") — a number there would imply a catch-up that cannot happen. */
+  function estParts(planLtr,planRev,doneLtr,doneRev,planRl){
+    if(planLtr<=0)return null;
+    var balL=planLtr-doneLtr, balR=planRev-doneRev, o={balL:balL,balR:balR,req:null,gap:0};
+    // With nothing left to require, a word says less than a number. Show the realisation
+    // actually achieved instead, coloured for which case it is: green = the money target is
+    // already made, red = it is short and there is no planned volume left to make it on.
+    o.achieved = doneLtr ? (doneRev/doneLtr) : 0;
+    if(balR<=0){ o.label='met';    o.cls='g'; }
+    else if(balL<=0){ o.label='no vol'; o.cls='r'; }
+    else {
+      o.req=balR/balL;
+      // Guard the float: an untouched item's required rate IS its plan rate, and the residue
+      // would otherwise render as a meaningless "-0.00" in the red/green gap column.
+      var g=planRl?(o.req-planRl):0;
+      o.gap=Math.abs(g)<0.005?0:g;
+    }
+    return o;
+  }
+  function estCells(planLtr,planRev,doneLtr,doneRev,planRl){
+    var e=estParts(planLtr,planRev,doneLtr,doneRev,planRl);
+    if(!e)return '<td class="mute sep" data-c="ebal">—</td>'
+      +'<td class="mute" data-c="ereq">—</td><td class="mute" data-c="egap">—</td>';
+    return '<td class="pd-bal sep" data-c="ebal">'+fN(Math.round(e.balL))+'</td>'
+      +(e.req===null
+        ? '<td class="'+e.cls+'" data-c="ereq" title="'
+            +(e.label==='met'?'Target already made — this is the realisation achieved'
+                             :'Short on value with no planned litres left — this is the realisation achieved')
+            +'">'+(e.achieved?f2(e.achieved):e.label)+'</td>'
+          +'<td class="mute" data-c="egap">—</td>'
+        : '<td class="pd-req" data-c="ereq">'+f2(e.req)+'</td>'
+          +'<td class="'+(e.gap?(e.gap<=0?'g':'r'):'mute')+'" data-c="egap">'
+            +(e.gap?((e.gap>=0?'+':'')+f2(e.gap)):'—')+'</td>');
+  }
+
+  function planTable(p,pidx,rid,D,scopeLbl,tgtCh,tgtMap,tgtSt){
+    var j=joinPlan(p,D);
+    var A=planAssumptions(p); ASSUME[rid+'|'+pidx]=A;   // the input handler needs these too
+    var body=j.rows.map(function(r){
+      var pct=r.planLtr?(r.doneLtr/r.planLtr*100):0;
+      var actRl=r.doneLtr?(r.doneRev/r.doneLtr):0;
+      var diff=actRl&&r.planRl?(actRl-r.planRl):0;
+      return '<tr>'
+        +itemCell(r.item,r.code)
+        +'<td>'+f2(r.retailer)+'</td><td>'+f2(r.boxltr)+'</td><td>'+f2(r.scheme)+'</td>'
+        +'<td>'+fN(Math.round(r.planLtr))+'</td>'
+        +'<td class="pd-rl">'+f2(r.planRl)+'</td>'
+        +'<td class="'+(r.doneLtr<0?'r':'pd-done')+' sep">'+(r.matched?fN(Math.round(r.doneLtr)):'<span class="mute">—</span>')+'</td>'
+        +'<td class="'+(r.planLtr?achCls(pct):'mute')+'">'+(r.planLtr?f2(pct)+'%':'—')+'</td>'
+        +'<td>'+(actRl?f2(actRl):'<span class="mute">—</span>')+'</td>'
+        +'<td class="'+(diff?(diff>=0?'g':'r'):'mute')+'">'+(diff?((diff>=0?'+':'')+f2(diff)):'—')+'</td>'
+        +ratePcCell(r.code?D[r.code]:null)
+        +estCells(r.planLtr,r.planRev,r.doneLtr,r.doneRev,r.planRl)+'</tr>';
+    }).join('');
+
+    var pct=j.planLtr?(j.doneLtr/j.planLtr*100):0;
+    var blendPlan=j.planLtr?(j.planRev/j.planLtr):0;
+    var blendAct=j.doneLtr?(j.doneRev/j.doneLtr):0;
+    var bdiff=(blendAct&&blendPlan)?(blendAct-blendPlan):0;
+
+    /* Items sold outside this plan: a summary row that is always visible (so the size of what
+       the plan misses is never hidden) and the detail rows behind a toggle. Scheme and To-be-sale
+       are editable there — typing a volume plans the item, and Save writes it into this result. */
+    /* Each segment's unplanned items sit under that segment's own Target row, which doubles as
+       the group header. A segment with no target keeps a plain header, and a target with no
+       sales still shows so a missed segment is not invisible.
+       A Target row's Done covers the whole territory, so the plan's own items are repeated
+       inside their segment (tagged IN PLAN, read-only - they are editable at the top of the
+       card) and the listed items add up to the Target row exactly. */
+    var x=extrasFor(j.codes,D), pend=0, extraHtml='';
+    var planRef=j.rows.filter(function(r){
+      return r.code && (Math.round(num(r.doneLtr)) || Math.round(num(r.doneRev)));
+    }).map(function(r){
+      return {item:r.item,code:r.code,retailer:r.retailer,boxltr:r.boxltr,scheme:r.scheme,
+              planLtr:r.planLtr,planRev:r.planRev,planRl:r.planRl,
+              doneLtr:r.doneLtr,doneRev:r.doneRev,inPlan:true};
+    });
+    var IT=itemTargetBucket(tgtSt,tgtCh)||{};
+    injectTargeted(IT,x.rows,D);
+    var tsegs=targetSegs(tgtSt,tgtCh), groups=buildGroups(x.rows,tsegs,planRef);
+    var tByseg={}; tsegs.forEach(function(pr){ tByseg[pr[0]]=pr[1]; });
+
+    if(groups.length){
+      extraHtml=groups.map(function(g){
+        var gid='x'+(++UID), gk='g:'+rid+'|'+pidx+'|'+g.seg, t=tByseg[g.seg];
+        var head = t
+          ? targetRowHtml('Target · '+terrLbl(tgtSt,tgtCh)+(g.seg?' · '+g.seg:''),
+                          t, segTotals(tgtMap||{},g.seg).ltr, segTotals(tgtMap||{},g.seg).rev, gid, gk)
+          : segHeadRow(g, gid, gk);
+        return '<tbody>'+head+'</tbody><tbody class="pd-xrows" id="'+gid+'"'+(isOpen(gk)?'':' hidden')+'>'
+          +g.rows.map(function(r){
+            /* Already planned: show it as it reads at the top of the card, no inputs — editing
+               it here would fight the plan row that owns it. */
+            if(r.inPlan){
+              var rp=r.planLtr?(r.doneLtr/r.planLtr*100):0;
+              var rAct=r.doneLtr?(r.doneRev/r.doneLtr):0;
+              var rDif=(rAct&&r.planRl)?(rAct-r.planRl):0;
+              return '<tr class="x ref">'
+                +itemCell(r.item,r.code,'IN PLAN')
+                +'<td>'+f2(r.retailer)+'</td><td>'+f2(r.boxltr)+'</td><td>'+f2(r.scheme)+'</td>'
+                +'<td>'+fN(Math.round(r.planLtr))+'</td>'
+                +'<td class="pd-rl">'+f2(r.planRl)+'</td>'
+                +'<td class="'+(r.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(r.doneLtr))+'</td>'
+                +'<td class="'+(r.planLtr?achCls(rp):'mute')+'">'+(r.planLtr?f2(rp)+'%':'—')+'</td>'
+                +'<td>'+(rAct?f2(rAct):'<span class="mute">—</span>')+'</td>'
+                +'<td class="'+(rDif?(rDif>=0?'g':'r'):'mute')+'">'+(rDif?((rDif>=0?'+':'')+f2(rDif)):'—')+'</td>'
+                +ratePcCell(D[r.code])
+                +estCells(r.planLtr,r.planRev,r.doneLtr,r.doneRev,r.planRl)+'</tr>';
+            }
+            var d=D[r.code], k=pkey(rid,pidx,r.code), e=PENDING[k]||{};
+            var actRl=r.doneLtr?(r.doneRev/r.doneLtr):0;
+            /* Carries its own target from Update Targets and nobody has started editing it
+               here — show the commitment rather than an empty row to fill in. Once a pending
+               edit exists it wins: the person is mid-plan and must not have it overwritten. */
+            if(IT[r.code] && !PENDING[k])return itemTargetRow(r,IT[r.code],d,actRl);
+            var sell=num(e.sell), sch=num(e.scheme), ret=num(e.retailer);
+            if(sell>0)pend++;
+            var pk=packOf(r.code,rid,D);
+            var rl=addedRealise(ret,pk.pcsbox,pk.boxltr,sch,actRl,A);
+            var rev=rl*sell, bal=sell-r.doneLtr, ap=sell?(r.doneLtr/sell*100):0;
+            return '<tr class="x" data-k="'+esc(k)+'">'
+              +itemCell(r.item,r.code)
+              +'<td class="pd-in"><input type="number" step="any" min="0" data-f="retailer" value="'+esc(e.retailer==null?'':e.retailer)+'" placeholder="retailer"></td>'
+              +'<td>'+(pk.boxltr?f2(pk.boxltr):'<span class="mute">—</span>')+'</td>'
+              +'<td class="pd-in"><input type="number" step="any" min="0" data-f="scheme" value="'+esc(e.scheme==null?'':e.scheme)+'" placeholder="0"></td>'
+              +'<td class="pd-in"><input type="number" step="any" min="0" data-f="sell" value="'+esc(e.sell==null?'':e.sell)+'" placeholder="to be sale"></td>'
+              +'<td class="pd-rl" data-c="rl">'+(sell>0?f2(rl):'<span class="mute">—</span>')+'</td>'
+              +'<td class="'+(r.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(r.doneLtr))+'</td>'
+              +'<td data-c="ach" class="'+(sell>0?achCls(ap):'mute')+'">'+(sell>0?f2(ap)+'%':'—')+'</td>'
+              +'<td>'+(actRl?f2(actRl):'<span class="mute">—</span>')+'</td>'
+              +'<td class="mute">—</td>'
+              +ratePcCell(d)
+              +estCells(sell,rev,r.doneLtr,r.doneRev,rl)+'</tr>';
+          }).join('')
+          +(g.rows.length?'':'<tr class="x"><td class="l" colspan="14"><span class="mute">Nothing sold in this segment this month.</span></td></tr>')
+          +'</tbody>';
+      }).join('')
+      ;      // each segment's own Target row already carries its total
+    }
+
+    var allLtr=j.doneLtr+x.doneLtr, allRev=x.doneRev+j.doneRev;
+
+    var notes=[];
+    if(j.nocode)notes.push(j.nocode+' row'+(j.nocode===1?'':'s')+' have no item code — cannot be matched to sales.');
+    if(j.nosale)notes.push(j.nosale+' planned item'+(j.nosale===1?'':'s')+' had no sale this month.');
+    notes.push('Added items: enter a Retailer ₹ and Relise ₹/L is calculated on this plan’s own terms '
+      +'(SS '+f2(A.ss)+'% · DM '+f2(A.dm)+'% · GST '+f2(A.gst)+'% · Disc '+f2(A.disc)+'). '
+      +'Leave it blank and the month’s actual realisation is used instead, with the price inputs left empty.');
+
+    /* The planned rows collapse behind their own heading, the same way each segment's items
+       collapse behind its Target row. Closed to start with: a plan of 30 SKUs pushes the
+       totals and the target rows off screen, and those are what most readings need. */
+    var pgid='pg'+(++UID), pgk='p:'+rid+'|'+pidx;
+    return '<div class="pd-plan-h hdr'+openCls(pgk)+'" data-more="'+pgid+'" data-okey="'+esc(pgk)+'">'
+      +'<i class="ic ic-chevron-down"></i>'
+      +'<span class="pd-plan-t">'+esc(p.name||'Plan')+'</span>'
+      +'<span class="pd-plan-n">'+j.rows.length+' item'+(j.rows.length===1?'':'s')+'</span></div>'
+      +'<div class="pd-tbl-wrap"><table class="pd-tbl"><thead>'
+      +'<tr class="grp"><th class="l"></th><th class="pl" colspan="5">Plan — as saved</th>'
+      +'<th class="dn sep" colspan="5">Done — '+esc(MONTH_LABEL)+' · '+esc(scopeLbl)+'</th>'
+      +'<th class="es sep" colspan="3">Estimate — left to hit plan</th></tr><tr>'
+      +'<th class="l">Item</th><th>Retailer ₹</th><th>Box Ltrs</th><th>Scheme</th>'
+      +'<th>To be sale</th><th>Relise ₹/L</th>'
+      +'<th class="sep">Done Ltr</th><th>Ach %</th>'
+      +'<th>Actual Relise ₹/L</th><th>Diff ₹/L</th><th>Rate ₹/Pc</th>'
+      +'<th class="sep">Bal Ltr</th><th>Req ₹/L</th><th>Req vs Plan ₹/L</th>'
+      // Blended stays OUT of the collapsing tbody: it is the summary of what just folded
+      // away, so hiding it with the rows would leave the plan showing nothing at all.
+      +'</tr></thead><tbody id="'+pgid+'"'+(isOpen(pgk)?'':' hidden')+'>'+body+'</tbody>'
+      +'<tbody><tr class="pd-sub"><td class="l">Blended ('+j.rows.length+')</td>'
+      +'<td></td><td></td><td></td>'
+      +'<td>'+fN(Math.round(j.planLtr))+'</td>'
+      +'<td class="pd-rl">'+f2(blendPlan)+'</td>'
+      +'<td class="'+(j.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(j.doneLtr))+'</td>'
+      +'<td class="'+(j.planLtr?achCls(pct):'mute')+'">'+(j.planLtr?f2(pct)+'%':'—')+'</td>'
+      +'<td>'+f2(blendAct)+'</td>'
+      +'<td class="'+(bdiff?(bdiff>=0?'g':'r'):'mute')+'">'+(bdiff?((bdiff>=0?'+':'')+f2(bdiff)):'—')+'</td>'
+      // blended Rate ₹/Pc would mix pack sizes the same way — see the note above
+      +'<td></td>'
+      +estCells(j.planLtr,j.planRev,j.doneLtr,j.doneRev,blendPlan)+'</tr></tbody>'
+      +extraHtml
+      /* ONE tfoot. Two separate ones is invalid HTML and browsers relocate or drop the second,
+         so the grand total and the target total are built together. */
+      +(function(){
+          var rows='';
+          if(x.rows.length){
+            // Everything sold in this scope, measured against the plan: unplanned SKUs count
+            // towards the territory's target too, so this line answers "after all of it, how
+            // much is still left and what rate must the balance fetch". The Blended row above
+            // answers the same question for the planned SKUs alone.
+            var apct = j.planLtr ? (allLtr/j.planLtr*100) : 0;
+            var aRl  = allLtr ? (allRev/allLtr) : 0;
+            var adiff = (aRl && blendPlan) ? (aRl-blendPlan) : 0;
+            rows += '<tr><td class="l">All items sold · '+esc(MONTH_LABEL)+'</td>'
+              +'<td></td><td></td><td></td><td></td><td></td>'
+              +'<td class="'+(allLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(allLtr))+'</td>'
+              +'<td class="'+(j.planLtr?achCls(apct):'mute')+'">'+(j.planLtr?f2(apct)+'%':'—')+'</td>'
+              +'<td>'+(allLtr?f2(aRl):'<span class="mute">—</span>')+'</td>'
+              +'<td class="'+(adiff?(adiff>=0?'g':'r'):'mute')+'">'+(adiff?((adiff>=0?'+':'')+f2(adiff)):'—')+'</td>'
+              +'<td></td>'
+              +estCells(j.planLtr,j.planRev,allLtr,allRev,blendPlan)+'</tr>';
+          }
+          rows += targetTotalRow(tgtSt,tgtCh,tgtMap);
+          return rows?('<tfoot>'+rows+'</tfoot>'):'';
+        })()
+      +'</table></div>'
+      +(x.rows.length
+        ? '<div class="pd-save" data-save="'+rid+'|'+pidx+'"><span class="pd-save-n">'
+          +(pend?pend+' item'+(pend===1?'':'s')+' ready to add':'Fill “To be sale” on any unplanned item to add it to this plan')
+          +'</span><button class="pd-save-b"'+(pend?'':' disabled')+'>Add to this plan</button></div>'
+        : '')
+      +'<div class="pd-kpis">'
+      +'<div class="pd-kpi acc"><div class="k-l">Plan · Litres</div><div class="k-v">'+fN(Math.round(j.planLtr))+'</div></div>'
+      +'<div class="pd-kpi acc"><div class="k-l">Done · Litres</div><div class="k-v">'+fN(Math.round(j.doneLtr))+'</div></div>'
+      +'<div class="pd-kpi opp"><div class="k-l">Achievement</div><div class="k-v">'+(j.planLtr?f2(pct)+'%':'—')+'</div></div>'
+      +'<div class="pd-kpi opp"><div class="k-l">Relise ₹/L · Plan → Actual</div><div class="k-v">'+f2(blendPlan)+' → '+f2(blendAct)+'</div></div>'
+      +'<div class="pd-kpi acc"><div class="k-l">Plan · Revenue</div><div class="k-v">₹'+fN(Math.round(j.planRev))+'</div></div>'
+      +'<div class="pd-kpi opp"><div class="k-l">Done · Revenue</div><div class="k-v">₹'+fN(Math.round(j.doneRev))+'</div></div>'
+      +(function(){                       // the headline: what the balance must fetch
+          var e=estParts(j.planLtr,j.planRev,j.doneLtr,j.doneRev,blendPlan);
+          if(!e)return '';
+          return '<div class="pd-kpi req"><div class="k-l">Balance '+fN(Math.round(e.balL))+' L · needs</div>'
+            +'<div class="k-v">'+(e.req===null?e.label:'₹'+f2(e.req)+' /L')+'</div></div>';
+        })()
+      +'</div>'
+      +(notes.length?'<div class="pd-note">'+esc(notes.join(' '))+'</div>':'');
+  }
+
+  /* ── Item drill-down: the parties and invoices behind one item's Done figure ── */
+  var DOCS={};        // 'code|month' -> payload, so reopening a row costs nothing
+
+  /* Territory map (channel|state -> assigned owner), baked in at render like the dashboard,
+     so the Contact Person dimension shows the ASSIGNED owner rather than the invoice's
+     sales-person UDF. person_map is keyed by both the channel and its raw groups. */
+  var TERRITORY_DATA={{ territory_payload|safe }};
+  var TERRITORY=TERRITORY_DATA.map||{}, GROUP_OWNERS=TERRITORY_DATA.group_owners||{};
+  function assignedPerson(group,state){
+    group=String(group||'').trim().toUpperCase(); state=String(state||'').trim().toUpperCase();
+    return TERRITORY[group+'|'+state]||GROUP_OWNERS[group]||'—';
+  }
+
+  /* Drill By picks COLUMNS, not nesting levels. A dimension contributes its own column(s) to
+     one flat row, so Customer and Document sit side by side on the same line instead of the
+     document hanging under a one-child customer group and repeating its value. Rows are the
+     distinct combinations of whatever is selected, aggregated. Product / Item Name are absent:
+     the drill-down already sits inside one item. */
+  var PD_DIMS=[
+    {key:'customer', label:'Customer', sub:'CardName / buyer', cols:[
+      {h:'Party', v:function(r){ return r.customer||r.card_code||'—'; }}]},
+    {key:'doc', label:'Document', sub:'Invoice / CN number', cols:[
+      {h:'Doc No', v:function(r){ return String(r.doc_num||'—'); }},
+      {h:'Date',   v:function(r){ return r.doc_date||'—'; }}]},
+    {key:'state', label:'State', sub:'Ship-to state', cols:[
+      {h:'State', v:function(r){ return r.state||'—'; }}]},
+    {key:'channel', label:'Channel', sub:'GT / MT / ROI / …', cols:[
+      {h:'Channel', v:function(r){ return r.channel||'—'; }}]},
+    {key:'person', label:'Contact Person', sub:'Assigned territory owner', cols:[
+      {h:'Contact Person', v:function(r){ return assignedPerson(r.channel,r.state); }}]}
+  ];
+  var DRILL=['customer','doc'], drillPick=['customer','doc'];
+
+  function dimOf(k){ for(var i=0;i<PD_DIMS.length;i++)if(PD_DIMS[i].key===k)return PD_DIMS[i]; return null; }
+  function activeCols(){
+    var out=[];
+    DRILL.forEach(function(k){ var d=dimOf(k); if(d)out=out.concat(d.cols); });
+    return out;
+  }
+
+  /* One row per distinct combination of the selected columns. Nothing selected collapses to a
+     single total row — honest for "no dimensions", rather than quietly showing a grain nobody
+     asked for. */
+  function groupRows(rows,cols){
+    var byKey={}, order=[];
+    rows.forEach(function(r){
+      var vals=cols.map(function(c){ return c.v(r); });
+      var k=vals.join(''), g=byKey[k];
+      if(!g){ g=byKey[k]={vals:vals,qty:0,litres:0,revenue:0,cn:false}; order.push(k); }
+      g.qty+=num(r.qty); g.litres+=num(r.litres); g.revenue+=num(r.revenue);
+      if(r.kind==='CN')g.cn=true;
+    });
+    var out=order.map(function(k){ return byKey[k]; });
+    out.sort(function(a,b){ return b.revenue-a.revenue; });
+    return out;
+  }
+
+  function docsTable(p){
+    if(p.status!=='ok')return '<div class="pd-dmsg">'+esc(p.error||'Could not load invoices.')+'</div>';
+    if(!p.rows.length)return '<div class="pd-dmsg">No invoices for this item in '+esc(MONTH_LABEL)+'.</div>';
+    if(!DRILL.length)return '<div class="pd-dmsg">Pick a Drill By dimension to break this item down.</div>';
+    var rows=p.rows.filter(function(r){ return personOk(normState(r.state),r.channel); });
+    if(!rows.length)return '<div class="pd-dmsg">No invoices for the selected person(s) in '+esc(MONTH_LABEL)+'.</div>';
+    // Totals come from the rows on screen, not the payload, so a filter can never leave a
+    // footer that disagrees with what is above it.
+    var t={qty:0,litres:0,revenue:0};
+    rows.forEach(function(r){ t.qty+=num(r.qty); t.litres+=num(r.litres); t.revenue+=num(r.revenue); });
+    var cols=activeCols(), grouped=groupRows(rows,cols), span=cols.length;
+    return '<table class="pd-dtbl"><thead><tr>'
+      +cols.map(function(c){return '<th class="l">'+esc(c.h)+'</th>';}).join('')
+      +'<th>Qty (Pcs)</th><th>Litres</th><th>Revenue ₹</th><th>₹/L</th></tr></thead><tbody>'
+      +grouped.map(function(g){
+          return '<tr'+(g.cn?' class="cn"':'')+'>'
+            +g.vals.map(function(v){return '<td class="l">'+esc(v)+'</td>';}).join('')
+            +'<td>'+fN(Math.round(g.qty))+'</td><td>'+fN(Math.round(g.litres))+'</td>'
+            +'<td>'+fN(Math.round(g.revenue))+'</td>'
+            +'<td>'+(g.litres?f2(g.revenue/g.litres):'<span class="mute">—</span>')+'</td></tr>';
+        }).join('')
+      +'</tbody><tfoot><tr><td class="l" colspan="'+span+'">'+rows.length+' document'+(rows.length===1?'':'s')+'</td>'
+      +'<td>'+fN(Math.round(t.qty))+'</td><td>'+fN(Math.round(t.litres))+'</td>'
+      +'<td>'+fN(Math.round(t.revenue))+'</td>'
+      +'<td>'+(t.litres?f2(t.revenue/t.litres):'0.00')+'</td></tr></tfoot></table>';
+  }
+  function labelOf(k){
+    for(var i=0;i<PD_DIMS.length;i++)if(PD_DIMS[i].key===k)return PD_DIMS[i].label;
+    return k;
+  }
+
+  function toggleDocs(cell){
+    var tr=cell.closest('tr'), code=cell.getAttribute('data-code');
+    var nxt=tr.nextElementSibling;
+    if(nxt && nxt.classList.contains('pd-docs')){        // already open -> close
+      nxt.parentNode.removeChild(nxt); cell.classList.remove('open'); return;
+    }
+    var card=cell.closest('.pd-card'), st=card?(card.getAttribute('data-state')||''):'';
+    var ch=card?(card.getAttribute('data-channel')||''):'';
+    var month=document.getElementById('pdMonth').value;
+    var key=code+'|'+month+'|'+st+'|'+ch;
+    var row=document.createElement('tr');
+    row.className='pd-docs';
+    row.setAttribute('data-key',key);
+    row.innerHTML='<td colspan="14"><div class="pd-dwrap"><div class="pd-dmsg">Loading…</div></div></td>';
+    tr.parentNode.insertBefore(row,tr.nextSibling);
+    cell.classList.add('open');
+    var box=row.querySelector('.pd-dwrap');
+    if(DOCS[key]){ box.innerHTML=docsTable(DOCS[key]); return; }
+    fetch('/realise/api/done-by-item/docs/?code='+encodeURIComponent(code)
+          +'&month='+encodeURIComponent(month)+'&state='+encodeURIComponent(st)
+          +'&channel='+encodeURIComponent(ch),
+          {headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{status:'error',error:'HTTP '+r.status};})
+      .then(function(p){ DOCS[key]=p; box.innerHTML=docsTable(p); })
+      .catch(function(){ box.innerHTML='<div class="pd-dmsg">Could not load invoices.</div>'; });
+  }
+
+  /* Card-header achievement chip = every plan in the result, pooled. */
+  function resultAch(o,D){
+    var pl=0,dn=0;
+    ((o.payload&&o.payload.plans)||[]).forEach(function(p){
+      var j=joinPlan(p,D); pl+=j.planLtr; dn+=j.doneLtr;
+    });
+    return {plan:pl,done:dn,pct:pl?(dn/pl*100):0};
+  }
+
+  function cardHtml(o,idx){
+    var pl=(o.payload&&o.payload.plans)||[];
+    var st=scopeStateOf(o), ci=chanInfo(o), ch=ci.ch, D=doneMapFor(st,ch);
+    var lbl = st ? (st+(ch?' · '+ch:' · all channels'))
+                 : (ch ? (ch+' · all states') : 'all-India');
+    var a=resultAch(o,D);
+    var tgtCh=(o.channel||channelFromName(o.name)||'');
+    /* The Target row follows the card's scope, same as Done: All India keeps the channel and
+       widens the state, so the row compares the channel's whole target to the channel's whole
+       sale. Pinning it to the card's own state left an all-India Done measured against one
+       state's target. */
+    var tgtSt=scopeStateOf(o);
+    var tgtMap=doneMapFor(tgtSt,tgtCh);
+    var tables=pl.map(function(p,i){return planTable(p,i,o.id,D,lbl,tgtCh,tgtMap,tgtSt);}).join('');
+    var scope=(o.scope==='GRID'?'Planning Grid':(o.scope==='ORDER'?'Old + New Order':
+               (o.scope==='BOTH'?'Existing + New':(o.scope==='A'?'Existing Plan':'New Plan'))));
+    // Scoped to a state that billed nothing this month reads identically to a broken join;
+    // say which it is rather than leaving a card of dashes.
+    var dry=(st && !Object.keys(D).length)
+      ? '<div class="pd-note">Nothing sold in '+esc(lbl)+' this month. Switch the scope to All India, or clear the channel on the Rate List tab, to widen it.</div>'
+      : '';
+    var ck='c:'+o.id;
+    return '<div class="pd-card'+openCls(ck)+'" data-okey="'+esc(ck)+'" data-id="'+o.id+'" data-state="'+esc(st)+'" data-channel="'+esc(ch)+'">'
+      +'<div class="pd-card-h">'
+        +'<span class="pd-name">'+esc(o.name)+'</span>'
+        +(function(){
+            if(!o.state)return '';
+            var txt=st ? (st+(ch?' · '+ch:' · all channels')) : (ch?(ch+' · all states'):'all states');
+            // A guessed channel keeps its chip whatever the name says — the badge is the
+            // warning that the tagging was inferred, and that has to stay visible.
+            if(!ci.guess && !chipSaysMore(o.name,txt))return '';
+            return '<span class="pd-chip state">'+esc(txt)
+              +(ci.guess?'<span class="pd-guess" title="Taken from the result name — set it on the Rate List tab to make it explicit">from name</span>':'')
+              +'</span>';
+          })()
+        +'<span class="pd-chip scope">'+esc(scope)+'</span>'
+        /* A plan with no month rides along with whatever month is on screen. That is a real
+           choice for a standing plan, but silently it looks like a bug — say it on the card. */
+        +(o.month?'' : '<span class="pd-chip anymonth" title="This plan is not tied to a month, so it shows against every month. Set its month on the Rate List tab.">every month</span>')
+        +'<span class="pd-chip ach '+(a.plan?chipCls(a.pct):'')+'">'
+          +fN(Math.round(a.done))+' / '+fN(Math.round(a.plan))+' L'
+          +(a.plan?' · '+f2(a.pct)+'%':'')+'</span>'
+        +'<div class="pd-sp"><span class="pd-meta">saved '+esc(o.created_at)+(o.created_by?' · '+esc(o.created_by):'')+'</span>'
+        +'<button class="pd-add" data-add="'+o.id+'|'+esc(o.state)+'|'+esc(tgtCh)+'|plan" title="Add an item to this plan">'
+          +'<i class="ic ic-plus"></i></button>'
+        +'<button class="pd-del" title="Delete this saved result" data-del="'+o.id+'"><i class="ic ic-x"></i></button>'
+        +'<i class="ic ic-chevron-down pd-chev"></i></div>'
+      +'</div><div class="pd-body">'+dry+tables+'</div></div>';
+  }
+
+  /* A target set in Update Targets is a commitment whether or not anyone built a rate list for
+     it, so a (channel, state) with a target and no saved result still gets a card. It has no
+     planning grid — there is no plan — just what sold in that scope against the target.
+     All India collapses these to ONE card per channel, keyed 'CHANNEL|': the state is what the
+     scope widens, so eight state cards each showing the same national Done would read as eight
+     separate sales. Target and Done both become the channel's whole figure. */
+  /* Every territory that SOLD, keyed like TARGETS ('CHANNEL|STATE', or 'CHANNEL|' when the
+     scope is All India). A sale with neither a target nor a rate list had nowhere to appear,
+     so the tab read as if that state or channel had done nothing — the numbers were only ever
+     as complete as somebody's planning. Zero-net territories are left out. */
+  function soldKeys(wide){
+    var out={};
+    if(wide){
+      Object.keys(DONE_CH).forEach(function(ch){
+        var m=DONE_CH[ch], lt=0;
+        Object.keys(m).forEach(function(c){ if(typeOk(c))lt+=num(m[c].litres); });
+        if(Math.round(lt))out[ch+'|']=1;
+      });
+      return out;
+    }
+    Object.keys(DONE_SC).forEach(function(k){
+      var p=k.split('|'), st=p[0], ch=p[1], m=DONE_SC[k], lt=0;
+      if(!st||!ch)return;
+      Object.keys(m).forEach(function(c){ if(typeOk(c))lt+=num(m[c].litres); });
+      if(Math.round(lt))out[ch+'|'+st]=1;
+    });
+    return out;
+  }
+
+  function targetKeys(){
+    var claimed={}, wide=(SCOPE==='all');
+    ALL.forEach(function(o){
+      var ch=o.channel||channelFromName(o.name);          // its own territory, not the view scope
+      if(!ch)return;
+      if(wide)claimed[ch+'|']=1;                          // that result already covers the channel
+      else if(o.state)claimed[ch+'|'+normState(o.state)]=1;
+    });
+    var sold=soldKeys(wide), keys={};
+    if(wide){
+      Object.keys(TARGETS).forEach(function(k){
+        var p=k.split('|');
+        if(stateF && normState(stateF)!==p[1])return;     // State filter still picks which targets count
+        keys[p[0]+'|']=1;
+      });
+      // A channel is only a card in its own right when it billed; with a State filter on,
+      // that has to be the sale inside that state, not the channel's national figure.
+      Object.keys(soldKeys(false)).forEach(function(k){
+        var p=k.split('|');
+        if(stateF && normState(stateF)!==p[1])return;
+        keys[p[0]+'|']=1;
+      });
+      return Object.keys(keys).sort().filter(function(k){
+        if(claimed[k])return false;
+        if(chanF && k.split('|')[0]!==chanF)return false;
+        if(searchF && k.toLowerCase().indexOf(searchF)===-1)return false;
+        var b=targetBucket('',k.split('|')[0]), t=b&&b[TYPEF||'ALL'];
+        return !!(t&&t.ltrs>0) || !!sold[k];              // a target to hit, or a sale to show
+      });
+    }
+    Object.keys(TARGETS).forEach(function(k){ keys[k]=1; });
+    Object.keys(sold).forEach(function(k){ keys[k]=1; });
+    return Object.keys(keys).sort().filter(function(k){
+      if(claimed[k])return false;                       // a saved result already shows this territory
+      var st=k.split('|')[1];
+      if(stateF && normState(stateF)!==st)return false;
+      if(chanF && k.split('|')[0]!==chanF)return false;
+      if(searchF && k.toLowerCase().indexOf(searchF)===-1)return false;
+      var t=TARGETS[k]&&TARGETS[k][TYPEF||'ALL'];
+      return !!(t&&t.ltrs>0) || !!sold[k];
+    });
+  }
+
+  function targetCardHtml(key,idx){
+    var p=key.split('|'), ch=p[0], st=p[1]||'';
+    /* Blank state = All India: the channel's target across every state, against the channel's
+       sale across every state. Both sides widen together, so the card reads what the Targets
+       dashboard reads for that channel. */
+    var b=targetBucket(st,ch), t=b&&b[TYPEF||'ALL'];      // header chip: the scope's total
+    var D=doneMapFor(st,ch), scopeLbl=terrLbl(st,ch);
+    var x=extrasFor({},D);                             // nothing is planned, so everything is "extra"
+    /* No target and no rate list, but the territory BILLED — it still gets a card. Sales that
+       nobody planned or targeted were invisible here, which reads as "we sold nothing" rather
+       than "nobody set a number for this". A card with neither a target nor a sale is the one
+       case with nothing to say. */
+    if(!t && !Math.round(x.doneLtr) && !Math.round(x.doneRev))return '';
+    var rid='T:'+key.replace('|','~');
+    var pct=(t&&t.ltrs)?(x.doneLtr/t.ltrs*100):0;
+    /* Editing turns the card into a plan being drafted: fill Retailer / Scheme / To be sale and
+       Create plan writes a real Rate List for this territory, after which it stops being a
+       target-only card. Terms default to SS 0 / DM 0 / GST 5 / Disc 0 — there is no saved plan
+       here to inherit them from. */
+    // pkey splits on '|', and key is 'CHANNEL|STATE' — swap the separator or the row key
+    // parses wrong and the input handler edits the neighbouring field.
+    var ed=!!EDIT[key], A={ss:0,dm:0,gst:5,disc:0}, pend=0;
+    var IT=itemTargetBucket(st,ch)||{};
+    injectTargeted(IT,x.rows,D);
+    /* Same shape as a saved card: each segment's items sit under that segment's Target row. */
+    var tsegs=targetSegs(st,ch), groups=buildGroups(x.rows,tsegs);
+    var tByseg={}; tsegs.forEach(function(pr){ tByseg[pr[0]]=pr[1]; });
+    var body=groups.map(function(g){
+      var gid='t'+(++UID), gk='g:'+key+'|'+g.seg, t=tByseg[g.seg];
+      var head = t
+        ? targetRowHtml('Target · '+terrLbl(st,ch)+(g.seg?' · '+g.seg:''),
+                        t, segTotals(D,g.seg).ltr, segTotals(D,g.seg).rev, gid, gk)
+        : segHeadRow(g, gid, gk);
+      return '<tbody>'+head+'</tbody><tbody class="pd-xrows" id="'+gid+'"'+(isOpen(gk)?'':' hidden')+'>'
+        +g.rows.map(function(r){
+                var d=D[r.code], a=r.doneLtr?(r.doneRev/r.doneLtr):0, pk=packOf(r.code,rid,D);
+      if(!ed && IT[r.code])return itemTargetRow(r,IT[r.code],d,a);
+      if(!ed){
+        return '<tr class="x">'+itemCell(r.item,r.code)
+          +'<td class="mute">—</td>'
+          +'<td>'+(pk.boxltr?f2(pk.boxltr):'<span class="mute">—</span>')+'</td>'
+          +'<td class="mute">—</td><td class="mute">—</td><td class="mute">—</td>'
+          +'<td class="'+(r.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(r.doneLtr))+'</td>'
+          +'<td class="mute">—</td>'
+          +'<td>'+(a?f2(a):'<span class="mute">—</span>')+'</td>'
+          +'<td class="mute">—</td>'+ratePcCell(d)
+          +'<td class="mute sep">—</td><td class="mute">—</td><td class="mute">—</td></tr>';
+      }
+      var k=pkey(rid,0,r.code), it=IT[r.code];
+      /* Editing a targeted item starts from the target, not from blank — Create plan then
+         writes the Rate List with the pricing the target was actually set at. -1 means the
+         states disagreed when pooled for All India, so there is no single price to seed. */
+      var e=PENDING[k]||(it?{retailer:num(it.retailer)>=0?it.retailer:'',
+                             scheme:num(it.scheme)>=0?it.scheme:'',
+                             sell:it.ltrs}:{});
+      var sell=num(e.sell), sch=num(e.scheme), ret=num(e.retailer);
+      if(sell>0)pend++;
+      var rl=addedRealise(ret,pk.pcsbox,pk.boxltr,sch,a,A);
+      var ap=sell?(r.doneLtr/sell*100):0;
+      return '<tr class="x" data-k="'+esc(k)+'">'+itemCell(r.item,r.code)
+        +'<td class="pd-in"><input type="number" step="any" min="0" data-f="retailer" value="'+esc(e.retailer==null?'':e.retailer)+'" placeholder="retailer"></td>'
+        +'<td>'+(pk.boxltr?f2(pk.boxltr):'<span class="mute">—</span>')+'</td>'
+        +'<td class="pd-in"><input type="number" step="any" min="0" data-f="scheme" value="'+esc(e.scheme==null?'':e.scheme)+'" placeholder="0"></td>'
+        +'<td class="pd-in"><input type="number" step="any" min="0" data-f="sell" value="'+esc(e.sell==null?'':e.sell)+'" placeholder="to be sale"></td>'
+        +'<td class="pd-rl" data-c="rl">'+(sell>0?f2(rl):'<span class="mute">—</span>')+'</td>'
+        +'<td class="'+(r.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(r.doneLtr))+'</td>'
+        +'<td data-c="ach" class="'+(sell>0?achCls(ap):'mute')+'">'+(sell>0?f2(ap)+'%':'—')+'</td>'
+        +'<td>'+(a?f2(a):'<span class="mute">—</span>')+'</td>'
+        +'<td class="mute">—</td>'+ratePcCell(d)
+        +estCells(sell,rl*sell,r.doneLtr,r.doneRev,rl)+'</tr>';
+        }).join('')
+        +(g.rows.length?'':'<tr class="x"><td class="l" colspan="14"><span class="mute">Nothing sold in this segment this month.</span></td></tr>')
+        +'</tbody>';
+    }).join('');
+
+    var ck='c:'+key;
+    return '<div class="pd-card'+openCls(ck)+'" data-okey="'+esc(ck)+'" data-state="'+esc(st)
+      +'" data-channel="'+esc(ch)+'">'
+      +'<div class="pd-card-h">'
+        +'<span class="pd-name">'+esc(terrLbl(st,ch))+'</span>'
+        // The heading IS the territory here, so no chip repeating it — only the Type filter,
+        // which the heading cannot show.
+        +(TYPEF?'<span class="pd-chip state">'+esc(TYPEF)+'</span>':'')
+        +(t?'<span class="pd-chip tgt">Target only — no rate list</span>'
+           :'<span class="pd-chip sale" title="This territory billed this month but has no target in Update Targets and no saved rate list.">Sale only — no target, no plan</span>')
+        +(t
+          ? '<span class="pd-chip ach '+chipCls(pct)+'">'+fN(Math.round(x.doneLtr))+' / '+fN(Math.round(t.ltrs))+' L · '+f2(pct)+'%</span>'
+          // Nothing to measure against, so state the sale rather than a 0% that reads as failure.
+          : '<span class="pd-chip ach">'+fN(Math.round(x.doneLtr))+' L sold'
+            +(x.doneLtr?' · ₹'+f2(x.doneRev/x.doneLtr)+'/L':'')+'</span>')
+        +'<div class="pd-sp">'
+          +'<button class="pd-add" data-add="T:'+esc(key.replace('|','~'))+'|'+esc(st)+'|'+esc(ch)+'|target|'+esc(key)+'" title="Add an item to this target">'
+            +'<i class="ic ic-plus"></i></button>'
+          +'<button class="pd-edit'+(ed?' on':'')+'" data-edit="'+esc(key)+'" title="'
+            +(ed?'Stop editing':'Set Retailer / Scheme / To be sale on these items')+'">'
+            +'<i class="ic ic-'+(ed?'x':'pencil')+'"></i></button>'
+          +'<i class="ic ic-chevron-down pd-chev"></i></div>'
+      +'</div><div class="pd-body">'
+      +'<div class="pd-plan-h">'+(t?'Target — Update Targets':'Sold this month — nothing planned or targeted')+'</div>'
+      +'<div class="pd-tbl-wrap"><table class="pd-tbl"><thead>'
+      +'<tr class="grp"><th class="l"></th><th class="pl" colspan="5">Target — as set</th>'
+      +'<th class="dn sep" colspan="5">Done — '+esc(MONTH_LABEL)+' · '+esc(scopeLbl)+'</th>'
+      +'<th class="es sep" colspan="3">Estimate — left to hit target</th></tr><tr>'
+      +'<th class="l">Item</th><th>Retailer ₹</th><th>Box Ltrs</th><th>Scheme</th>'
+      +'<th>To be sale</th><th>Relise ₹/L</th>'
+      +'<th class="sep">Done Ltr</th><th>Ach %</th>'
+      +'<th>Actual Relise ₹/L</th><th>Diff ₹/L</th><th>Rate ₹/Pc</th>'
+      +'<th class="sep">Bal Ltr</th><th>Req ₹/L</th><th>Req vs Plan ₹/L</th>'
+      +'</tr></thead>'
+      +body
+      +(function(){
+          var tr=targetTotalRow(st,ch,D);
+          /* With no target there is no Target · TOTAL row, but the card still needs its own
+             bottom line — otherwise the only totals on a sale-only card are the per-segment
+             headers and the whole figure is left for the reader to add up. */
+          if(!tr && !t){
+            var aRl=x.doneLtr?(x.doneRev/x.doneLtr):0;
+            tr='<tr><td class="l">All items sold · '+esc(MONTH_LABEL)+'</td>'
+              +'<td></td><td></td><td></td><td></td><td></td>'
+              +'<td class="'+(x.doneLtr<0?'r':'pd-done')+' sep">'+fN(Math.round(x.doneLtr))+'</td>'
+              +'<td class="mute">—</td>'
+              +'<td>'+(aRl?f2(aRl):'<span class="mute">—</span>')+'</td>'
+              +'<td class="mute">—</td><td></td>'
+              +'<td class="mute sep">—</td><td class="mute">—</td><td class="mute">—</td></tr>';
+          }
+          return tr?('<tfoot>'+tr+'</tfoot>'):'';
+        })()
+      +'</table></div>'
+      +(ed
+        ? '<div class="pd-save" data-create="'+esc(key)+'"><span class="pd-save-n">'
+          +(pend?pend+' item'+(pend===1?'':'s')+' ready':'Fill “To be sale” on the items this territory should sell')
+          +'</span><button class="pd-save-b"'+(pend?'':' disabled')+'>Create plan</button></div>'
+        : '')
+      +'</div></div>';
+  }
+
+  function render(){
+    var list=document.getElementById('pdList'), cnt=document.getElementById('pdCount');
+    if(loading){ list.innerHTML='<div class="pd-empty">Loading…</div>'; cnt.textContent=''; return; }
+    /* A plan belongs to a month, and Done and targets are both scoped by the month picker —
+       so a plan from another month must not sit against them. Without this the August plan
+       stayed on screen while every other number on the card had moved to July.
+       A plan with no month at all is a standing one and shows in every month; the card says
+       so, and it can be tied to a month on the Rate List tab. */
+    /* Channel view is states COMBINED, so a state filter has nothing to narrow — it would
+       only decide which channels appear, while each card still reported its national figure.
+       Disable it and drop any pick, rather than leave a control that quietly lies. */
+    var stSel=document.getElementById('pdState');
+    stSel.disabled=(SCOPE==='all');
+    stSel.title=stSel.disabled?'Channel view combines every state — switch to State view to filter by one.':'';
+    if(stSel.disabled && stateF){ stateF=''; stSel.value=''; }
+    var mv=document.getElementById('pdMonth').value||'';
+    var inScope=ALL.filter(function(o){
+      if(stateF && normState(o.state)!==normState(stateF))return false;
+      // A result's own channel, not the view scope — an untagged one is not tied to a channel
+      // and so cannot be excluded by picking one.
+      if(chanF && (o.channel||channelFromName(o.name))!==chanF)return false;
+      if(searchF && String(o.name||'').toLowerCase().indexOf(searchF)===-1)return false;
+      return true;
+    });
+    var rows=inScope.filter(function(o){ return !(o.month && mv && o.month!==mv); });
+    var hidden=inScope.length-rows.length;
+    // count the keys, not the markup: "pd-card" also matches the header's "pd-card-h"
+    var tkeys=targetKeys();
+    cnt.textContent=fN(rows.length)+' saved result'+(rows.length===1?'':'s')
+      +(tkeys.length?' · '+tkeys.length+' target-only':'')
+      // Say what the month hid, or an empty screen reads as missing data.
+      +(hidden?' · '+hidden+' from another month':'');
+    if(!rows.length && !tkeys.length){
+      list.innerHTML='<div class="pd-empty">Nothing'
+        +(stateF?(' for '+esc(stateF)):'')+(chanF?(' in '+esc(chanF)):'')
+        +' in '+esc(MONTH_LABEL)+'.'
+        +(hidden?' '+hidden+' plan'+(hidden===1?' is':'s are')+' saved for another month — switch the month, or retag them on the Rate List tab.'
+                :' Save one from the Realise Calculator, or set a target in Update Targets.')
+        +'</div>';
+      return;
+    }
+    list.innerHTML=rows.map(cardHtml).join('')+tkeys.map(targetCardHtml).join('');
+  }
+
+  /* Both dropdowns are built from EVERYTHING the page can show — what billed this month, what
+     carries a target, and what a saved result is tagged with. Filling States from the saved
+     results alone listed one state while the page rendered twenty; filling Channels before
+     the Done map had arrived listed only the one channel a saved result was tagged with.
+
+     Values are the normalised state name, so a saved result's "Delhi" and a Done row's
+     "DELHI" are the same option; the label is title-cased for reading. Must be called AFTER
+     the Done fetch resolves, and again on every month change — a month's territories are not
+     the previous month's. */
+  function fillFilters(){
+    var st={}, ch={};
+    Object.keys(DONE_BY||{}).forEach(function(s){ if(s)st[s]=1; });
+    Object.keys(DONE_CH||{}).forEach(function(c){ if(c)ch[c]=1; });
+    Object.keys(DONE_SC||{}).forEach(function(k){
+      var p=k.split('|'); if(p[0])st[p[0]]=1; if(p[1])ch[p[1]]=1;
+    });
+    Object.keys(TARGETS||{}).forEach(function(k){          // targeted but maybe unsold
+      var p=k.split('|'); if(p[0])ch[p[0]]=1; if(p[1])st[p[1]]=1;
+    });
+    ALL.forEach(function(o){
+      if(o.state)st[normState(o.state)]=1;
+      var c=o.channel||channelFromName(o.name); if(c)ch[c]=1;
+    });
+    fillSel('pdState','All states',Object.keys(st).sort(),titleState,function(v){stateF=v;});
+    fillSel('pdChannel','All channels',Object.keys(ch).sort(),null,function(v){chanF=v;});
+  }
+  /* Rebuild one dropdown, keeping the current pick if it still exists. If it does not — the
+     month changed and that territory sold nothing — the filter is cleared rather than left
+     pointing at an option that is gone, which would show an empty page with no way back. */
+  function fillSel(id,allLbl,vals,label,onLost){
+    var sel=document.getElementById(id), cur=sel.value;
+    sel.innerHTML='<option value="">'+allLbl+'</option>'
+      +vals.map(function(v){return '<option value="'+esc(v)+'">'+esc(label?label(v):v)+'</option>';}).join('');
+    if(cur && vals.indexOf(cur)>=0)sel.value=cur;
+    else if(cur){ sel.value=''; onLost(''); }
+  }
+
+  /* Done map for the picked month — refetched on every month change. The server echoes the
+     month it actually used, so an unparseable input still labels the columns correctly. */
+  function fetchDone(){
+    var m=document.getElementById('pdMonth').value;
+    MONTH_LABEL=monthLabel(m);
+    DOCS={};                                   // drill-downs are month-scoped
+
+    return fetch('/realise/api/done-by-item/?month='+encodeURIComponent(m),{headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{rows:{}};})
+      .then(function(p){ DONE_ALL=p.rows||{}; DONE_BY=p.by_state||{};
+                         DONE_SC=p.by_state_channel||{}; DONE_CH=p.by_channel||{};
+                         ITEM_TYPES=p.item_types||{}; TARGETS=p.targets||{}; ITEM_TGT=p.item_targets||{};
+                         if(p.month)MONTH_LABEL=monthLabel(p.month);
+                         fillFilters(); })
+      .catch(function(){ DONE_ALL={}; DONE_BY={}; DONE_SC={}; DONE_CH={}; fillFilters(); });
+  }
+  function loadDone(){
+    loading=true; render();
+    return fetchDone().then(function(){ loading=false; render(); });
+  }
+
+  /* Write the filled-in unplanned items into the saved Rate List, then reload so the plan
+     block, totals and the header chip all come back from the server — never from local state. */
+  function saveAdditions(bar){
+    var parts=bar.getAttribute('data-save').split('|'), rid=parts[0], pidx=parts[1];
+    var pfx=rid+'|'+pidx+'|', rows=[], D=mapForNode(bar);
+    Object.keys(PENDING).forEach(function(k){
+      if(k.indexOf(pfx)!==0)return;
+      var code=k.split('|')[2], e=PENDING[k], sell=num(e.sell);
+      if(sell<=0)return;
+      var d=D[code]||{}, lt=num(d.litres), rv=num(d.revenue), pk=packOf(code,rid,D);
+      // `realise` is only the price-less fallback; when a retailer price is sent the server
+      // recomputes from the plan's own SS/DM/GST/disc rather than trusting this number.
+      rows.push({code:code, item:d.item_name||code, retailer:num(e.retailer),
+                 scheme:num(e.scheme), sell:sell, realise:lt?(rv/lt):0,
+                 pcsbox:pk.pcsbox, boxltr:pk.boxltr});
+    });
+    if(!rows.length)return;
+    var btn=bar.querySelector('.pd-save-b');
+    btn.disabled=true; btn.textContent='Saving…';
+    fetch('/realise/api/rate-list/add-items/',{method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({id:rid, plan:pidx, rows:rows})})
+      .then(function(r){return r.json().catch(function(){return {status:'error',error:'HTTP '+r.status};});})
+      .then(function(p){
+        btn.textContent='Add to this plan';
+        if(p.status!=='ok'){ btn.disabled=false; window.alert('Could not add: '+(p.error||'error')); return; }
+        Object.keys(PENDING).forEach(function(k){ if(k.indexOf(pfx)===0)delete PENDING[k]; });
+        loading=true; render();
+        loadSaved().then(function(){ loading=false; render(); });
+      })
+      .catch(function(){ btn.disabled=false; btn.textContent='Add to this plan'; window.alert('Could not add.'); });
+  }
+
+  /* Turn a target-only card into a real Rate List, so it stops being target-only and joins the
+     saved results with its own plan. Rows are written in the calculator's shape, with the same
+     price terms the edit note states. */
+  function createPlan(bar){
+    var key=bar.getAttribute('data-create'), p=key.split('|'), ch=p[0], st=p[1]||'';
+    var D=doneMapFor(st,ch);              // st is blank on All India: the whole channel
+    var A={ss:0,dm:0,gst:5,disc:0}, rid='T:'+key.replace('|','~'), pfx=rid+'|0|', rows=[];
+    Object.keys(PENDING).forEach(function(k){
+      if(k.indexOf(pfx)!==0)return;
+      var code=k.split('|')[2], e=PENDING[k], sell=num(e.sell);
+      if(sell<=0)return;
+      var d=D[code]||{}, lt=num(d.litres), rv=num(d.revenue), pk=packOf(code,rid,D);
+      var actRl=lt?(rv/lt):0, ret=num(e.retailer), sch=num(e.scheme);
+      var pb=pk.pcsbox, bl=pk.boxltr, tot=bl+sch;
+      var priced=(ret>0&&pb>0&&tot>0);
+      var rl=addedRealise(ret,pb,bl,sch,actRl,A);
+      rows.push({item:d.item_name||code, code:code,
+        retailer:priced?ret:'', ss:priced?A.ss:'', dm:priced?A.dm:'',
+        gst:priced?A.gst:'', disc:priced?A.disc:'',
+        pcsbox:pb||'', boxltr:bl||'', scheme:sch, sell:sell,
+        realise:rl, revenue:rl*sell,
+        ssRate:0, dmRate:0, exgst:0, boxVal:0, netBox:0, totLtr:tot});
+    });
+    if(!rows.length)return;
+    var totSell=rows.reduce(function(a,r){return a+r.sell;},0);
+    var revSum=rows.reduce(function(a,r){return a+r.revenue;},0);
+    var btn=bar.querySelector('.pd-save-b');
+    btn.disabled=true; btn.textContent='Creating…';
+    fetch('/realise/api/rate-list/save/',{method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      // On All India the card has no state, so the plan is saved for the channel alone.
+      body:JSON.stringify({name:terrLbl(st,ch)+' '+MONTH_LABEL, state:titleState(st), channel:ch,
+        scope:'GRID', payload:{plans:[{name:'Planning Grid', rows:rows,
+          totals:{totSell:totSell, revSum:revSum, blend:totSell?revSum/totSell:0}}], compare:null}})})
+      .then(function(r){return r.json().catch(function(){return {status:'error'};});})
+      .then(function(pl){
+        btn.textContent='Create plan';
+        if(pl.status!=='ok'){ btn.disabled=false; window.alert('Could not create the plan: '+(pl.error||'error')); return; }
+        Object.keys(PENDING).forEach(function(k){ if(k.indexOf(pfx)===0)delete PENDING[k]; });
+        delete EDIT[key];
+        loading=true; render();
+        loadSaved().then(function(){ loading=false; render(); });
+      })
+      .catch(function(){ btn.disabled=false; btn.textContent='Create plan'; window.alert('Could not create the plan.'); });
+  }
+  /* RateList.state is stored the way the calculator's dropdown spells it, so send Title Case:
+     'DELHI' -> 'Delhi', 'JAMMU AND KASHMIR' -> 'Jammu & Kashmir'.
+     No regex on purpose. A word-boundary escape does not survive the quoting between the
+     generator and this file - it degraded to a literal backspace here, so the replace never
+     matched and the state went out lowercase. Splitting on spaces cannot go wrong. */
+  function titleState(st){
+    return String(st||'').toLowerCase().split(' ').map(function(w){
+      if(!w)return w;
+      return (w==='and') ? '&' : (w.charAt(0).toUpperCase()+w.slice(1));
+    }).join(' ');
+  }
+  function loadSaved(){
+    return fetch('/realise/api/rate-list/',{headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{rows:[],states:[]};})
+      // Saved results contribute their own state and channel to the filters. At boot this may
+      // run before the Done map lands; the Promise.all below refills once both are in.
+      .then(function(p){ ALL=p.rows||[]; fillFilters(); })
+      .catch(function(){ ALL=[]; });
+  }
+
+  var mEl=document.getElementById('pdMonth');
+  var now=new Date();
+  mEl.value=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  mEl.addEventListener('change',loadDone);
+  var ITEMS=null, itemsLoading=false, pkVar='', pkSku='', pkQuery='';
+  var pickCard=null;                 // {rid, st, ch, kind} the picker is adding to
+  function loadItems(cb){
+    if(ITEMS){cb&&cb();return;}
+    if(itemsLoading)return;
+    itemsLoading=true;
+    fetch('/realise/api/realise-calculator/items/',{headers:{'X-CSRFToken':csrf()}})
+      .then(function(r){return r.ok?r.json():{items:[]};})
+      .then(function(p){ITEMS=p.items||[];itemsLoading=false;cb&&cb();})
+      .catch(function(){ITEMS=[];itemsLoading=false;cb&&cb();});
+  }
+  function itemOpt(x){
+    return '<div class="rc-opt" data-code="'+esc(x.code)+'"><span>'+esc(x.name)+'</span>'
+      +'<span>'+(x.type?'<span class="tp '+x.type+'">'+x.type+'</span>':'')+'</span></div>';
+  }
+  // SKU sort: unit group order MLS → LTR → GMS → KG (others last), number descending within a unit.
+  function skuRank(s){
+    var m=String(s).trim().match(/^([\d.]+)\s*(\S+)/);
+    var num=m?parseFloat(m[1]):0, u=m?m[2].toUpperCase():'', order;
+    if(/^ML/.test(u))order=0; else if(/^L/.test(u))order=1;
+    else if(/^G/.test(u))order=2; else if(/^K/.test(u))order=3; else order=9;
+    return {order:order,num:num};
+  }
+  function skuCmp(a,b){ var ra=skuRank(a),rb=skuRank(b); return ra.order!==rb.order?ra.order-rb.order:rb.num-ra.num; }
+  function renderPicker(){
+    var vC=document.getElementById('pkVar'),sC=document.getElementById('pkSku'),iC=document.getElementById('pkItem');
+    if(!ITEMS){vC.innerHTML='<div class="rc-col-h">Variety</div>';sC.innerHTML='<div class="rc-col-h">SKU / Size</div>';iC.innerHTML='<div class="rc-col-h">Item</div><div class="rc-col-empty">Loading items…</div>';return;}
+    if(pkQuery){                                   // search overrides the cascade
+      var q=pkQuery.toLowerCase();
+      var m=ITEMS.filter(function(x){return (x.name+' '+x.code).toLowerCase().indexOf(q)!==-1;}).slice(0,400);
+      vC.innerHTML='<div class="rc-col-h">SKU / Size</div><div class="rc-col-empty">— searching —</div>';
+      sC.innerHTML='<div class="rc-col-h">Variety</div>';
+      iC.innerHTML='<div class="rc-col-h">Item ('+m.length+')</div>'+(m.length?m.map(itemOpt).join(''):'<div class="rc-col-empty">No match</div>');
+      return;
+    }
+    // Column 1 = SKU / Size (chosen first), Column 2 = Variety (filtered by SKU), Column 3 = Item.
+    var skuMap={}; ITEMS.forEach(function(x){skuMap[x.sku]=(skuMap[x.sku]||0)+1;});
+    var GK=['MLS','LTR','GMS','KGS','OTHER'], grp={MLS:[],LTR:[],GMS:[],KGS:[],OTHER:[]};
+    Object.keys(skuMap).forEach(function(s){
+      var o=skuRank(s).order; grp[o===0?'MLS':o===1?'LTR':o===2?'GMS':o===3?'KGS':'OTHER'].push(s);
+    });
+    var html='<div class="rc-col-h">SKU / Size</div>';
+    GK.forEach(function(g){
+      var arr=grp[g]; if(!arr.length)return; arr.sort(skuCmp);
+      html+='<div class="rc-skugrp"><div class="rc-skugrp-l">'+g+'</div><div class="rc-skuchips">'
+        +arr.map(function(s){var num=s.split(/\s+/)[0];
+          return '<div class="rc-skuchip'+(s===pkSku?' on':'')+'" data-sku="'+esc(s)+'" title="'+esc(s)+'">'+esc(num)+'<span class="n">'+skuMap[s]+'</span></div>';
+        }).join('')+'</div></div>';
+    });
+    vC.innerHTML=html;
+    if(pkSku){
+      var varMap={}; ITEMS.forEach(function(x){if(x.sku===pkSku)varMap[x.variety]=(varMap[x.variety]||0)+1;});
+      sC.innerHTML='<div class="rc-col-h">Variety</div>'+Object.keys(varMap).sort().map(function(v){
+        return '<div class="rc-opt'+(v===pkVar?' on':'')+'" data-var="'+esc(v)+'">'+esc(v)+'<span class="n">'+varMap[v]+'</span></div>';}).join('');
+    } else sC.innerHTML='<div class="rc-col-h">Variety</div><div class="rc-col-empty">Pick a size</div>';
+    if(pkSku&&pkVar){
+      var its=ITEMS.filter(function(x){return x.sku===pkSku&&x.variety===pkVar;});
+      iC.innerHTML='<div class="rc-col-h">Item ('+its.length+')</div>'+its.map(itemOpt).join('');
+    } else iC.innerHTML='<div class="rc-col-h">Item</div><div class="rc-col-empty">Pick size &amp; variety</div>';
+  }
+
+  /* ══════════════════ Item picker ══════════════════
+     Lifted from the Realise Calculator so picking an item is the same gesture in both places.
+     Here it adds the chosen item to a card as an editable row: an item that has never sold does
+     not appear in the Done map, so without this there was no way to plan it at all. */
+  /* Two steps in one modal: pick the item, then fill its plan line. Box Ltrs and Relise are
+     derived from the item master and the plan's own terms, so only the three commercial numbers
+     are ever typed. Saving writes it straight into the Rate List - a target-only card gets one
+     created for it, after which it stops being target-only. */
+  var pickCard=null, pkPicked=null;
+  function openPicker(ctx){
+    pickCard=ctx; pkPicked=null; pkVar=''; pkSku=''; pkQuery='';
+    document.getElementById('pkSearch').value='';
+    showPickStep(1);
+    document.getElementById('pickModal').hidden=false;
+    renderPicker(); loadItems(renderPicker);
+    setTimeout(function(){document.getElementById('pkSearch').focus();},30);
+  }
+  function closePicker(){ document.getElementById('pickModal').hidden=true; pickCard=null; pkPicked=null; }
+  function showPickStep(n){
+    document.querySelector('.rc-modal-body').hidden = (n!==1);
+    document.getElementById('pkForm').hidden = (n!==2);
+    document.getElementById('pkSearch').style.display = (n===1?'':'none');
+    document.getElementById('pkClear').style.display = (n===1?'':'none');
+  }
+  function pickAssumptions(){
+    return (pickCard && ASSUME[pickCard.rid+'|0']) || {ss:0,dm:0,gst:5,disc:0};
+  }
+  function selectItem(code){
+    var it=(ITEMS||[]).filter(function(x){return x.code===code;})[0];
+    if(!it||!pickCard)return;
+    pkPicked=it;
+    document.getElementById('pkFormName').textContent=it.name;
+    document.getElementById('pkFormCode').textContent=it.code;
+    document.getElementById('pkBoxltr').textContent=num(it.box_litres)?f2(it.box_litres):'—';
+    document.getElementById('pkRetailer').value='';
+    document.getElementById('pkScheme').value='';
+    document.getElementById('pkSell').value='';
+    var A=pickAssumptions();
+    document.getElementById('pkNote').textContent=
+      'Relise on this plan’s terms — SS '+f2(A.ss)+'% · DM '+f2(A.dm)+'% · GST '+f2(A.gst)+'% · Disc '+f2(A.disc);
+    pkRecalc();
+    showPickStep(2);
+    setTimeout(function(){document.getElementById('pkRetailer').focus();},30);
+  }
+  function pkRecalc(){
+    if(!pkPicked)return;
+    var A=pickAssumptions();
+    var ret=num(document.getElementById('pkRetailer').value);
+    var sch=num(document.getElementById('pkScheme').value);
+    var sell=num(document.getElementById('pkSell').value);
+    var pb=num(pkPicked.pcs_per_box), bl=num(pkPicked.box_litres);
+    var rl=addedRealise(ret,pb,bl,sch,0,A);
+    document.getElementById('pkRelise').textContent=rl?f2(rl):'—';
+    document.getElementById('pkSave').disabled=!(sell>0);
+    return {ret:ret, sch:sch, sell:sell, pb:pb, bl:bl, rl:rl, A:A};
+  }
+  function pkSaveItem(){
+    var v=pkRecalc();
+    if(!v||v.sell<=0||!pickCard)return;
+    var priced=(v.ret>0 && v.pb>0 && (v.bl+v.sch)>0);
+    var row={item:pkPicked.name, code:pkPicked.code,
+      retailer:priced?v.ret:'', ss:priced?v.A.ss:'', dm:priced?v.A.dm:'',
+      gst:priced?v.A.gst:'', disc:priced?v.A.disc:'',
+      pcsbox:v.pb||'', boxltr:v.bl||'', scheme:v.sch, sell:v.sell,
+      realise:v.rl, revenue:v.rl*v.sell,
+      ssRate:0, dmRate:0, exgst:0, boxVal:0, netBox:0, totLtr:v.bl+v.sch};
+    var btn=document.getElementById('pkSave');
+    btn.disabled=true; btn.textContent='Saving…';
+    var req = pickCard.kind==='plan'
+      ? fetch('/realise/api/rate-list/add-items/',{method:'POST',
+          headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+          body:JSON.stringify({id:pickCard.rid, plan:0, rows:[row]})})
+      : fetch('/realise/api/rate-list/save/',{method:'POST',
+          headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+          body:JSON.stringify({name:pickCard.st+' '+pickCard.ch+' '+MONTH_LABEL,
+            state:titleState(pickCard.st), channel:pickCard.ch, scope:'GRID',
+            payload:{plans:[{name:'Planning Grid', rows:[row],
+              totals:{totSell:v.sell, revSum:v.rl*v.sell, blend:v.rl}}], compare:null}})});
+    req.then(function(r){return r.json().catch(function(){return {status:'error'};});})
+      .then(function(pl){
+        btn.disabled=false; btn.textContent='Add to plan';
+        if(pl.status!=='ok'){ window.alert('Could not add the item: '+(pl.error||'error')); return; }
+        closePicker();
+        loading=true; render();
+        loadSaved().then(function(){ loading=false; render(); });
+      })
+      .catch(function(){ btn.disabled=false; btn.textContent='Add to plan'; window.alert('Could not add the item.'); });
+  }
+
+  /* ── Drill By ── */
+  function renderDrillList(){
+    document.getElementById('pdDrillList').innerHTML=PD_DIMS.map(function(d){
+      var i=drillPick.indexOf(d.key), on=i>=0;
+      return '<div class="com-dp-item'+(on?' checked':'')+'" data-k="'+d.key+'">'
+        +'<input type="checkbox"'+(on?' checked':'')+'>'
+        +'<span class="com-dp-name">'+esc(d.label)+'<div class="com-dp-sub">'+esc(d.sub)+'</div></span>'
+        +'<span class="com-pos">'+(on?(i+1):'')+'</span></div>';
+    }).join('');
+  }
+  function drillLabel(){
+    document.getElementById('pdDrillLabel').textContent=
+      DRILL.length?DRILL.map(labelOf).join(' › '):'No grouping';
+  }
+  /* Re-render from the cached payload rather than refetching: the drill is a client-side
+     regrouping of rows the server already sent. */
+  function refreshOpenDocs(){
+    Array.prototype.forEach.call(document.querySelectorAll('tr.pd-docs'),function(row){
+      var box=row.querySelector('.pd-dwrap'), k=row.getAttribute('data-key');
+      if(box&&DOCS[k])box.innerHTML=docsTable(DOCS[k]);
+    });
+  }
+  function renderPersList(){
+    document.getElementById('pdPersList').innerHTML=PERSONS.map(function(n){
+      var on=persPick.indexOf(n)>=0;
+      return '<div class="com-dp-item'+(on?' checked':'')+'" data-p="'+esc(n)+'">'
+        +'<input type="checkbox"'+(on?' checked':'')+'>'
+        +'<span class="com-dp-name">'+(n==='—'?'Unassigned':esc(n))+'</span>'
+        +'<span class="com-pos"><i class="ic ic-check"></i></span></div>';
+    }).join('');
+  }
+  function persLabel(){
+    document.getElementById('pdPersLabel').textContent=
+      (!PSEL.length||PSEL.length===PERSONS.length)?'All persons':(PSEL.length+' selected');
+  }
+  var persPick=[];
+  document.getElementById('pdPersBtn').addEventListener('click',function(e){
+    e.stopPropagation();
+    document.getElementById('pdPersPanel').classList.toggle('open');
+  });
+  document.getElementById('pdPersList').addEventListener('click',function(e){
+    var it=e.target.closest?e.target.closest('.com-dp-item'):null;
+    if(!it)return;
+    e.stopPropagation();          // this row is about to be replaced; keep the panel open
+    var n=it.getAttribute('data-p'), i=persPick.indexOf(n);
+    if(i>=0)persPick.splice(i,1); else persPick.push(n);
+    renderPersList();
+  });
+  document.getElementById('pdPersAll').addEventListener('click',function(e){
+    e.stopPropagation();
+    persPick=PERSONS.slice(); renderPersList();
+  });
+  document.getElementById('pdPersClr').addEventListener('click',function(e){
+    e.stopPropagation();
+    persPick=[]; renderPersList();
+  });
+  document.getElementById('pdPersApply').addEventListener('click',function(){
+    // every person ticked == no filter, so the fast path stays in play
+    PSEL=(persPick.length===PERSONS.length)?[]:persPick.slice();
+    document.getElementById('pdPersPanel').classList.remove('open');
+    persLabel(); DOCS={}; render();
+  });
+
+  document.getElementById('pdDrillBtn').addEventListener('click',function(e){
+    e.stopPropagation();
+    document.getElementById('pdDrillPanel').classList.toggle('open');
+  });
+  document.getElementById('pdDrillList').addEventListener('click',function(e){
+    var it=e.target.closest?e.target.closest('.com-dp-item'):null;
+    if(!it)return;
+    e.stopPropagation();          // this row is about to be replaced; keep the panel open
+    var k=it.getAttribute('data-k'), i=drillPick.indexOf(k);
+    if(i>=0)drillPick.splice(i,1); else drillPick.push(k);   // click order = nesting order
+    renderDrillList();
+  });
+  document.getElementById('pdDrillAll').addEventListener('click',function(e){
+    e.stopPropagation();
+    drillPick=PD_DIMS.map(function(d){return d.key;}); renderDrillList();
+  });
+  document.getElementById('pdDrillClr').addEventListener('click',function(e){
+    e.stopPropagation();
+    drillPick=[]; renderDrillList();
+  });
+  document.getElementById('pdDrillApply').addEventListener('click',function(){
+    DRILL=drillPick.slice();
+    document.getElementById('pdDrillPanel').classList.remove('open');
+    drillLabel(); refreshOpenDocs();
+  });
+  document.addEventListener('click',function(e){
+    if(e.target.closest&&e.target.closest('.com-drill-box'))return;
+    document.getElementById('pdDrillPanel').classList.remove('open');
+    document.getElementById('pdPersPanel').classList.remove('open');
+  });
+
+  ['pkRetailer','pkScheme','pkSell'].forEach(function(id){
+    document.getElementById(id).addEventListener('input',pkRecalc);
+  });
+  document.getElementById('pkSave').addEventListener('click',pkSaveItem);
+  document.getElementById('pkBack').addEventListener('click',function(){ pkPicked=null; showPickStep(1); });
+  document.getElementById('pkSearch').addEventListener('input',function(){pkQuery=this.value.trim();renderPicker();});
+  document.getElementById('pkClose').addEventListener('click',closePicker);
+  document.getElementById('pkClear').addEventListener('click',function(){
+    pkSku=''; pkVar=''; pkQuery=''; document.getElementById('pkSearch').value='';
+    renderPicker(); document.getElementById('pkSearch').focus();
+  });
+  document.getElementById('pickModal').addEventListener('click',function(e){if(e.target===this)closePicker();});
+  document.querySelector('.rc-modal-body').addEventListener('click',function(e){
+    var el=e.target.closest?e.target.closest('.rc-opt,.rc-skuchip'):null; if(!el)return;
+    if(el.hasAttribute('data-sku')){pkSku=el.getAttribute('data-sku');pkVar='';pkQuery='';document.getElementById('pkSearch').value='';renderPicker();}
+    else if(el.hasAttribute('data-var')){pkVar=el.getAttribute('data-var');renderPicker();}
+    else if(el.hasAttribute('data-code')){selectItem(el.getAttribute('data-code'));}
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.key==='Escape'&&!document.getElementById('pickModal').hidden)closePicker();
+  });
+
+  document.getElementById('pdScope').addEventListener('click',function(e){
+    var b=e.target.closest?e.target.closest('[data-scope]'):null;
+    if(!b || b.getAttribute('data-scope')===SCOPE)return;
+    SCOPE=b.getAttribute('data-scope');
+    Array.prototype.forEach.call(this.querySelectorAll('[data-scope]'),function(x){
+      x.classList.toggle('on',x.getAttribute('data-scope')===SCOPE);
+    });
+    DOCS={};                                 // drill-downs are scope-specific too
+    render();
+  });
+  document.getElementById('pdType').addEventListener('change',function(){TYPEF=this.value;render();});
+  document.getElementById('pdState').addEventListener('change',function(){stateF=this.value;render();});
+  document.getElementById('pdChannel').addEventListener('change',function(){chanF=this.value;render();});
+  var sd=debounce(render,120);
+  document.getElementById('pdSearch').addEventListener('input',function(){searchF=this.value.trim().toLowerCase();sd();});
+  /* Typing recomputes only the edited row + its Save bar. Card/plan totals deliberately do NOT
+     move until Save — an unsaved number must never read as part of the plan. */
+  document.getElementById('pdList').addEventListener('input',function(e){
+    var inp=e.target;
+    if(!inp.matches||!inp.matches('.pd-in input'))return;
+    var tr=inp.closest('tr.x'); if(!tr)return;
+    var parts=k=tr.getAttribute('data-k'), code=k.split('|')[2];
+    parts=k.split('|');
+    var e0=PENDING[k]||(PENDING[k]={});
+    e0[inp.getAttribute('data-f')]=inp.value;
+    if(!String(e0.sell||'').trim() && !String(e0.scheme||'').trim() && !String(e0.retailer||'').trim())
+      delete PENDING[k];
+
+    var M=mapForNode(tr), d=M[code]||{}, doneLtr=num(d.litres), doneRev=num(d.revenue);
+    var pk=packOf(code,parts[0],M);
+    var actRl=doneLtr?(doneRev/doneLtr):0, sell=num(e0.sell);
+    var A=ASSUME[parts[0]+'|'+parts[1]]||{ss:0,dm:0,gst:5,disc:0};
+    var rl=addedRealise(num(e0.retailer),pk.pcsbox,pk.boxltr,num(e0.scheme),actRl,A);
+    var on=sell>0, ap=on?(doneLtr/sell*100):0;
+    function set(c,html,cls){
+      var td=tr.querySelector('[data-c="'+c+'"]'); if(!td)return;
+      td.innerHTML=html; if(cls!=null)td.className=cls;
+    }
+    set('rl', on?f2(rl):'<span class="mute">—</span>', 'pd-rl');
+    set('ach',on?f2(ap)+'%':'—', on?achCls(ap):'mute');
+
+    var e=on?estParts(sell,rl*sell,doneLtr,doneRev,rl):null;
+    if(!e){
+      set('ebal','—','mute sep');
+      set('ereq','—','mute'); set('egap','—','mute');
+    }else{
+      set('ebal',fN(Math.round(e.balL)),'pd-bal sep');
+      // same as estCells: no rate to require, so state the one being achieved
+      if(e.req===null){ set('ereq',e.achieved?f2(e.achieved):e.label,e.cls); set('egap','—','mute'); }
+      else{
+        set('ereq',f2(e.req),'pd-req');
+        set('egap',e.gap?((e.gap>=0?'+':'')+f2(e.gap)):'—',e.gap?(e.gap<=0?'g':'r'):'mute');
+      }
+    }
+
+    var wrap=tr.closest('.pd-tbl-wrap'), bar=wrap&&wrap.parentNode.querySelector('.pd-save');
+    if(bar){
+      var pfx=k.split('|')[0]+'|'+k.split('|')[1]+'|', n=0;
+      Object.keys(PENDING).forEach(function(key){
+        if(key.indexOf(pfx)===0 && num(PENDING[key].sell)>0)n++;
+      });
+      bar.querySelector('.pd-save-n').textContent = n
+        ? n+' item'+(n===1?'':'s')+' ready to add'
+        : 'Fill “To be sale” on any unplanned item to add it to this plan';
+      bar.querySelector('.pd-save-b').disabled=!n;
+    }
+  });
+
+  document.getElementById('pdList').addEventListener('click',function(e){
+    var add=e.target.closest?e.target.closest('[data-add]'):null;
+    if(add){
+      e.stopPropagation();
+      var p=add.getAttribute('data-add').split('|');
+      openPicker({rid:p[0], st:p[1], ch:p[2], kind:p[3], key:p.slice(4).join('|')});
+      return;
+    }
+    var ed=e.target.closest?e.target.closest('[data-edit]'):null;
+    if(ed){
+      e.stopPropagation();
+      var k=ed.getAttribute('data-edit');
+      if(EDIT[k])delete EDIT[k]; else EDIT[k]=1;
+      render(); return;
+    }
+    var cr=e.target.closest?e.target.closest('.pd-save-b'):null;
+    if(cr && cr.closest('[data-create]')){ createPlan(cr.closest('[data-create]')); return; }
+    var it=e.target.closest?e.target.closest('.pd-item'):null;
+    if(it){ toggleDocs(it); return; }
+    var sv=e.target.closest?e.target.closest('.pd-save-b'):null;
+    if(sv){ saveAdditions(sv.closest('.pd-save')); return; }
+    var del=e.target.closest?e.target.closest('[data-del]'):null;
+    if(del){
+      e.stopPropagation();                       // don't also collapse the card
+      var id=del.getAttribute('data-del');
+      var o=ALL.filter(function(r){return String(r.id)===String(id);})[0];
+      if(!window.confirm('Delete the saved result “'+((o&&o.name)||id)+'”?\n\nIt disappears from the Rate List tab too. This cannot be undone.'))return;
+      fetch('/realise/api/rate-list/delete/',{method:'POST',
+        headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+        body:JSON.stringify({id:id})})
+        .then(function(){
+          ALL=ALL.filter(function(r){return String(r.id)!==String(id);});
+          Object.keys(PENDING).forEach(function(k){ if(k.indexOf(id+'|')===0)delete PENDING[k]; });
+          render();
+        })
+        .catch(function(){ window.alert('Could not delete.'); });
+      return;
+    }
+    var more=e.target.closest?e.target.closest('[data-more]'):null;
+    if(more){
+      var tb=document.getElementById(more.getAttribute('data-more'));
+      if(tb){
+        tb.hidden=!tb.hidden;
+        more.classList.toggle('open',!tb.hidden);
+        // Remember it, or the next filter change rebuilds the list and shuts it again.
+        var ok=more.getAttribute('data-okey');
+        if(ok){ if(tb.hidden)delete OPEN[ok]; else OPEN[ok]=1; }
+      }
+      return;
+    }
+    var h=e.target.closest?e.target.closest('.pd-card-h'):null;
+    if(h){
+      var card=h.parentNode;
+      card.classList.toggle('open');
+      var ck=card.getAttribute('data-okey');
+      if(ck){ if(card.classList.contains('open'))OPEN[ck]=1; else delete OPEN[ck]; }
+    }
+  });
+
+  /* '—' is what assignedPerson returns for a (channel, state) with no owner — e.g. ROI in
+     Jammu and Kashmir. It carries real volume, so it has to be selectable or a person filter
+     would silently drop it. */
+  PERSONS=(TERRITORY_DATA.persons||[]).slice().sort().concat(['—']);
+  renderDrillList(); drillLabel(); renderPersList(); persLabel();
+
+  /* ── Excel export: scrape every saved result's rendered table (all filters/scope honoured) ── */
+  // Read a cell as plain text, dropping any Material-icons glyph text (chevron_right, expand_more…).
+  function cellText(c){
+    var clone=c.cloneNode(true);
+    Array.prototype.forEach.call(clone.querySelectorAll('.ic'), function(ic){ ic.parentNode.removeChild(ic); });
+    var code=clone.querySelector('.pd-code'); if(code) code.textContent=' '+(code.textContent||'');   // keep item name / code apart
+    return (clone.textContent||'').replace(/\s+/g,' ').trim();
+  }
+  // One table cell → a styled workbook cell. `kind`: grp (section band) | head (labels) | foot | body.
+  function styleCell(c, kind){
+    var span=c.colSpan||1, txt=cellText(c), cls=' '+(c.className||'')+' ', cell={value:txt}, bd='';
+    if(kind!=='grp' && kind!=='head'){                 // real numbers on body/foot (strip ₹ , % +)
+      var nn=txt.replace(/[₹,%\s+]/g,'');
+      if(nn!=='' && /^-?\d+(\.\d+)?$/.test(nn)) cell.value=parseFloat(nn);
+    }
+    if(kind==='grp'){                                  // Plan / Done / Estimate colour bands
+      if(/ pl /.test(cls)){ cell.fill='E0E7FF'; cell.color='3730A3'; }
+      else if(/ dn /.test(cls)){ cell.fill='DCFCE7'; cell.color='166534'; }
+      else if(/ es /.test(cls)){ cell.fill='FEF3C7'; cell.color='92400E'; }
+      cell.bold=true; cell.align='center'; bd='tb';
+    } else if(kind==='head'){                          // column-label row
+      cell.fill='EEF2F6'; cell.color='334155'; cell.bold=true; bd='tb';
+      if(/ sep /.test(cls)) bd+='l';
+    } else if(kind==='foot'){                          // Blended / All-items rows
+      cell.fill='F1F5F9'; cell.bold=true; bd='t';
+      if(/ sep /.test(cls)) bd+='l';
+    } else if(/ sep /.test(cls)){ bd='l'; }            // body: section divider
+    if(bd) cell.border=bd;
+    if(span>1) cell.colspan=span;
+    return cell;
+  }
+  /* Live Excel formulas — columns are fixed A–Q on every Plan vs Done table:
+     A Item · B Retailer · C Box Ltrs · D Scheme · E To-be-sale · F Relise/L · G Revenue ·
+     H Done Ltr · I Ach% · J Act Relise · K Diff · L Rate/Pc · M Done Rev · N Bal Ltr ·
+     O Bal Rev · P Req/L · Q Req-vs-Plan. Only inputs (E,F,H,L,M) stay values; the rest recalc. */
+  var ITEM_F={ 6:function(R){return 'E'+R+'*F'+R;}, 8:function(R){return 'H'+R+'/E'+R+'*100';},
+               9:function(R){return 'M'+R+'/H'+R;}, 10:function(R){return 'J'+R+'-F'+R;},
+              13:function(R){return 'E'+R+'-H'+R;}, 14:function(R){return 'G'+R+'-M'+R;},
+              15:function(R){return 'O'+R+'/N'+R;}, 16:function(R){return 'P'+R+'-F'+R;} };
+  // Attach a formula to a cell — only when it currently holds a real number (skips —/met/no-vol text).
+  function setF(row,i,f){ var c=row[i]; if(!c||typeof c!=='object'){c={value:c};row[i]=c;}
+    if(typeof c.value==='number') c.formula='IFERROR('+f+',"")'; }
+  function applyItemF(row,R){ Object.keys(ITEM_F).forEach(function(k){ setF(row,+k,ITEM_F[+k](R)); }); }
+  // Blended row: base totals are SUMs over the item range f0..f1; the rest derive from the same row.
+  function applyBlendF(row,R,f0,f1){
+    var F={ 4:'SUM(E'+f0+':E'+f1+')', 6:'SUM(G'+f0+':G'+f1+')', 7:'SUM(H'+f0+':H'+f1+')', 12:'SUM(M'+f0+':M'+f1+')',
+            5:'G'+R+'/E'+R, 8:'H'+R+'/E'+R+'*100', 9:'M'+R+'/H'+R, 10:'J'+R+'-F'+R,
+           13:'E'+R+'-H'+R, 14:'G'+R+'-M'+R, 15:'O'+R+'/N'+R, 16:'P'+R+'-F'+R };
+    Object.keys(F).forEach(function(k){ setF(row,+k,F[+k]); });
+  }
+  // Scrape one table, tracking each row's Excel row number so live formulas can reference it.
+  function pushTable(tbl,rows){
+    var tbodyIdx=0, firstR=0, lastR=0;
+    Array.prototype.forEach.call(tbl.children, function(sec){
+      var tag=(sec.tagName||'').toLowerCase(); if(tag!=='thead'&&tag!=='tbody'&&tag!=='tfoot')return;
+      var isFirstBody=(tag==='tbody' && tbodyIdx===0); if(tag==='tbody') tbodyIdx++;
+      Array.prototype.forEach.call(sec.rows, function(tr){
+        var isGrp=(tr.className||'').indexOf('grp')!==-1;
+        var kind = tag==='thead' ? (isGrp?'grp':'head') : (tag==='tfoot'?'foot':'body');
+        var row=[]; Array.prototype.forEach.call(tr.cells, function(c){ row.push(styleCell(c,kind)); });
+        var R=rows.length+1;                                       // this row's 1-based Excel row
+        if(isFirstBody){ applyItemF(row,R); if(!firstR)firstR=R; lastR=R; }   // planned items → live
+        else if(tag==='tfoot' && (tr.className||'').indexOf('all')===-1 && firstR){
+          applyBlendF(row,R,firstR,lastR);                         // Blended row → SUM + derived
+        }
+        rows.push(row);
+      });
+    });
+  }
+  function exportExcel(){
+    var cards=document.querySelectorAll('#pdList .pd-card');
+    if(!cards.length){ window.alert('Nothing to export.'); return; }
+    var rows=[[{value:'Plan vs Done — '+MONTH_LABEL, bold:true, color:'0F172A'}], []];
+    Array.prototype.forEach.call(cards, function(card){
+      var name=((card.querySelector('.pd-name')||{}).textContent||'').trim();
+      var chips=Array.prototype.map.call(card.querySelectorAll('.pd-card-h .pd-chip'),
+        function(c){return (c.textContent||'').replace(/\s+/g,' ').trim();}).join('   ·   ');
+      rows.push([{value:name||'Result', bold:true, fill:'E0E7FF', color:'1E293B', border:'tb'}]);
+      if(chips) rows.push([{value:chips, color:'64748B'}]);
+      var title='';
+      Array.prototype.forEach.call(card.querySelectorAll('.pd-plan-h, table.pd-tbl'), function(el){
+        if(el.classList.contains('pd-plan-h')){
+          // Read the name span when there is one: the collapsible heading also holds a
+          // chevron ligature and an item-count pill, neither of which belongs in the file.
+          var t=el.querySelector('.pd-plan-t');
+          title=((t||el).textContent||'').trim(); return;
+        }
+        if(title){ rows.push([{value:title, bold:true, color:'4338CA'}]); title=''; }
+        pushTable(el, rows);
+        rows.push([]);
+      });
+      rows.push([]);
+    });
+    var mv=document.getElementById('pdMonth').value||'', fname='Plan-vs-Done'+(mv?'-'+mv:'');
+    fetch('/realise/plan-vs-done/export/',{method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({filename:fname, sheets:[{name:'Plan vs Done', rows:rows}]})})
+      .then(function(r){ if(!r.ok) throw 0; return r.blob(); })
+      .then(function(b){ var u=URL.createObjectURL(b), a=document.createElement('a');
+        a.href=u; a.download=fname+'.xlsx'; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){URL.revokeObjectURL(u);},2000); })
+      .catch(function(){ window.alert('Export failed.'); });
+  }
+  document.getElementById('pdExport').addEventListener('click', exportExcel);
+
+  loading=true; render();
+  Promise.all([loadSaved(), fetchDone()]).then(function(){ fillFilters(); loading=false; render(); });
+})();
+</script>
+{% endblock %}

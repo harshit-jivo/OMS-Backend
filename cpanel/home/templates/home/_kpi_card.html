@@ -1,0 +1,54 @@
+<div class="kpi-card gradient-{{ kpi.gradient }}{% if not kpi.has_data %} no-data{% endif %}{% if kpi.extra.is_cogs %} cogs-kpi-card{% endif %}"
+     {% if kpi.extra.is_cogs %}data-from-date="{{ kpi.extra.from_date }}" data-to-date="{{ kpi.extra.to_date }}"{% endif %}
+     {% if kpi.extra.glimpse_rows and not is_inventory %}role="button" tabindex="0" data-glimpse-source="{{ kpi.extra.glimpse_id }}" data-glimpse-title="{{ kpi.extra.glimpse_title|default:kpi.label }}"{% endif %}>
+  <div class="kpi-head">
+    <div class="kpi-icon"><i class="ic ic-{{ kpi.icon }}"></i></div>
+    {% if kpi.trend is not None %}
+      {# Colour by MEANING: a rise is "good" (green) for revenue KPIs, "bad" (red) for cost KPIs. #}
+      {% if kpi.trend > 0 %}
+        <span class="kpi-trend {% if kpi.higher_is_better %}good{% elif kpi.higher_is_better == False %}bad{% else %}flat{% endif %}" title="vs last month">&#9650; +{{ kpi.trend }}%</span>
+      {% elif kpi.trend < 0 %}
+        <span class="kpi-trend {% if kpi.higher_is_better %}bad{% elif kpi.higher_is_better == False %}good{% else %}flat{% endif %}" title="vs last month">&#9660; {{ kpi.trend }}%</span>
+      {% else %}
+        <span class="kpi-trend flat" title="vs last month">&#8213; 0%</span>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="kpi-label">{{ kpi.label }}</div>
+  {% if kpi.current_value %}
+    <div class="kpi-value"{% if kpi.extra.is_cogs %} data-cogs-value{% endif %}>{{ kpi.current_value }}</div>
+    <div class="kpi-compare">vs last month <b>{{ kpi.last_value }}</b></div>
+  {% else %}
+    <div class="kpi-value"{% if kpi.extra.is_cogs %} data-cogs-value{% endif %}>{{ kpi.value }}</div>
+  {% endif %}
+  {% if is_inventory %}
+    <div class="kpi-sub">{{ kpi.status|default:kpi.sub_value }}</div>
+  {% elif kpi.sub_value %}
+    <div class="kpi-sub"{% if kpi.extra.is_cogs %} data-cogs-sub{% endif %}>{{ kpi.sub_value }}</div>
+  {% endif %}
+
+  {% if kpi.extra.is_cogs %}
+    <form class="cogs-inline-form" data-cogs-form>
+      <select name="param_type" aria-label="COGS type">
+        <option value=""{% if not kpi.extra.param_type %} selected{% endif %}>Blank</option>
+        <option value="A"{% if kpi.extra.param_type == "A" %} selected{% endif %}>A</option>
+        <option value="Y"{% if kpi.extra.param_type == "Y" %} selected{% endif %}>Y</option>
+      </select>
+      <input name="otp" type="password" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter OTP" aria-label="COGS OTP">
+      <button type="submit">Apply</button>
+    </form>
+  {% endif %}
+
+  {% if is_inventory %}
+  <div class="kpi-footer">
+    {% if is_inventory %}
+      <span>{{ kpi.extra.warehouse_count|default:"0" }} Warehouses</span>
+      <span>{{ kpi.extra.unit_count|default:"—" }} units</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% if kpi.extra.glimpse_rows and not is_inventory %}
+  {{ kpi.extra.glimpse_rows|json_script:kpi.extra.glimpse_id }}
+{% endif %}

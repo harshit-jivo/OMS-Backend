@@ -1,0 +1,844 @@
+{% extends base_template %}
+{% block title %}{{ detail_payload.name }} — Aging Detail{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important}
+  .ad-wrap{max-width:1500px;margin:0 auto}
+
+  .ad-hero{position:relative;overflow:hidden;border-radius:18px;padding:18px 24px;margin-bottom:16px;
+    background:linear-gradient(120deg,#ffffff 0%,#fbfbff 55%,#f4f1ff 100%);
+    border:1px solid var(--rz-card-brd);box-shadow:var(--rz-shadow-lg)}
+  .ad-hero::after{content:"";position:absolute;right:-50px;top:-50px;width:220px;height:220px;border-radius:50%;
+    background:radial-gradient(circle,rgba(124,58,237,.10),transparent 70%)}
+  .ad-hero-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;position:relative;z-index:1}
+  .ad-h1{font-size:23px;font-weight:800;color:var(--rz-ink);margin:0;display:flex;align-items:center;gap:10px}
+  .ad-h1 .ad-code{font-size:12px;font-weight:700;color:var(--rz-indigo-deep);background:var(--rz-soft);border:1px solid var(--rz-soft-brd);padding:3px 10px;border-radius:999px}
+  .ad-sub{margin:6px 0 0;font-size:12.5px;color:var(--rz-muted)}
+  .ad-back{display:inline-flex;align-items:center;gap:6px;color:var(--rz-indigo-deep);text-decoration:none;background:var(--rz-soft);
+    border:1px solid var(--rz-soft-brd);padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700}
+  .ad-back:hover{background:#e0e7ff}
+  .ad-back .ic{font-size:17px;color:var(--rz-indigo)}
+
+  .ad-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:13px}
+  .ad-search{flex:1;min-width:200px;display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #e2e8f0;
+    border-radius:11px;padding:9px 13px;box-shadow:0 1px 2px rgba(15,23,42,.05)}
+  .ad-search:focus-within{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .ad-search .ic{font-size:19px;color:#94a3b8}
+  .ad-search input{border:0;outline:0;flex:1;font-family:inherit;font-size:13px;color:#0f172a;background:transparent}
+  .ad-btn{display:inline-flex;align-items:center;gap:7px;background:#fff;border:1px solid #e2e8f0;color:#4338ca;
+    font-family:inherit;font-size:13px;font-weight:700;padding:9px 16px;border-radius:11px;cursor:pointer}
+  .ad-btn:hover{background:#eef2ff;border-color:#c7d2fe}
+  .ad-btn.primary{background:var(--rz-soft);color:var(--rz-indigo-deep);border-color:var(--rz-soft-brd);box-shadow:0 1px 2px rgba(15,23,42,.08)}
+  .ad-btn.primary:hover{background:#e0e7ff;border-color:#c7d2fe}
+  .ad-btn.danger{color:#dc2626}
+  .ad-btn.danger:hover{background:#fef2f2;border-color:#fecaca}
+  .ad-btn .ic{font-size:17px}
+
+  .ad-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow)}
+  .ad-tw{overflow:auto;max-height:74vh}
+  table.ad-tb{width:100%;border-collapse:collapse;font-size:12.5px}
+  table.ad-tb thead th{position:sticky;top:0;z-index:2;background:var(--rz-head-bg);color:var(--rz-head-ink);text-align:right;
+    font-size:10.5px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;padding:11px 13px;white-space:nowrap;border-bottom:1px solid var(--rz-line)}
+  table.ad-tb thead th.lbl{text-align:left}
+  table.ad-tb thead th.sortable{cursor:pointer;user-select:none}
+  table.ad-tb thead th.sortable:hover{background:#eef2f6}
+  table.ad-tb thead th .ar{font-size:9px;margin-left:4px;opacity:.75}
+  table.ad-tb td{padding:9px 13px;border-bottom:1px solid #eef2f7;color:#334155;white-space:nowrap}
+  table.ad-tb td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:'CPNum',system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+  table.ad-tb tbody tr:hover td{background:#f8fafc}
+  /* Item-type badge (P / C / P+C) and per-invoice credit-period input */
+  .ad-pc{display:inline-block;min-width:34px;text-align:center;font-size:11px;font-weight:800;letter-spacing:.3px;padding:2px 8px;border-radius:999px;border:1px solid transparent}
+  .ad-pc.p{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+  .ad-pc.c{background:#fef3c7;color:#92400e;border-color:#fde68a}
+  .ad-pc.pc{background:#e0e7ff;color:#3730a3;border-color:#c7d2fe}
+  .ad-pc.none{background:#f1f5f9;color:#94a3b8;border-color:#e2e8f0}
+  .ad-pc.doc{min-width:0;font-size:10.5px;font-weight:700;letter-spacing:.2px;background:#eef2ff;color:#4338ca;border-color:#c7d2fe;white-space:nowrap}
+  .ad-pc.unc{min-width:0;font-size:10.5px;font-weight:800;letter-spacing:.2px;background:#fff7ed;color:#c2410c;border-color:#fed7aa;white-space:nowrap}
+  .ad-cd{width:70px;text-align:center;border:1px solid #e2e8f0;border-radius:7px;padding:5px 6px;font-family:inherit;font-size:12.5px;color:#0f172a;outline:none}
+  .ad-cd:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.14)}
+  .ad-rmk{width:100%;min-width:150px;border:1px solid #e2e8f0;border-radius:7px;padding:5px 8px;font-family:inherit;font-size:12.5px;color:#0f172a;outline:none}
+  .ad-rmk:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.14)}
+  .ad-rmk.saved{border-color:#16a34a;box-shadow:0 0 0 2px rgba(22,163,74,.16)}
+  /* Auto NOT DUE (locked, within grace) / OVERDUE (editable, grace exceeded) */
+  .ad-rmk.locked{background:#f0fdf4;border-color:#bbf7d0;color:#166534;font-weight:800;cursor:not-allowed;letter-spacing:.3px}
+  /* NOT DUE but partly paid → still green, but editable (dashed = unlocked note) */
+  .ad-rmk.notdue-edit{background:#f0fdf4;border-color:#86efac;border-style:dashed;color:#166534;font-weight:800}
+  .ad-rmk.notdue-edit::placeholder{color:#4ade80;font-weight:800}
+  .ad-rmk.overdue{border-color:#fecaca;color:#b91c1c;font-weight:800}
+  .ad-rmk.overdue::placeholder{color:#f87171;font-weight:800}
+
+  /* NOT DUE grace-days control */
+  .ad-days{display:inline-flex;align-items:center;gap:7px;background:#fff;border:1px solid #e2e8f0;border-radius:11px;
+    padding:8px 13px;box-shadow:0 1px 2px rgba(15,23,42,.05);font-size:12.5px;color:#475569;font-weight:700;white-space:nowrap}
+  .ad-days label{color:#475569}
+  .ad-days input{width:56px;border:1px solid #e2e8f0;border-radius:7px;padding:5px 8px;font-family:inherit;font-size:12.5px;
+    text-align:center;color:#0f172a;outline:none;font-weight:700}
+  .ad-days input:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.14)}
+  .ad-days .ad-days-hint{color:#94a3b8;font-weight:600}
+  .ad-pcdays{gap:8px}
+  .ad-pcd{display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
+  .ad-pcd input[type=checkbox]{width:15px;height:15px;accent-color:#6366f1;cursor:pointer;margin:0}
+  .ad-pcd b{font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:999px;border:1px solid transparent}
+  .ad-pcd b.p{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+  .ad-pcd b.c{background:#fef3c7;color:#92400e;border-color:#fde68a}
+  .ad-pcd b.pc{background:#e0e7ff;color:#3730a3;border-color:#c7d2fe}
+  .ad-pcd b.unc{background:#fff7ed;color:#c2410c;border-color:#fed7aa}
+  .neg{color:#e11d48;font-weight:700}
+  .v0{color:#cbd5e1}
+  .bal{font-weight:800;color:#0f172a}
+  tr.ad-tot td{position:sticky;bottom:0;background:var(--rz-total-bg);color:var(--rz-ink);font-weight:900;border-top:2px solid var(--rz-total-brd);z-index:1}
+  tr.ad-tot .neg{color:var(--rz-neg)}
+  td.bk0{background:#f2fdf5}td.bk1{background:#eafaf0}td.bk2{background:#e3f7ea}td.bk3{background:#f0fdfa}td.bk4{background:#fffbeb}td.bk5{background:#fff7ed}td.bk6{background:#fef2f2}
+  .ad-empty{padding:40px;text-align:center;color:#7b8794}
+  /* Clickable pivot rows → documents-behind-it popup */
+  tr.ad-piv-row{cursor:pointer}
+  tr.ad-piv-row:hover td{background:#eef2ff}
+  .apd-ov{position:fixed;inset:0;background:rgba(15,23,42,.34);display:none;align-items:center;justify-content:center;z-index:3000;padding:24px}
+  .apd-ov.show{display:flex}
+  .apd-box{background:#fff;border:1px solid #e2e8f0;border-radius:16px;box-shadow:0 24px 60px rgba(15,23,42,.30);width:min(920px,96vw);max-height:86vh;display:flex;flex-direction:column;overflow:hidden}
+  .apd-h{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 20px;border-bottom:1px solid #eef2f6}
+  .apd-tt b{font-size:18px;font-weight:900;color:#111827}
+  .apd-sub{display:block;font-size:12px;font-weight:700;color:#64748b;margin-top:3px}
+  .apd-x{border:0;background:transparent;color:#94a3b8;font-size:24px;line-height:1;cursor:pointer;padding:0 2px}
+  .apd-x:hover{color:#334155}
+  .apd-warn{margin:12px 20px 0;padding:9px 12px;background:#fef2f2;border:1px solid #fecaca;border-radius:9px;color:#b91c1c;font-size:12px;font-weight:700}
+  .apd-wrap{overflow:auto;margin:12px 0 4px}
+  table.apd-tbl{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+  table.apd-tbl th{position:sticky;top:0;background:#f8fafc;color:#475569;text-align:right;font-size:10.5px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:9px 14px;border-bottom:1px solid #e2e8f0;white-space:nowrap}
+  table.apd-tbl th.lbl{text-align:left}
+  table.apd-tbl td{padding:8px 14px;border-bottom:1px solid #eef2f6;color:#334155;text-align:right;white-space:nowrap}
+  table.apd-tbl td.lbl{text-align:left}
+  table.apd-tbl td.apd-no{font-weight:800;color:#111827}
+  table.apd-tbl td.apd-amt{font-weight:800;color:#1f2937}
+  table.apd-tbl td.apd-sp{white-space:normal;font-size:11.5px;color:#64748b;max-width:280px}
+  .apd-dash{color:#cbd5e1}
+  table.apd-tbl tbody tr:hover td{background:#f8fafc}
+  .apd-empty{padding:22px;text-align:center;color:#94a3b8}
+
+  /* ── Expandable split breakdown (TDS / RTV / Claim …) ── */
+  .ad-exp{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:0;background:transparent;cursor:pointer;color:#64748b;border-radius:6px;vertical-align:middle}
+  .ad-exp:hover{background:#eef2ff;color:#4338ca}
+  .ad-exp .ic{font-size:18px;transition:transform .15s}
+  .ad-exp.on .ic{transform:rotate(90deg);color:#4338ca}
+  .ad-cnt{display:inline-block;min-width:16px;margin-left:3px;padding:0 5px;font-size:10px;font-weight:800;color:#4338ca;background:#e0e7ff;border-radius:999px;vertical-align:middle}
+  td.ad-detcell{background:#f8fafc;padding:0;border-bottom:1px solid #e2e8f0}
+  .sp-wrap{padding:12px 16px 14px}
+  .sp-grid{display:grid;grid-template-columns:1.2fr .8fr 2fr 28px;gap:8px 8px;align-items:center;max-width:780px}
+  .sp-h{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;color:#94a3b8}
+  .sp-line{display:contents}
+  .sp-cat,.sp-amt,.sp-rmk{border:1px solid #e2e8f0;border-radius:7px;padding:6px 9px;font-family:inherit;font-size:12.5px;color:#0f172a;outline:none;background:#fff;width:100%}
+  select.sp-cat{cursor:pointer;height:31px}
+  .sp-amt{text-align:right;font-variant-numeric:tabular-nums}
+  .sp-cat:focus,.sp-amt:focus,.sp-rmk:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.14)}
+  .sp-del{border:0;background:transparent;color:#cbd5e1;font-size:20px;line-height:1;cursor:pointer;border-radius:6px;width:28px;height:28px}
+  .sp-del:hover{color:#e11d48;background:#fef2f2}
+  .sp-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:780px;margin-top:10px;flex-wrap:wrap}
+  .sp-add{display:inline-flex;align-items:center;gap:4px;border:1px dashed #c7d2fe;background:#fff;color:#4338ca;font-family:inherit;font-size:12px;font-weight:700;padding:6px 12px;border-radius:8px;cursor:pointer}
+  .sp-add:hover{background:#eef2ff}
+  .sp-rec{font-size:12px;color:#475569;font-weight:600}
+  .sp-rec b{color:#0f172a}
+  .sp-rec.ok .sp-un{color:#16a34a;font-weight:800}
+  .sp-rec.part .sp-un{color:#d97706;font-weight:800}
+  .sp-rec.over .sp-un{color:#e11d48;font-weight:800}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ad-wrap">
+  <div class="ad-hero">
+    <div class="ad-hero-row">
+      <div>
+        <h1 class="ad-h1" id="adName">Customer <span class="ad-code" id="adCode"></span></h1>
+        <p class="ad-sub">Open documents behind the balance &middot; aging as of <span id="adAsOf"></span></p>
+      </div>
+      <a class="ad-back" href="{% url 'realise:customer_aging' %}?as_of={{ aging_date }}"><i class="ic ic-arrow-left"></i>Back to Aging</a>
+    </div>
+  </div>
+
+  <div class="ad-tools">
+    <label class="ad-search">
+      <i class="ic ic-search"></i>
+      <input type="text" id="adSearch" placeholder="Search doc no, remark, branch…" autocomplete="off">
+    </label>
+    <!-- Bulk-set the credit period: type the days, tick the P/C types, Apply → every matching invoice fills. -->
+    <span class="ad-days ad-pcdays" title="Type the days, tick which P/C types to apply to, then Apply — every matching invoice is filled (and saved). Blank days = reset to default.">
+      <label>P/C credit period</label>
+      <input type="number" id="adPCDays" min="0" step="1" inputmode="numeric" placeholder="days">
+      <label class="ad-pcd"><input type="checkbox" class="pcchk" value="P" checked><b class="p">P</b></label>
+      <label class="ad-pcd"><input type="checkbox" class="pcchk" value="C" checked><b class="c">C</b></label>
+      <label class="ad-pcd"><input type="checkbox" class="pcchk" value="P+C"><b class="pc">P+C</b></label>
+      <label class="ad-pcd"><input type="checkbox" class="pcchk" value="U"><b class="unc">U</b></label>
+      <button type="button" class="ad-btn" id="adPCApply">Apply</button>
+    </span>
+    <button type="button" class="ad-btn primary" id="adPivotBtn"><i class="ic ic-table-properties"></i><span id="adPivotLbl">Pivot</span></button>
+    <button type="button" class="ad-btn" id="adExport"><i class="ic ic-download"></i>Export Excel</button>
+    <button type="button" class="ad-btn" id="adUpload" title="Upload an Excel/CSV to bulk-update by Doc No. The Remark / Category value sets BOTH the note and the on-screen Category, allocating the document's Balance Due to it. Add an Amount column to split one balance across several categories."><i class="ic ic-upload"></i>Upload Excel</button>
+    <input type="file" id="adUploadFile" accept=".xlsx,.csv" style="display:none">
+    <button type="button" class="ad-btn danger" id="adClear" title="Clear all saved remarks for this customer"><i class="ic ic-delete"></i>Clear Remarks</button>
+  </div>
+
+  <div class="ad-card">
+    <div class="ad-tw">
+      <table class="ad-tb">
+        <thead><tr id="adHead"></tr></thead>
+        <tbody id="adBody"><tr><td class="ad-empty" colspan="14">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+{{ detail_payload|json_script:"detail-data" }}
+<script>
+(function(){
+  var DATA = JSON.parse(document.getElementById('detail-data').textContent || '{}');
+  var ROWS = DATA.rows || [];
+  var CODE = DATA.code || '';
+  var COMPANY = DATA.company || 'oil';
+  // Bulk Upload + Clear hit the oil schema / clear all remarks for this CardCode — not safe for
+  // Mart (its remarks are 'MART:'-prefixed and could share a CardCode with oil). Hide them there.
+  if(COMPANY==='mart'||COMPANY==='bev'){
+    ['adUpload','adClear'].forEach(function(id){ var el=document.getElementById(id); if(el) el.style.display='none'; });
+  }
+  // Fixed Category vocabulary (server is the source of truth; see AGING_REMARK_CATEGORIES).
+  // The split Category is a dropdown limited to these — no free text is accepted.
+  var CATEGORIES = DATA.categories || ['NOT DUE','RTV DEBIT','RTV PICK UP','SHORTAGE','CLAIM','TDS',
+    'SHORT & EXCESS','OVERDUE','RC','JE','REVERSE WRONG CLAIM','ADVICE PENDING'];
+  var CATEGORY_SET = {}; CATEGORIES.forEach(function(c){ CATEGORY_SET[c.toUpperCase()] = 1; });
+  var BUCKETS = [{key:'b0_7',label:'0 - 7'},{key:'b8_15',label:'8 - 15'},{key:'b16_30',label:'16 - 30'},
+                 {key:'b31_60',label:'31 - 60'},{key:'b61_90',label:'61 - 90'},
+                 {key:'b91_120',label:'91 - 120'},{key:'b121',label:'121+'}];
+  // Data-view columns (after the expander) — order matches the rendered <td>s. `lbl` = left-aligned
+  // header (text), `num` = numeric sort/right-aligned value. Both flags are independent so Credit
+  // Period can be left-aligned yet sort numerically. Drives BOTH the sortable header and the sorter.
+  var DATA_COLS = [
+    {key:'type',         label:'Type',          lbl:true},
+    {key:'doc_no',       label:'Doc No',        lbl:true},
+    {key:'posting_date', label:'Posting Date',  lbl:true},
+    {key:'due_date',     label:'Due Date',      lbl:true},
+    {key:'item_type',    label:'P/C',           lbl:true},
+    {key:'credit',       label:'Credit Period', lbl:true, num:true},
+    {key:'original',     label:'Original',      num:true},
+    {key:'balance_due',  label:'Balance Due',   num:true},
+    {key:'remark',       label:'Remarks',       lbl:true}
+  ].concat(BUCKETS.map(function(b){ return {key:b.key, label:b.label, num:true}; }))
+   .concat([{key:'branch', label:'Branch', lbl:true}]);
+  // Sort state — null key = document order (as returned by SAP). Pivot has its own sort, default
+  // by Sum of Balance Due desc (matches the pre-sort in buildCategoryPivot).
+  var sort = {key:null, dir:1};
+  var pivotSort = {key:'balance_due', dir:-1};
+  var pivot = false;
+  // Fallback credit period (whole days from posting) for rows with NO P/C item type — e.g. credit
+  // notes / JEs. 0 = off. Invoices use their own per-invoice period (see creditDays below).
+  var GRACE = Math.max(0, parseInt(DATA.grace_days, 10) || 0);
+  // Per-invoice credit-period override the user typed (else '' → fall back to the P/C default).
+  ROWS.forEach(function(r){
+    var ov = parseInt(r.credit_override, 10);
+    r._cd = (r.credit_override != null && String(r.credit_override).trim() !== '' && isFinite(ov) && ov >= 0) ? ov : null;
+  });
+  // Default credit period from the invoice's item mix: Premium → 30, Commodity → 7, both → none
+  // (user fills it), and no P/C type → the customer-wide fallback (GRACE).
+  function typeDefault(r){
+    if(r.item_type==='P')   return 30;
+    if(r.item_type==='C')   return 7;
+    if(r.item_type==='P+C') return null;
+    return GRACE>0 ? GRACE : null;
+  }
+  // Effective credit period for a row: the user's override if set, else the type default.
+  function creditDays(r){ return (r._cd!=null) ? r._cd : typeDefault(r); }
+  var SAVE_URL = "{% url 'realise:api_aging_remark' %}";
+  var SAVE_DAYS_URL = "{% url 'realise:api_aging_due_days' %}";
+  var SAVE_LINES_URL = "{% url 'realise:api_aging_remark_lines' %}";
+  var EXPORT_URL = "{% url 'realise:api_export_xlsx' %}";
+  var UPLOAD_URL = "{% url 'realise:api_aging_remark_upload' %}";
+  var CLEAR_URL = "{% url 'realise:api_aging_remark_clear' %}";
+  var CSRF = "{{ csrf_token }}";
+
+  function num(v){ v=String(v==null?'':v).replace(/[₹,\s]/g,''); var n=parseFloat(v); return isFinite(n)?n:0; }
+  function splitCount(sp){ return (sp||[]).filter(function(x){ return (x.category||'').trim() || (x.remark||'').trim() || Math.abs(Number(x.amount)||0)>=0.005; }).length; }
+
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function attr(s){return String(s==null?'':s).replace(/"/g,'&quot;');}
+  function money(n){
+    n = Number(n)||0;
+    if(Math.abs(n) < 0.5) return '<span class="v0">—</span>';
+    var s = '₹'+Math.round(Math.abs(n)).toLocaleString('en-IN');
+    return n<0 ? '<span class="neg">('+s+')</span>' : s;
+  }
+  // ── Auto NOT DUE / OVERDUE from the per-customer grace window ──
+  // A document is NOT DUE while it is fewer than GRACE days past its posting date (its
+  // Remarks cell is locked to 'NOT DUE'); once GRACE days pass it is OVERDUE and the cell
+  // becomes editable, defaulting to 'OVERDUE'. GRACE<=0 or an unknown posting date → no
+  // auto-status, so the Remarks column is plain free text.
+  function statusOf(r){
+    var cd = creditDays(r);
+    if(cd==null) return '';            // no window (P+C unfilled, or untyped with fallback off)
+    var a = r.age_days;
+    if(a==null) return '';
+    return a < cd ? 'notdue' : 'overdue';
+  }
+  // A document is partly paid when some of its original value has been settled but a balance
+  // still remains (fully-paid documents drop off the list entirely). original & balance_due
+  // are already reconciled as of the aging date, so their gap is exactly what's been paid.
+  function partlyPaid(r){
+    var o = Math.abs(Number(r.original)||0), b = Math.abs(Number(r.balance_due)||0);
+    return (o - b) > 0.5 && b > 0.5;
+  }
+  // A NOT DUE row is locked (auto 'NOT DUE', read-only) ONLY while nothing has been paid yet;
+  // a partial payment unlocks it so the note can be edited even inside the grace window.
+  function lockedNotDue(r){ return statusOf(r)==='notdue' && !partlyPaid(r); }
+  // The remark text a row contributes to Pivot / Export / Search: forced 'NOT DUE' while
+  // locked, else the stored remark falling back to the status default (NOT DUE / OVERDUE).
+  function effRemark(r){
+    var s = statusOf(r);
+    if(s==='notdue') return lockedNotDue(r) ? 'NOT DUE' : (((r.remark||'').trim()) || 'NOT DUE');
+    if(s==='overdue') return ((r.remark||'').trim()) || 'OVERDUE';
+    return r.remark||'';
+  }
+
+  document.getElementById('adCode').textContent = CODE;
+  document.getElementById('adName').childNodes[0].nodeValue = (DATA.name||'Customer')+' ';
+  document.getElementById('adAsOf').textContent = DATA.aging_date||'';
+
+  // ── Data view ──
+  // Item-type badge: Premium / Commodity / both; blank (—) for non-invoice or unclassified docs.
+  // Non-invoice documents carry no P/C — show what the document actually is instead of a blank.
+  var TYPE_NAME={IN:'Invoice',CN:'Credit Note',DN:'Debit Note',RC:'Receipt',JE:'Journal Entry',
+                 PU:'A/P Invoice',GR:'Goods Receipt',PS:'Payment'};
+  function pcBadge(t, docType){
+    if(t==='P')   return '<span class="ad-pc p">P</span>';
+    if(t==='C')   return '<span class="ad-pc c">C</span>';
+    if(t==='P+C') return '<span class="ad-pc pc">P+C</span>';
+    var dt=String(docType||'').trim().toUpperCase();
+    // An invoice with no classifiable oil item (items missing from OITM / opening-balance docs).
+    if(dt==='IN') return '<span class="ad-pc unc" title="Invoice with no classifiable oil item (not in item master)">Unclassified</span>';
+    var nm=TYPE_NAME[dt];
+    return nm ? '<span class="ad-pc doc">'+esc(nm)+'</span>' : '<span class="ad-pc none">—</span>';
+  }
+  function renderDataHead(){
+    var th = '<th class="lbl"></th>';                     // expander column — not sortable
+    DATA_COLS.forEach(function(c){
+      var ar = sort.key===c.key ? (sort.dir<0?'▼':'▲') : '';
+      th += '<th class="'+(c.lbl?'lbl ':'')+'sortable" data-sk="'+c.key+'">'+esc(c.label)+
+            '<span class="ar">'+ar+'</span></th>';
+    });
+    document.getElementById('adHead').innerHTML = th;
+  }
+  // Sort value for a data column. Credit Period uses the effective days (null → -1 so 'no window'
+  // rows sink); Remarks uses the effective (auto NOT DUE / OVERDUE) text; everything else the raw
+  // field. Numeric columns are compared as numbers, text with a numeric-aware locale compare (so
+  // Doc No sorts naturally). Returns the raw value; the comparator decides how to compare.
+  function dataSortVal(r, key){
+    if(key==='credit'){ var c=creditDays(r); return c==null ? -1 : c; }
+    if(key==='remark') return effRemark(r);
+    return r[key]==null ? '' : r[key];
+  }
+  // Sort a permutation of row indices (not ROWS itself) so the split-detail rows, which reference
+  // ROWS[i] by their original index, stay valid after sorting.
+  function sortedIndices(){
+    var idx = ROWS.map(function(_, i){ return i; });
+    if(!sort.key) return idx;
+    var col = null;
+    for(var k=0;k<DATA_COLS.length;k++){ if(DATA_COLS[k].key===sort.key){ col=DATA_COLS[k]; break; } }
+    if(!col) return idx;
+    var dir = sort.dir;
+    idx.sort(function(ia, ib){
+      var a = dataSortVal(ROWS[ia], col.key), b = dataSortVal(ROWS[ib], col.key);
+      if(col.num) return ((Number(a)||0) - (Number(b)||0)) * dir;
+      return String(a).localeCompare(String(b), undefined, {numeric:true}) * dir;
+    });
+    return idx;
+  }
+  function renderData(){
+    renderDataHead();
+    var body = document.getElementById('adBody');
+    if(!ROWS.length){ body.innerHTML='<tr><td class="ad-empty" colspan="16">No open documents for this customer.</td></tr>'; return; }
+    var t={original:0,balance_due:0}; BUCKETS.forEach(function(b){t[b.key]=0;});
+    var html = sortedIndices().map(function(i){
+      var r = ROWS[i];
+      t.original+=Number(r.original)||0; t.balance_due+=Number(r.balance_due)||0;
+      BUCKETS.forEach(function(b){ t[b.key]+=Number(r[b.key])||0; });
+      var hay = ((r.doc_no||'')+' '+effRemark(r)+' '+(r.branch||'')+' '+(r.type||'')+' '+(r.item_type||'')).toLowerCase();
+      var n = splitCount(r.splits);
+      var st = statusOf(r), rmkCell;
+      if(st==='notdue' && lockedNotDue(r)){
+        rmkCell = '<input class="ad-rmk locked notdue" type="text" data-key="'+attr(r.row_key)+'" data-i="'+i+'" '+
+          'value="NOT DUE" readonly title="Auto: within the '+creditDays(r)+'-day credit period — locked until it is exceeded or you change the days">';
+      } else if(st==='notdue'){
+        var nv = ((r.remark||'').trim()) || 'NOT DUE';
+        rmkCell = '<input class="ad-rmk notdue-edit" type="text" data-key="'+attr(r.row_key)+'" data-i="'+i+'" '+
+          'value="'+attr(nv)+'" placeholder="NOT DUE" title="Partly paid within credit period — editable">';
+      } else if(st==='overdue'){
+        var ov = ((r.remark||'').trim()) || 'OVERDUE';
+        rmkCell = '<input class="ad-rmk overdue" type="text" data-key="'+attr(r.row_key)+'" data-i="'+i+'" '+
+          'value="'+attr(ov)+'" placeholder="OVERDUE">';
+      } else {
+        rmkCell = '<input class="ad-rmk" type="text" data-key="'+attr(r.row_key)+'" data-i="'+i+'" '+
+          'value="'+attr(r.remark)+'" placeholder="Add remark…">';
+      }
+      var cd = creditDays(r);
+      var cdInput = '<input class="ad-cd" type="number" min="0" step="1" inputmode="numeric" data-key="'+attr(r.row_key)+'" data-i="'+i+'" '+
+        'value="'+(cd==null?'':cd)+'" placeholder="'+(r.item_type==='P+C'?'set days':'days')+'" title="Credit period (days from posting) for this invoice">';
+      return '<tr data-i="'+i+'" data-hay="'+attr(hay)+'">'+
+        '<td><button type="button" class="ad-exp" title="Split this balance into TDS / RTV / Claim …"><i class="ic ic-chevron-right"></i></button>'+
+          '<span class="ad-cnt"'+(n?'':' style="display:none"')+'>'+(n||'')+'</span></td>'+
+        '<td>'+esc(r.type)+'</td><td>'+esc(r.doc_no)+'</td><td>'+esc(r.posting_date)+'</td><td>'+esc(r.due_date)+'</td>'+
+        '<td>'+pcBadge(r.item_type, r.type)+'</td><td>'+cdInput+'</td>'+
+        '<td class="num">'+money(r.original)+'</td><td class="num bal">'+money(r.balance_due)+'</td>'+
+        '<td>'+rmkCell+'</td>'+
+        BUCKETS.map(function(b,bi){return '<td class="num bk'+bi+'">'+money(r[b.key])+'</td>';}).join('')+
+        '<td>'+esc(r.branch)+'</td>'+
+      '</tr>'+
+      '<tr class="ad-det" data-det="'+i+'" style="display:none"><td></td>'+
+        '<td class="ad-detcell" colspan="15"><div class="sp-wrap" data-i="'+i+'"></div></td></tr>';
+    }).join('');
+    html += '<tr class="ad-tot"><td></td><td>TOTAL</td><td></td><td></td><td></td><td></td><td></td>'+
+      '<td class="num">'+money(t.original)+'</td><td class="num">'+money(t.balance_due)+'</td><td></td>'+
+      BUCKETS.map(function(b){return '<td class="num">'+money(t[b.key])+'</td>';}).join('')+
+      '<td></td></tr>';
+    body.innerHTML = html;
+  }
+
+  // ── Pivot view (group by Remark / split Category) ──
+  // A row with no split amounts contributes its whole balance under its Remark text; a row
+  // that uses splits is broken down by split Category (each split inheriting its invoice's age
+  // bucket) with any leftover under '(unallocated)'. Grand Total still equals total Balance Due.
+  function buildCategoryPivot(){
+    var map={}, order=[], gt={balance_due:0}, detail={}; BUCKETS.forEach(function(b){gt[b.key]=0;});
+    function add(key, amt, r){
+      if(!map[key]){ map[key]={balance_due:0}; BUCKETS.forEach(function(b){map[key][b.key]=0;}); order.push(key); detail[key]=[]; }
+      map[key].balance_due += amt; gt.balance_due += amt;
+      detail[key].push({r:r, amt:amt});   // the document contributing to this category, and how much
+      var bal = Number(r.balance_due)||0;
+      BUCKETS.forEach(function(b){
+        var share = (Math.abs(bal)>0.005) ? amt*((Number(r[b.key])||0)/bal) : 0;
+        map[key][b.key] += share; gt[b.key] += share;
+      });
+    }
+    ROWS.forEach(function(r){
+      var bal = Number(r.balance_due)||0, alloc = 0;
+      (r.splits||[]).forEach(function(s){
+        var amt = Number(s.amount)||0;
+        if(Math.abs(amt) < 0.005) return;                 // note-only split moves no money
+        add((s.category||'').trim() || '(uncategorized)', amt, r); alloc += amt;
+      });
+      var rem = bal - alloc;
+      if(Math.abs(rem) > 0.5){
+        // No split amounts on this row → bucket the whole balance under its Remark (the
+        // category people type in the Remarks column or fill via Upload). Rows that DO use
+        // splits keep an explicit (unallocated) remainder for whatever isn't categorised.
+        add(alloc===0 ? ((effRemark(r)||'').trim() || '(no remark)') : '(unallocated)', rem, r);
+      }
+    });
+    order.sort(function(a,b){ return map[b].balance_due - map[a].balance_due; });
+    return {order:order, map:map, gt:gt, detail:detail};
+  }
+  var PIVOT_DETAIL={};   // {category: [{r, amt}]} for the click-through detail popup
+  var PIVOT_ALL=' ALL';   // sentinel data-cat for the Grand Total row (all documents)
+  function renderPivot(){
+    var pcols = [{key:'label', label:'Remark / Category (Row Labels)', lbl:true},
+                 {key:'balance_due', label:'Sum of Balance Due', num:true}]
+                .concat(BUCKETS.map(function(b){ return {key:b.key, label:'Sum of '+b.label, num:true}; }));
+    var head = pcols.map(function(c){
+      var ar = pivotSort.key===c.key ? (pivotSort.dir<0?'▼':'▲') : '';
+      return '<th class="'+(c.lbl?'lbl ':'')+'sortable" data-sk="'+c.key+'">'+esc(c.label)+
+             '<span class="ar">'+ar+'</span></th>';
+    }).join('');
+    document.getElementById('adHead').innerHTML = head;
+    var body = document.getElementById('adBody');
+    var P = buildCategoryPivot(); PIVOT_DETAIL = P.detail;
+    if(!P.order.length){ body.innerHTML='<tr><td class="ad-empty" colspan="'+(2+BUCKETS.length)+'">No data to pivot.</td></tr>'; return; }
+    // Re-order rows by the clicked pivot column (label = numeric-aware text; else the summed value).
+    var ps = pivotSort;
+    P.order.sort(function(a,b){
+      if(ps.key==='label') return String(a).localeCompare(String(b), undefined, {numeric:true}) * ps.dir;
+      return ((P.map[a][ps.key]||0) - (P.map[b][ps.key]||0)) * ps.dir;
+    });
+    var html = P.order.map(function(k){
+      return '<tr class="ad-piv-row" data-cat="'+esc(k)+'" title="Click to see the documents behind this row">'+
+        '<td class="lbl" style="font-weight:700;color:#1f2937">'+esc(k)+'</td>'+
+        '<td class="num bal">'+money(P.map[k].balance_due)+'</td>'+
+        BUCKETS.map(function(b){return '<td class="num">'+money(P.map[k][b.key])+'</td>';}).join('')+'</tr>';
+    }).join('');
+    html += '<tr class="ad-tot ad-piv-row" data-cat="'+PIVOT_ALL+'" title="Click to see all documents"><td>Grand Total</td><td class="num">'+money(P.gt.balance_due)+'</td>'+
+      BUCKETS.map(function(b){return '<td class="num">'+money(P.gt[b.key])+'</td>';}).join('')+'</tr>';
+    body.innerHTML = html;
+  }
+
+  function render(){ if(pivot) renderPivot(); else renderData(); }
+
+  // ── Expandable split breakdown (TDS / RTV / Claim …) ──
+  function toggleRow(tr){
+    var det = tr.nextElementSibling;
+    if(!det || !det.classList.contains('ad-det')) return;
+    var open = tr.classList.toggle('ad-open');
+    det.style.display = open ? '' : 'none';
+    var chev = tr.querySelector('.ad-exp'); if(chev) chev.classList.toggle('on', open);
+    if(open && det.getAttribute('data-rendered')!=='1'){
+      renderSplits(+tr.getAttribute('data-i'));
+      det.setAttribute('data-rendered','1');
+    }
+  }
+  // Category options = the built-in AGING_REMARK_CATEGORIES plus every category already in use on
+  // this customer's documents — so a value set by an Excel upload appears as a real, pickable
+  // option. De-duped case-insensitively, built-ins first.
+  function allCategories(){
+    var seen = {}, out = [];
+    (CATEGORIES||[]).forEach(function(c){ var u=String(c).trim().toUpperCase(); if(u && !seen[u]){ seen[u]=1; out.push(String(c).trim()); } });
+    (ROWS||[]).forEach(function(r){ (r.splits||[]).forEach(function(s){
+      var c=String(s.category||'').trim(), u=c.toUpperCase(); if(c && !seen[u]){ seen[u]=1; out.push(c); } }); });
+    return out;
+  }
+  // <option> list for a split's Category; pre-selects the saved value (case-insensitive) and, if
+  // it isn't already listed, appends it so it still shows selected (free vocabulary).
+  function catOptions(val){
+    var cur = String(val==null?'':val).trim().toUpperCase(), matched = false;
+    var cats = allCategories();
+    var html = '<option value="">— select —</option>';
+    for(var k=0;k<cats.length;k++){
+      var c = cats[k], sel = c.toUpperCase()===cur; if(sel) matched = true;
+      html += '<option value="'+attr(c)+'"'+(sel?' selected':'')+'>'+esc(c)+'</option>';
+    }
+    if(cur && !matched){ var v=String(val).trim(); html += '<option value="'+attr(v)+'" selected>'+esc(v)+'</option>'; }
+    return html;
+  }
+  function renderSplits(i){
+    var wrap = document.querySelector('.sp-wrap[data-i="'+i+'"]'); if(!wrap) return;
+    if(!ROWS[i].splits) ROWS[i].splits = [];
+    if(!ROWS[i].splits.length) ROWS[i].splits.push({category:'',amount:0,remark:''});
+    var lines = ROWS[i].splits.map(function(s,j){
+      var amt = Number(s.amount)||0, av = Math.abs(amt)<0.005 ? '' : amt;
+      return '<div class="sp-line" data-j="'+j+'">'+
+        '<select class="sp-cat">'+catOptions(s.category)+'</select>'+
+        '<input class="sp-amt" inputmode="decimal" placeholder="0" value="'+attr(av)+'">'+
+        '<input class="sp-rmk" placeholder="Note (optional)" value="'+attr(s.remark)+'">'+
+        '<button type="button" class="sp-del" title="Remove split">&times;</button>'+
+      '</div>';
+    }).join('');
+    wrap.innerHTML =
+      '<div class="sp-grid"><span class="sp-h">Category</span><span class="sp-h">Amount (₹)</span><span class="sp-h">Remark</span><span class="sp-h"></span>'+lines+'</div>'+
+      '<div class="sp-foot"><button type="button" class="sp-add"><i class="ic ic-plus" style="font-size:16px"></i>Add split</button>'+
+        '<div class="sp-rec"></div></div>';
+    reconcile(i);
+  }
+  function reconcile(i){
+    var wrap = document.querySelector('.sp-wrap[data-i="'+i+'"]'); if(!wrap) return;
+    var sp = ROWS[i].splits||[];
+    var alloc = sp.reduce(function(s,x){return s+(Number(x.amount)||0);},0);
+    var bal = Number(ROWS[i].balance_due)||0, un = bal - alloc;
+    var state = Math.abs(un)<0.5 ? 'ok' : ((bal>=0 ? un<0 : un>0) ? 'over' : 'part');
+    var rec = wrap.querySelector('.sp-rec');
+    rec.className = 'sp-rec '+state;
+    var tail = state==='ok' ? 'Fully allocated'
+             : state==='over' ? 'Over-allocated by '+money(Math.abs(un))
+             : 'Unallocated '+money(un);
+    rec.innerHTML = 'Allocated <b>'+money(alloc)+'</b> of <b>'+money(bal)+'</b> &middot; <span class="sp-un">'+tail+'</span>';
+    var tr = document.querySelector('#adBody tr[data-i="'+i+'"]');
+    if(tr){ var c = tr.querySelector('.ad-cnt'), n = splitCount(sp);
+      if(c){ c.textContent = n||''; c.style.display = n ? '' : 'none'; } }
+  }
+  var spTimers = {};
+  function saveSplits(i){
+    var rk = ROWS[i].row_key;
+    clearTimeout(spTimers[rk]);
+    spTimers[rk] = setTimeout(function(){
+      var lines = (ROWS[i].splits||[]).map(function(s){
+        return {category:s.category||'', amount:Number(s.amount)||0, remark:s.remark||''}; });
+      fetch(SAVE_LINES_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':CSRF},
+        body:JSON.stringify({code:CODE, row_key:rk, lines:lines})}).catch(function(){});
+    }, 500);
+  }
+
+  // ── Remarks auto-save (debounced); refresh pivot if it's showing ──
+  var timers = {};
+  function saveRemark(inp){
+    var key = inp.getAttribute('data-key'), i = +inp.getAttribute('data-i');
+    var val = inp.value;
+    if(i>=0 && ROWS[i]) ROWS[i].remark = val;       // keep model in sync (pivot uses it)
+    clearTimeout(timers[key]);
+    timers[key] = setTimeout(function(){
+      fetch(SAVE_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':CSRF},
+        body:JSON.stringify({code:CODE, row_key:key, remark:val})})
+        .then(function(r){return r.json();})
+        .then(function(j){ if(j&&j.status==='ok'){ inp.classList.add('saved'); setTimeout(function(){inp.classList.remove('saved');},900); } })
+        .catch(function(){});
+    }, 450);
+  }
+  // Per-invoice credit period: persist the override (empty clears → back to the P/C default) and
+  // re-render so every row's NOT DUE / OVERDUE reflects its own credit period.
+  function saveCreditDays(inp){
+    var key = inp.getAttribute('data-key'), i = +inp.getAttribute('data-i');
+    var raw = (inp.value||'').trim(), ov = parseInt(raw,10);
+    ov = (raw!=='' && isFinite(ov) && ov>=0) ? ov : null;
+    if(i>=0 && ROWS[i]) ROWS[i]._cd = ov;
+    fetch(SAVE_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':CSRF},
+      body:JSON.stringify({code:CODE, row_key:'CREDITDAYS:'+key, remark:(ov==null?'':String(ov))})}).catch(function(){});
+    renderData(); if(!pivot) filterData();
+  }
+  // Does a row belong to a P/C-type bucket? 'U' = an invoice with no P/C classification.
+  function rowIsKind(r, kind){
+    if(kind==='U') return !((r.item_type||'').trim()) && String(r.type||'').toUpperCase()==='IN';
+    return r.item_type===kind;
+  }
+  // Bulk-fill the credit period for every invoice of the ticked P/C types (blank days = reset to default).
+  (function(){
+    var applyBtn=document.getElementById('adPCApply'), daysEl=document.getElementById('adPCDays');
+    function apply(){
+      var raw=(daysEl.value||'').trim(), ov=parseInt(raw,10);
+      ov=(raw!=='' && isFinite(ov) && ov>=0) ? ov : null;
+      var kinds=[].slice.call(document.querySelectorAll('.pcchk:checked')).map(function(c){return c.value;});
+      if(!kinds.length){ if(applyBtn) applyBtn.title='Tick at least one P/C type first.'; return; }
+      var n=0;
+      ROWS.forEach(function(r){
+        if(!kinds.some(function(k){return rowIsKind(r,k);})) return;
+        r._cd = ov; n++;
+        fetch(SAVE_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':CSRF},
+          body:JSON.stringify({code:CODE, row_key:'CREDITDAYS:'+r.row_key, remark:(ov==null?'':String(ov))})}).catch(function(){});
+      });
+      renderData(); if(!pivot) filterData();
+      if(applyBtn) applyBtn.title=n+' invoice'+(n===1?'':'s')+' ('+kinds.join(', ')+') set to '+(ov==null?'default':ov+' days');
+    }
+    if(applyBtn) applyBtn.addEventListener('click', apply);
+    if(daysEl) daysEl.addEventListener('keydown', function(e){ if(e.key==='Enter'){ apply(); } });
+  })();
+
+  function filterData(){
+    if(pivot) return;
+    var q = (document.getElementById('adSearch').value||'').trim().toLowerCase();
+    document.querySelectorAll('#adBody tr[data-hay]').forEach(function(tr){
+      var show = (!q || tr.getAttribute('data-hay').indexOf(q)!==-1);
+      tr.style.display = show ? '' : 'none';
+      var det = tr.nextElementSibling;
+      if(det && det.classList.contains('ad-det'))
+        det.style.display = (show && tr.classList.contains('ad-open')) ? '' : 'none';
+    });
+  }
+
+  // Export current view (data or pivot) to CSV.
+  function exportCSV(){
+    function cell(v){v=String(v==null?'':v);return /[",\r\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v;}
+    function rnd(n){return Math.round(Number(n)||0);}
+    var lines=[];
+    if(pivot){
+      lines.push(['Remark / Category','Sum of Balance Due'].concat(BUCKETS.map(function(b){return 'Sum of '+b.label;})).map(cell).join(','));
+      var P=buildCategoryPivot();
+      P.order.forEach(function(k){lines.push([k,rnd(P.map[k].balance_due)].concat(BUCKETS.map(function(b){return rnd(P.map[k][b.key]);})).map(cell).join(','));});
+      lines.push(['Grand Total',rnd(P.gt.balance_due)].concat(BUCKETS.map(function(b){return rnd(P.gt[b.key]);})).map(cell).join(','));
+    }else{
+      lines.push(['Type','Doc No','Posting Date','Due Date','Original','Balance Due','Remarks'].concat(BUCKETS.map(function(b){return b.label;})).concat(['Branch']).map(cell).join(','));
+      ROWS.forEach(function(r){lines.push([r.type,r.doc_no,r.posting_date,r.due_date,rnd(r.original),rnd(r.balance_due),effRemark(r)].concat(BUCKETS.map(function(b){return rnd(r[b.key]);})).concat([r.branch]).map(cell).join(','));});
+    }
+    var blob=new Blob(['\uFEFF'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');a.href=url;a.download=(DATA.name||CODE||'Aging')+(pivot?'_pivot':'_detail')+'.csv';a.click();
+    setTimeout(function(){URL.revokeObjectURL(url);},1000);
+  }
+
+  // Export ONE .xlsx with two sheets — Pivot (by category) and Data (per document) — built
+  // server-side from these arrays. Falls back to the single-view CSV if the request fails.
+  function exportXLSX(){
+    function rnd(n){return Math.round(Number(n)||0);}
+    function H(v){return {value:v, style:1};}                 // bold header cell
+    function G(v){return {value:v, style:3};}                 // grand-total cell
+
+    var P = buildCategoryPivot();
+    var pv = [ [H('Remark / Category'), H('Sum of Balance Due')].concat(BUCKETS.map(function(b){return H('Sum of '+b.label);})) ];
+    P.order.forEach(function(k){
+      pv.push([k, rnd(P.map[k].balance_due)].concat(BUCKETS.map(function(b){return rnd(P.map[k][b.key]);})));
+    });
+    pv.push([G('Grand Total'), G(rnd(P.gt.balance_due))].concat(BUCKETS.map(function(b){return G(rnd(P.gt[b.key]));})));
+
+    var dv = [ [H('Type'),H('Doc No'),H('Posting Date'),H('Due Date'),H('Original'),H('Balance Due'),H('Remarks')]
+                 .concat(BUCKETS.map(function(b){return H(b.label);})).concat([H('Branch')]) ];
+    ROWS.forEach(function(r){
+      dv.push([r.type, r.doc_no, r.posting_date, r.due_date, rnd(r.original), rnd(r.balance_due), effRemark(r)]
+                .concat(BUCKETS.map(function(b){return rnd(r[b.key]);})).concat([r.branch]));
+    });
+
+    var fn = (DATA.name||CODE||'Aging').replace(/[^A-Za-z0-9._ -]/g,'_')+'_aging.xlsx';
+    var btn = document.getElementById('adExport'); btn.disabled = true;
+    fetch(EXPORT_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':CSRF},
+      body:JSON.stringify({filename:fn, sheets:[{name:'Pivot',rows:pv},{name:'Data',rows:dv}]})})
+      .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.blob(); })
+      .then(function(blob){
+        var url=URL.createObjectURL(blob);
+        var a=document.createElement('a'); a.href=url; a.download=fn;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){URL.revokeObjectURL(url);},1500);
+      })
+      .catch(function(){ exportCSV(); })          // fallback: current-view CSV
+      .then(function(){ btn.disabled = false; });
+  }
+
+  document.getElementById('adPivotBtn').addEventListener('click',function(){
+    pivot = !pivot;
+    document.getElementById('adPivotLbl').textContent = pivot ? 'Unpivot' : 'Pivot';
+    document.getElementById('adSearch').parentElement.style.visibility = pivot ? 'hidden' : 'visible';
+    render();
+  });
+  document.getElementById('adExport').addEventListener('click', exportXLSX);
+
+  // ── Upload an edited export to bulk-update Remarks (matched by Doc No) ──
+  document.getElementById('adUpload').addEventListener('click', function(){
+    document.getElementById('adUploadFile').click();
+  });
+  document.getElementById('adUploadFile').addEventListener('change', function(){
+    var inp = this, f = inp.files && inp.files[0]; if(!f){ return; }
+    var fd = new FormData();
+    fd.append('file', f); fd.append('code', CODE); fd.append('as_of', DATA.aging_date||'');
+    var btn = document.getElementById('adUpload'); btn.disabled = true;
+    fetch(UPLOAD_URL, {method:'POST', headers:{'X-CSRFToken':CSRF}, body:fd})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(j && j.status==='ok'){
+          var msg = 'Updated '+j.updated+' remark(s) across '+j.matched_docs+' document(s) (from '+j.rows+' row(s) read).';
+          if(j.splits){ msg += '\nSet the Category & allocated the Balance Due on '+j.splits+' document line(s).'; }
+          if(j.unmatched && j.unmatched.length){
+            msg += '\n\n'+j.unmatched.length+' Doc No(s) had no open document and were skipped:\n'+j.unmatched.slice(0,15).join(', ')+(j.unmatched.length>15?' …':'');
+          }
+          alert(msg);
+          location.reload();           // re-render with the updated remarks + splits
+        } else {
+          alert('Upload failed: '+((j&&j.error)||'unknown error'));
+        }
+      })
+      .catch(function(){ alert('Upload failed — please try again.'); })
+      .then(function(){ btn.disabled = false; inp.value = ''; });   // allow re-selecting the same file
+  });
+
+  // ── Clear all saved remarks for this customer (splits are kept) ──
+  document.getElementById('adClear').addEventListener('click', function(){
+    if(!confirm('Clear ALL saved remarks for '+(DATA.name||CODE)+'?\nThis removes every remark in the Remarks column for this customer and cannot be undone. (Split breakdowns are kept.)')) return;
+    var btn = this; btn.disabled = true;
+    fetch(CLEAR_URL, {method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify({code:CODE})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(j && j.status==='ok'){ alert('Cleared '+j.cleared+' remark(s).'); location.reload(); }
+        else { alert('Clear failed: '+((j&&j.error)||'unknown error')); btn.disabled = false; }
+      })
+      .catch(function(){ alert('Clear failed — please try again.'); btn.disabled = false; });
+  });
+  // ── Click a column header to sort (data & pivot views) ──
+  // Default direction: numeric columns descend first, text ascends. Re-click the same column to
+  // flip. Data-view re-render re-applies the active search filter.
+  document.getElementById('adHead').addEventListener('click', function(e){
+    var th = e.target.closest && e.target.closest('th[data-sk]'); if(!th) return;
+    var k = th.getAttribute('data-sk');
+    if(pivot){
+      if(pivotSort.key===k) pivotSort.dir = -pivotSort.dir;
+      else pivotSort = {key:k, dir:(k==='label')?1:-1};
+      renderPivot();
+    } else {
+      var col = null;
+      for(var i=0;i<DATA_COLS.length;i++){ if(DATA_COLS[i].key===k){ col=DATA_COLS[i]; break; } }
+      if(sort.key===k) sort.dir = -sort.dir;
+      else sort = {key:k, dir:(col && col.num) ? -1 : 1};
+      renderData(); filterData();
+    }
+  });
+  document.getElementById('adSearch').addEventListener('input', filterData);
+  document.getElementById('adBody').addEventListener('input', function(e){
+    var t = e.target;
+    var rmk = t.closest && t.closest('input.ad-rmk'); if(rmk){ if(!rmk.readOnly) saveRemark(rmk); return; }
+    var line = t.closest && t.closest('.sp-line'); if(!line) return;
+    var wrap = t.closest('.sp-wrap'), i = +wrap.getAttribute('data-i'), j = +line.getAttribute('data-j');
+    var sp = (ROWS[i].splits||[])[j]; if(!sp) return;
+    if(t.classList.contains('sp-cat')) sp.category = t.value;
+    else if(t.classList.contains('sp-amt')) sp.amount = num(t.value);
+    else if(t.classList.contains('sp-rmk')) sp.remark = t.value;
+    reconcile(i); saveSplits(i);
+  });
+  // A <select> reliably fires 'change' (not all browsers fire 'input' on it), so mirror the
+  // Category save here. Guarded to sp-cat only, so it never double-handles the text inputs.
+  document.getElementById('adBody').addEventListener('change', function(e){
+    var t = e.target;
+    var cd = t.closest && t.closest('input.ad-cd'); if(cd){ saveCreditDays(cd); return; }
+    if(!t.classList || !t.classList.contains('sp-cat')) return;
+    var line = t.closest('.sp-line'), wrap = t.closest('.sp-wrap'); if(!line || !wrap) return;
+    var i = +wrap.getAttribute('data-i'), j = +line.getAttribute('data-j');
+    var sp = (ROWS[i].splits||[])[j]; if(!sp) return;
+    sp.category = t.value; reconcile(i); saveSplits(i);
+  });
+  document.getElementById('adBody').addEventListener('click', function(e){
+    var pv = e.target.closest && e.target.closest('.ad-piv-row');
+    if(pv){ openPivotDetail(pv.getAttribute('data-cat')); return; }
+    var exp = e.target.closest && e.target.closest('.ad-exp');
+    if(exp){ toggleRow(exp.closest('tr')); return; }
+    var add = e.target.closest && e.target.closest('.sp-add');
+    if(add){ var ia = +add.closest('.sp-wrap').getAttribute('data-i');
+      ROWS[ia].splits.push({category:'',amount:0,remark:''}); renderSplits(ia);
+      var ins = add.closest('.sp-wrap').querySelector('.sp-line:last-of-type .sp-cat'); if(ins) ins.focus();
+      return; }
+    var del = e.target.closest && e.target.closest('.sp-del');
+    if(del){ var w = del.closest('.sp-wrap'), id = +w.getAttribute('data-i'), jd = +del.closest('.sp-line').getAttribute('data-j');
+      ROWS[id].splits.splice(jd,1); renderSplits(id); saveSplits(id); return; }
+  });
+
+  // ── Pivot category → documents-behind-it popup ──
+  function splitSummary(r){
+    return (r.splits||[]).filter(function(s){return Math.abs(Number(s.amount)||0)>0.005;})
+      .map(function(s){return esc((s.category||'').trim()||'—')+' '+money(Number(s.amount)||0);}).join(' · ');
+  }
+  function ensureApd(){
+    var ov=document.getElementById('apdOv'); if(ov) return ov;
+    ov=document.createElement('div'); ov.id='apdOv'; ov.className='apd-ov';
+    ov.innerHTML='<div class="apd-box" id="apdBox"></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click',function(e){ if(e.target===ov) closePivotDetail(); });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape') closePivotDetail(); });
+    return ov;
+  }
+  function closePivotDetail(){ var ov=document.getElementById('apdOv'); if(ov) ov.classList.remove('show'); }
+  function openPivotDetail(cat){
+    ensureApd();
+    var isAll=(cat===PIVOT_ALL);
+    var list = isAll ? ROWS.map(function(r){return {r:r, amt:Number(r.balance_due)||0};}) : (PIVOT_DETAIL[cat]||[]).slice();
+    list.sort(function(a,b){ return Math.abs(b.amt)-Math.abs(a.amt); });
+    var tot=0; list.forEach(function(x){ tot+=x.amt; });
+    var title=isAll?'All documents':cat;
+    var over=(cat==='(unallocated)');
+    var rowsH=list.map(function(x){ var r=x.r, sp=splitSummary(r);
+      return '<tr><td class="lbl apd-no">'+esc(r.doc_no||'—')+'</td><td class="lbl">'+esc(r.type||'')+'</td>'
+        +'<td class="lbl">'+esc(r.posting_date||'')+'</td><td class="lbl">'+esc(r.due_date||'')+'</td>'
+        +'<td class="num">'+money(r.balance_due)+'</td>'
+        +'<td class="num apd-amt">'+money(x.amt)+'</td>'
+        +'<td class="lbl apd-sp">'+(sp||'<span class="apd-dash">—</span>')+'</td></tr>';
+    }).join('');
+    document.getElementById('apdBox').innerHTML=
+      '<div class="apd-h"><div class="apd-tt"><b>'+esc(title)+'</b>'
+        +'<span class="apd-sub">'+list.length+' document'+(list.length===1?'':'s')+' &middot; '+money(tot)+'</span></div>'
+        +'<button class="apd-x" type="button" onclick="closePivotDetail()" aria-label="Close">&times;</button></div>'
+      +(over?'<div class="apd-warn">These invoices\' category splits add up to more than their balance — the remainder shows here. Reduce the over-entered splits to clear it.</div>':'')
+      +'<div class="apd-wrap"><table class="apd-tbl"><thead><tr>'
+        +'<th class="lbl">Doc No</th><th class="lbl">Type</th><th class="lbl">Posting</th><th class="lbl">Due</th>'
+        +'<th class="num">Doc Balance</th><th class="num">In this row</th><th class="lbl">Category splits</th></tr></thead>'
+      +'<tbody>'+(rowsH||'<tr><td colspan="7" class="apd-empty">No documents.</td></tr>')+'</tbody></table></div>';
+    document.getElementById('apdOv').classList.add('show');
+  }
+
+  // ── NOT DUE grace-days control: reclassify every row live, persist per customer ──
+  var daysInput = document.getElementById('adDays');
+  if(daysInput){
+    daysInput.value = GRACE>0 ? String(GRACE) : '';
+    var daysTimer;
+    var applyDays = function(){
+      var v = parseInt(daysInput.value, 10);
+      GRACE = (isFinite(v) && v>0) ? v : 0;
+      render();                          // re-classify NOT DUE / OVERDUE with the new window
+      if(!pivot) filterData();           // keep any active search filter applied
+      clearTimeout(daysTimer);
+      daysTimer = setTimeout(function(){
+        fetch(SAVE_DAYS_URL,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':CSRF},
+          body:JSON.stringify({code:CODE, days:GRACE})}).catch(function(){});
+      }, 500);
+    };
+    daysInput.addEventListener('input', applyDays);
+    daysInput.addEventListener('change', applyDays);
+  }
+
+  render();
+})();
+</script>
+{% endblock %}

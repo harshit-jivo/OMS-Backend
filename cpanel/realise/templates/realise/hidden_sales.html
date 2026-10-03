@@ -1,0 +1,545 @@
+{% extends base_template %}
+{% block title %}Hidden Customer Sales — Jivo Group{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .cp-main{background:var(--rz-bg) !important;padding:10px 20px !important}
+  .hs-wrap{max-width:1500px;margin:0 auto}
+  .hs-h1{font-size:30px;font-weight:800;color:var(--rz-ink);margin:0;letter-spacing:-.5px;
+    text-shadow:0 0 26px rgba(99,102,241,.55), 0 4px 14px rgba(79,70,229,.28)}   /* glowing title */
+  .hs-psub{margin:6px 0 0;font-size:13px;color:var(--rz-muted)}
+
+  /* ── KPI cards (white + thin colour accent) ── */
+  .hs-head{margin:0 0 12px}
+  .hs-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:0 0 14px}
+  .hs-kpi{position:relative;overflow:hidden;border-radius:16px;padding:18px 20px;color:var(--rz-ink);cursor:pointer;
+          background:var(--rz-card);border:1px solid var(--rz-card-brd);box-shadow:var(--rz-shadow);transition:transform .12s,box-shadow .12s,border-color .12s}
+  .hs-kpi:hover{transform:translateY(-3px);box-shadow:var(--rz-shadow-lg);border-color:var(--kpi-acc,var(--rz-soft-brd))}
+  .hs-kpi:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(99,102,241,.28)}
+  /* KPI detail popup */
+  .hs-pop-ov{position:fixed;inset:0;background:rgba(15,23,42,.32);display:none;align-items:center;justify-content:center;z-index:2000}
+  .hs-pop-ov.show{display:flex}
+  .hs-pop{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:18px;box-shadow:0 24px 60px rgba(15,23,42,.28);padding:24px 28px;min-width:280px;max-width:92vw;position:relative;overflow:hidden}
+  .hs-pop::before{content:"";position:absolute;left:0;right:0;top:0;height:4px;background:var(--kpi-acc,var(--rz-acc-indigo))}
+  .hs-pop-l{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .hs-pop-l .ic{color:var(--kpi-ic,#6366f1)}
+  .hs-pop-v{font-size:44px;font-weight:900;letter-spacing:-1px;line-height:1.05;margin:12px 0 6px;color:var(--rz-ink);font-variant-numeric:tabular-nums}
+  .hs-pop-m{font-size:13px;font-weight:600;color:var(--rz-muted)}
+  .hs-pop-x{position:absolute;top:12px;right:14px;border:0;background:transparent;color:var(--rz-faint);font-size:22px;line-height:1;cursor:pointer}
+  .hs-pop-x:hover{color:var(--rz-body)}
+  .hs-pop-bdh{margin:16px 0 6px;font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--rz-muted);border-top:1px solid var(--rz-line);padding-top:12px}
+  .hs-pop-bd{max-height:230px;overflow-y:auto;min-width:340px}
+  .hs-pop-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:5px 0;font-variant-numeric:tabular-nums}
+  .hs-pop-rl{font-size:12.5px;color:var(--rz-body);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hs-pop-rv{font-size:13px;font-weight:800;color:var(--rz-ink);white-space:nowrap;flex-shrink:0}
+  .hs-pop-more{margin-top:8px;font-size:11.5px;font-weight:700;color:var(--rz-faint);text-align:center}
+  .hs-pop-empty{padding:10px 0;font-size:12.5px;color:var(--rz-faint)}
+  .hs-kpi::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--kpi-acc,var(--rz-acc-indigo))}
+  .hs-kpi .hs-kpi-l{font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--rz-muted);display:flex;align-items:center;gap:7px}
+  .hs-kpi .hs-kpi-l .ic{color:var(--kpi-ic,#6366f1)}
+  .hs-kpi .hs-kpi-v{font-size:29px;font-weight:900;margin-top:8px;letter-spacing:-.5px;line-height:1;color:var(--rz-ink);font-variant-numeric:tabular-nums}
+  .hs-kpi .hs-kpi-m{font-size:12px;font-weight:600;color:var(--rz-muted);margin-top:6px}
+  .hs-kpi .ic.hs-kpi-bg{position:absolute;right:-8px;bottom:-14px;font-size:96px;color:var(--kpi-ic,#6366f1);opacity:.08}
+  .k-val{--kpi-acc:var(--rz-acc-indigo);--kpi-ic:#6366f1}
+  .k-ltr{--kpi-acc:var(--rz-acc-teal);--kpi-ic:#0d9488}
+  .k-inv{--kpi-acc:var(--rz-acc-red);--kpi-ic:#e11d48}
+  .k-cust{--kpi-acc:var(--rz-acc-teal);--kpi-ic:#0891b2}
+  .k-prem{--kpi-acc:var(--rz-acc-indigo);--kpi-ic:#2563eb}
+  .k-comm{--kpi-acc:var(--rz-acc-amber);--kpi-ic:#d97706}
+
+  .hs-bar{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:0 0 14px;background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:14px;padding:14px 16px;box-shadow:var(--rz-shadow)}
+  .hs-fld{display:flex;flex-direction:column;gap:5px}
+  .hs-lbl{font-size:10px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--rz-muted)}
+  .hs-bar input[type=date],.hs-bar input[type=search],.hs-bar input[type=number],.hs-bar select{font-family:inherit;font-size:13px;font-weight:600;color:var(--rz-ink);border:1px solid #e2e8f0;border-radius:9px;padding:8px 10px;background:#fff;outline:none}
+  .hs-bar input[type=search]{min-width:200px}
+  .hs-bar input[type=search]::placeholder,.hs-bar input[type=number]::placeholder{color:var(--rz-faint)}
+  .hs-bar input[type=search]:focus,.hs-bar input[type=date]:focus,.hs-bar input[type=number]:focus,.hs-bar select:focus{border-color:var(--rz-indigo);box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+  .hs-fetch{background:var(--rz-soft);color:var(--rz-indigo-deep);border:1px solid var(--rz-soft-brd);border-radius:9px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+  .hs-fetch:hover{background:#e0e7ff;border-color:#c7d2fe}
+  .hs-export{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;padding:9px 14px;font-size:12px;font-weight:700;color:#047857;cursor:pointer;font-family:inherit}
+  .hs-export:hover{background:#ecfdf5;border-color:#a7f3d0}
+
+  .com-drill-box{position:relative}
+  .com-drill-btn{display:inline-flex;align-items:center;gap:10px;min-width:170px;justify-content:space-between;background:#fff;border:1px solid #e2e8f0;color:var(--rz-indigo-deep);font-weight:700;font-size:12px;padding:8px 10px;border-radius:9px;cursor:pointer;font-family:inherit}
+  .com-drill-btn .com-caret{color:var(--rz-muted);font-size:10px}
+  .com-drill-panel{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:250px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--rz-card-brd);border-radius:12px;box-shadow:var(--rz-shadow-lg)}
+  .com-drill-panel.open{display:block}
+  .hs-m{line-height:1.4;font-variant-numeric:tabular-nums;font-size:14px;font-weight:800}
+  .hs-m ~ .hs-m{font-size:12.5px;font-weight:700}   /* stacked extra metrics — readable, not tiny */
+  .hs-m.hs-m-lit{color:#0d9488}
+  .hs-m.hs-m-qty{color:#475569}
+  .hs-m.hs-m-rlz{color:#7c3aed}
+  .hs-m.hs-m-rate{color:#c2410c}
+  .hs-m.hs-m-inv{color:#334155;font-weight:800}
+  /* "N bills" cue on a leaf item + its inline bill drop-down sub-rows */
+  .hs-billcue{font-size:10.5px;font-weight:800;color:var(--rz-indigo-deep);background:var(--rz-soft);border:1px solid var(--rz-soft-brd);border-radius:20px;padding:1px 8px;margin-left:8px;vertical-align:middle}
+  tr.hs-subrow td{background:#fbfcfe}
+  tr.hs-subrow:hover td{background:#f4f7fb}
+  td.hs-billname{color:var(--rz-body);font-weight:700}
+  .hs-tag-inv{background:#eef2ff!important;color:#4338ca!important}
+  .hs-tag-dn{background:#fef2f2!important;color:#b91c1c!important;border:1px solid #fecaca}
+  .hs-bill-dt{font-size:10.5px;color:var(--rz-faint);font-weight:600;margin-left:8px}
+  .hs-dn-note{font-size:10px;font-weight:700;color:#b91c1c;background:#fef2f2;border-radius:20px;padding:1px 8px;margin-left:8px;white-space:nowrap}
+  .hs-dn-inline{display:inline-block;font-size:9.5px;font-weight:800;color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;border-radius:20px;padding:0 6px;margin-left:6px;vertical-align:middle}
+  .hs-msuf{font-size:9.5px;font-weight:700;opacity:.6;margin-left:2px}   /* unit tag (/L, /Pc, L, pcs) */
+  /* small pill labelling each stacked metric — like the Debit Note chip */
+  .hs-chip{display:inline-block;font-size:9px;font-weight:800;border-radius:20px;padding:0 6px;margin-right:6px;vertical-align:middle;letter-spacing:.3px;text-transform:uppercase;min-width:38px;text-align:center}
+  .hs-chip.c-val{color:#334155;background:#f1f5f9;border:1px solid #e2e8f0}
+  .hs-chip.c-lit{color:#0d9488;background:#f0fdfa;border:1px solid #99f6e4}
+  .hs-chip.c-qty{color:#475569;background:#f1f5f9;border:1px solid #e2e8f0}
+  .hs-chip.c-rlz{color:#7c3aed;background:#f5f3ff;border:1px solid #ddd6fe}
+  .hs-chip.c-rate{color:#c2410c;background:#fff7ed;border:1px solid #fed7aa}
+  .com-dp-head{display:flex;justify-content:space-between;padding:9px 12px;border-bottom:1px solid var(--rz-line);position:sticky;top:0;background:#fff}
+  .com-dp-head a{color:var(--rz-indigo-deep);font-size:12px;font-weight:700;cursor:pointer}
+  .com-dp-list{padding:4px 0}
+  .com-dp-item{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:13px}
+  .com-dp-item:hover{background:var(--rz-soft)}
+  .com-dp-item input{width:16px;height:16px;cursor:pointer;flex:0 0 auto}
+  .com-dp-item .com-dp-name{flex:1 1 auto;font-weight:600;color:var(--rz-ink)}
+  .com-dp-item .com-dp-sub{font-size:10px;color:var(--rz-faint);font-weight:600}
+  .com-dp-item .com-pos{flex:0 0 auto;width:19px;height:19px;border-radius:50%;background:var(--rz-indigo);color:#fff;font-size:11px;font-weight:800;display:none;align-items:center;justify-content:center}
+  .com-dp-item.checked .com-pos{display:inline-flex}
+  .com-dp-foot{padding:9px 12px;border-top:1px solid var(--rz-line);position:sticky;bottom:0;background:#fff}
+  .com-dp-foot button{width:100%;background:var(--rz-indigo);color:#fff;border:none;border-radius:8px;padding:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit}
+
+  .hs-table-card{background:var(--rz-card);border:1px solid var(--rz-card-brd);border-radius:16px;overflow:hidden;box-shadow:var(--rz-shadow)}
+  .hs-table-wrap{overflow:auto;max-height:72vh}
+  table.hs-table{width:max-content;min-width:100%;border-collapse:collapse;font-size:13px}
+  table.hs-table thead th{position:sticky;top:0;z-index:2;background:var(--rz-head-bg);color:var(--rz-head-ink);text-align:right;font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:12px 16px;white-space:nowrap;border-bottom:1px solid var(--rz-line)}
+  table.hs-table thead th.gc-name{text-align:left;left:0;z-index:3}
+  table.hs-table tbody td{padding:9px 16px;border-bottom:1px solid #eef2f6;color:var(--rz-body);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.hs-table tbody td.gc-name{text-align:left;color:var(--rz-ink);font-weight:600;position:sticky;left:0;background:#fff;z-index:1}
+  table.hs-table tbody tr:nth-child(even) td.gc-name{background:#fafcff}
+  table.hs-table tbody tr:hover td{background:#f1f5ff}
+  table.hs-table tbody tr:hover td.gc-name{background:#eef3ff}
+  td.hs-hi{font-weight:800;color:var(--rz-ink)}
+  .hs-v0{color:#cbd5e1}
+  table.hs-table tbody tr.hs-total td{background:var(--rz-total-bg);color:var(--rz-ink);font-weight:800;position:sticky;bottom:0;border-top:2px solid var(--rz-total-brd)}
+  table.hs-table tbody tr.hs-total td.gc-name{background:var(--rz-total-bg);color:var(--rz-ink)}
+  .hs-tw{display:inline-block;width:13px;font-size:9px;color:var(--rz-muted);margin-right:7px;cursor:pointer;transition:transform .12s;vertical-align:middle}
+  .hs-tw.open{transform:rotate(90deg)}
+  .hs-tw-empty{display:inline-block;width:13px;margin-right:7px}
+  .hs-tag{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:4px;background:var(--rz-soft);color:var(--rz-indigo-deep);margin-right:8px;vertical-align:middle}
+  .hs-empty{padding:40px;text-align:center;color:var(--rz-muted)}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="hs-wrap">
+  <div class="hs-head"><h1 class="hs-h1">Hidden Customer Sales</h1></div>
+
+  <div class="hs-kpis" id="hsKpis"></div>
+
+  <!-- KPI detail popup: click any KPI to see its full value + meaning. -->
+  <div class="hs-pop-ov" id="hsPopOv"><div class="hs-pop" id="hsPop"></div></div>
+
+  <div class="hs-bar">
+    <div class="hs-fld"><span class="hs-lbl">From</span><input type="date" id="hsStart"></div>
+    <div class="hs-fld"><span class="hs-lbl">To</span><input type="date" id="hsEnd"></div>
+    <div class="hs-fld"><span class="hs-lbl">Last (months)</span><input type="number" id="hsMonths" min="1" max="120" step="1" placeholder="e.g. 6" style="width:96px" title="Fetch the last N months (overrides From/To); drill by Month to see it month-wise"></div>
+    <button class="hs-fetch" id="hsFetch">&#9654; Fetch</button>
+    <div class="hs-fld"><span class="hs-lbl">Type</span>
+      <select id="hsType"><option value="">All</option><option value="PREMIUM">Premium</option><option value="COMMODITY">Commodity</option></select>
+    </div>
+    <div class="hs-fld"><span class="hs-lbl">State</span>
+      <select id="hsState"><option value="">All states</option></select>
+    </div>
+    <div class="hs-fld"><span class="hs-lbl">Main Group</span>
+      <select id="hsGroup"><option value="">All groups</option></select>
+    </div>
+    <div class="hs-fld"><span class="hs-lbl">Search</span>
+      <input type="search" id="hsSearch" placeholder="Customer / item / cost center / doc…" autocomplete="off">
+    </div>
+    <div class="hs-fld"><span class="hs-lbl">Metric</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="hsMetricBtn"><span id="hsMetricLabel">Value ₹</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="hsMetricPanel"><div class="com-dp-list" id="hsMetricList"></div></div>
+      </div>
+    </div>
+    <div class="hs-fld"><span class="hs-lbl">Drill By</span>
+      <div class="com-drill-box">
+        <button type="button" class="com-drill-btn" id="hsDrillBtn"><span id="hsDrillLabel">Customer › Item</span><span class="com-caret">&#9662;</span></button>
+        <div class="com-drill-panel" id="hsDrillPanel">
+          <div class="com-dp-head"><a id="hsDrillAll">Select All</a><a id="hsDrillClr">Clear All</a></div>
+          <div class="com-dp-list" id="hsDrillList"></div>
+          <div class="com-dp-foot"><button type="button" id="hsDrillApply">Apply</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="hs-fld"><span class="hs-lbl">&nbsp;</span>
+      <button class="hs-export" id="hsExport" title="Export the current view to Excel"><i class="ic ic-download" style="font-size:16px"></i>Export Excel</button>
+    </div>
+  </div>
+
+  <div class="hs-table-card">
+    <div class="hs-table-wrap">
+      <table class="hs-table">
+        <thead id="hsHead"></thead>
+        <tbody id="hsBody"><tr><td class="hs-empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function(){
+  function csrf(){var m=document.querySelector('meta[name=csrf-token]');return m?m.content:'';}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function fRz(x){x=Number(x)||0;return '₹'+x.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+  function fN(n){n=Number(n)||0;if(Math.abs(n)<0.5)return '<span class="hs-v0">—</span>';return Math.round(n).toLocaleString('en-IN');}
+  function money(n){n=Number(n)||0;if(Math.abs(n)<0.5)return '<span class="hs-v0">—</span>';return '₹'+Math.round(n).toLocaleString('en-IN');}
+  function abbr(n){n=Number(n)||0;var a=Math.abs(n),sg=n<0?'-':'';if(a>=1e7)return sg+'₹'+(a/1e7).toFixed(2)+' Cr';if(a>=1e5)return sg+'₹'+(a/1e5).toFixed(2)+' L';if(a>=1e3)return sg+'₹'+(a/1e3).toFixed(1)+' K';return sg+'₹'+Math.round(a);}
+  function abbrQ(n){n=Number(n)||0;var a=Math.abs(n),sg=n<0?'-':'';if(a>=1e5)return sg+(a/1e5).toFixed(2)+' L';if(a>=1e3)return sg+(a/1e3).toFixed(1)+' K';return sg+Math.round(a).toLocaleString('en-IN');}
+  function debounce(fn,ms){var t;return function(){clearTimeout(t);t=setTimeout(fn,ms);};}
+
+  var DIMS=[
+    {key:'customer',label:'Customer',sub:'CardName / buyer'},
+    {key:'doc',label:'Invoice',sub:'Bill / invoice no'},
+    {key:'item_name',label:'Item Name',sub:'SAP item name'},
+    {key:'state',label:'State',sub:'Ship-to state'},
+    {key:'main_group',label:'Main Group',sub:'Channel'},
+    {key:'u_type',label:'Prem/Comm',sub:'Premium / Commodity'},
+    {key:'cost_center',label:'Cost Center',sub:'OcrCode (variety)'},
+    {key:'date',label:'Date',sub:'Invoice date'},
+    {key:'status',label:'Status',sub:'Open / Closed'},
+  ];
+  var DIM_LABEL={}; DIMS.forEach(function(d){DIM_LABEL[d.key]=d.label;});
+  var rows=[], loaded=false, err=null, expanded={}, billsX={};   // billsX: inline bill drop-down per leaf item
+  var order=['customer','item_name'], chosen=['customer','item_name'];
+  var searchF='', typeF='', stateF='', groupF='';
+  var METRIC_DEFS=[{k:'val',l:'Value ₹'},{k:'lit',l:'Litres'},{k:'qty',l:'Quantity'},{k:'rlz',l:'Realise ₹/L'},{k:'rate',l:'Rate ₹/Pc'},{k:'inv',l:'Invoice No'}];
+  var RATE_METRICS={rlz:1,rate:1};   // per-unit rates: blended (never divided by #months) in Avg/export
+  var METRIC_SUF={val:'',lit:' L',qty:' pcs',rlz:' /L',rate:' /Pc',inv:''};   // unit tag so stacked metrics are self-labelling
+  var METRIC_CHIP={val:'Value',lit:'Litre',qty:'Qty',rlz:'Realise',rate:'Rate',inv:''};   // small pill labelling each stacked metric
+  // Invoice-No "metric": the bill number(s) behind a cell — the doc if one, else "N bills".
+  function invText(o){var ds=Object.keys((o&&o.docs)||{});return !ds.length?'':(ds.length===1?ds[0]:ds.length+' bills');}
+  var METRIC_LBL={}; METRIC_DEFS.forEach(function(d){METRIC_LBL[d.k]=d.l;});
+  var metrics=['val'];   // multi-select: any of val / lit / qty / rlz, shown stacked in each cell
+
+  function blank(){return {docs:{},dn:{},qty:0,lit:0,val:0,rq:0,rvp:0,byM:{}};}
+  function addRow(n,r){
+    // Rate ₹/Pc = the bill's OWN unit rate (INV1.Price), qty-weighted, over the REAL selling lines only.
+    // Combo / no-inventory-movement lines (r.combo) carry a nominal split price, so they're excluded.
+    // dn = the debit-note bills among this node's invoices (whole invoice has no goods line).
+    var q=Number(r.qty)||0, l=Number(r.litres)||0, v=Number(r.value)||0, p=Number(r.price)||0, real=!r.combo;
+    if(r.doc){n.docs[r.doc]=1;if(r.debit_note)n.dn[r.doc]=1;}n.qty+=q;n.lit+=l;n.val+=v;if(real){n.rq+=q;n.rvp+=p*q;}
+    var ym=r.ym||'—', b=n.byM[ym]; if(!b)b=n.byM[ym]={qty:0,lit:0,val:0,rq:0,rvp:0,docs:{},dn:{}};   // per-month bucket
+    b.qty+=q;b.lit+=l;b.val+=v;if(r.doc){b.docs[r.doc]=1;if(r.debit_note)b.dn[r.doc]=1;}if(real){b.rq+=q;b.rvp+=p*q;}
+  }
+  function vals(n){return {inv:Object.keys(n.docs).length,qty:n.qty,lit:n.lit,val:n.val};}
+  function metricRaw(o,k){o=o||{};if(k==='lit')return o.lit||0;if(k==='qty')return o.qty||0;if(k==='rlz')return (o.lit>0)?(o.val/o.lit):0;if(k==='rate')return (o.rq>0)?(o.rvp/o.rq):0;return o.val||0;}
+  function fmtMetricV(k,x){if(k==='rlz'||k==='rate')return x?fRz(x):'';if(!x)return '';return k==='val'?money(Math.round(x)):fN(Math.round(x));}
+  // Stacked cell of the selected metrics (grand-style: realise = value/litres of the bucket).
+  function metricLine(k,o,valOverride){
+    if(k==='inv'){var ds=Object.keys((o&&o.docs)||{}), dn=Object.keys((o&&o.dn)||{});
+      var tag=(ds.length&&dn.length===ds.length)?'<span class="hs-dn-inline">Debit Note</span>'   // all bills are debit notes
+             :(dn.length?'<span class="hs-dn-inline">'+dn.length+' DN</span>':'');                // some are
+      return '<div class="hs-m hs-m-inv">'+esc(invText(o))+tag+'</div>';}
+    var x=(valOverride!==undefined)?valOverride:metricRaw(o,k), v=fmtMetricV(k,x);
+    return '<div class="hs-m hs-m-'+k+'"><span class="hs-chip c-'+k+'">'+METRIC_CHIP[k]+'</span>'+(v||'—')+'</div>';
+  }
+  function metricCell(o){return metrics.map(function(k){return metricLine(k,o);}).join('');}
+  // Avg cell: invoice-no + rate metrics (realise / rate ₹/Pc) don't divide by #months; counts do.
+  function metricCellAvg(o,nM){return metrics.map(function(k){return (k==='inv'||RATE_METRICS[k])?metricLine(k,o):metricLine(k,o,metricRaw(o,k)/nM);}).join('');}
+  function activeMonths(a){var m={};a.forEach(function(r){if(r.ym)m[r.ym]={ym:r.ym,label:r.month||r.ym};});return Object.keys(m).sort().map(function(k){return m[k];});}
+
+  function rowMatches(r){
+    if(typeF && String(r.u_type||'').toUpperCase()!==typeF)return false;
+    if(stateF && String(r.state||'')!==stateF)return false;
+    if(groupF && String(r.main_group||'')!==groupF)return false;
+    if(!searchF)return true;
+    var hay=(r.customer+' '+r.item_name+' '+r.state+' '+r.main_group+' '+r.cost_center+' '+r.doc+' '+r.status+' '+r.item_code).toLowerCase();
+    return hay.indexOf(searchF)!==-1;
+  }
+  function fillFilter(id,key,cur){
+    var s={}; rows.forEach(function(r){var v=r[key];if(v&&v!=='—')s[v]=1;});
+    var el=document.getElementById(id), first=el.querySelector('option').outerHTML;
+    el.innerHTML=first+Object.keys(s).sort().map(function(v){
+      return '<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'+esc(v)+'</option>';}).join('');
+  }
+  function buildFilters(){ fillFilter('hsState','state',stateF); fillFilter('hsGroup','main_group',groupF); }
+  function activeRows(){var out=[];for(var i=0;i<rows.length;i++){if(rowMatches(rows[i]))out.push(rows[i]);}return out;}
+
+  function buildTree(subset,dims,depth,prefix){
+    if(depth>=dims.length)return [];
+    var dim=dims[depth], map={}, ord=[];
+    for(var i=0;i<subset.length;i++){var r=subset[i],k=String(r[dim]||'—')||'—';
+      var n=map[k]; if(!n){n=map[k]=blank();n.label=k;n.dim=dim;n._rows=[];ord.push(k);}
+      addRow(n,r); n._rows.push(r);
+    }
+    return ord.map(function(k){var n=map[k]; n.path=prefix+'>'+dim+':'+k;
+      n.kids=buildTree(n._rows,dims,depth+1,n.path); n.leaf=!n.kids.length; delete n._rows; return n;
+    }).sort(function(a,b){
+      if(dim==='date')return String(b.label).localeCompare(String(a.label));   // newest first
+      return (b.val-a.val)||(b.lit-a.lit)||String(a.label).localeCompare(String(b.label));
+    });
+  }
+
+  // Month-wise pivot rows: name + one cell per month (selected metric) + Grand Total + Avg.
+  function monthRows(nodes,months,depth){
+    var html='', nM=months.length||1;
+    nodes.forEach(function(n){
+      var hasKids=!n.leaf, nDocs=Object.keys(n.docs||{}).length, hasBills=n.leaf&&nDocs>1;
+      var open=hasKids?!!expanded[n.path]:!!billsX[n.path], canExp=hasKids||hasBills, pad='padding-left:'+(12+depth*18)+'px';
+      var tw=canExp?'<span class="hs-tw'+(open?' open':'')+'">&#9654;</span>':'<span class="hs-tw-empty"></span>';
+      var tag='<span class="hs-tag">'+esc(DIM_LABEL[n.dim]||n.dim)+'</span>';
+      var toggle=hasKids?'data-hstoggle="'+esc(n.path)+'"':(hasBills?'data-hsbills="'+esc(n.path)+'"':'');
+      var cue=hasBills?' <span class="hs-billcue">'+nDocs+' bills</span>':'';
+      var name='<td class="gc-name" style="'+pad+(canExp?';cursor:pointer':'')+'" '+toggle+'>'+tw+tag+esc(n.label)+cue+'</td>';
+      var mc=months.map(function(mo){return '<td>'+metricCell(n.byM[mo.ym]||{})+'</td>';}).join('');
+      html+='<tr>'+name+mc+'<td class="hs-hi">'+metricCell(n)+'</td><td>'+metricCellAvg(n,nM)+'</td></tr>';
+      if(hasKids&&open)html+=monthRows(n.kids,months,depth+1);
+      else if(hasBills&&open)html+=billRows(n,months,depth+1);
+    });
+    return html;
+  }
+
+  function renderKpis(){
+    var a=activeRows(), docs={}, custs={}, lit=0, val=0, prem=0, comm=0;
+    a.forEach(function(r){
+      if(r.doc)docs[r.doc]=1;if(r.card_code)custs[r.card_code]=1;
+      lit+=Number(r.litres)||0;val+=Number(r.value)||0;
+      var t=String(r.u_type||'').toUpperCase();
+      if(t==='PREMIUM')prem+=Number(r.value)||0; else if(t==='COMMODITY')comm+=Number(r.value)||0;
+    });
+    var nInv=fN(Object.keys(docs).length), nCust=fN(Object.keys(custs).length);
+    var cards=[
+      {c:'k-val',ic:'banknote',l:'Hidden Value',v:abbr(val),vf:'₹'+fN(val),m:'Σ invoice line value (₹)'},
+      {c:'k-prem',ic:'award',l:'Premium',v:abbr(prem),vf:'₹'+fN(prem),m:'Hidden premium value (₹)'},
+      {c:'k-comm',ic:'package',l:'Commodity',v:abbr(comm),vf:'₹'+fN(comm),m:'Hidden commodity value (₹)'},
+      {c:'k-ltr',ic:'droplet',l:'Hidden Litres',v:abbrQ(lit),vf:fN(Math.round(lit))+' L',m:'Quantity × pack size'},
+      {c:'k-inv',ic:'eye-off',l:'Invoices',v:nInv,vf:nInv,m:'Hidden invoices'},
+      {c:'k-cust',ic:'store',l:'Customers',v:nCust,vf:nCust,m:'With hidden sales'}
+    ];
+    hsKpiCards=cards;
+    document.getElementById('hsKpis').innerHTML=cards.map(function(k,i){
+      return '<div class="hs-kpi '+k.c+'" role="button" tabindex="0" data-kpi="'+i+'" title="Click for detail">'
+        +'<div class="hs-kpi-l"><i class="ic ic-'+k.ic+'" style="font-size:15px"></i>'+k.l+'</div>'
+        +'<div class="hs-kpi-v">'+k.v+'</div><div class="hs-kpi-m">'+esc(k.m)+'</div>'
+        +'<i class="ic hs-kpi-bg ic-'+k.ic+'"></i></div>';
+    }).join('');
+  }
+  // Click / keyboard-activate a KPI -> detail popup with its full value + meaning.
+  var hsKpiCards=[];
+  // Break the clicked KPI down into its contributors (grouped from the loaded rows) so the popup
+  // adds real detail instead of echoing the card. Value KPIs → by item/invoice/customer (₹);
+  // Litres → by item (L). Sorted biggest-first.
+  function hsBreakdown(cls){
+    var g={}, order=[], lit=(cls==='k-ltr');
+    (rows||[]).forEach(function(r){
+      var t=String(r.u_type||'').toUpperCase();
+      if(cls==='k-prem'&&t!=='PREMIUM')return;
+      if(cls==='k-comm'&&t!=='COMMODITY')return;
+      var key = cls==='k-inv'?(r.doc||'—') : cls==='k-cust'?(r.customer||'—') : (r.item_name||'—');
+      var val = lit?(Number(r.litres)||0):(Number(r.value)||0);
+      if(!(key in g)){g[key]=0;order.push(key);}
+      g[key]+=val;
+    });
+    var list=order.map(function(k){return {label:k,val:g[k]};}).filter(function(x){return Math.abs(x.val)>0.001;});
+    list.sort(function(a,b){return b.val-a.val;});
+    return {head: cls==='k-inv'?'Invoice':(cls==='k-cust'?'Customer':'Item'), lit:lit, list:list};
+  }
+  function openHsKpi(i){
+    var k=hsKpiCards[i]; if(!k)return;
+    var bd=hsBreakdown(k.c);
+    var body=bd.list.length
+      ? bd.list.slice(0,12).map(function(x){
+          return '<div class="hs-pop-row"><span class="hs-pop-rl">'+esc(x.label)+'</span>'
+            +'<span class="hs-pop-rv">'+(bd.lit?fN(Math.round(x.val))+' L':'₹'+fN(Math.round(x.val)))+'</span></div>';
+        }).join('')
+      : '<div class="hs-pop-empty">No breakdown available.</div>';
+    var more=bd.list.length>12?'<div class="hs-pop-more">+'+(bd.list.length-12)+' more</div>':'';
+    var pop=document.getElementById('hsPop');
+    pop.className='hs-pop '+k.c;
+    pop.innerHTML='<button class="hs-pop-x" onclick="closeHsKpi()" aria-label="Close">&times;</button>'
+      +'<div class="hs-pop-l"><i class="ic ic-'+k.ic+'" style="font-size:17px"></i>'+esc(k.l)+'</div>'
+      +'<div class="hs-pop-v">'+k.vf+'</div><div class="hs-pop-m">'+esc(k.m)+'</div>'
+      +'<div class="hs-pop-bdh">'+esc(bd.head)+' breakdown</div>'
+      +'<div class="hs-pop-bd">'+body+'</div>'+more;
+    document.getElementById('hsPopOv').classList.add('show');
+  }
+  function closeHsKpi(){document.getElementById('hsPopOv').classList.remove('show');}
+  document.getElementById('hsKpis').addEventListener('click',function(e){var c=e.target.closest('.hs-kpi');if(c)openHsKpi(+c.getAttribute('data-kpi'));});
+  document.getElementById('hsKpis').addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){var c=e.target.closest('.hs-kpi');if(c){e.preventDefault();openHsKpi(+c.getAttribute('data-kpi'));}}});
+  document.getElementById('hsPopOv').addEventListener('click',function(e){if(e.target===this)closeHsKpi();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHsKpi();});
+
+  function render(){
+    document.getElementById('hsDrillLabel').textContent=order.length?order.map(function(k){return DIM_LABEL[k];}).join(' › '):'— none —';
+    var head=document.getElementById('hsHead'), body=document.getElementById('hsBody');
+    if(err){head.innerHTML='';body.innerHTML='<tr><td class="hs-empty">Could not load ('+esc(err)+').</td></tr>';document.getElementById('hsKpis').innerHTML='';return;}
+    if(!loaded){head.innerHTML='';body.innerHTML='<tr><td class="hs-empty">Loading…</td></tr>';return;}
+    renderKpis();
+    var dims=order.length?order:['customer'];
+    var a=activeRows();
+    if(!a.length){head.innerHTML='';body.innerHTML='<tr><td class="hs-empty">No hidden invoices in this selection.</td></tr>';return;}
+    var months=activeMonths(a), nM=months.length||1;
+    head.innerHTML='<tr><th class="gc-name">'+esc(dims.map(function(k){return DIM_LABEL[k];}).join(' › '))+'</th>'
+      +months.map(function(mo){return '<th>'+esc(mo.label)+'</th>';}).join('')
+      +'<th>Grand Total</th><th>Avg</th></tr>';
+    var html=monthRows(buildTree(a,dims,0,''),months,0);
+    var t=blank(); a.forEach(function(r){addRow(t,r);});
+    html+='<tr class="hs-total"><td class="gc-name">TOTAL</td>'
+      +months.map(function(mo){return '<td>'+metricCell(t.byM[mo.ym]||{})+'</td>';}).join('')
+      +'<td class="hs-hi">'+metricCell(t)+'</td><td>'+metricCellAvg(t,nM)+'</td></tr>';
+    body.innerHTML=html;
+  }
+
+  function renderDrillList(){
+    var list=document.getElementById('hsDrillList'); list.innerHTML='';
+    DIMS.forEach(function(d){
+      var pos=chosen.indexOf(d.key);
+      var item=document.createElement('label'); item.className='com-dp-item'+(pos!==-1?' checked':'');
+      item.innerHTML='<input type="checkbox" '+(pos!==-1?'checked':'')+'><span class="com-dp-name">'+esc(d.label)+'<div class="com-dp-sub">'+esc(d.sub)+'</div></span><span class="com-pos">'+(pos!==-1?pos+1:'')+'</span>';
+      item.querySelector('input').addEventListener('change',function(){
+        var i=chosen.indexOf(d.key); if(this.checked){if(i===-1)chosen.push(d.key);}else if(i!==-1)chosen.splice(i,1);
+        renderDrillList();
+      });
+      list.appendChild(item);
+    });
+  }
+
+  function ymd(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+  var HS_MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function fmtMonth(d){d=String(d||'');if(d.length>=7){var y=d.slice(0,4),m=parseInt(d.slice(5,7),10);if(m>=1&&m<=12)return HS_MON[m-1]+' '+y;}return '—';}
+  function load(){
+    // 'Last (months)' overrides From/To when set (like Compare Sales): end=today,
+    // start=1st of the (N-1) months-ago month. Otherwise use the explicit From/To.
+    var sd, ed, m=parseInt(document.getElementById('hsMonths').value,10);
+    if(m&&m>=1){ if(m>120)m=120; var now=new Date(); ed=ymd(now); sd=ymd(new Date(now.getFullYear(), now.getMonth()-(m-1), 1));
+      document.getElementById('hsStart').value=sd; document.getElementById('hsEnd').value=ed; }
+    else { sd=document.getElementById('hsStart').value; ed=document.getElementById('hsEnd').value; }
+    if(!sd||!ed)return;
+    var btn=document.getElementById('hsFetch'); btn.disabled=true; btn.textContent='Loading…';
+    loaded=false; render();
+    fetch('/realise/api/hidden-sales/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({start_date:sd,end_date:ed})})
+      .then(function(r){return r.ok?r.json():{status:'error',error:'HTTP '+r.status};})
+      .then(function(p){ rows=p.rows||[]; rows.forEach(function(r){r.ym=String(r.date||'').slice(0,7); r.month=fmtMonth(r.date);}); err=p.status==='error'?(p.error||'error'):null; loaded=true; expanded={}; buildFilters(); render(); })
+      .catch(function(){ err='load failed'; loaded=true; render(); })
+      .then(function(){ btn.disabled=false; btn.innerHTML='&#9654; Fetch'; });
+  }
+
+  // Excel export — flatten the current drill pivot (dimension columns + Invoices / Quantity /
+  // Litres / Value), respecting all filters. Hidden Sales is Oil only.
+  function exportXlsx(){
+    var a=activeRows();
+    if(!a.length){ window.alert('No data to export — click Fetch first.'); return; }
+    var dims=order.length?order:['customer'];
+    var months=activeMonths(a), nM=months.length||1;
+    function xv(o,k){if(k==='inv')return invText(o);var v=metricRaw(o,k);return RATE_METRICS[k]?Math.round(v*100)/100:Math.round(v);}   // grand/cell value per metric
+    function av(o,k){if(k==='inv')return invText(o);return RATE_METRICS[k]?xv(o,k):Math.round(metricRaw(o,k)/nM);}                       // avg per metric (rate = blended)
+    var tree=buildTree(a,dims,0,'');
+    // One sub-column per (month × selected metric), grouped by month, then Grand Total + Avg per metric.
+    var hd=dims.map(function(k){return DIM_LABEL[k];});
+    months.forEach(function(mo){metrics.forEach(function(k){hd.push(mo.label+' — '+METRIC_LBL[k]);});});
+    metrics.forEach(function(k){hd.push('Grand Total — '+METRIC_LBL[k]);});
+    metrics.forEach(function(k){hd.push('Avg — '+METRIC_LBL[k]);});
+    var out=[hd.map(function(h){return {value:h,bold:true,fill:'0F172A',color:'FFFFFF'};})];
+    (function walk(nodes,depth,labels){
+      nodes.forEach(function(n){
+        var dc=[]; for(var i=0;i<dims.length;i++)dc.push(i<depth?labels[i]:(i===depth?n.label:''));
+        var mc=[]; months.forEach(function(mo){var b=n.byM[mo.ym]||{};metrics.forEach(function(k){mc.push(xv(b,k));});});
+        var gc=metrics.map(function(k){return xv(n,k);}), ac=metrics.map(function(k){return av(n,k);});
+        out.push(dc.concat(mc).concat(gc).concat(ac));
+        if(!n.leaf)walk(n.kids,depth+1,labels.concat([n.label]));
+      });
+    })(tree,0,[]);
+    var t=blank(); a.forEach(function(r){addRow(t,r);});
+    var tr=[{value:'TOTAL',bold:true}]; for(var i=1;i<dims.length;i++)tr.push('');
+    var tmc=[]; months.forEach(function(mo){var b=t.byM[mo.ym]||{};metrics.forEach(function(k){tmc.push({value:xv(b,k),bold:true});});});
+    var tgc=metrics.map(function(k){return {value:xv(t,k),bold:true};}), tac=metrics.map(function(k){return {value:av(t,k),bold:true};});
+    out.push(tr.concat(tmc).concat(tgc).concat(tac));
+    var fn='Oil_Hidden_Customer_Sales';
+    fetch('/realise/api/export-xlsx/',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      body:JSON.stringify({filename:fn,sheets:[{name:'Hidden Sales',rows:out}]})})
+      .then(function(r){return r.ok?r.blob():null;})
+      .then(function(b){ if(!b){window.alert('Export failed.');return;} var u=URL.createObjectURL(b),el=document.createElement('a');el.href=u;el.download=fn+'.xlsx';document.body.appendChild(el);el.click();el.remove();URL.revokeObjectURL(u); });
+  }
+
+  // Wiring
+  document.getElementById('hsFetch').addEventListener('click',load);
+  document.getElementById('hsExport').addEventListener('click',exportXlsx);
+  document.getElementById('hsStart').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  document.getElementById('hsEnd').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  document.getElementById('hsMonths').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  var searchDeb=debounce(render,120);
+  document.getElementById('hsSearch').addEventListener('input',function(){searchF=this.value.trim().toLowerCase();searchDeb();});
+  document.getElementById('hsType').addEventListener('change',function(){typeF=this.value;render();});
+  document.getElementById('hsState').addEventListener('change',function(){stateF=this.value;render();});
+  document.getElementById('hsGroup').addEventListener('change',function(){groupF=this.value;render();});
+  // Metric multi-select (Value / Litres / Quantity / Realise) — stacked in each cell.
+  function updateMetricLabel(){
+    metrics=METRIC_DEFS.filter(function(d){return metrics.indexOf(d.k)!==-1;}).map(function(d){return d.k;});
+    if(!metrics.length)metrics=['val'];
+    document.getElementById('hsMetricLabel').textContent=metrics.map(function(k){return METRIC_LBL[k];}).join(', ');
+  }
+  function renderMetricList(){
+    var list=document.getElementById('hsMetricList'); list.innerHTML='';
+    METRIC_DEFS.forEach(function(d){
+      var lab=document.createElement('label');
+      lab.style.cssText='display:flex;align-items:center;gap:8px;padding:7px 11px;cursor:pointer;font-size:13px;font-weight:600;color:var(--rz-ink)';
+      lab.innerHTML='<input type="checkbox"'+(metrics.indexOf(d.k)!==-1?' checked':'')+'>'+esc(d.l);
+      lab.querySelector('input').addEventListener('change',function(){
+        var i=metrics.indexOf(d.k);
+        if(this.checked){ if(i===-1)metrics.push(d.k); }
+        else if(i!==-1){ if(metrics.length>1)metrics.splice(i,1); else this.checked=true; }   // keep at least one
+        updateMetricLabel(); render();
+      });
+      list.appendChild(lab);
+    });
+  }
+  (function(){
+    var btn=document.getElementById('hsMetricBtn'), panel=document.getElementById('hsMetricPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();renderMetricList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    updateMetricLabel();
+  })();
+  document.getElementById('hsBody').addEventListener('click',function(e){
+    if(!e.target||!e.target.closest)return;
+    var tb=e.target.closest('[data-hstoggle]'); if(tb){var p=tb.getAttribute('data-hstoggle');expanded[p]=!expanded[p];render();return;}
+    var bb=e.target.closest('[data-hsbills]'); if(bb){var q=bb.getAttribute('data-hsbills');billsX[q]=!billsX[q];render();return;}
+  });
+  // Rebuild a node's own rows from its dimension path (nodes drop their _rows after building).
+  function rowsByPath(path){
+    var pairs=[]; String(path||'').split('>').forEach(function(seg){ if(!seg)return; var i=seg.indexOf(':'); if(i<0)return; pairs.push([seg.slice(0,i),seg.slice(i+1)]); });
+    return activeRows().filter(function(r){ return pairs.every(function(p){ return String(r[p[0]]||'—')===p[1]; }); });
+  }
+  // Inline "drop-down" of a leaf item's bills: one sub-row per invoice, with the same metric cells.
+  function billRows(node,months,depth){
+    var g={}, ord=[]; rowsByPath(node.path).forEach(function(r){var d=r.doc||'—',b=g[d];if(!b){g[d]=b=blank();b.label=d;b.date=r.date||'';b.dnote=!!r.debit_note;ord.push(d);}addRow(b,r);});
+    var subs=ord.map(function(d){return g[d];}).sort(function(a,b){return b.val-a.val;});
+    var nM=months.length||1, html='', pad='padding-left:'+(12+depth*18)+'px';
+    subs.forEach(function(b){
+      var tagLbl=b.dnote?'hs-tag-dn':'hs-tag-inv', tagTxt=b.dnote?'Debit Note':'Invoice';
+      var name='<td class="gc-name hs-billname" style="'+pad+'"><span class="hs-tw-empty"></span>'
+        +'<span class="hs-tag '+tagLbl+'">'+tagTxt+'</span>'+esc(b.label)+(b.date?'<span class="hs-bill-dt">'+esc(b.date)+'</span>':'')
+        +(b.dnote?'<span class="hs-dn-note">RATE DIFF DEBIT NOTE — no goods</span>':'')+'</td>';
+      var mc=months.map(function(mo){return '<td>'+metricCell(b.byM[mo.ym]||{})+'</td>';}).join('');
+      html+='<tr class="hs-subrow">'+name+mc+'<td class="hs-hi">'+metricCell(b)+'</td><td>'+metricCellAvg(b,nM)+'</td></tr>';
+    });
+    return html;
+  }
+  (function(){
+    var btn=document.getElementById('hsDrillBtn'), panel=document.getElementById('hsDrillPanel');
+    btn.addEventListener('click',function(e){e.stopPropagation();chosen=order.slice();renderDrillList();panel.classList.toggle('open');});
+    panel.addEventListener('click',function(e){e.stopPropagation();});
+    document.addEventListener('click',function(){panel.classList.remove('open');});
+    document.getElementById('hsDrillAll').addEventListener('click',function(){chosen=DIMS.map(function(d){return d.key;});renderDrillList();});
+    document.getElementById('hsDrillClr').addEventListener('click',function(){chosen=[];renderDrillList();});
+    document.getElementById('hsDrillApply').addEventListener('click',function(){if(!chosen.length)return;order=chosen.slice();expanded={};panel.classList.remove('open');render();});
+  })();
+
+  // Default range = current month to date, then auto-fetch.
+  (function(){var t=new Date();
+    document.getElementById('hsStart').value=ymd(new Date(t.getFullYear(),t.getMonth(),1));
+    document.getElementById('hsEnd').value=ymd(t);
+  })();
+  renderDrillList();
+  load();
+})();
+</script>
+{% endblock %}
