@@ -96,6 +96,19 @@ def _branch(advance):
     if not docs:
         return sap_company.default_bpl_id(advance.company), ''
     kind = docs[0].kind
+    if kind == DocumentKind.LEDGER:
+        # A refund's items are lines of the customer's account: the branch is
+        # on the journal, and an item no longer open there cannot be applied.
+        items = sap_service.ledger_items(advance.company, advance.partner_code)
+        gone = [d.sap_doc_num or str(d.sap_doc_entry) for d in docs
+                if (d.sap_doc_entry, d.sap_line) not in items]
+        if gone:
+            return None, f'{", ".join(gone)} no longer open on the customer’s account in SAP.'
+        branches = {items[(d.sap_doc_entry, d.sap_line)]['bpl_id'] for d in docs}
+        if len(branches) > 1:
+            return None, 'The ledger items belong to different SAP branches; SAP pays one branch at a time.'
+        (bpl_id,) = branches
+        return bpl_id if bpl_id is not None else sap_company.default_bpl_id(advance.company), ''
     found = sap_service.document_branches(advance.company, kind, [d.sap_doc_entry for d in docs])
     missing = [d.sap_doc_num or str(d.sap_doc_entry) for d in docs if d.sap_doc_entry not in found]
     if missing:
@@ -115,18 +128,59 @@ def _remarks(advance):
     docs = list(advance.documents.all())
     parts = [f'OMS {advance.request_no}', advance.partner_name]
     if docs:
-        noun = 'Bill' if docs[0].kind == DocumentKind.BILL else 'PO'
+        noun = {DocumentKind.BILL: 'Bill', DocumentKind.LEDGER: 'Refund against'}.get(docs[0].kind, 'PO')
         parts.append(f'{noun} ' + ', '.join(d.sap_doc_num or str(d.sap_doc_entry) for d in docs))
     if getattr(advance, 'budget_code', ''):
-        parts.append(f'Budget {advance.budget_code}/{advance.sub_budget_code}')
+        parts.append('Budget ' + '/'.join(c for c in (advance.budget_code, advance.sub_budget_code) if c))
+    if getattr(advance, 'purpose_label', ''):
+        parts.append(advance.purpose_label)
+    payout = getattr(advance, '_payout_for_remarks', None)
+    if payout is not None and getattr(payout, 'tds_amount', 0):
+        parts.append(f'TDS {payout.tds_code} {payout.tds_rate:g}% {payout.tds_amount}')
     if advance.remarks:
         parts.append(advance.remarks)
     return ' | '.join(p for p in parts if p)[:REMARKS_MAX]
 
 
-def build_payload(advance, payout, *, posting_date, series, bpl_id, memo):
-    """The Service Layer `VendorPayments` body. Pure: no SAP, no database writes."""
+def tds_memo(memo):
+    """The TDS journal's memo: the payment's, marked. How a retry finds it again."""
+    return f'{memo} TDS'[:MEMO_MAX]
+
+
+def build_tds_journal(advance, payout, *, posting_date, bpl_id, memo, control_account):
+    """The Service Layer `JournalEntries` body booking the TDS: Dr vendor, Cr TDS payable.
+
+    The vendor line comes FIRST: it is line 0, the line the payment applies.
+    The same entry JIVO's accountants post by hand when they book TDS.
+    """
     day = posting_date.isoformat()
+    text = f'TDS {payout.tds_code} {advance.request_no}'[:50]
+    branch = {'BPLID': int(bpl_id)} if bpl_id is not None else {}
+    return {
+        'ReferenceDate': day,
+        'DueDate': day,
+        'TaxDate': day,
+        'Memo': tds_memo(memo),
+        'Reference': advance.request_no,
+        'JournalEntryLines': [
+            {'AccountCode': control_account, 'ShortName': advance.partner_code,
+             'Debit': _money(payout.tds_amount), 'Credit': 0.0, 'LineMemo': text, **branch},
+            {'AccountCode': payout.tds_account, 'Debit': 0.0,
+             'Credit': _money(payout.tds_amount), 'LineMemo': text, **branch},
+        ],
+    }
+
+
+def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_trans_id=None):
+    """The Service Layer `VendorPayments` body. Pure: no SAP, no database writes.
+
+    With TDS: the methods pay the net, and against bills the TDS journal's
+    vendor line is applied with them, so the bills close in full (bills less
+    the journal = what the bank pays). A PO advance is on account: the
+    journal stands beside it until accounts set both off against the bill.
+    """
+    day = posting_date.isoformat()
+    advance._payout_for_remarks = payout
     payload = {
         'DocDate': day,
         'TaxDate': day,
@@ -146,6 +200,22 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo):
             'SumPaid': _money(advance.amount),
             'Decription': advance.partner_name[:50],
         }]
+    elif advance.request_type == RequestType.CUSTOMER:
+        # A refund: an outgoing payment TO the customer. Against the ledger,
+        # one PaymentInvoices line per item, every SumApplied positive: SAP
+        # nets debits (their invoices) against credits (receipts, credit
+        # memos) itself, exactly as its own refunds read back. On account:
+        # no lines at all.
+        from advance_payment.services.requests import LEDGER_OBJECTS
+
+        payload['DocType'] = 'rCustomer'
+        payload['CardCode'] = advance.partner_code
+        items = [d for d in advance.documents.all() if d.kind == DocumentKind.LEDGER]
+        if items:
+            payload['PaymentInvoices'] = [
+                {'LineNum': i, 'DocEntry': d.sap_doc_entry, 'DocLine': d.sap_line,
+                 'InvoiceType': LEDGER_OBJECTS[d.sap_object]['invoice_type'], 'SumApplied': _money(d.amount)}
+                for i, d in enumerate(items)]
     else:
         payload['DocType'] = 'rSupplier'
         payload['CardCode'] = advance.partner_code
@@ -157,6 +227,10 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo):
                 {'LineNum': i, 'DocEntry': d.sap_doc_entry,
                  'InvoiceType': 'it_PurchaseInvoice', 'SumApplied': _money(d.amount)}
                 for i, d in enumerate(bills)]
+            if tds_trans_id and getattr(payout, 'tds_amount', 0):
+                payload['PaymentInvoices'].append({
+                    'LineNum': len(bills), 'DocEntry': int(tds_trans_id), 'DocLine': 0,
+                    'InvoiceType': 'it_JournalEntry', 'SumApplied': _money(payout.tds_amount)})
 
     lines = list(payout.lines.all())
     bank = [l for l in lines if l.method != PayoutMethod.CASH]
@@ -172,6 +246,54 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo):
         payload['CashAccount'] = cash[0].from_account
         payload['CashSum'] = _money(sum(l.amount for l in cash))
     return payload
+
+
+def _tds_journal(advance, payout, *, posting_date, bpl_id, memo, company_db):
+    """Book the TDS journal, or find the one an earlier attempt booked. `(trans_id, problem)`.
+
+    Found again by its memo, and reused only when it still books this TDS: a
+    journal left by an attempt before the TDS was changed is not this one.
+    """
+    from payments import sap_client
+
+    try:
+        found = sap_service.journal_by_memo(advance.company, tds_memo(memo), advance.partner_code)
+        control = '' if found else sap_service.vendor_control_account(advance.company, advance.partner_code)
+    except sap_service.SapUnavailable as exc:
+        return None, f'Could not reach SAP to book the TDS: {exc}'
+    if found:
+        if found['debit'] != payout.tds_amount:
+            return None, (f'SAP already has TDS journal {found["trans_id"]} for this payment, booking '
+                          f'{found["debit"]} — not the {payout.tds_amount} now asked. Reverse it in SAP, '
+                          f'then approve again.')
+        return found['trans_id'], ''
+    if not control:
+        return None, f'SAP has no control account for {advance.partner_code}: the TDS cannot be booked.'
+    body = build_tds_journal(advance, payout, posting_date=posting_date, bpl_id=bpl_id, memo=memo,
+                             control_account=control)
+    try:
+        _, answer = sap_client.request('POST', '/JournalEntries', company_db=company_db, json_body=body)
+    except sap_client.SapError as exc:
+        if exc.status_code is None:
+            return None, (f'SAP did not answer booking the TDS ({exc}). It may have booked it: approving '
+                          f'again finds it by its memo and will not book it twice.')
+        return None, f'SAP refused the TDS journal: {exc}'
+    trans_id = answer.get('JdtNum') or answer.get('TransId')
+    logger.info('ADVANCE: %s booked TDS journal %s (%s)', advance.request_no, trans_id, payout.tds_amount)
+    return int(trans_id), ''
+
+
+def _cancel_tds_journal(trans_id, company_db):
+    """Undo the TDS journal of a payment SAP refused. The sentence to add to the message."""
+    from payments import sap_client
+
+    try:
+        sap_client.request('POST', f'/JournalEntries({int(trans_id)})/Cancel', company_db=company_db)
+    except sap_client.SapError as exc:
+        logger.error('ADVANCE: could not cancel TDS journal %s: %s', trans_id, exc)
+        return (f'Its TDS journal {trans_id} could NOT be cancelled ({exc}): reverse it in SAP '
+                f'before approving again.')
+    return f'Its TDS journal {trans_id} was cancelled.'
 
 
 def _company_db(advance):
@@ -194,11 +316,13 @@ def post(advance, *, user):
     memo = memo_for(advance)
     payload = None
 
+    tds_trans_id = None
+
     def failed(message, response=None):
         voucher = SapVoucher.objects.create(
             request=advance, version=version, sap_object=VoucherObject.OUTGOING_PAYMENT,
             status=VoucherStatus.FAILED, payload=payload, response=response,
-            error=message, posted_by=user)
+            error=message, posted_by=user, tds_trans_id=tds_trans_id)
         return Outcome(False, voucher, message)
 
     if payout is None:
@@ -227,6 +351,25 @@ def post(advance, *, user):
         body = {'DocEntry': existing['doc_entry'], 'DocNum': existing['doc_num'],
                 'adopted': 'found in SAP by its journal memo'}
     else:
+        # SAP as it is NOW, not as it was when raised: an amended, part-paid,
+        # closed or cancelled PO / bill must not be paid as if nothing changed.
+        # (Not for an adopted payment: our own payment has already moved SAP.)
+        from advance_payment.services import reservations
+
+        try:
+            changed = [r['message'] for r in reservations.live_check(advance) if not r['ok']]
+        except sap_service.SapUnavailable as exc:
+            return failed(f'Could not check the documents with SAP before paying: {exc}')
+        if changed:
+            return failed('SAP has changed since this request was raised: ' + ' '.join(changed)
+                          + ' Send it back to Payment to correct it.')
+        if payout.tds_amount:
+            tds_trans_id, problem = _tds_journal(advance, payout, posting_date=posting_date,
+                                                 bpl_id=bpl_id, memo=memo, company_db=company_db)
+            if problem:
+                return failed(problem)
+            payload = build_payload(advance, payout, posting_date=posting_date, series=series,
+                                    bpl_id=bpl_id, memo=memo, tds_trans_id=tds_trans_id)
         try:
             _, body = sap_client.request('POST', '/VendorPayments', company_db=company_db,
                                          json_body=payload)
@@ -234,12 +377,22 @@ def post(advance, *, user):
             if exc.status_code is None:
                 return failed(f'SAP did not answer ({exc}). It may still have posted: approving '
                               f'again checks SAP first and will not post twice.')
-            return failed(f'SAP refused the payment: {exc}', response=exc.payload)
+            message = f'SAP refused the payment: {exc}'
+            if tds_trans_id:
+                message += ' ' + _cancel_tds_journal(tds_trans_id, company_db)
+            return failed(message, response=exc.payload)
 
+    if existing and payout.tds_amount:
+        try:
+            found = sap_service.journal_by_memo(advance.company, tds_memo(memo), advance.partner_code)
+        except sap_service.SapUnavailable:
+            found = None
+        tds_trans_id = found['trans_id'] if found else None
     voucher = SapVoucher.objects.create(
         request=advance, version=version, sap_object=VoucherObject.OUTGOING_PAYMENT,
         status=VoucherStatus.POSTED, sap_doc_entry=body.get('DocEntry'),
-        sap_doc_num=body.get('DocNum'), payload=payload, response=body, posted_by=user)
+        sap_doc_num=body.get('DocNum'), payload=payload, response=body, posted_by=user,
+        tds_trans_id=tds_trans_id)
     logger.info('ADVANCE: %s posted outgoing payment %s (DocEntry %s)',
                 advance.request_no, voucher.sap_doc_num, voucher.sap_doc_entry)
     return Outcome(True, voucher)

@@ -6,21 +6,29 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /vendors/               ?company=&search=&limit=
   GET /customers/             ?company=&search=&limit=
   GET /employees/             ?company=&search=&limit=
-  GET /open-purchase-orders/  ?company=&card_code=&search=&limit=
-  GET /document-attachment/   ?company=&kind=po|bill&doc_entry=  (latest SAP attachment, the file)
+  GET /open-purchase-orders/  ?company=&card_code=&search=&limit=&offset=&from_date=  (offset: a page, with total)
+  GET /document-attachment/   ?company=&kind=po|bill|grpo&doc_entry=[&line=]  (one SAP attachment, the file)
+  GET /document-attachments/  ?company=&kind=po|bill&doc_entry=  (every related SAP attachment, a list)
+  GET /purchase-order/        ?company=&doc_entry=                (one PO in full: header, lines, follow-on)
+  GET /document-history/      ?company=&kind=po|bill|ledger&doc_entry=[&line=]  (OMS's payments against it)
+  GET /tds-options/           ?company=&card_code=&bills=     (TDS the Payment desk may deduct)
+  GET /assignment-recipients/                                  (who bills / POs may be sent to)
+  GET|POST /assignments/      ?scope=mine|sent ; send {company, assigned_to, documents, note}
+  POST /assignments/<id>/dismiss|withdraw/
   GET /document-attachment/read/  same params  (its invoice fields, checked against SAP)
   POST /payment-proof/        multipart: file, company, amount, to_account, card_code, invoices
   GET|POST /employee-master/  ?search=&role=&is_active=  (admins: the employee master)
   GET /employee-directory/     ?roles=1,2&search=&not_in_sap=1&company=  (request form pickers)
-  GET /departments/            (departments with their sub-departments)
-  GET /open-invoices/         ?company=&party_type=vendor|customer
+  GET /departments/            (departments with their sub-departments; the form no longer asks)
+  GET /payment-purposes/       (Payment Purpose: the Payment Desk's list)
+  GET /open-invoices/         ?company=&party_type=vendor|customer&offset=&from_date=
                               &card_code=&search=&limit=
   GET /open-documents/        ?company=&card_code=&limit=
   GET /open-other-documents/  ?company=&card_code=&limit=   (vendor "All")
   GET /partner-bank-accounts/ ?company=&card_code=           (payee's banks)
   GET /house-banks/           ?company=                     (our banks, all)
   GET /cash-accounts/         ?company=                     (our cash G/Ls)
-  GET /budgets/               ?company=                     (Payment Purpose: Budget, Sub Budget)
+  GET /budgets/               ?company=                     (the form's Department: budget heads)
 
 `/open-invoices/` lists unpaid invoices across a company, for picking one.
 `/open-documents/` is ONE partner's whole open ledger — invoices, credit
@@ -32,6 +40,7 @@ The requests and their approval (see `views.py`, `services/flow.py`):
   GET|POST /requests/                    ?scope=mine|desk ; raise (multipart data=JSON, files)
   GET  /requests/<id>/                   one, with its history and its route
   POST /requests/<id>/edit/              the creator's edit (+ remove_file_ids, resubmit)
+  GET  /requests/<id>/sap-check/         its documents against SAP now (what Final checks)
   POST /requests/<id>/<action>/          approve | reject | return | send-back |
                                          cancel | resubmit     {remarks, version}
   PUT  /requests/<id>/payout/            the Payment stage's payment details
@@ -57,6 +66,20 @@ urlpatterns = [
          name='advance-payment-document-attachment'),
     path('document-attachment/read/', views.DocumentAttachmentReadView.as_view(),
          name='advance-payment-document-attachment-read'),
+    path('document-attachments/', views.DocumentAttachmentsView.as_view(),
+         name='advance-payment-document-attachments'),
+    path('purchase-order/', views.PurchaseOrderView.as_view(),
+         name='advance-payment-purchase-order'),
+    path('document-history/', views.DocumentHistoryView.as_view(),
+         name='advance-payment-document-history'),
+    path('tds-options/', views.TdsOptionsView.as_view(),
+         name='advance-payment-tds-options'),
+    path('assignment-recipients/', views.AssignmentRecipientsView.as_view(),
+         name='advance-payment-assignment-recipients'),
+    path('assignments/', views.AssignmentsView.as_view(),
+         name='advance-payment-assignments'),
+    path('assignments/<int:pk>/<slug:action>/', views.AssignmentActionView.as_view(),
+         name='advance-payment-assignment-action'),
     path('payment-proof/', views.PaymentProofView.as_view(),
          name='advance-payment-payment-proof'),
     path('employee-master/', views.EmployeeMasterView.as_view(),
@@ -65,6 +88,8 @@ urlpatterns = [
          name='advance-payment-employee-directory'),
     path('departments/', views.DepartmentsView.as_view(),
          name='advance-payment-departments'),
+    path('payment-purposes/', views.PaymentPurposesView.as_view(),
+         name='advance-payment-payment-purposes'),
     path('open-invoices/', views.OpenInvoicesView.as_view(),
          name='advance-payment-open-invoices'),
     path('open-documents/', views.OpenDocumentsView.as_view(),
@@ -84,6 +109,8 @@ urlpatterns = [
          name='advance-payment-requests'),
     path('requests/<int:pk>/', views.RequestDetailView.as_view(),
          name='advance-payment-request'),
+    path('requests/<int:pk>/sap-check/', views.RequestSapCheckView.as_view(),
+         name='advance-payment-request-sap-check'),
     path('requests/<int:pk>/edit/', views.RequestEditView.as_view(),
          name='advance-payment-request-edit'),
     path('requests/<int:pk>/payout/', views.RequestPayoutView.as_view(),

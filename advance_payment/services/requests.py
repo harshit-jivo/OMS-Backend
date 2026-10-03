@@ -11,8 +11,13 @@ So `clean()` re-checks everything that decides money or routing:
     has open, a percentage line worth what its percentage says, and the
     request's amount is their total;
   * a case without documents carries a typed amount above zero;
-  * department and sub-department exist, and a department that has
-    sub-departments names one of its own;
+  * a customer refund against the ledger is its credits less its debits,
+    and that is above zero;
+  * no line takes more than is still available once what other OMS
+    requests hold is counted (`services/reservations.py`), checked again
+    inside the save under a per-document lock;
+  * the Department is one of the company's budget heads in SAP, and the
+    Payment Purpose one of `advance_payment.purposes`;
   * the dates the case asks for are there.
 
 It does NOT re-read SAP for the documents. The snapshot is what the creator
@@ -35,18 +40,17 @@ from django.utils import timezone
 from advance_payment.models import (
     AdvanceRequest,
     AllocationMode,
-    Department,
     DocumentKind,
+    LedgerDirection,
     Employee,
     FilePurpose,
     PaymentAgainst,
-    Priority,
     RequestDocument,
     RequestFile,
     RequestType,
     ReturnMethod,
-    SubDepartment,
 )
+from advance_payment.purposes import purpose_label
 from core.companies import COMPANY_CODES
 
 #: The form's `NOT_IN_SAP_PREFIX`: an employee from the master with no SAP
@@ -65,9 +69,24 @@ CASES = {
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.ADVANCE): {'documents': None, 'repayment': True},
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.OTHER): {'documents': None},
     (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.ADVANCE): {'documents': None, 'expected_bill_date': True},
-    (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.AGAINST_BILL): {
-        'documents': DocumentKind.BILL, 'expected_bill_date': True},
+    # The bills are the expense already: there is no bill still to expect.
+    (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.AGAINST_BILL): {'documents': DocumentKind.BILL},
     (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.OTHER): {'documents': None, 'expected_bill_date': True},
+    # A refund: what the customer is owed back. Against their open ledger
+    # items, or a typed amount applied to nothing.
+    (RequestType.CUSTOMER, PaymentAgainst.AGAINST_LEDGER): {'documents': DocumentKind.LEDGER},
+    (RequestType.CUSTOMER, PaymentAgainst.ON_ACCOUNT): {'documents': None},
+}
+
+#: The ledger items a refund may be applied to, by SAP object type, and the
+#: PaymentInvoices type each posts as. A/R invoices and credit memos are
+#: addressed by their own DocEntry; receipts and journal entries through the
+#: journal (TransId + line). Read off SAP's own refunds (Oil, Sept 2026).
+LEDGER_OBJECTS = {
+    13: {'invoice_type': 'it_Invoice', 'by_journal': False},
+    14: {'invoice_type': 'it_CredItnote', 'by_journal': False},
+    24: {'invoice_type': 'it_Receipt', 'by_journal': True},
+    30: {'invoice_type': 'it_JournalEntry', 'by_journal': True},
 }
 
 CENT = Decimal('0.01')
@@ -148,20 +167,6 @@ def clean(data):
     if not_in_sap and request_type != RequestType.EMPLOYEE_ADVANCE:
         problems.append('Only an Employee advance may be raised for someone not yet in SAP.')
 
-    department = Department.objects.filter(pk=_int(data.get('department_id')), is_active=True).first()
-    sub_department = None
-    if department is None:
-        problems.append('Choose a Department.')
-    else:
-        subs = SubDepartment.objects.filter(department=department, is_active=True)
-        sub_id = _int(data.get('sub_department_id'))
-        if sub_id:
-            sub_department = subs.filter(pk=sub_id).first()
-            if sub_department is None:
-                problems.append(f'That Sub-department is not part of {department.name}.')
-        elif subs.exists():
-            problems.append(f'Choose a Sub-department of {department.name}.')
-
     documents = []
     if case['documents']:
         documents, amount = _clean_documents(data.get('documents'), case['documents'], problems)
@@ -188,11 +193,7 @@ def clean(data):
     if not _text(data.get('remarks')):
         problems.append('Enter the Remarks.')
 
-    purpose = _clean_purpose(company, data, problems) if company in COMPANY_CODES else {}
-
-    priority = _text(data.get('priority')).upper() or Priority.MEDIUM
-    if priority not in Priority.values:
-        problems.append('Priority must be Low, Medium or High.')
+    routing = _clean_routing(company, data, problems)
 
     # The form shows owners as "Preshit Singh (JWPL0030)": the code in the
     # brackets finds them in the employee master. A label with no code (a
@@ -220,8 +221,6 @@ def clean(data):
             'request_type': request_type,
             'payment_against': against,
             'payment_against_other': against_other,
-            'department': department,
-            'sub_department': sub_department,
             'partner_code': partner_code,
             'partner_name': partner_name,
             'partner_not_in_sap': not_in_sap,
@@ -235,8 +234,7 @@ def clean(data):
             'expected_from_date': repayment.get('expected_from_date'),
             'expected_to_date': repayment.get('expected_to_date'),
             'payment_date': payment_date,
-            'priority': priority,
-            **purpose,
+            **routing,
             'remarks': _text(data.get('remarks')),
             'owner_employee': owner,
             'owner_label': owner_label,
@@ -245,8 +243,31 @@ def clean(data):
     )
 
 
+def _ledger_fields(doc, label, problems):
+    """A ledger item's SAP object, line and side, or None (with a problem)."""
+    obj = _int(doc.get('sap_object'))
+    direction = _text(doc.get('direction')).upper()
+    if obj not in LEDGER_OBJECTS:
+        problems.append(f'Ledger item {label}: only incoming payments, credit memos, invoices and '
+                        f'journal entries can be refunded against.')
+        return None
+    if direction not in LedgerDirection.values:
+        problems.append(f'Ledger item {label} must be a credit or a debit.')
+        return None
+    line = _int(doc.get('sap_line')) or 0
+    if line < 0 or (line and not LEDGER_OBJECTS[obj]['by_journal']):
+        problems.append(f'Ledger item {label} has a journal line it cannot have.')
+        return None
+    return {'sap_object': obj, 'sap_line': line, 'direction': direction}
+
+
 def _clean_documents(raw, kind, problems):
-    """The document lines, and their total. Appends to `problems`."""
+    """The document lines, and their total. Appends to `problems`.
+
+    For a customer's ledger items the total is SIGNED: credits (owed to the
+    customer) add, debits (invoices they owe) subtract, exactly as SAP nets
+    an outgoing payment to a customer.
+    """
     if not isinstance(raw, list) or not raw:
         problems.append('Choose at least one document to pay.')
         return [], None
@@ -258,10 +279,14 @@ def _clean_documents(raw, kind, problems):
         if not entry:
             problems.append(f'Document {index} has no SAP entry.')
             continue
-        if entry in seen:
+        ledger = _ledger_fields(doc, label, problems) if kind == DocumentKind.LEDGER else None
+        if kind == DocumentKind.LEDGER and ledger is None:
+            continue
+        key = (entry, ledger['sap_line'] if ledger else 0)
+        if key in seen:
             problems.append(f'Document {label} is chosen twice.')
             continue
-        seen.add(entry)
+        seen.add(key)
         if _text(doc.get('kind')).upper() not in ('', kind):
             problems.append(f'Document {label} is not a {DocumentKind(kind).label}.')
             continue
@@ -291,10 +316,11 @@ def _clean_documents(raw, kind, problems):
         if amount > open_amount:
             problems.append(f'Document {label}: {amount} is more than the {open_amount} still open.')
             continue
-        total += amount
+        total += -amount if ledger and ledger['direction'] == LedgerDirection.DEBIT else amount
         lines.append({
             'kind': kind,
             'sap_doc_entry': entry,
+            **(ledger or {}),
             'sap_doc_num': _text(doc.get('sap_doc_num'), 30),
             'vendor_ref': _text(doc.get('vendor_ref'), 100),
             'doc_date': _date(doc.get('doc_date')),
@@ -310,37 +336,47 @@ def _clean_documents(raw, kind, problems):
             'attachment_date': _date(doc.get('attachment_date')),
             'attachment_check': doc.get('attachment_check') if isinstance(doc.get('attachment_check'), dict) else None,
         })
+    if kind == DocumentKind.LEDGER and lines and total <= 0:
+        problems.append('The credits chosen must come to more than the invoices: the refund is what '
+                        'the customer is owed, credits less debits.')
     return lines, total
 
 
-def _clean_purpose(company, data, problems):
-    """Budget and Sub Budget: both required, both one of the company's in SAP."""
+def _clean_routing(company, data, problems):
+    """Department (SAP's budget head) and Payment Purpose: both required.
+
+    The budget head must be one of the company's active dimension-3 cost
+    centres in SAP; the purpose one of `advance_payment.purposes`. Sub Budget
+    is no longer asked, so it is cleared.
+    """
     from advance_payment.services import sap as sap_service
 
+    out = {}
+    purpose = _text(data.get('purpose_code'), 30).upper()
+    if not purpose:
+        problems.append('Choose the Payment Purpose.')
+    elif not purpose_label(purpose):
+        problems.append(f'"{purpose}" is not a Payment Purpose.')
+    else:
+        out.update(purpose_code=purpose, purpose_label=purpose_label(purpose))
+
     budget = _text(data.get('budget_code'), 20)
-    sub_budget = _text(data.get('sub_budget_code'), 20)
     if not budget:
-        problems.append('Choose the Payment Purpose (Budget).')
-    if not sub_budget:
-        problems.append('Choose the Payment Purpose (Sub Budget).')
-    if not (budget and sub_budget):
-        return {}
+        problems.append('Choose the Department.')
+        return out
+    if company not in COMPANY_CODES:
+        return out
     try:
         known = sap_service.budgets(company)
     except sap_service.SapUnavailable:
-        problems.append('Could not check the Payment Purpose with SAP. Try again shortly.')
-        return {}
-    names = {(r['kind'], r['code']): r['name'] for r in known}
-    if ('BUDGET', budget) not in names:
-        problems.append(f'Budget "{budget}" is not an active budget in {company}.')
-    if ('SUB_BUDGET', sub_budget) not in names:
-        problems.append(f'Sub Budget "{sub_budget}" is not an active sub budget in {company}.')
-    return {
-        'budget_code': budget,
-        'budget_name': names.get(('BUDGET', budget), ''),
-        'sub_budget_code': sub_budget,
-        'sub_budget_name': names.get(('SUB_BUDGET', sub_budget), ''),
-    }
+        problems.append('Could not check the Department with SAP. Try again shortly.')
+        return out
+    names = {r['code']: r['name'] for r in known if r['kind'] == 'BUDGET'}
+    if budget not in names:
+        problems.append(f'Department "{budget}" is not an active budget head in {company}.')
+        return out
+    out.update(budget_code=budget, budget_name=names[budget], sub_budget_code='', sub_budget_name='')
+    return out
 
 
 def _clean_repayment(data, problems):
@@ -407,6 +443,16 @@ def _write_documents(advance, documents):
         [RequestDocument(request=advance, **doc) for doc in documents])
 
 
+def _reserve(cleaned, *, exclude_request=None):
+    """Refuse a line that takes more than is still available. Inside the save's transaction."""
+    from advance_payment.services import reservations
+
+    found = reservations.problems(cleaned.fields['company'], cleaned.documents,
+                                  exclude_request=exclude_request)
+    if found:
+        raise RequestInvalid(found)
+
+
 def create(cleaned, *, user, files=()):
     """Insert the request, its documents and files. The caller submits it.
 
@@ -419,6 +465,7 @@ def create(cleaned, *, user, files=()):
     for _attempt in range(5):
         try:
             with transaction.atomic():
+                _reserve(cleaned)
                 advance = AdvanceRequest.objects.create(
                     request_no=_next_request_no(year), created_by=user, **cleaned.fields)
                 _write_documents(advance, cleaned.documents)
@@ -432,11 +479,11 @@ def create(cleaned, *, user, files=()):
 
 #: What an edit is compared on, for the EDITED log row.
 _COMPARED = (
-    'company', 'request_type', 'payment_against', 'payment_against_other', 'department_id',
-    'sub_department_id', 'partner_code', 'partner_name', 'amount', 'expected_date',
+    'company', 'request_type', 'payment_against', 'payment_against_other',
+    'partner_code', 'partner_name', 'amount', 'expected_date',
     'expected_bill_date', 'return_method', 'return_method_other', 'installments', 'emi_amount',
-    'expected_from_date', 'expected_to_date', 'payment_date', 'priority', 'remarks',
-    'owner_employee_id', 'owner_label', 'budget_code', 'sub_budget_code',
+    'expected_from_date', 'expected_to_date', 'payment_date', 'remarks',
+    'owner_employee_id', 'owner_label', 'budget_code', 'sub_budget_code', 'purpose_code',
 )
 
 
@@ -446,7 +493,7 @@ def _snapshot(advance):
         value = getattr(advance, name)
         out[name] = None if value is None else str(value)
     out['documents'] = sorted(
-        f'{d.kind}:{d.sap_doc_entry}:{d.amount}' for d in advance.documents.all())
+        f'{d.kind}:{d.sap_doc_entry}:{d.sap_line}:{d.amount}' for d in advance.documents.all())
     return out
 
 
@@ -456,6 +503,7 @@ def update(advance, cleaned, *, user, files=(), remove_file_ids=()):
     `{field: {"old": .., "new": ..}}`, for the EDITED log row.
     """
     check_files(files)
+    _reserve(cleaned, exclude_request=advance.pk)
     before = _snapshot(advance)
     for name, value in cleaned.fields.items():
         setattr(advance, name, value)

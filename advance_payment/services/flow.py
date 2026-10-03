@@ -4,10 +4,10 @@ THE ROUTE
 ---------
 The Workflow Engine chooses ONE workflow of module `ADVANCE_PAYMENT` for the
 request (the workflow's queries read `advance_payment_request`: company,
-department, sub-department). It may start with ANY number of approval
-stages, named freely (none, or Sub-HOD, HOD, Director, ...), and must end
-with three stages named exactly Payment Approval, Audit Approval, Final
-Approval (see `StageRole`):
+budget_code, the form's Department, and purpose_code). It may start with
+ANY number of approval stages, named freely (none, or Sub-HOD, HOD,
+Director, ...), and must end with three stages named exactly Payment
+Approval, Audit Approval, Final Approval (see `StageRole`):
 
     approval stages (0 or more) approve, reject, or RETURN to the creator
     Payment                     fills the payment details; approves only when
@@ -261,7 +261,7 @@ def edit(advance, cleaned, *, user, files=(), remove_file_ids=(), resubmit=False
         log(advance, LogAction.EDITED, user=user, flow=flow, stage=None, data=changes)
     if flow.status == FlowStatus.PENDING and changes:
         # Nothing is approved yet, so nothing is lost by routing again: a new
-        # department must reach its own approvers.
+        # Department (budget head) or purpose must reach its own approvers.
         _reroute(flow, advance)
         _save(flow)
     elif flow.status == FlowStatus.RETURNED and resubmit:
@@ -456,11 +456,15 @@ def reject(advance, *, user, remarks, version=None):
 
 @transaction.atomic
 def return_to_creator(advance, *, user, remarks, version=None):
-    """Sub-HOD, HOD or Director: back to the creator, to edit and resubmit."""
+    """An approval stage or Payment: back to the creator, to edit and resubmit.
+
+    Resubmitting routes it afresh from the first stage (a new round); the
+    payment details Payment had filled stay, to be checked again there.
+    """
     _remarks_required(remarks, 'returning it')
     flow = _acting(advance, user, version)
     if StageRole(flow.current_role) not in RETURN_TO_CREATOR_ROLES:
-        raise FlowError('Only the approval stages before Payment may return a request to its creator.',
+        raise FlowError('Only the approval stages and Payment may return a request to its creator.',
                         status=409)
     advance = flow.request
     log(advance, LogAction.RETURNED, user=user, flow=flow, remarks=remarks,
