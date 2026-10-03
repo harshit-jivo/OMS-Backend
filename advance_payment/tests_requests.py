@@ -14,7 +14,6 @@ managers and SAP calls are patched. What is pinned:
   is not posted again.
 """
 import datetime
-import unittest
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
@@ -73,9 +72,6 @@ class TheRoute(SimpleTestCase):
             flow_service.roles([FULL_ROUTE[3], FULL_ROUTE[5]])
 
 
-FINANCE = SimpleNamespace(pk=35, id=35, name='Finance')
-
-
 #: The company's Budget and Sub Budget cost centres, as SAP lists them.
 BUDGETS = [
     {'kind': 'BUDGET', 'code': 'BackOff', 'name': 'Back Office'},
@@ -85,18 +81,9 @@ BUDGETS = [
 ]
 
 
-def _clean(data, *, subs=(92, 88), sub_found=True):
-    """`requests.clean` with the department tables and SAP's budgets stood in for."""
-    department_qs = mock.Mock()
-    department_qs.first.return_value = FINANCE
-
-    sub_qs = mock.Mock()
-    sub_qs.exists.return_value = bool(subs)
-    sub_qs.filter.return_value.first.return_value = (
-        SimpleNamespace(pk=92, id=92, name='AP') if sub_found else None)
-    with mock.patch.object(request_service.Department.objects, 'filter', return_value=department_qs), \
-            mock.patch.object(request_service.SubDepartment.objects, 'filter', return_value=sub_qs), \
-            mock.patch('advance_payment.services.sap.budgets', return_value=BUDGETS):
+def _clean(data):
+    """`requests.clean` with SAP's budgets stood in for."""
+    with mock.patch('advance_payment.services.sap.budgets', return_value=BUDGETS):
         return request_service.clean(data)
 
 
@@ -104,9 +91,9 @@ def vendor_bill_request(**overrides):
     data = {
         'company': 'OIL', 'request_type': 'VENDOR', 'payment_against': 'AGAINST_BILL',
         'partner_code': 'VENDA001465', 'partner_name': 'GODAMWALE TRADING',
-        'department_id': 35, 'sub_department_id': 92, 'payment_date': '2026-10-01',
-        'priority': 'HIGH', 'remarks': 'Part settlement', 'owner_label': 'Finance desk',
-        'budget_code': 'BackOff', 'sub_budget_code': 'Accounts',
+        'payment_date': '2026-10-01',
+        'remarks': 'Part settlement', 'owner_label': 'Finance desk',
+        'budget_code': 'BackOff', 'purpose_code': 'RAW_MATERIAL',
         'documents': [
             {'kind': 'BILL', 'sap_doc_entry': 501, 'sap_doc_num': '126226523', 'original_amount': '300000',
              'paid_amount': '0', 'open_amount': '288746', 'mode': 'FIXED', 'amount': '200000'},
@@ -118,30 +105,12 @@ def vendor_bill_request(**overrides):
     return data
 
 
-#: The three tests below assert that a request WITHOUT a Budget / Sub Budget is
-#: refused. That refusal is deliberately off on this branch: `_clean_purpose` is
-#: present and validates what it is given, but its call site in
-#: `services/requests.py` discards the problems, because neither the web form
-#: nor the app sends the two fields yet and enforcing it would refuse every
-#: request from both clients.
-#:
-#: These come back on together with that one-line switch, once both clients
-#: have the pickers fed by `GET /api/advance-payments/budgets/`. Skipped rather
-#: than deleted so the requirement is not quietly lost, and skipped rather than
-#: left failing so a red suite does not become normal.
-#:
-#: `test_keeps_the_payment_purpose_with_sap_names` is NOT skipped: when a client
-#: does send the fields they are still checked against SAP and stored.
-skip_until_clients_send_the_purpose = unittest.skip(
-    'Payment Purpose is not enforced on this branch — see services/requests.py')
-
-
 class WhatTheServerAccepts(SimpleTestCase):
     def test_a_bill_request_is_worth_its_lines(self):
         cleaned = _clean(vendor_bill_request())
         self.assertEqual(cleaned.fields['amount'], Decimal('240000.00'))
         self.assertEqual([d['sap_doc_entry'] for d in cleaned.documents], [501, 502])
-        self.assertEqual(cleaned.fields['sub_department'].name, 'AP')
+        self.assertNotIn('department', cleaned.fields)
 
     def test_a_typed_amount_is_ignored_where_documents_decide_it(self):
         cleaned = _clean(vendor_bill_request(amount='999999'))
@@ -174,34 +143,54 @@ class WhatTheServerAccepts(SimpleTestCase):
         with self.assertRaisesRegex(request_service.RequestInvalid, 'Expected Bill Date'):
             _clean(data)
 
+    def test_an_imprest_against_bills_asks_no_expected_bill_date(self):
+        cleaned = _clean(vendor_bill_request(request_type='EMPLOYEE_IMPREST', partner_code='EMP001',
+                                             expected_bill_date='2026-11-01'))
+        self.assertIsNone(cleaned.fields['expected_bill_date'])
+
+    def test_an_imprest_advance_still_asks_the_expected_bill_date(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Expected Bill Date'):
+            _clean(vendor_bill_request(request_type='EMPLOYEE_IMPREST', payment_against='ADVANCE',
+                                       partner_code='EMP001', documents=[], amount='5000'))
+
+    def test_priority_is_no_longer_asked(self):
+        cleaned = _clean(vendor_bill_request(priority='NONSENSE'))
+        self.assertNotIn('priority', cleaned.fields)
+
     def test_refuses_a_pair_the_form_does_not_offer(self):
         with self.assertRaisesRegex(request_service.RequestInvalid, 'not offered'):
             _clean(vendor_bill_request(payment_against='ADVANCE', documents=[], amount='1000'))
 
-    def test_a_department_with_sub_departments_needs_one(self):
-        with self.assertRaisesRegex(request_service.RequestInvalid, 'Sub-department of Finance'):
-            _clean(vendor_bill_request(sub_department_id=None))
-
-    def test_keeps_the_payment_purpose_with_sap_names(self):
-        cleaned = _clean(vendor_bill_request())
+    def test_keeps_the_department_and_purpose_with_their_names(self):
+        cleaned = _clean(vendor_bill_request(sub_budget_code='Accounts'))
         self.assertEqual(
-            {k: cleaned.fields[k] for k in ('budget_code', 'budget_name', 'sub_budget_code', 'sub_budget_name')},
-            {'budget_code': 'BackOff', 'budget_name': 'Back Office',
-             'sub_budget_code': 'Accounts', 'sub_budget_name': 'Accounts'})
+            {k: cleaned.fields[k] for k in ('budget_code', 'budget_name', 'sub_budget_code', 'sub_budget_name',
+                                            'purpose_code', 'purpose_label')},
+            {'budget_code': 'BackOff', 'budget_name': 'Back Office', 'sub_budget_code': '',
+             'sub_budget_name': '', 'purpose_code': 'RAW_MATERIAL', 'purpose_label': 'Raw Material Purchase'})
 
-    @skip_until_clients_send_the_purpose
+    def test_the_department_is_required(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Choose the Department'):
+            _clean(vendor_bill_request(budget_code=''))
+
     def test_the_payment_purpose_is_required(self):
-        with self.assertRaisesRegex(request_service.RequestInvalid, r'Payment Purpose \(Sub Budget\)'):
-            _clean(vendor_bill_request(sub_budget_code=''))
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Choose the Payment Purpose'):
+            _clean(vendor_bill_request(purpose_code=''))
 
-    @skip_until_clients_send_the_purpose
-    def test_refuses_a_budget_sap_does_not_have(self):
-        with self.assertRaisesRegex(request_service.RequestInvalid, 'Budget "Nowhere" is not an active budget'):
+    def test_refuses_a_purpose_not_on_the_list(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, '"BRIBES" is not a Payment Purpose'):
+            _clean(vendor_bill_request(purpose_code='bribes'))
+
+    def test_a_purpose_code_is_matched_in_any_case(self):
+        self.assertEqual(_clean(vendor_bill_request(purpose_code='rent')).fields['purpose_code'], 'RENT')
+
+    def test_refuses_a_department_sap_does_not_have(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid,
+                                    'Department "Nowhere" is not an active budget head'):
             _clean(vendor_bill_request(budget_code='Nowhere'))
 
-    @skip_until_clients_send_the_purpose
-    def test_a_sub_budget_is_not_a_budget(self):
-        with self.assertRaisesRegex(request_service.RequestInvalid, 'Budget "IT" is not an active budget'):
+    def test_a_sub_budget_is_not_a_department(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Department "IT" is not an active budget head'):
             _clean(vendor_bill_request(budget_code='IT'))
 
     def test_the_owner_is_found_by_the_code_in_their_label(self):
@@ -220,11 +209,11 @@ class WhatTheServerAccepts(SimpleTestCase):
         cleaned = _clean({
             'company': 'OIL', 'request_type': 'EMPLOYEE_ADVANCE', 'payment_against': 'ADVANCE',
             'partner_code': 'NOSAP:JWPL0999', 'partner_name': 'NEW JOINER', 'amount': '60000',
-            'department_id': 35, 'sub_department_id': 92, 'payment_date': '2026-10-01',
+            'payment_date': '2026-10-01',
             'return_method': 'EMI', 'installments': 6, 'emi_amount': '10000',
             'expected_from_date': '2026-11-01', 'expected_to_date': '2027-04-01',
             'owner_label': 'HR', 'remarks': 'Relocation advance',
-            'budget_code': 'BackOff', 'sub_budget_code': 'IT',
+            'budget_code': 'BackOff', 'purpose_code': 'EMP_ADVANCE',
         })
         self.assertTrue(cleaned.fields['partner_not_in_sap'])
         self.assertEqual(cleaned.fields['installments'], 6)
@@ -243,7 +232,7 @@ def line(pk, method, amount, account='1104107', **extra):
 
 def payout(*lines, **extra):
     values = dict(beneficiary_name='GODAMWALE TRADING', to_account_number='50200057911744',
-                  to_ifsc='HDFC0001452')
+                  to_ifsc='HDFC0001452', tds_code='', tds_rate=None, tds_account='', tds_amount=Decimal('0'))
     values.update(extra)
     row = SimpleNamespace(**values)
     row.lines = mock.Mock()
@@ -252,7 +241,7 @@ def payout(*lines, **extra):
 
 
 def payout_problems(amount, the_payout):
-    advance = SimpleNamespace(amount=Decimal(amount))
+    advance = SimpleNamespace(amount=Decimal(amount), request_type='VENDOR')
     with mock.patch.object(payout_service.Payout.objects, 'filter') as found:
         found.return_value.first.return_value = the_payout
         return payout_service.problems(advance)
@@ -291,7 +280,7 @@ class ThePaymentDetails(SimpleTestCase):
 
     def test_the_methods_must_add_up_to_the_request(self):
         problems = payout_problems('240000', payout(line(1, 'NEFT', '200000')))
-        self.assertIn('The payment methods add up to 200000, but the request is for 240000.', problems)
+        self.assertIn('The payment methods add up to 200000, but the request pays 240000.', problems)
 
     def test_upi_only_below_one_lakh(self):
         problems = payout_problems('100000', payout(line(1, 'UPI', '100000')))
@@ -388,7 +377,7 @@ class PostingOnce(SimpleTestCase):
                                   return_value={'doc_entry': 29150, 'doc_num': 926466970}) as by_memo, \
                 mock.patch('payments.sap_client.request') as sap_post, \
                 mock.patch.object(voucher_service.SapVoucher.objects, 'create') as create:
-            payouts.return_value.first.return_value = object()
+            payouts.return_value.first.return_value = SimpleNamespace(tds_amount=Decimal('0'))
             outcome = voucher_service.post(advance, user=SimpleNamespace(pk=1))
         by_memo.assert_called_once_with('OIL', 'OMS AP-2026-0007/1')
         sap_post.assert_not_called()
@@ -410,10 +399,11 @@ class PostingOnce(SimpleTestCase):
                 mock.patch.object(voucher_service, '_company_db', return_value='TEST_OIL'), \
                 mock.patch.object(voucher_service.sap_service, 'outgoing_payment_series', return_value=2601), \
                 mock.patch.object(voucher_service.sap_service, 'outgoing_payment_by_memo', return_value=None), \
+                mock.patch('advance_payment.services.reservations.live_check', return_value=[]), \
                 mock.patch('payments.sap_client.request',
                            side_effect=SapError('Balance due exceeded', status_code=400)), \
                 mock.patch.object(voucher_service.SapVoucher.objects, 'create') as create:
-            payouts.return_value.first.return_value = object()
+            payouts.return_value.first.return_value = SimpleNamespace(tds_amount=Decimal('0'))
             outcome = voucher_service.post(advance, user=SimpleNamespace(pk=1))
         self.assertFalse(outcome.ok)
         self.assertIn('Balance due exceeded', outcome.message)

@@ -263,29 +263,57 @@ _OPEN_PO_SQL = '''
       AND T0."DocTotal" - IFNULL(T0."PaidToDate", 0) > 0
       {card}
       {search}
+      {since}
     ORDER BY T0."DocDate" DESC, T0."DocEntry" DESC
-    LIMIT {limit}
+    {page}
 '''
 
 
-def open_purchase_orders(company, card_code=None, search=None, limit=None):
-    """Purchase orders with something still to receive, newest first.
+def _paging(limit, offset):
+    """`LIMIT n OFFSET m`, both coerced to ints here: formatted into the SQL, never bound."""
+    try:
+        start = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        start = 0
+    return f'LIMIT {_limit(limit)} OFFSET {start}'
 
-    `card_code` narrows to one vendor — the normal call, since an advance is
-    raised against a vendor and then against one of their orders.
-    """
-    schema = _schema(company)
+
+def _count(company, sql, params, what):
+    """How many rows `sql` (with no LIMIT) selects."""
+    rows = _run(company, f'SELECT COUNT(*) AS "n" FROM ({sql}) Q', params, what)
+    return int(rows[0]['n']) if rows else 0
+
+
+def _open_po_query(company, card_code, search, from_date):
     code = _s(card_code)
     pattern = _like(search)
-    sql = _OPEN_PO_SQL.format(
-        schema=schema,
+    parts = dict(
+        schema=_schema(company),
         card='AND T0."CardCode" = ?' if code else '',
         search=(f'AND (UPPER(T0."CardName") LIKE ?{_ESC} '
                 f'OR UPPER(IFNULL(T0."NumAtCard", \'\')) LIKE ?{_ESC} '
                 f'OR TO_VARCHAR(T0."DocNum") LIKE ?)') if pattern else '',
-        limit=_limit(limit),
+        since='AND T0."DocDate" >= ?' if from_date else '',
     )
-    params = ([code] if code else []) + ([pattern] * 3 if pattern else [])
+    params = ([code] if code else []) + ([pattern] * 3 if pattern else []) + ([from_date] if from_date else [])
+    return parts, params
+
+
+def count_open_purchase_orders(company, card_code=None, search=None, from_date=None):
+    """How many open POs `open_purchase_orders` would list with no limit: the total for paging."""
+    parts, params = _open_po_query(company, card_code, search, from_date)
+    return _count(company, _OPEN_PO_SQL.format(**parts, page=''), params, 'open purchase orders count')
+
+
+def open_purchase_orders(company, card_code=None, search=None, limit=None, from_date=None, offset=None):
+    """Purchase orders with something still to receive, newest first.
+
+    `card_code` narrows to one vendor — the normal call, since an advance is
+    raised against a vendor and then against one of their orders. `from_date`
+    (a `date`) keeps those posted on or after it.
+    """
+    parts, params = _open_po_query(company, card_code, search, from_date)
+    sql = _OPEN_PO_SQL.format(**parts, page=_paging(limit, offset))
     rows = [{
         'doc_entry': int(r['doc_entry']),
         'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
@@ -332,13 +360,44 @@ _OPEN_INVOICE_SQL = '''
       AND IFNULL("CANCELED", 'N') = 'N'
       {card}
       {search}
+      {since}
     ORDER BY "DocDueDate", "DocEntry" DESC
-    LIMIT {limit}
+    {page}
 '''
 
 
+def _invoice_table(party_type):
+    table = _INVOICE_TABLE.get(str(party_type or '').strip().lower())
+    if not table:
+        raise ValueError(
+            f'party_type must be one of: {", ".join(sorted(_INVOICE_TABLE))}.')
+    return table
+
+
+def _open_invoice_query(company, table, card_code, search, from_date):
+    code = _s(card_code)
+    pattern = _like(search)
+    parts = dict(
+        schema=_schema(company),
+        table=table,
+        card='AND "CardCode" = ?' if code else '',
+        search=(f'AND (UPPER("CardName") LIKE ?{_ESC} '
+                f'OR UPPER(IFNULL("NumAtCard", \'\')) LIKE ?{_ESC} '
+                f'OR TO_VARCHAR("DocNum") LIKE ?)') if pattern else '',
+        since='AND "DocDate" >= ?' if from_date else '',
+    )
+    params = ([code] if code else []) + ([pattern] * 3 if pattern else []) + ([from_date] if from_date else [])
+    return parts, params
+
+
+def count_open_invoices(company, party_type='vendor', card_code=None, search=None, from_date=None):
+    """How many open invoices `open_invoices` would list with no limit: the total for paging."""
+    parts, params = _open_invoice_query(company, _invoice_table(party_type), card_code, search, from_date)
+    return _count(company, _OPEN_INVOICE_SQL.format(**parts, page=''), params, f'open {party_type} invoices count')
+
+
 def open_invoices(company, party_type='vendor', card_code=None, search=None,
-                  limit=None):
+                  limit=None, from_date=None, offset=None):
     """Unpaid invoices, oldest due first.
 
     `party_type` is 'vendor' (A/P — the advance we pay) or 'customer' (A/R —
@@ -346,24 +405,9 @@ def open_invoices(company, party_type='vendor', card_code=None, search=None,
     defaulting: silently reading the wrong ledger would put a customer's
     invoice in front of someone about to pay a supplier.
     """
-    table = _INVOICE_TABLE.get(str(party_type or '').strip().lower())
-    if not table:
-        raise ValueError(
-            f'party_type must be one of: {", ".join(sorted(_INVOICE_TABLE))}.')
-
-    schema = _schema(company)
-    code = _s(card_code)
-    pattern = _like(search)
-    sql = _OPEN_INVOICE_SQL.format(
-        schema=schema,
-        table=table,
-        card='AND "CardCode" = ?' if code else '',
-        search=(f'AND (UPPER("CardName") LIKE ?{_ESC} '
-                f'OR UPPER(IFNULL("NumAtCard", \'\')) LIKE ?{_ESC} '
-                f'OR TO_VARCHAR("DocNum") LIKE ?)') if pattern else '',
-        limit=_limit(limit),
-    )
-    params = ([code] if code else []) + ([pattern] * 3 if pattern else [])
+    table = _invoice_table(party_type)
+    parts, params = _open_invoice_query(company, table, card_code, search, from_date)
+    sql = _OPEN_INVOICE_SQL.format(**parts, page=_paging(limit, offset))
     rows = [{
         'doc_entry': int(r['doc_entry']),
         'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
@@ -506,6 +550,262 @@ def document_attachment(company, kind, doc_entry):
     except (TypeError, ValueError):
         raise ValueError('doc_entry must be a number.') from None
     return latest_attachments(company, table, [entry]).get(entry)
+
+
+def _doc_entry(doc_entry):
+    try:
+        return int(doc_entry)
+    except (TypeError, ValueError):
+        raise ValueError('doc_entry must be a number.') from None
+
+
+#: The documents whose attachments can be listed and opened, by KIND. A GRPO
+#: is only ever reached as the base of a bill (see `related_attachments`).
+LINE_ATTACHMENT_TABLES = {'po': 'OPOR', 'bill': 'OPCH', 'grpo': 'OPDN'}
+
+_KIND_LABEL = {'po': 'Purchase order', 'bill': 'A/P invoice', 'grpo': 'Goods receipt PO'}
+
+#: The documents an A/P invoice was copied from. In these books a bill is
+#: always copied from GRPOs (PCH1.BaseType 20; never straight from a PO), and
+#: a GRPO from POs (PDN1.BaseType 22). Cancelled bases are left out.
+_BILL_BASES_SQL = '''
+    SELECT DISTINCT 'grpo' AS "kind", G."DocEntry" AS "doc_entry", G."DocNum" AS "doc_num"
+    FROM "{schema}"."PCH1" L
+    JOIN "{schema}"."OPDN" G ON G."DocEntry" = L."BaseEntry"
+    WHERE L."DocEntry" = ? AND L."BaseType" = 20 AND G."CANCELED" = 'N'
+    UNION
+    SELECT DISTINCT 'po', P."DocEntry", P."DocNum"
+    FROM "{schema}"."PCH1" L
+    JOIN "{schema}"."PDN1" GL ON GL."DocEntry" = L."BaseEntry" AND L."BaseType" = 20
+    JOIN "{schema}"."OPOR" P ON P."DocEntry" = GL."BaseEntry"
+    WHERE L."DocEntry" = ? AND GL."BaseType" = 22 AND P."CANCELED" = 'N'
+'''
+
+_DOC_ATTACHMENT_LINES_SQL = '''
+    SELECT D."DocEntry" AS "doc_entry", D."DocNum" AS "doc_num",
+           A."Line" AS "line", A."FileName" AS "file_name", A."FileExt" AS "file_ext",
+           A."Date" AS "date", A."FreeText" AS "note"
+    FROM "{schema}"."{table}" D
+    JOIN "{schema}"."ATC1" A ON A."AbsEntry" = D."AtcEntry"
+    WHERE D."DocEntry" IN ({entries})
+    ORDER BY D."DocEntry", A."Line"
+'''
+
+
+def _attachment_lines(company, kind, entries):
+    """Every ATC1 line of `entries` (documents of one kind), in line order."""
+    entries = sorted({int(e) for e in entries})
+    if not entries:
+        return []
+    sql = _DOC_ATTACHMENT_LINES_SQL.format(
+        schema=_schema(company), table=LINE_ATTACHMENT_TABLES[kind],
+        entries=', '.join('?' for _ in entries))
+    return [{
+        'kind': kind,
+        'kind_label': _KIND_LABEL[kind],
+        'doc_entry': int(r['doc_entry']),
+        'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+        'line': int(r['line']),
+        'file_name': _file_name(r.get('file_name'), r.get('file_ext')),
+        'date': _date(r.get('date')),
+        'note': _s(r.get('note')),
+    } for r in _run(company, sql, entries, 'document attachments')]
+
+
+def related_attachments(company, kind, doc_entry):
+    """EVERY SAP attachment of a document and of what it was made from.
+
+    A bill: its own attachment lines, then its GRPOs', then the POs behind
+    those GRPOs, each line once. A PO: its own lines. `[{kind, kind_label,
+    doc_entry, doc_num, line, file_name, date, note}]`. Each file is opened by
+    (kind, doc_entry, line) through `attachment_line`, so a file name is never
+    taken from the caller.
+    """
+    kind = str(kind or '').strip().lower()
+    if kind not in ATTACHMENT_TABLES:
+        raise ValueError(f'kind must be one of: {", ".join(sorted(ATTACHMENT_TABLES))}.')
+    entry = _doc_entry(doc_entry)
+    found = _attachment_lines(company, kind, [entry])
+    if kind == 'bill':
+        bases = _run(company, _BILL_BASES_SQL.format(schema=_schema(company)), [entry, entry],
+                     'bill base documents')
+        for base_kind in ('grpo', 'po'):
+            found += _attachment_lines(
+                company, base_kind, [int(b['doc_entry']) for b in bases if b['kind'] == base_kind])
+    return found
+
+
+def attachment_line(company, kind, doc_entry, line):
+    """One attachment line of one document, or None. `kind`: po | bill | grpo."""
+    kind = str(kind or '').strip().lower()
+    if kind not in LINE_ATTACHMENT_TABLES:
+        raise ValueError(f'kind must be one of: {", ".join(sorted(LINE_ATTACHMENT_TABLES))}.')
+    entry = _doc_entry(doc_entry)
+    try:
+        number = int(line)
+    except (TypeError, ValueError):
+        raise ValueError('line must be a number.') from None
+    return next((a for a in _attachment_lines(company, kind, [entry]) if a['line'] == number), None)
+
+
+# ---------------------------------------------------------------------------
+# One purchase order, in full
+# ---------------------------------------------------------------------------
+_PO_STATUS = {'O': 'Open', 'C': 'Closed'}
+
+_PO_HEADER_SQL = '''
+    SELECT
+        H."DocEntry" AS "doc_entry", H."DocNum" AS "doc_num", H."DocStatus" AS "status",
+        H."CANCELED" AS "cancelled", H."DocDate" AS "doc_date", H."DocDueDate" AS "delivery_date",
+        H."TaxDate" AS "document_date", H."CreateDate" AS "created_on",
+        H."CardCode" AS "card_code", H."CardName" AS "card_name", H."NumAtCard" AS "vendor_ref",
+        H."DocCur" AS "currency", H."DocRate" AS "rate",
+        H."DocTotal" AS "doc_total", H."VatSum" AS "tax", H."DiscPrcnt" AS "discount_percent",
+        H."DiscSum" AS "discount", H."TotalExpns" AS "freight", H."RoundDif" AS "rounding",
+        H."WTSum" AS "tds", H."PaidToDate" AS "paid_to_date", H."DpmAmnt" AS "down_payment",
+        H."BPLName" AS "branch", H."Address" AS "pay_to", H."Address2" AS "ship_to",
+        H."Comments" AS "remarks", H."JrnlMemo" AS "journal_memo",
+        T."PymntGroup" AS "payment_terms", S."SlpName" AS "buyer",
+        TRIM(IFNULL(E."firstName", '') || ' ' || IFNULL(E."lastName", '')) AS "owner",
+        U."U_NAME" AS "created_by"
+    FROM "{schema}"."OPOR" H
+    LEFT JOIN "{schema}"."OCTG" T ON T."GroupNum" = H."GroupNum"
+    LEFT JOIN "{schema}"."OSLP" S ON S."SlpCode" = H."SlpCode"
+    LEFT JOIN "{schema}"."OHEM" E ON E."empID" = H."OwnerCode"
+    LEFT JOIN "{schema}"."OUSR" U ON U."USERID" = H."UserSign"
+    WHERE H."DocEntry" = ?
+'''
+
+_PO_LINES_SQL = '''
+    SELECT
+        L."LineNum" AS "line", L."ItemCode" AS "item_code", L."Dscription" AS "description",
+        L."Quantity" AS "quantity", L."OpenCreQty" AS "open_quantity", L."unitMsr" AS "unit",
+        L."PriceBefDi" AS "price_before_discount", L."DiscPrcnt" AS "discount_percent",
+        L."Price" AS "price", L."LineTotal" AS "line_total", L."TaxCode" AS "tax_code",
+        L."VatPrcnt" AS "tax_percent", L."VatSum" AS "tax", L."GTotal" AS "gross_total",
+        L."WhsCode" AS "warehouse", L."ShipDate" AS "delivery_date", L."LineStatus" AS "status",
+        L."AcctCode" AS "account", L."OcrCode3" AS "budget", L."OcrCode4" AS "sub_budget",
+        L."FreeTxt" AS "note"
+    FROM "{schema}"."POR1" L
+    WHERE L."DocEntry" = ?
+    ORDER BY L."VisOrder"
+'''
+
+#: What was made from the PO: its GRPOs (PDN1.BaseType 22) and the bills
+#: made from those GRPOs (PCH1.BaseType 20), each document once.
+_PO_FOLLOW_ON_SQL = '''
+    SELECT 'grpo' AS "kind", G."DocEntry" AS "doc_entry", G."DocNum" AS "doc_num",
+           G."DocDate" AS "doc_date", G."DocTotal" AS "doc_total", G."DocStatus" AS "status",
+           G."CANCELED" AS "cancelled", G."NumAtCard" AS "vendor_ref"
+    FROM "{schema}"."OPDN" G
+    WHERE G."DocEntry" IN (SELECT "DocEntry" FROM "{schema}"."PDN1" WHERE "BaseType" = 22 AND "BaseEntry" = ?)
+    UNION ALL
+    SELECT 'bill', B."DocEntry", B."DocNum", B."DocDate", B."DocTotal", B."DocStatus", B."CANCELED",
+           B."NumAtCard"
+    FROM "{schema}"."OPCH" B
+    WHERE B."DocEntry" IN (
+        SELECT L."DocEntry" FROM "{schema}"."PCH1" L
+        JOIN "{schema}"."PDN1" GL ON GL."DocEntry" = L."BaseEntry"
+        WHERE L."BaseType" = 20 AND GL."BaseType" = 22 AND GL."BaseEntry" = ?)
+    ORDER BY 1 DESC, 4, 3
+'''
+
+
+def _qty(value):
+    return None if value is None else str(value)
+
+
+def _lines_of(value):
+    """SAP keeps multi-line text (addresses) with bare CRs."""
+    return _s(value).replace('\r\n', '\n').replace('\r', '\n')
+
+
+#: SAP's "no buyer" placeholder (SlpCode -1) is not a name.
+_NO_BUYER = '-No Sales Employee / Buyer-'
+
+
+def purchase_order(company, doc_entry):
+    """One PO as SAP holds it: header, every line, and what was made from it.
+
+    `{header: {...}, lines: [...], follow_on: [...], attachments: [...]}`, or
+    None when there is no such PO. Amounts and quantities are strings, as
+    everywhere in this module.
+    """
+    entry = _doc_entry(doc_entry)
+    schema = _schema(company)
+    rows = _run(company, _PO_HEADER_SQL.format(schema=schema), [entry], 'purchase order')
+    if not rows:
+        return None
+    h = rows[0]
+    header = {
+        'doc_entry': int(h['doc_entry']),
+        'doc_num': int(h['doc_num']) if h.get('doc_num') is not None else None,
+        'status': ('Cancelled' if _s(h.get('cancelled')) == 'Y'
+                   else _PO_STATUS.get(_s(h.get('status')), _s(h.get('status')))),
+        'doc_date': _date(h.get('doc_date')),
+        'delivery_date': _date(h.get('delivery_date')),
+        'document_date': _date(h.get('document_date')),
+        'created_on': _date(h.get('created_on')),
+        'card_code': _s(h.get('card_code')),
+        'card_name': _s(h.get('card_name')),
+        'vendor_ref': _s(h.get('vendor_ref')),
+        'currency': _s(h.get('currency')),
+        'rate': _qty(h.get('rate')),
+        'doc_total': _money(h.get('doc_total')),
+        'tax': _money(h.get('tax')),
+        'discount_percent': _qty(h.get('discount_percent')),
+        'discount': _money(h.get('discount')),
+        'freight': _money(h.get('freight')),
+        'rounding': _money(h.get('rounding')),
+        'tds': _money(h.get('tds')),
+        'paid_to_date': _money(h.get('paid_to_date')),
+        'down_payment': _money(h.get('down_payment')),
+        'branch': _s(h.get('branch')),
+        'pay_to': _lines_of(h.get('pay_to')),
+        'ship_to': _lines_of(h.get('ship_to')),
+        'payment_terms': _s(h.get('payment_terms')),
+        'buyer': '' if _s(h.get('buyer')) == _NO_BUYER else _s(h.get('buyer')),
+        'owner': _s(h.get('owner')),
+        'created_by': _s(h.get('created_by')),
+        'remarks': _s(h.get('remarks')),
+        'journal_memo': _s(h.get('journal_memo')),
+    }
+    lines = [{
+        'line': int(r['line']),
+        'item_code': _s(r.get('item_code')),
+        'description': _s(r.get('description')),
+        'quantity': _qty(r.get('quantity')),
+        'open_quantity': _qty(r.get('open_quantity')),
+        'unit': _s(r.get('unit')),
+        'price_before_discount': _money(r.get('price_before_discount')),
+        'discount_percent': _qty(r.get('discount_percent')),
+        'price': _money(r.get('price')),
+        'line_total': _money(r.get('line_total')),
+        'tax_code': _s(r.get('tax_code')),
+        'tax_percent': _qty(r.get('tax_percent')),
+        'tax': _money(r.get('tax')),
+        'gross_total': _money(r.get('gross_total')),
+        'warehouse': _s(r.get('warehouse')),
+        'delivery_date': _date(r.get('delivery_date')),
+        'status': _PO_STATUS.get(_s(r.get('status')), _s(r.get('status'))),
+        'account': _s(r.get('account')),
+        'budget': _s(r.get('budget')),
+        'sub_budget': _s(r.get('sub_budget')),
+        'note': _s(r.get('note')),
+    } for r in _run(company, _PO_LINES_SQL.format(schema=schema), [entry], 'purchase order lines')]
+    follow_on = [{
+        'kind': r['kind'],
+        'kind_label': _KIND_LABEL[r['kind']],
+        'doc_entry': int(r['doc_entry']),
+        'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+        'doc_date': _date(r.get('doc_date')),
+        'doc_total': _money(r.get('doc_total')),
+        'status': 'Cancelled' if _s(r.get('cancelled')) == 'Y' else _PO_STATUS.get(_s(r.get('status')), ''),
+        'vendor_ref': _s(r.get('vendor_ref')),
+    } for r in _run(company, _PO_FOLLOW_ON_SQL.format(schema=schema), [entry, entry],
+                    'purchase order follow-on')]
+    return {'header': header, 'lines': lines, 'follow_on': follow_on,
+            'attachments': _attachment_lines(company, 'po', [entry])}
 
 
 # ---------------------------------------------------------------------------
@@ -1270,6 +1570,179 @@ _DOCUMENT_BRANCHES_SQL = '''
     FROM "{schema}"."{table}"
     WHERE "DocEntry" IN ({marks})
 '''
+
+
+# ---------------------------------------------------------------------------
+# TDS deducted at payment
+# ---------------------------------------------------------------------------
+#: The rates the Payment desk offers. A rate is offered only where SAP has an
+#: active TDS code at it (no 5% code exists today; one created in SAP appears).
+TDS_RATES = (Decimal('1'), Decimal('2'), Decimal('5'), Decimal('10'))
+
+#: Active TDS codes at the offered rates, with the payable account each books
+#: to (the India `ApTdsAcc`: one 2133xxx account per section), and whether the
+#: vendor has the code assigned in SAP (CRD4).
+_TDS_CODES_SQL = '''
+    SELECT W."WTCode" AS "code", W."WTName" AS "name", W."Rate" AS "rate", W."ApTdsAcc" AS "account",
+           A."AcctName" AS "account_name",
+           CASE WHEN EXISTS (SELECT 1 FROM "{schema}"."CRD4" X
+                             WHERE X."CardCode" = ? AND X."WTCode" = W."WTCode") THEN 1 ELSE 0 END AS "assigned"
+    FROM "{schema}"."OWHT" W
+    LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = W."ApTdsAcc"
+    WHERE IFNULL(W."Inactive", 'N') <> 'Y' AND IFNULL(W."ApTdsAcc", '') <> '' AND W."Rate" IN ({rates})
+    ORDER BY W."Rate", 6 DESC, W."WTName"
+'''
+
+
+def tds_codes(company, card_code):
+    """`[{code, name, rate, account, account_name, assigned}]` at the offered rates.
+
+    The vendor's own codes (assigned in SAP) come first at each rate.
+    """
+    sql = _TDS_CODES_SQL.format(schema=_schema(company), rates=', '.join(str(r) for r in TDS_RATES))
+    return [{
+        'code': _s(r.get('code')),
+        'name': _s(r.get('name')),
+        'rate': f"{Decimal(str(r.get('rate'))).normalize():f}",
+        'account': _s(r.get('account')),
+        'account_name': _s(r.get('account_name')),
+        'assigned': bool(r.get('assigned')),
+    } for r in _run(company, sql, [_s(card_code)], 'TDS codes')]
+
+
+_BILLS_TDS_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", "DocNum" AS "doc_num", "WTSum" AS "tds"
+    FROM "{schema}"."OPCH" WHERE "DocEntry" IN ({marks}) AND IFNULL("WTSum", 0) <> 0
+'''
+
+
+def bills_with_tds(company, doc_entries):
+    """`{doc_entry: {doc_num, tds}}` for the bills that already had TDS deducted in SAP."""
+    entries = sorted({int(e) for e in doc_entries})
+    if not entries:
+        return {}
+    sql = _BILLS_TDS_SQL.format(schema=_schema(company), marks=', '.join('?' * len(entries)))
+    return {int(r['doc_entry']): {'doc_num': r.get('doc_num'), 'tds': _money(r.get('tds'))}
+            for r in _run(company, sql, entries, 'bill TDS')}
+
+
+def vendor_control_account(company, card_code):
+    """The vendor's control account (OCRD.DebPayAcct): the G/L a journal line on them books to."""
+    rows = _run(company, f'SELECT "DebPayAcct" AS "account" FROM "{_schema(company)}"."OCRD" WHERE "CardCode" = ?',
+                [_s(card_code)], 'vendor control account')
+    return _s(rows[0].get('account')) if rows else ''
+
+
+#: A journal entry OMS booked, found again by its memo: not reversed, and the
+#: amount it debited the partner with.
+_JOURNAL_BY_MEMO_SQL = '''
+    SELECT H."TransId" AS "trans_id",
+           (SELECT SUM(L."Debit") FROM "{schema}"."JDT1" L
+             WHERE L."TransId" = H."TransId" AND L."ShortName" = ?) AS "debit"
+    FROM "{schema}"."OJDT" H
+    WHERE H."Memo" = ? AND H."TransType" = '30' AND H."StornoToTr" IS NULL
+      AND NOT EXISTS (SELECT 1 FROM "{schema}"."OJDT" R WHERE R."StornoToTr" = H."TransId")
+    ORDER BY H."TransId" DESC
+'''
+
+
+def journal_by_memo(company, memo, card_code):
+    """`{trans_id, debit}` of a live (not reversed) journal entry with that memo, or None."""
+    rows = _run(company, _JOURNAL_BY_MEMO_SQL.format(schema=_schema(company)), [_s(card_code), memo],
+                'journal entry by memo')
+    if not rows:
+        return None
+    return {'trans_id': int(rows[0]['trans_id']), 'debit': Decimal(str(rows[0].get('debit') or 0))}
+
+
+_LIVE_DOCUMENTS_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", "DocNum" AS "doc_num",
+           "DocTotal" - IFNULL("PaidToDate", 0) AS "open_amount",
+           "DocStatus" AS "doc_status", "CANCELED" AS "cancelled",
+           "CardCode" AS "card_code", "CardName" AS "card_name", "NumAtCard" AS "vendor_ref",
+           "DocDate" AS "doc_date", "DocDueDate" AS "due_date", "DocTotal" AS "doc_total"
+    FROM "{schema}"."{table}"
+    WHERE "DocEntry" IN ({marks})
+'''
+
+
+def live_documents(company, kind, doc_entries):
+    """Bills or POs as SAP holds them NOW: `{doc_entry: {doc_num, open, status}}`.
+
+    `open` is SAP's open amount (DocTotal less PaidToDate: for a bill what is
+    unpaid, for a PO what is not yet received), `status` OPEN, CLOSED or
+    CANCELLED. A document SAP no longer has is absent.
+    """
+    table = BRANCH_TABLES[kind]
+    entries = sorted({int(e) for e in doc_entries})
+    if not entries:
+        return {}
+    sql = _LIVE_DOCUMENTS_SQL.format(schema=_schema(company), table=table, marks=', '.join('?' * len(entries)))
+    out = {}
+    for r in _run(company, sql, entries, f'{table} open amounts'):
+        status = ('CANCELLED' if _s(r.get('cancelled')) == 'Y'
+                  else 'OPEN' if _s(r.get('doc_status')) == 'O' else 'CLOSED')
+        out[int(r['doc_entry'])] = {
+            'doc_num': r.get('doc_num'), 'open': _money(r.get('open_amount')), 'status': status,
+            'card_code': _s(r.get('card_code')), 'card_name': _s(r.get('card_name')),
+            'vendor_ref': _s(r.get('vendor_ref')), 'doc_date': _date(r.get('doc_date')),
+            'due_date': _date(r.get('due_date')), 'doc_total': _money(r.get('doc_total')),
+        }
+    return out
+
+
+#: An outgoing payment's partner line is found through the payment's own
+#: TransId (SAP puts SourceID only on the bank line). Its BalDueDeb is the part
+#: still on account: not yet set off against a bill. Oil, since Apr 2025: of
+#: 2,467 vendor payments on account, 1,853 fully adjusted, 74 partly, 547 open.
+_PAYMENTS_UNADJUSTED_SQL = '''
+    SELECT P."DocEntry" AS "doc_entry", SUM(J."BalDueDeb") AS "unadjusted"
+    FROM "{schema}"."OVPM" P
+    JOIN "{schema}"."JDT1" J ON J."TransId" = P."TransId" AND J."ShortName" = P."CardCode"
+    WHERE P."DocEntry" IN ({marks})
+    GROUP BY P."DocEntry"
+'''
+
+
+def payments_unadjusted(company, doc_entries):
+    """`{OVPM DocEntry: Decimal}`: how much of each outgoing payment is still on account."""
+    entries = sorted({int(e) for e in doc_entries})
+    if not entries:
+        return {}
+    sql = _PAYMENTS_UNADJUSTED_SQL.format(schema=_schema(company), marks=', '.join('?' * len(entries)))
+    return {int(r['doc_entry']): Decimal(str(r.get('unadjusted') or 0))
+            for r in _run(company, sql, entries, 'payments on account')}
+
+
+_LEDGER_BRANCH_SQL = '''
+    SELECT J."TransType" AS "obj", J."SourceID" AS "doc_entry", J."TransId" AS "trans_id",
+           J."Line_ID" AS "line", J."BPLId" AS "bpl_id",
+           J."BalDueDeb" AS "open_debit", J."BalDueCred" AS "open_credit"
+    FROM "{schema}"."JDT1" J
+    WHERE J."ShortName" = ? AND (J."BalDueDeb" <> 0 OR J."BalDueCred" <> 0)
+'''
+
+
+def ledger_items(company, card_code):
+    """A customer's open journal lines, keyed as a refund line stores them.
+
+    `{(sap_doc_entry, sap_line): {bpl_id, open}}`: an A/R invoice or credit
+    memo by its DocEntry (line 0), a receipt or journal entry by its TransId
+    and line, exactly as `views.ledger_key` keys them. An item no longer open
+    on the customer's account is simply absent.
+    """
+    by_journal = (24, 30)
+    out = {}
+    for r in _run(company, _LEDGER_BRANCH_SQL.format(schema=_schema(company)), [_s(card_code)],
+                  'customer ledger'):
+        obj = int(r['obj']) if r.get('obj') is not None else None
+        key = ((int(r['trans_id']), int(r['line'] or 0)) if obj in by_journal
+               else (int(r['doc_entry'] or r['trans_id']), 0))
+        out[key] = {
+            'bpl_id': r.get('bpl_id'),
+            'open': str(Decimal(str(r.get('open_debit') or 0)) + Decimal(str(r.get('open_credit') or 0))),
+        }
+    return out
 
 
 def document_branches(company, kind, doc_entries):
