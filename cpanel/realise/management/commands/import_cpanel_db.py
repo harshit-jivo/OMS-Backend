@@ -19,6 +19,7 @@ refused unless `--replace` is given, which empties it first.
     python manage.py import_cpanel_db C:/path/to/db.sqlite3            # dry run
     python manage.py import_cpanel_db C:/path/to/db.sqlite3 --apply
 """
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import timezone as dt_timezone
@@ -143,6 +144,10 @@ class Command(BaseCommand):
                     self.authorless += raw is None
                 values[field.attname] = raw
                 continue
+            # SQLite hands JSON columns back as text; JSONField.to_python keeps a str
+            # as a str, which would store a JSON *string* instead of the object.
+            if isinstance(field, models.JSONField) and isinstance(raw, str):
+                raw = json.loads(raw)
             value = field.to_python(raw) if raw is not None else None
             # Both projects run USE_TZ=True: SQLite holds UTC as naive text.
             if isinstance(field, models.DateTimeField) and value is not None and timezone.is_naive(value):
