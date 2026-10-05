@@ -27,6 +27,14 @@ ALLOWED_PATHS = (
     '/realise/', '/realise/beverages/', '/realise/realise-dashboard/', '/realise/targets/',
     '/realise/sales-channel/',
     '/sales/', '/inventory/', '/expenses/', '/salaries/',
+    # C_Panel's report pages (control_panel.permissions.REPORTS).
+    '/realise/compare-sales/', '/realise/sales-cn/', '/realise/hidden-sales/', '/realise/sales-flow/',
+    '/realise/dispatch-details/', '/realise/realise-calculator/', '/realise/rate-list/',
+    '/realise/plan-vs-done/', '/realise/customer-aging/', '/realise/beverages-gst/',
+    '/realise/required-credit-limit/', '/realise/open-payments/', '/realise/claims/',
+    '/inventory/reconciliation/', '/inventory/stock-available/', '/inventory/non-inventory/',
+    '/realise/oih-vs-stock/', '/inventory/production/', '/inventory/daily-production/',
+    '/realise/customer-master/',
 )
 
 

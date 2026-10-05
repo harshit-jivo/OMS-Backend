@@ -14,6 +14,7 @@ and `{% if can_* %}` — runs unchanged.
     Control Panel — Sales        realise_admin + sales_viewer
     Control Panel — Inventory    inventory_viewer + inventory_admin (rupee values shown)
     Control Panel — Finance      expenses_viewer + salaries_viewer
+    each report (REPORTS)        that report page's own `can_*` flag
 
 Which PAGE of a group a user may open is the page guard's job
 (cpanel/core/page_guard.py); which sub-tabs a page shows, the templates'
@@ -62,9 +63,9 @@ def cp_groups(user):
 def cp_flags(user):
     """C_Panel's `can_*` flags for `user`, from their OMS keys."""
     flags = dict.fromkeys(ALL_FLAGS, False)
-    groups = cp_groups(user)
-    if not groups:
+    if not user or not getattr(user, 'is_authenticated', False):
         return flags
+    groups = cp_groups(user)
     flags.update({
         'can_edit': 'realise_admin' in groups,
         'can_realise': bool(groups & REALISE_GROUPS),
@@ -74,6 +75,11 @@ def cp_flags(user):
         'can_expenses': 'expenses_viewer' in groups,
         'can_salaries': 'salaries_viewer' in groups,
     })
+    # Each report key turns on its page's own flag (control_panel.permissions.REPORTS).
+    keys = effective_keys(user)
+    for key, flag in cp.REPORT_FLAGS.items():
+        if key in keys:
+            flags[flag] = True
     return flags
 
 
