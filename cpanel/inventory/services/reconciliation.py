@@ -29,15 +29,16 @@ Only non-matched chains are "broken" and shown by default.
 import re
 from datetime import date, timedelta
 
+from cpanel.core import companies
 from cpanel.core.sap_connector import get_connection
 from .shared import cv
 
-MART = "JIVO_MART_HANADB"
-WELL = "JIVO_OIL_HANADB"
+MART = companies.MART
+WELL = companies.OIL
 
 # The seller side (Jivo Wellness) sells both oil and beverages to Jivo Mart through the same
 # PO→SO→GRPO→A/P→A/R chain and the same partner-card scoping; only the seller schema differs.
-WELL_SCHEMAS = {"oil": "JIVO_OIL_HANADB", "beverages": "JIVO_BEVERAGES_HANADB"}
+WELL_SCHEMAS = {"oil": companies.OIL, "beverages": companies.BEVERAGES}
 
 # Business-partner scoping. Mart's vendor cards for Wellness are named "JIVO … WELLNESS"
 # (excludes unrelated names like "KOMAL … WELLNESS"); Wellness's customer cards for Mart
@@ -111,7 +112,7 @@ def _in_str_list(values):
 def get_reconciliation(date_from=None, date_to=None, schema="oil"):
     # Seller schema: oil (default) or beverages. Buyer (MART) and the whole chain/scoping
     # are identical — only which Wellness company we pull SO/A/R (and its ties) from changes.
-    WELL = WELL_SCHEMAS.get(schema, "JIVO_OIL_HANADB")
+    WELL = WELL_SCHEMAS.get(schema, companies.OIL)
     today = date.today()
     d_to = _sql_date(date_to, today)
     d_from = _sql_date(date_from, today - timedelta(days=DEFAULT_MONTHS * 31))
@@ -792,7 +793,7 @@ def get_ledgers(date_from=None, date_to=None, schema="oil"):
     """Mart & Wellness BP ledgers (pivoted by ORIGIN) for the reconciliation 'Ledgers' tab.
     Mart = JIVO WELLNESS vendor's ledger in JIVO_MART_HANADB; Wellness = JIVO MART customer's
     ledger in the seller schema (oil default / beverages). Same date window as the main tab."""
-    WELL = WELL_SCHEMAS.get(schema, "JIVO_OIL_HANADB")
+    WELL = WELL_SCHEMAS.get(schema, companies.OIL)
     today = date.today()
     d_to = _sql_date(date_to, today)
     d_from = _sql_date(date_from, today - timedelta(days=DEFAULT_MONTHS * 31))

@@ -1,14 +1,17 @@
+from cpanel.core import companies
+
 from .shared import FG_VALID, GIFT_EXCL, PM_VALID, RM_VALID, cf, q, safe, tf, wf
 
+# The page's company switch ids -> the company databases set in OMS's .env.
 SCHEMAS = {
-    "jivo_oil": "JIVO_OIL_HANADB",
-    "jivo_mart": "JIVO_MART_HANADB",
-    "jivo_beverages": "JIVO_BEVERAGES_HANADB",
+    "jivo_oil": companies.OIL,
+    "jivo_mart": companies.MART,
+    "jivo_beverages": companies.BEVERAGES,
 }
 
 
 def get_schema(s):
-    return SCHEMAS.get(s, "JIVO_OIL_HANADB")
+    return SCHEMAS.get(s, companies.OIL)
 
 
 def JSONResponse(content):

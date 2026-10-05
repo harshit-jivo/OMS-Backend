@@ -1,6 +1,7 @@
 import calendar
 from datetime import date
 
+from cpanel.core import companies
 from cpanel.dashboard.sap_connector import execute_query
 
 
@@ -27,7 +28,7 @@ def _month_range(month, year):
 
 def get_sales_data(start_date, end_date):
     try:
-        sql = 'CALL "JIVO_OIL_HANADB"."REPORT_SALES_ANALYSIS"(?, ?)'
+        sql = f'CALL "{companies.OIL}"."REPORT_SALES_ANALYSIS"(?, ?)'
         raw_rows = execute_query(sql, [start_date, end_date])
         rows = []
         for row in raw_rows:
@@ -102,7 +103,7 @@ def get_sales_comparison(month, year):
 
 def get_historical_realise(start_date, end_date):
     try:
-        sql = 'CALL "JIVO_OIL_HANADB"."REPORT_SALES_ANALYSIS"(?, ?)'
+        sql = f'CALL "{companies.OIL}"."REPORT_SALES_ANALYSIS"(?, ?)'
         raw_rows = execute_query(sql, [start_date, end_date])
         
         # We need to aggregate the procedure output in Python since we can't GROUP BY a procedure
@@ -149,7 +150,7 @@ def get_historical_realise(start_date, end_date):
 
 def get_drill_down(start_date, end_date, product_type=None, sub_group=None):
     try:
-        sql = 'CALL "JIVO_OIL_HANADB"."REPORT_SALES_ANALYSIS"(?, ?)'
+        sql = f'CALL "{companies.OIL}"."REPORT_SALES_ANALYSIS"(?, ?)'
         raw_rows = execute_query(sql, [start_date, end_date])
         rows = []
         

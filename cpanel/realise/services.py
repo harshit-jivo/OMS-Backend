@@ -6,18 +6,18 @@ from decimal import Decimal
 from datetime import date, datetime, timedelta
 
 from django.db import transaction
+from django.db.models.functions import Collate
 from django.utils import timezone
 
-from cpanel.core import sap_connector
-from .models import (MainGroupMaster, MonthlyTarget, SegmentTarget, StateMaster,
-                     TargetMaster, TargetNode, TerritoryMapping, TerritoryProductTarget,
+from cpanel.core import companies, sap_connector
+from .models import (MonthlyTarget, TargetNode, TerritoryMapping, TerritoryProductTarget,
                      TerritoryItemTarget,
                      CityOwner, ClosingRemark, CreditLock, CreditLockSnapshot,
                      AgingRemark, AgingRemarkLine, AgingDueConfig, Claim)
 
 logger = logging.getLogger(__name__)
 
-SAP_SCHEMA = 'JIVO_OIL_HANADB'
+SAP_SCHEMA = companies.OIL
 SAP_PROC   = 'REPORT_SALES_ANALYSIS'
 
 ALLOWED_SUB_GROUPS = {
@@ -112,8 +112,8 @@ def _fetch_raw(start_date, end_date):
 # ── Beverages dataset (separate HANA schema + proc) ───────────────────────
 # Same fetch mechanism as oils, but a different schema/proc and a product-only
 # shape: Variety / Sub-Group / SKU dimensions with Quantity & Boxes metrics.
-BEVERAGES_SCHEMA = 'JIVO_BEVERAGES_HANADB'
-MART_SCHEMA = 'JIVO_MART_HANADB'          # Jivo Mart company — used by the Customer Aging Mart toggle
+BEVERAGES_SCHEMA = companies.BEVERAGES
+MART_SCHEMA = companies.MART          # Jivo Mart company — used by the Customer Aging Mart toggle
 _BEV_CACHE = {}
 _BEV_CACHE_TTL = 90   # seconds, same as oils
 
@@ -430,7 +430,10 @@ def get_beverages_rows(start_date, end_date, want_prev=False):
 
     # Union of sales + OIH keys so products with open orders but no in-range sales still show.
     rows = []
-    for k in set(agg) | set(oih_main):
+    # Sold rows in SAP's order (date, document), then rows that only have open orders.
+    # Not `set(agg) | set(oih_main)`: a set's order changes with every process (hash
+    # seed), so the list came back shuffled after each server restart.
+    for k in list(agg) + [k for k in oih_main if k not in agg]:
         v = agg.get(k)
         rows.append({'variety': k[0], 'sub_group': k[1], 'sku': k[2], 'item': k[3],
                      'main_group': k[4], 'state': k[5], 'brand': k[6], 'chain': k[7],
@@ -1009,15 +1012,7 @@ def save_monthly_targets(updates, month, year, user):
     return saved
 
 
-def ensure_channel_groups():
-    masters = {}
-    for name in CHANNEL_GROUPS:
-        masters[name], _ = MainGroupMaster.objects.get_or_create(name=name)
-    return masters
-
-
 def get_channel_target_map(month, year, segment=None):
-    ensure_channel_groups()
     grouped = {name: Decimal('0') for name in CHANNEL_GROUPS}
 
     # Prefer the hierarchical Update Targets editor (TargetNode) — the source of
@@ -1043,48 +1038,10 @@ def get_channel_target_map(month, year, segment=None):
             grouped[name] = channel_level[name] if channel_level.get(name, 0) > 0 else per_state.get(name, Decimal('0'))
         return {key: float(val) for key, val in grouped.items()}
 
-    # Prefer the flat per-main-group editor (SegmentTarget).
-    segment_rows = SegmentTarget.objects.filter(segment_type='main_group', month=month, year=year)
-    if segment_rows.exists():
-        for row in segment_rows:
-            name = _normalize_name(row.segment_value)
-            grouped[name] = grouped.get(name, Decimal('0')) + (row.target_ltrs or Decimal('0'))
-        return {key: float(val) for key, val in grouped.items()}
-
-    # Fallback: legacy TargetMaster rows.
-    rows = TargetMaster.objects.filter(month=month, year=year).select_related('main_group')
-    for row in rows:
-        name = (row.main_group.name or '').strip().upper()
-        if name not in grouped:
-            grouped[name] = Decimal('0')
-        grouped[name] += row.target_ltrs or Decimal('0')
+    # No target saved for the period: every channel at zero. (C_Panel's two older
+    # target tables, SegmentTarget and TargetMaster, used to be read here; they
+    # were empty in production and are gone.)
     return {key: float(val) for key, val in grouped.items()}
-
-
-def get_channel_target_rows(month, year):
-    data = get_channel_target_map(month, year)
-    return [{'name': name, 'target_ltrs': data.get(name, 0.0)} for name in CHANNEL_GROUPS]
-
-
-def save_channel_targets(month, year, targets):
-    masters = ensure_channel_groups()
-    saved = 0
-    for name in CHANNEL_GROUPS:
-        raw_value = targets.get(name, 0)
-        try:
-            value = Decimal(str(raw_value or 0))
-        except Exception:
-            value = Decimal('0')
-        TargetMaster.objects.update_or_create(
-            main_group=masters[name],
-            state=None,
-            sales_person='',
-            month=month,
-            year=year,
-            defaults={'target_ltrs': value},
-        )
-        saved += 1
-    return saved
 
 
 # ── Channel Targets editor (set a whole channel's target directly, vs last-month sale) ──
@@ -1261,159 +1218,19 @@ def _item_label(code, name):
     return name or code or '—'
 
 
-def get_target_editor_options(raw_rows=None):
-    ensure_channel_groups()
-    state_names = {_normalize_name(row.name) for row in StateMaster.objects.all() if row.name}
-    sales_people = {_normalize_name(row.sales_person) for row in TargetMaster.objects.exclude(sales_person__isnull=True).exclude(sales_person__exact='') if row.sales_person}
-
-    raw_rows = raw_rows or []
-    sales_keys = ['U_SALES_PERSON', 'U_Sales_Person', 'SALES_PERSON', 'SalesPerson', 'SlpName']
-    for row in raw_rows:
-        state_name = _normalize_name(row.get('State'))
-        if state_name:
-            state_names.add(state_name)
-        for key in sales_keys:
-            sales_name = _normalize_name(row.get(key))
-            if sales_name:
-                sales_people.add(sales_name)
-                break
-
-    return {
-        'main_groups': CHANNEL_GROUPS,
-        'states': sorted(state_names),
-        'sales_people': sorted(sales_people),
-    }
-
-
-def get_target_entries(month, year):
-    ensure_channel_groups()
-    rows = TargetMaster.objects.filter(month=month, year=year).select_related('main_group', 'state').order_by('main_group__name', 'state__name', 'sales_person')
-    data = []
-    for row in rows:
-        state_name = row.state.name if row.state_id else ''
-        sales_person = row.sales_person or ''
-        if state_name and sales_person:
-            level = 'state_sales'
-        elif state_name:
-            level = 'state'
-        elif sales_person:
-            level = 'sales_person'
-        else:
-            level = 'main_group'
-        data.append({
-            'main_group': row.main_group.name,
-            'state': state_name,
-            'sales_person': sales_person,
-            'target_ltrs': float(row.target_ltrs or 0),
-            'level': level,
-        })
-    return data
-
-
-def save_target_entry(month, year, entry):
-    masters = ensure_channel_groups()
-    main_group_name = _normalize_name(entry.get('main_group'))
-    if main_group_name not in masters:
-        raise ValueError('Invalid main group')
-
-    state_name = _normalize_name(entry.get('state'))
-    sales_person = _normalize_name(entry.get('sales_person'))
-    level = _normalize_name(entry.get('level')) or 'MAIN_GROUP'
-    try:
-        target_ltrs = Decimal(str(entry.get('target_ltrs') or 0))
-    except Exception as exc:
-        raise ValueError('Invalid target litres') from exc
-
-    if level == 'MAIN_GROUP':
-        state_name = ''
-        sales_person = ''
-    elif level == 'STATE':
-        if not state_name:
-            raise ValueError('State is required')
-        sales_person = ''
-    elif level == 'SALES_PERSON':
-        if not sales_person:
-            raise ValueError('Sales person is required')
-        state_name = ''
-    elif level == 'STATE_SALES':
-        if not state_name or not sales_person:
-            raise ValueError('State and sales person are required')
-    else:
-        raise ValueError('Invalid target level')
-
-    state_obj = None
-    if state_name:
-        state_obj, _ = StateMaster.objects.get_or_create(name=state_name)
-
-    TargetMaster.objects.update_or_create(
-        main_group=masters[main_group_name],
-        state=state_obj,
-        sales_person=sales_person,
-        month=month,
-        year=year,
-        defaults={'target_ltrs': target_ltrs},
-    )
-
-
 # ---------------------------------------------------------------------------
-# Segment targets (flat per-dimension editor: Main Group / State / Person)
+# Segment targets — the dashboard's target per dimension (Main Group / State / Person),
+# rolled up from TargetNode
 # ---------------------------------------------------------------------------
 
-SEGMENT_TYPES = list(SegmentTarget.SEGMENT_TYPES)
+SEGMENT_TYPES = [
+    ('main_group', 'Main Group'),
+    ('state', 'State'),
+    ('person', 'Person'),
+    ('premium_item', 'Premium Items'),
+    ('commodity_item', 'Commodity Items'),
+]
 _SEGMENT_KEYS = {key for key, _ in SEGMENT_TYPES}
-
-
-def get_segment_value_list(segment_type, raw_rows=None):
-    """Return the ordered list of values to show for the chosen dimension."""
-    if segment_type not in _SEGMENT_KEYS:
-        segment_type = 'main_group'
-
-    if segment_type == 'main_group':
-        return list(CHANNEL_GROUPS)
-
-    options = get_target_editor_options(raw_rows)
-    if segment_type == 'state':
-        values = set(options['states'])
-    elif segment_type == 'person':
-        values = set(options['sales_people'])
-    else:
-        target_type = 'PREMIUM' if segment_type == 'premium_item' else 'COMMODITY'
-        values = set()
-        for row in (raw_rows or []):
-            row_type = _normalize_name(row.get('U_TYPE'))
-            if row_type != target_type:
-                continue
-            item_name = _normalize_name(row.get('ItemName'))
-            if item_name:
-                values.add(item_name)
-
-    # Include anything already saved so previously-entered rows never disappear.
-    for value in SegmentTarget.objects.filter(segment_type=segment_type).values_list('segment_value', flat=True):
-        cleaned = _normalize_name(value)
-        if cleaned:
-            values.add(cleaned)
-
-    return sorted(values)
-
-
-def get_segment_target_rows(segment_type, month, year, raw_rows=None):
-    """Every value for the dimension with its saved ltrs / realise value (0 if unset)."""
-    if segment_type not in _SEGMENT_KEYS:
-        segment_type = 'main_group'
-
-    saved = {}
-    for row in SegmentTarget.objects.filter(segment_type=segment_type, month=month, year=year):
-        saved[_normalize_name(row.segment_value)] = row
-
-    rows = []
-    for value in get_segment_value_list(segment_type, raw_rows):
-        existing = saved.get(_normalize_name(value))
-        rows.append({
-            'value': value,
-            'target_ltrs': float(existing.target_ltrs) if existing else 0.0,
-            'target_realise_value': float(existing.target_realise_value) if existing else 0.0,
-        })
-    return rows
 
 
 _SEGMENT_TO_NODE_FIELD = {'main_group': 'main_group', 'state': 'state', 'person': 'sales_person'}
@@ -1440,43 +1257,8 @@ def get_segment_target_map(segment_type, month, year, segment=None):
                 data[key] = data.get(key, 0.0) + float(node.target_ltrs or 0)
             return data
 
-    data = {}
-    for row in SegmentTarget.objects.filter(segment_type=segment_type, month=month, year=year):
-        key = _normalize_name(row.segment_value)
-        if not key:
-            continue
-        data[key] = float(row.target_ltrs or 0)
-    return data
-
-
-def save_segment_targets(segment_type, month, year, entries):
-    """Upsert a list of {value, target_ltrs, target_realise_value} for one dimension."""
-    if segment_type not in _SEGMENT_KEYS:
-        raise ValueError('Invalid segment type')
-
-    def _decimal(raw):
-        try:
-            return Decimal(str(raw or 0))
-        except Exception:
-            return Decimal('0')
-
-    saved = 0
-    for entry in entries:
-        value = _normalize_name(entry.get('value'))
-        if not value:
-            continue
-        SegmentTarget.objects.update_or_create(
-            segment_type=segment_type,
-            segment_value=value,
-            month=month,
-            year=year,
-            defaults={
-                'target_ltrs': _decimal(entry.get('target_ltrs')),
-                'target_realise_value': _decimal(entry.get('target_realise_value')),
-            },
-        )
-        saved += 1
-    return saved
+    # No target saved on that dimension (the old SegmentTarget fallback was always empty).
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1651,12 +1433,12 @@ _HIER_DIM_LABELS = {'main_group': 'Main Group', 'state': 'State', 'sales_person'
 
 
 def get_ocrd_master_rows():
-    sql = '''
+    sql = f'''
         SELECT DISTINCT
             COALESCE(TRIM("U_Main_Group"), '') AS "U_Main_Group",
             COALESCE(TRIM("State1"), '') AS "State1",
             COALESCE(TRIM("CntctPrsn"), '') AS "CntctPrsn"
-        FROM "JIVO_OIL_HANADB"."OCRD"
+        FROM "{companies.OIL}"."OCRD"
         WHERE COALESCE(TRIM("U_Main_Group"), '') <> ''
     '''
     try:
@@ -5357,7 +5139,11 @@ def get_target_nodes(month, year, segment=None):
     segment PREMIUM/COMMODITY filters to that product segment; blank/None = all.
     Unsegmented targets (segment='') are treated as applying to any segment, so a
     channel target entered without a segment still shows under Premium/Commodity."""
-    qs = TargetNode.objects.filter(month=month, year=year)
+    # Byte-wise order ("C" collation), then id: the order C_Panel's SQLite gave and the
+    # import kept. Postgres's default collation skips spaces, which put UTTARAKHAND
+    # before UTTAR PRADESH and reordered the rows.
+    qs = TargetNode.objects.filter(month=month, year=year).order_by(
+        Collate('main_group', 'C'), Collate('state', 'C'), Collate('sales_person', 'C'), 'id')
     seg = _norm_segment(segment)
     if seg:
         qs = qs.filter(segment__in=[seg, ''])
@@ -5437,12 +5223,7 @@ def get_hier_rows(order_key, month, year, master_rows, filters=None, segment='')
 # translate B1's system-query logic (stored as T-SQL) to HANA SQL, bucket by
 # posting date (JDT1.RefDate — matches the SAP report's actual export, which ages
 # by document/posting date, not due date), group by FORMAT (OCRD.U_Main_Group) →
-# customers, and cache per aging date. The Customer-Aging.xlsx reader below is legacy,
-# retained for reference / manual fallback but no longer used by default.
-import os
-from django.conf import settings
-
-AGING_XLSX_PATH = os.path.join(settings.BASE_DIR, 'Customer-Aging.xlsx')
+# customers, and cache per aging date.
 
 # Bucket columns in the DATA sheet, in display order, with the palette used by the
 # Customer Aging tab (current=green → escalating to 121+=red).
@@ -5473,117 +5254,6 @@ def _empty_buckets():
     return {k: 0.0 for k in ['original', 'balance_due'] + _BUCKET_KEYS}
 
 
-_XL_NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
-_XL_RNS = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
-
-
-def _xl_col_index(ref):
-    """'C5' / 'AB12' → 0-based column index from the cell reference letters."""
-    idx = 0
-    for ch in ref:
-        if ch.isalpha():
-            idx = idx * 26 + (ord(ch.upper()) - 64)
-        else:
-            break
-    return idx - 1
-
-
-def _read_xlsx_sheet(path, sheet_name):
-    """Read one worksheet from an .xlsx into a list of rows (each a list of cell values,
-    None for gaps). Stdlib-only (zipfile + ElementTree) so we don't pull in openpyxl —
-    the project already hand-rolls xlsx writing in core.simple_xlsx for the same reason."""
-    import zipfile
-    import xml.etree.ElementTree as ET
-
-    with zipfile.ZipFile(path) as z:
-        # name → r:id (workbook.xml) → target path (workbook.xml.rels)
-        wb = ET.fromstring(z.read('xl/workbook.xml'))
-        rid = None
-        for s in wb.iter(_XL_NS + 'sheet'):
-            if s.get('name') == sheet_name:
-                rid = s.get(_XL_RNS + 'id')
-                break
-        target = None
-        if rid:
-            rels = ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
-            for rel in rels:
-                if rel.get('Id') == rid:
-                    target = rel.get('Target')
-                    break
-        sheet_path = 'xl/' + target.lstrip('/') if target else 'xl/worksheets/sheet1.xml'
-
-        # shared string table (string cells store an index into this)
-        shared = []
-        if 'xl/sharedStrings.xml' in z.namelist():
-            sst = ET.fromstring(z.read('xl/sharedStrings.xml'))
-            for si in sst.iter(_XL_NS + 'si'):
-                shared.append(''.join(t.text or '' for t in si.iter(_XL_NS + 't')))
-
-        ws = ET.fromstring(z.read(sheet_path))
-        rows = []
-        for row in ws.iter(_XL_NS + 'row'):
-            cells = {}
-            width = 0
-            for c in row.findall(_XL_NS + 'c'):
-                ci = _xl_col_index(c.get('r', 'A'))
-                ctype = c.get('t')
-                if ctype == 'inlineStr':
-                    is_el = c.find(_XL_NS + 'is')
-                    val = ''.join(t.text or '' for t in is_el.iter(_XL_NS + 't')) if is_el is not None else None
-                else:
-                    v = c.find(_XL_NS + 'v')
-                    raw = v.text if v is not None else None
-                    if raw is None:
-                        val = None
-                    elif ctype == 's':
-                        try:
-                            val = shared[int(raw)]
-                        except (ValueError, IndexError):
-                            val = raw
-                    elif ctype in ('str', 'e'):
-                        val = raw
-                    else:
-                        try:
-                            val = float(raw)
-                        except ValueError:
-                            val = raw
-                cells[ci] = val
-                width = max(width, ci + 1)
-            rows.append([cells.get(i) for i in range(width)])
-        return rows
-
-
-def _load_aging_rows():
-    """UNUSED - the spreadsheet fallback. Nothing calls this; every company now reads live
-    SAP through _load_aging_rows_sap(). Left in place only as a record of the old sheet
-    layout. NOTE: it still emits the pre-split b0_30 key, so if you ever revive it you must
-    first split that column into b0_7 / b8_15 / b16_30 to match AGING_BUCKETS.
-
-    Parse the DATA sheet into one dict per customer. Header is row 2, totals row 1,
-    data from row 3 down (cols: code, name, FORMAT, original, balance, 5 buckets)."""
-    sheet = _read_xlsx_sheet(AGING_XLSX_PATH, 'DATA')
-    out = []
-    for i, row in enumerate(sheet):
-        if i < 2:                       # skip the totals row + header row
-            continue
-        code = (row[0] or '') if len(row) > 0 else ''
-        name = (row[1] or '') if len(row) > 1 else ''
-        fmt = (str(row[2]).strip() if len(row) > 2 and row[2] else '') or 'Unclassified'
-        if not str(code).strip() and not str(name).strip():
-            continue
-        out.append({
-            'code': str(code).strip(),
-            'name': str(name).strip() or str(code).strip(),
-            'format': fmt,
-            'original': _aging_num(row[3] if len(row) > 3 else 0),
-            'balance_due': _aging_num(row[4] if len(row) > 4 else 0),
-            'b0_30':   _aging_num(row[5] if len(row) > 5 else 0),
-            'b31_60':  _aging_num(row[6] if len(row) > 6 else 0),
-            'b61_90':  _aging_num(row[7] if len(row) > 7 else 0),
-            'b91_120': _aging_num(row[8] if len(row) > 8 else 0),
-            'b121':    _aging_num(row[9] if len(row) > 9 else 0),
-        })
-    return out
 
 
 # Live SAP source ─────────────────────────────────────────────────────────

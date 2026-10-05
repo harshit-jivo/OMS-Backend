@@ -1,5 +1,5 @@
-from django.conf import settings
 
+from cpanel.core import companies
 from cpanel.dashboard.sap_connector import run_query
 
 
@@ -7,7 +7,7 @@ PROC_NAME = 'REPORT_SALES_COGS_SUMMARY'
 
 
 def _schema():
-    return settings.SAP_HANA.get('SCHEMA') or 'JIVO_OIL_HANADB'
+    return companies.OIL
 
 
 def _first(row, *keys):

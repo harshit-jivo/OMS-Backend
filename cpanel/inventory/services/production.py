@@ -14,10 +14,10 @@ OnHand only (no committed/on-order netting).
 """
 import logging
 
-from cpanel.core import sap_connector
+from cpanel.core import companies, sap_connector
 
 logger = logging.getLogger(__name__)
-SAP_SCHEMA = 'JIVO_OIL_HANADB'
+SAP_SCHEMA = companies.OIL
 
 
 def _num(v):

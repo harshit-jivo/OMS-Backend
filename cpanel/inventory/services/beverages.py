@@ -1,8 +1,10 @@
+from cpanel.core import companies
+
 from .shared import cf, q, safe, wf
 
-DB1 = "JIVO_MART_HANADB"
-DB2 = "JIVO_OIL_HANADB"
-DB3 = "JIVO_BEVERAGES_HANADB"
+DB1 = companies.MART
+DB2 = companies.OIL
+DB3 = companies.BEVERAGES
 ALL_DBS = [DB1, DB2, DB3]
 UNIT = "BEVERAGES"
 
