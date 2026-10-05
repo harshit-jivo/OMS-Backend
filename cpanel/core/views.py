@@ -49,7 +49,11 @@ def session_from_oms(request):
         user, next_path = oms_session.redeem(request.GET.get('ticket', ''))
     except oms_session.TicketRefused as exc:
         return render(request, 'core/oms_signed_out.html', {'reason': str(exc)}, status=403)
-    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+    # The backend named here must be in settings.AUTHENTICATION_BACKENDS, or
+    # Django treats the next request as anonymous. OMS's only backend is Jivo
+    # Auth's (ModelBackend is deliberately absent: passwords are Jivo Auth's);
+    # the ticket has already proved who this is, so nothing is checked here.
+    login(request, user, backend='jivo_auth.backends.JivoAuthBackend')
     request.session.set_expiry(oms_session.SESSION_AGE)
     return redirect(next_path)
 
