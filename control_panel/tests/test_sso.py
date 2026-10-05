@@ -48,19 +48,18 @@ class TicketLinkTests(SimpleTestCase):
         return raw, signing.loads(raw, salt=oms_session.SALT)
 
     def test_link_names_the_page_and_the_user(self):
-        _, data = self._ticket(self._post('beverages-sale', {perms.BEVERAGES, perms.PREMIUM_ONLY}))
+        _, data = self._ticket(self._post('beverages-sale', {perms.SALES}))
         self.assertEqual((data['uid'], data['path']), (7, '/realise/beverages/'))
 
     def test_a_page_needs_its_own_key(self):
         self.assertEqual(self._post('salaries', {perms.SALES}).status_code, 403)
         self.assertEqual(self._post('sales', {'Reports'}).status_code, 403)
-        # A sub-tab opens its own page, not its siblings.
-        self.assertEqual(self._post('targets', {perms.BEVERAGES}).status_code, 403)
-        self.assertEqual(self._post('oils-sale', {perms.OILS_MAP}).status_code, 200)
-        self.assertEqual(self._post('inventory', {perms.INVENTORY_TABS['aging']}).status_code, 200)
-        # A scope or the AI assistant alone opens nothing.
-        self.assertEqual(self._post('oils-sale', {perms.PREMIUM_ONLY}).status_code, 403)
-        self.assertEqual(self._post('inventory', {perms.INVENTORY_CHAT}).status_code, 403)
+        # One page key opens every sub-page of that page, and only those.
+        for page in ('sales-channel', 'beverages-sale', 'realise-dashboard', 'targets', 'sales'):
+            self.assertEqual(self._post(page, {perms.SALES}).status_code, 200, page)
+        self.assertEqual(self._post('oils-sale', {perms.SALES}).status_code, 403)
+        self.assertEqual(self._post('expenses', {perms.FINANCE}).status_code, 200)
+        self.assertEqual(self._post('inventory', {perms.FINANCE}).status_code, 403)
         self.assertEqual(self._post('users', {perms.SALES}).status_code, 400)
 
     def test_a_ticket_opens_once(self):
@@ -92,22 +91,18 @@ class AccessBridgeTests(SimpleTestCase):
             _keys(stack, keys, admin)
             return oms_access.cp_groups(_user()), oms_access.cp_flags(_user())
 
-    def test_premium_only_is_a_premium_viewer(self):
-        groups, flags = self._flags({perms.OILS_OVERVIEW, perms.PREMIUM_ONLY})
-        self.assertEqual(groups, {'realise_premium'})
-        self.assertTrue(flags['can_realise'])
-        self.assertFalse(flags['can_edit'] or flags['can_sales'] or flags['can_salaries'])
-
-    def test_without_a_scope_realise_is_all_segments_and_edits(self):
-        groups, flags = self._flags({perms.SALES_CHANNEL})
+    def test_oils_sale_is_all_segments_and_edits_targets(self):
+        groups, flags = self._flags({perms.OILS_SALE})
         self.assertEqual(groups, {'realise_admin'})
-        self.assertTrue(flags['can_edit'])
-        groups, _ = self._flags({perms.TARGETS, perms.COMMODITY_ONLY})
-        self.assertEqual(groups, {'realise_commodity'})
+        self.assertTrue(flags['can_edit'] and flags['can_realise'])
+        self.assertFalse(flags['can_sales'] or flags['can_salaries'])
 
-    def test_one_group_per_page(self):
-        groups, _ = self._flags({perms.SALES, perms.INVENTORY_TABS['trace'], perms.SALARIES})
-        self.assertEqual(groups, {'sales_viewer', 'inventory_viewer', 'salaries_viewer'})
+    def test_each_page_brings_its_groups(self):
+        self.assertEqual(self._flags({perms.SALES})[0], {'realise_admin', 'sales_viewer'})
+        groups, flags = self._flags({perms.INVENTORY})
+        self.assertEqual(groups, {'inventory_viewer', 'inventory_admin'})
+        self.assertTrue(flags['inventory_can_edit'])  # rupee values shown
+        self.assertEqual(self._flags({perms.FINANCE})[0], {'expenses_viewer', 'salaries_viewer'})
 
     def test_admin_gets_every_page_and_nothing_else(self):
         # Admins hold the scope keys too; they must not narrow an admin.
@@ -134,11 +129,12 @@ class PageGuardTests(SimpleTestCase):
             with mock.patch.object(page_guard, 'render', return_value='refused'):
                 return guard(request)
 
-    def test_a_sub_tab_opens_its_own_page_only(self):
-        self.assertEqual(self._get('/realise/beverages/', {perms.BEVERAGES}), 'page')
-        self.assertEqual(self._get('/realise/targets/', {perms.BEVERAGES}), 'refused')
-        self.assertEqual(self._get('/realise/', {perms.BEVERAGES}), 'refused')
-        self.assertEqual(self._get('/realise/', {perms.OILS_REALISE}), 'page')
+    def test_a_page_key_opens_its_own_pages_only(self):
+        self.assertEqual(self._get('/realise/beverages/', {perms.SALES}), 'page')
+        self.assertEqual(self._get('/realise/targets/', {perms.SALES}), 'page')
+        self.assertEqual(self._get('/realise/', {perms.SALES}), 'refused')
+        self.assertEqual(self._get('/realise/', {perms.OILS_SALE}), 'page')
+        self.assertEqual(self._get('/realise/targets/', {perms.OILS_SALE}), 'refused')
 
     def test_other_paths_pass_through(self):
         # The JSON endpoints stay with C_Panel's own group checks.
@@ -146,11 +142,12 @@ class PageGuardTests(SimpleTestCase):
 
 
 class SubTabTests(SimpleTestCase):
-    def test_only_held_tabs_in_page_order(self):
+    def test_a_page_key_opens_every_tab(self):
         with ExitStack() as stack:
-            _keys(stack, {perms.INVENTORY_TABS['trace'], perms.INVENTORY_TABS['stock']})
-            self.assertEqual(perms.allowed_tabs(_user(), perms.INVENTORY_TABS), ['stock', 'trace'])
-            self.assertEqual(perms.allowed_tabs(_user(), perms.OILS_TABS), [])
+            _keys(stack, {perms.INVENTORY})
+            self.assertEqual(perms.allowed_tabs(_user(), perms.INVENTORY, perms.INVENTORY_TABS),
+                             list(perms.INVENTORY_TABS))
+            self.assertEqual(perms.allowed_tabs(_user(), perms.OILS_SALE, perms.OILS_TABS), [])
 
 
 class CompanySettingsTests(SimpleTestCase):

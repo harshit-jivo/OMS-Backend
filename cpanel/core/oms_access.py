@@ -3,29 +3,26 @@
 C_Panel decided access from Django groups (realise_admin, sales_viewer, ...)
 and the `can_*` flags `build_user_permissions` derived from them. Inside OMS
 there are no such groups: an administrator grants the Control Panel's four
-pages, per sub-tab, on the OMS Permissions page (control_panel/permissions.py).
+pages, one permission each, on the OMS Permissions page (control_panel/permissions.py).
 This module turns a user's keys into the group names C_Panel's code expects,
 so the rest of that code — every `group_required`, `permission_flag_required`
 and `{% if can_* %}` — runs unchanged.
 
-    OMS keys                                  C_Panel group
-    ────────────────────────────────────────  ─────────────────────────────────
-    any Oils Sale sub-tab, or Sales › Sales   realise_admin — all segments, edits targets;
-      Channel / Beverages / Realise             realise_premium with the Premium-only scope,
-      Dashboard / Targets                       realise_commodity with the Commodity-only one
-    Sales › Sales                             sales_viewer
-    any Inventory sub-tab                     inventory_viewer
-    Inventory › AI assistant (+ a sub-tab)    inventory_admin
-    Finance › Expenses                        expenses_viewer (budgets editable, as in C_Panel)
-    Finance › Salaries                        salaries_viewer
+    OMS page key                 C_Panel groups
+    ───────────────────────────  ─────────────────────────────────────────────
+    Control Panel — Oils Sale    realise_admin (all segments, edits targets)
+    Control Panel — Sales        realise_admin + sales_viewer
+    Control Panel — Inventory    inventory_viewer + inventory_admin (rupee values shown)
+    Control Panel — Finance      expenses_viewer + salaries_viewer
 
 Which PAGE of a group a user may open is the page guard's job
 (cpanel/core/page_guard.py); which sub-tabs a page shows, the templates'
-(`cp_oils_tabs` / `cp_inventory_tabs` from cpanel/core/context.py).
+(`cp_oils_tabs` / `cp_inventory_tabs` from cpanel/core/context.py — all of
+them for a page holder).
 
 An OMS administrator holds every key, so gets every group above — and nothing
-beyond them; the segment scopes do not apply to them. An OMS superuser is NOT
-a C_Panel superuser: the C_Panel report pages OMS does not show stay closed.
+beyond them. An OMS superuser is NOT a C_Panel superuser: the C_Panel report
+pages OMS does not show stay closed.
 """
 from control_panel import permissions as cp
 from core.permissions import effective_keys
@@ -45,34 +42,20 @@ ALL_FLAGS = (
 )
 
 
-def _realise_group(user, keys):
-    """One Realise role, as in C_Panel. A scope narrows it unless both are held
-    (which the Permissions screen does not offer) or the user is an admin."""
-    premium, commodity = cp.PREMIUM_ONLY in keys, cp.COMMODITY_ONLY in keys
-    if premium != commodity and not is_oms_admin(user):
-        return 'realise_premium' if premium else 'realise_commodity'
-    return 'realise_admin'
-
-
 def cp_groups(user):
     """The C_Panel group names `user`'s OMS keys amount to."""
     if not user or not getattr(user, 'is_authenticated', False):
         return set()
     keys = effective_keys(user)
     groups = set()
-    if keys.intersection(cp.REALISE_KEYS):
-        groups.add(_realise_group(user, keys))
+    if cp.OILS_SALE in keys or cp.SALES in keys:
+        groups.add('realise_admin')
     if cp.SALES in keys:
         groups.add('sales_viewer')
-    if keys.intersection(cp.INVENTORY_TABS.values()):
-        groups.add('inventory_viewer')
-        # The assistant is an extra on the page, never the way in.
-        if cp.INVENTORY_CHAT in keys:
-            groups.add('inventory_admin')
-    if cp.EXPENSES in keys:
-        groups.add('expenses_viewer')
-    if cp.SALARIES in keys:
-        groups.add('salaries_viewer')
+    if cp.INVENTORY in keys:
+        groups |= {'inventory_viewer', 'inventory_admin'}
+    if cp.FINANCE in keys:
+        groups |= {'expenses_viewer', 'salaries_viewer'}
     return groups
 
 
