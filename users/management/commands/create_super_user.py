@@ -1,21 +1,28 @@
 """
-Create (or update) the all-access OMS user `super@oms.com`.
+Make a Jivo user the all-access OMS user.
 
 Access model (see OMS-Frontend src/components/Sidebar.tsx): a user with the
 `admin` role sees every page — `canSee = isAdmin || extra_pages.includes(key)`.
 So this command assigns the `admin` role AND fills `extra_pages` with every
 grantable page key (belt-and-suspenders), and flags Django is_staff/is_superuser.
 
-Idempotent: re-running updates the existing user (and resets the password).
+The person must already exist in Jivo Auth (auth.jivo.in) with access to
+OMS: accounts and passwords live there, and this command never sets one. It
+finds them by email with the application's API key, gives them an OMS row if
+they have none (or links the unlinked row with that email), and makes it the
+admin. See docs/jivo-auth-integration.md.
 
-    python manage.py create_super_user
-    python manage.py create_super_user --password "MyStrong@Pass1"
-    python manage.py create_super_user --username super@oms.com --email super@oms.com
+Idempotent: re-running updates the existing user.
+
+    python manage.py create_super_user --email someone@jivo.in
 """
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from users.models import User, UserRole
+from jivo_auth.users import get_local_user
+
+from users.jivo import JivoUnavailable, jivo_directory
+from users.models import UserRole
 
 # Mirror of OMS-Frontend/src/config/adminPages.ts -> GRANTABLE_PAGE_KEYS.
 # The admin role already unlocks all pages; these are set too for completeness
@@ -35,20 +42,24 @@ ALL_PAGE_KEYS = [
 
 
 class Command(BaseCommand):
-    help = "Create/update super@oms.com with the admin role and all page permissions."
+    help = "Give a Jivo user with OMS access the admin role and all page permissions."
 
     def add_arguments(self, parser):
-        parser.add_argument("--username", default="super@oms.com",
-                            help="Login username (default: super@oms.com)")
-        parser.add_argument("--email", default="super@oms.com")
-        parser.add_argument("--name", default="Super Admin")
-        parser.add_argument("--password", default="Super@1234",
-                            help="Password to set (default: Super@1234)")
+        parser.add_argument("--email", required=True,
+                            help="The Jivo Auth email of the person to make admin.")
 
     @transaction.atomic
     def handle(self, *args, **opts):
-        username = opts["username"]
-        password = opts["password"]
+        email = opts["email"].strip().lower()
+        try:
+            jivo = next(
+                (u for u in jivo_directory() if u["email"].lower() == email), None)
+        except JivoUnavailable as exc:
+            raise CommandError(f"Jivo Auth: {exc.detail}") from exc
+        if jivo is None:
+            raise CommandError(
+                f"No Jivo user with access to OMS has the email {email}. Create "
+                "them in Jivo Auth and grant OMS first.")
 
         role, role_created = UserRole.objects.get_or_create(
             name="admin",
@@ -58,24 +69,20 @@ class Command(BaseCommand):
             role.is_active = True
             role.save(update_fields=["is_active"])
 
-        user, created = User.objects.get_or_create(
-            username=username,
-            defaults={"name": opts["name"], "email": opts["email"]},
-        )
-        user.name = user.name or opts["name"]
-        user.email = opts["email"]
+        created = jivo["oms_user_id"] is None
+        user = get_local_user({"sub": jivo["auth_id"], "email": jivo["email"]})
+        user.name = user.name or jivo["name"] or jivo["email"]
         user.role = role
         user.extra_pages = list(ALL_PAGE_KEYS)
         user.is_active = True
         user.is_staff = True
         user.is_superuser = True
-        user.set_password(password)
         user.save()
 
         self.stdout.write(self.style.SUCCESS(
-            f"{'Created' if created else 'Updated'} user '{username}' "
+            f"{'Created' if created else 'Updated'} OMS user {user.pk} for {jivo['email']} "
             f"(role=admin{' [role created]' if role_created else ''})."
         ))
-        self.stdout.write(f"  Password set to: {password}")
         self.stdout.write(f"  extra_pages: {user.extra_pages}")
-        self.stdout.write(self.style.WARNING("  Log in with the USERNAME above."))
+        self.stdout.write(self.style.WARNING(
+            "  Sign in with the Jivo Auth email and password."))

@@ -14,11 +14,16 @@ managers and SAP calls are patched. What is pinned:
   is not posted again.
 """
 import datetime
+import uuid
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
 
 from django.test import SimpleTestCase
+from django.utils import timezone
+
+from jivo_auth.exceptions import AuthServiceError, AuthServiceUnavailable
+from users.jivo_test_tokens import make_access_token, use_test_keys
 
 from advance_payment.models import StageRole
 from advance_payment.services import flow as flow_service
@@ -432,44 +437,125 @@ class FinalPosts(SimpleTestCase):
         self.assertEqual(logged, ['SAP_POST_FAILED'])
 
 
+@use_test_keys
 class TypingTheAccountByHand(SimpleTestCase):
-    """At Payment, a payee account that is not one of SAP's needs the user's password."""
+    """At Payment, a payee account that is not one of SAP's needs the user's
+    password: a fresh Jivo Auth sign-in, proved by the session it created."""
 
     def setUp(self):
         from django.core.cache import cache
         cache.clear()
-        self.user = mock.Mock(pk=1)
-        self.user.check_password.side_effect = lambda raw: raw == 'secret'
+        self.user = mock.Mock(pk=1, auth_id=uuid.uuid4())
         self.advance = SimpleNamespace(pk=14, request_type='VENDOR', company='OIL',
                                        partner_code='VENDA000101')
+        self.session_id = str(uuid.uuid4())
+        self.revoked = []
 
-    def confirm(self, password, *, actor=True, role='PAYMENT'):
+    def session(self, *, age=10, device=flow_service.CONFIRM_DEVICE_NAME, active=True):
+        created = timezone.now() - datetime.timedelta(seconds=age)
+        return {'id': self.session_id, 'device_name': device, 'is_active': active,
+                'created_at': created.isoformat()}
+
+    def token(self, **claims):
+        return make_access_token(user_id=self.user.auth_id, **claims)
+
+    def confirm(self, access=None, *, sessions=None, revoke=None, actor=True, role='PAYMENT'):
+        """`confirm_password`, with Jivo Auth's sessions API stood in for."""
+        sessions = [self.session()] if sessions is None else sessions
+
+        def jivo_api(method, path, access):
+            if isinstance(sessions, Exception):
+                raise sessions
+            if method == 'GET':
+                self.assertEqual(path, '/auth/sessions/')
+                return sessions
+            if isinstance(revoke, Exception):
+                raise revoke
+            self.revoked.append(path)
+            return {'message': 'Session revoked.'}
+
         flow = SimpleNamespace(current_role=role)
         with mock.patch.object(flow_service.RequestFlow.objects, 'select_related') as rel, \
-                mock.patch.object(flow_service, 'is_actor', return_value=actor):
+                mock.patch.object(flow_service, 'is_actor', return_value=actor), \
+                mock.patch.object(flow_service, '_jivo_api', side_effect=jivo_api) as api:
             rel.return_value.get.return_value = flow
-            return flow_service.confirm_password(self.advance, user=self.user, password=password)
+            self.api = api
+            return flow_service.confirm_password(
+                self.advance, user=self.user,
+                access=self.token() if access is None else access)
 
-    def test_the_right_password_gives_a_token_for_this_request_and_user(self):
-        token = self.confirm('secret')
+    def test_a_fresh_sign_in_gives_a_token_for_this_request_and_user(self):
+        token = self.confirm()
         self.assertTrue(flow_service._token_ok(token, self.advance, self.user))
         self.assertFalse(flow_service._token_ok(token, SimpleNamespace(pk=15), self.user))
         self.assertFalse(flow_service._token_ok(token, self.advance, mock.Mock(pk=2)))
         self.assertFalse(flow_service._token_ok('forged', self.advance, self.user))
 
-    def test_a_wrong_password_is_refused_and_counted(self):
+    def test_the_confirming_sign_in_is_ended_so_it_confirms_once(self):
+        self.confirm()
+        self.assertEqual(self.revoked, [f'/auth/sessions/{self.session_id}/revoke/'])
+
+    def test_a_refreshed_token_without_a_new_sign_in_is_refused(self):
+        """A refresh mints a fresh access token without the password: only
+        the browser's ordinary session exists, so nothing is confirmed."""
+        everyday = self.session(age=3600, device='OMS web')
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(sessions=[everyday])
+        self.assertEqual(self.revoked, [])
+
+    def test_a_sign_in_older_than_two_minutes_is_refused(self):
+        stale = self.session(age=flow_service.FRESH_SIGN_IN_SECONDS + 5)
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(sessions=[stale])
+
+    def test_an_ended_confirmation_session_is_refused(self):
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(sessions=[self.session(active=False)])
+
+    def test_a_session_revoked_in_between_is_refused(self):
+        """Two confirmations racing on one sign-in: the second revoke fails."""
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(revoke=AuthServiceError(404, {'detail': 'Session not found.'}))
+
+    def test_someone_elses_token_is_refused_without_asking_jivo(self):
+        other = make_access_token(user_id=uuid.uuid4())
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(other)
+        self.api.assert_not_called()
+
+    def test_a_token_without_oms_access_is_refused(self):
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(self.token(apps=['other-app']))
+        self.api.assert_not_called()
+
+    def test_a_forged_token_is_refused(self):
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm('not.a.token')
+
+    def test_a_user_not_linked_to_jivo_is_refused(self):
+        token = self.token()
+        self.user.auth_id = None
+        with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+            self.confirm(token)
+
+    def test_failures_are_counted_then_locked(self):
         for _ in range(flow_service.MANUAL_MAX_FAILURES):
-            with self.assertRaisesRegex(flow_service.FlowError, 'not right'):
-                self.confirm('guess')
-        # Locked now, even with the right one.
+            with self.assertRaisesRegex(flow_service.FlowError, 'password again'):
+                self.confirm('not.a.token')
+        # Locked now, even with a good sign-in.
         with self.assertRaisesRegex(flow_service.FlowError, 'Too many'):
-            self.confirm('secret')
+            self.confirm()
+
+    def test_jivo_auth_unreachable_is_a_503(self):
+        with self.assertRaises(flow_service.FlowError) as caught:
+            self.confirm(sessions=AuthServiceUnavailable('timed out'))
+        self.assertEqual(caught.exception.status, 503)
 
     def test_only_the_payment_stage_user_may(self):
         with self.assertRaisesRegex(flow_service.FlowError, 'Only the Payment stage user'):
-            self.confirm('secret', actor=False)
+            self.confirm(actor=False)
         with self.assertRaisesRegex(flow_service.FlowError, 'Only the Payment stage user'):
-            self.confirm('secret', role='AUDIT')
+            self.confirm(role='AUDIT')
 
     def save(self, data, *, from_sap, stored=None):
         """`save_payout` with its rows stood in for (callers patch the transaction away)."""
@@ -497,7 +583,7 @@ class TypingTheAccountByHand(SimpleTestCase):
                 mock.patch('django.db.transaction.Atomic.__exit__', return_value=False):
             with self.assertRaisesRegex(flow_service.FlowError, 'Confirm your password'):
                 self.save({'to_account_number': '12345678901', 'to_ifsc': 'SBIN0001234'}, from_sap=False)
-            token = self.confirm('secret')
+            token = self.confirm()
             sent, log = self.save({'to_account_number': '12345678901', 'to_ifsc': 'SBIN0001234',
                                    'manual_token': token}, from_sap=False)
         # The server says it was typed, whatever the client claimed.

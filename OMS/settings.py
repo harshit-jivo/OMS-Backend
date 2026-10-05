@@ -13,7 +13,6 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 import sys
 from pathlib import Path
-from datetime import timedelta
 from corsheaders.defaults import default_headers as cors_default_headers
 from decouple import config
 from django.core.exceptions import ImproperlyConfigured
@@ -57,11 +56,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 #     ALLOWED_HOSTS = [..., '*']                  # defeated Host validation
 #
 # The hardcoded key is in git history, so it is compromised regardless of what
-# happens now. It signs sessions and — because SIMPLE_JWT.SIGNING_KEY defaults
-# to it — every JWT, so anyone with repo access can forge a valid token for any
-# user. Reading it from the environment stops the NEXT leak; only rotating it
-# (Phase 1.3, needs a maintenance window because it invalidates every issued
-# token) ends this one.
+# happens now. It signed sessions and — because SIMPLE_JWT.SIGNING_KEY
+# defaulted to it — every JWT, so anyone with repo access could forge a valid
+# token for any user. API tokens come from Jivo Auth now (RS256, verified
+# against its public keys), so it no longer mints API access; it still signs
+# sessions (the admin) and Django's signed values. Reading it from the
+# environment stops the NEXT leak; only rotating it ends this one.
 # ---------------------------------------------------------------------------
 
 DEBUG = _parse_bool(config('DEBUG', default='false'), default=False)
@@ -119,6 +119,10 @@ INSTALLED_APPS = [
     # 'rest_framework.authtoken',
     # 'rest_framework.authto
     'rest_framework_simplejwt.token_blacklist',
+    # Jivo Auth client (auth.jivo.in). Installed ahead of the switch so its
+    # system checks run; it authenticates nothing until
+    # DEFAULT_AUTHENTICATION_CLASSES names it. See docs/jivo-auth-integration.md.
+    'jivo_auth',
     'corsheaders',
     'django_filters',
     'django_apscheduler',
@@ -202,6 +206,10 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # Right after AuthenticationMiddleware: keeps the Jivo Auth session of an
+    # admin signed in through JivoAuthBackend in step with their Django
+    # session (refreshes it, and signs them out here when Jivo Auth ends it).
+    'jivo_auth.middleware.JivoSessionMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     # After XFrameOptions on purpose: lets the OMS app frame the Control Panel
@@ -510,6 +518,14 @@ USE_TZ = True
 
 AUTH_USER_MODEL = 'users.User'
 
+# The Django admin signs in with the Jivo email and password, checked by Jivo
+# Auth; staff flags and permissions stay on the OMS row. ModelBackend is
+# deliberately absent: until cleanup every migrated row still holds its old
+# password hash, and ModelBackend would accept it.
+AUTHENTICATION_BACKENDS = [
+    'jivo_auth.backends.JivoAuthBackend',
+]
+
 # Existing tables use 32-bit integer primary keys, so keep AutoField as the
 # project-wide default (this also silences models.W042). Apps that need 64-bit
 # ids (e.g. einvoice) opt in via default_auto_field = BigAutoField in apps.py.
@@ -587,8 +603,13 @@ SPECTACULAR_SETTINGS = {
 
 
 REST_FRAMEWORK = {
+    # Bearer access tokens from Jivo Auth (auth.jivo.in), verified locally
+    # against its JWKS — no call to Jivo Auth per request. `request.user` is
+    # the OMS `users.User` row whose `auth_id` is the token's `sub`, so every
+    # permission, role check and FK write works on the same row as before.
+    # See JIVO_AUTH below and docs/jivo-auth-integration.md.
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "jivo_auth.authentication.JivoJWTAuthentication",
     ),
 
     # Closed by default. DRF's own default is AllowAny, so before this line
@@ -600,10 +621,10 @@ REST_FRAMEWORK = {
     # highest-value line in the security work.
     #
     # The endpoints that must stay open declare `AllowAny` explicitly, so the
-    # decision is visible in the view that made it. There are two:
-    # `users.LoginView` and `users.AuthTokenRefreshView` — see
-    # `users.tests.PublicEndpointAllowlistTests`, which enumerates the live
-    # URLconf and fails if a third one appears.
+    # decision is visible in the view that made it — see
+    # `core.tests.PublicEndpointAllowlistTests`, which enumerates the live
+    # URLconf and fails if an undeclared one appears. Sign-in itself happens
+    # at Jivo Auth now; the old `/auth/login/` only answers 410 Gone.
     #
     # NOTE: this cannot reach a plain Django view (one with no `@api_view`),
     # because those never enter DRF's dispatch. `scripts/endpoint_inventory.py`
@@ -650,37 +671,35 @@ REST_FRAMEWORK = {
     },
 }
 
-# JWT Settings (SimpleJWT). Hardened for production while preserving the
-# existing API contract and token compatibility.
-SIMPLE_JWT = {
-    # Access lifetime kept at 1 day: the current web/mobile clients do NOT run
-    # a refresh flow, so shortening this would log active users out mid-session
-    # (a compatibility break). Shorten once clients adopt the /auth/refresh/
-    # endpoint added in this phase.
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+# SimpleJWT no longer issues or accepts tokens: OMS's own login, refresh and
+# logout are gone (users/views/auth.py). `rest_framework_simplejwt.token_blacklist`
+# stays in INSTALLED_APPS until cleanup only because its tables are dropped
+# there. See docs/jivo-auth-integration.md.
 
-    # Rotation + blacklist: a refresh issues a new refresh token and the old
-    # one is blacklisted so it cannot be replayed.
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
-
-    # Stamp user.last_login on token issuance.
-    'UPDATE_LAST_LOGIN': True,
-
-    'ALGORITHM': 'HS256',
-    # Defaults to SECRET_KEY (so all EXISTING tokens stay valid). Override with
-    # a dedicated JWT_SIGNING_KEY in production via .env. Rotating this key
-    # invalidates every issued token, so only change it deliberately.
-    'SIGNING_KEY': config('JWT_SIGNING_KEY', default=SECRET_KEY),
-
-    'AUTH_HEADER_TYPES': ('Bearer',),
-    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
-    'USER_ID_FIELD': 'id',
-    'USER_ID_CLAIM': 'user_id',
-    # Small clock-skew tolerance for token exp/nbf validation.
-    'LEEWAY': 10,
-    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+# Jivo Auth (auth.jivo.in) — the central sign-in service. Clients sign in
+# there and send its access token as `Authorization: Bearer`.
+# See docs/jivo-auth-integration.md.
+#
+# Passed in explicitly rather than left to the package: it reads
+# JIVO_AUTH_<KEY> with os.getenv, and python-decouple reads .env without
+# putting anything into os.environ, so a value that lives only in .env would
+# never reach it.
+JIVO_AUTH = {
+    # request.user is the OMS `users.User` row, not a token-only JivoUser.
+    'LOCAL_USERS': True,
+    # How a Jivo user maps to an OMS row: by `users.User.auth_id`. A first
+    # token whose user has no row yet claims the one unlinked row with the
+    # same email (decision D4), or else gets a new row with no role.
+    'LOCAL_USER_ID_FIELD': 'auth_id',
+    'LOCAL_USER_LINK_BY_EMAIL': True,
+    'URL': config('JIVO_AUTH_URL', default='https://auth.jivo.in'),
+    'APP': config('JIVO_AUTH_APP', default='oms'),
+    # Secret: lives in .env / the secret store only.
+    'API_KEY': config('JIVO_AUTH_API_KEY', default=''),
+    # Reverse proxies in front of OMS that append to X-Forwarded-For
+    # (1 behind Nginx, 0 for runserver). Decides the end-user IP reported to
+    # Jivo Auth on admin sign-ins.
+    'NUM_PROXIES': config('JIVO_AUTH_NUM_PROXIES', default=0, cast=int),
 }
 
 # ---------------------------------------------------------------------------

@@ -4,12 +4,15 @@ Stage CRUD, lookup CRUD and per-user stage assignment. All gated behind
 IsTrackerAdmin. Kept separate from the day-to-day flow views for clarity.
 """
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
 from django.db.models import ProtectedError
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers
 from rest_framework import status as http
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from users.jivo import add_jivo_user, assert_not_in_oms, jivo_directory, jivo_user
 from users.models import UserRole
 
 from .models import (
@@ -172,10 +175,15 @@ class UserStageListView(APIView):
 # Tracker user management (create / list / delete) — TRACKER users only.
 # A tracker admin can only ever touch users who hold a tracker sub-role, never
 # other OMS users.
+#
+# The people themselves live in Jivo Auth (auth.jivo.in): "create" gives an
+# existing Jivo user who has OMS access an OMS row with a tracker role, and
+# nothing here sets a password, name or email. See users/jivo.py.
 # ---------------------------------------------------------------------------
 def _serialize_tracker_user(u):
     return {
         'id': u.id,
+        'auth_id': str(u.auth_id) if u.auth_id else None,
         'username': u.username,
         'name': getattr(u, 'name', '') or u.username,
         'email': u.email or '',
@@ -186,8 +194,26 @@ def _serialize_tracker_user(u):
     }
 
 
+@extend_schema(responses={200: inline_serializer(name='TrackerJivoUser', fields={
+    'auth_id': serializers.UUIDField(),
+    'email': serializers.EmailField(),
+    'name': serializers.CharField(),
+    'is_active': serializers.BooleanField(),
+    'oms_user_id': serializers.IntegerField(allow_null=True),
+}, many=True)})
+class TrackerJivoUsersView(APIView):
+    """Jivo users with OMS access, and the OMS user each already has
+    (`oms_user_id`, null when none): what the tracker-user form picks from.
+    503 when Jivo Auth can't be reached."""
+    permission_classes = [IsTrackerAdmin]
+
+    def get(self, request):
+        return Response(jivo_directory())
+
+
 class TrackerUserListCreate(APIView):
-    """List all tracker users, or create a new one under a tracker sub-role."""
+    """List all tracker users, or give a Jivo user an OMS row under a
+    tracker sub-role."""
     permission_classes = [IsTrackerAdmin]
 
     def get(self, request):
@@ -199,40 +225,37 @@ class TrackerUserListCreate(APIView):
 
     def post(self, request):
         data = request.data
-        username = (data.get('username') or '').strip()
-        password = data.get('password') or ''
+        auth_id = str(data.get('auth_id') or '').strip()
         role_name = (data.get('role') or '').strip().lower()
-        name = (data.get('name') or '').strip() or username
 
-        if not username or not password:
-            return Response({'detail': 'Username and password are required.'},
+        if not auth_id:
+            return Response({'detail': 'Pick the Jivo user to add (auth_id).'},
                             status=http.HTTP_400_BAD_REQUEST)
         if role_name not in TRACKER_ROLE_NAMES:
             return Response(
                 {'detail': f'Role must be one of {sorted(TRACKER_ROLE_NAMES)}.'},
                 status=http.HTTP_400_BAD_REQUEST)
-        if User.objects.filter(username__iexact=username).exists():
-            return Response({'detail': 'A user with that username already exists.'},
-                            status=http.HTTP_400_BAD_REQUEST)
-
         role = UserRole.objects.filter(name=role_name).first()
         if not role:
             return Response({'detail': 'Tracker role not found; seed the roles first.'},
                             status=http.HTTP_400_BAD_REQUEST)
 
-        user = User(
-            username=username, name=name,
-            email=(data.get('email') or '').strip() or None,
+        try:
+            jivo = jivo_user(auth_id)
+            # A tracker admin adds new people only: someone already in OMS has
+            # a non-tracker role here or is managed by an OMS administrator.
+            assert_not_in_oms(jivo)
+        except ValidationError as exc:
+            messages = exc.detail.get('auth_id') if isinstance(exc.detail, dict) else exc.detail
+            return Response({'detail': str((messages or ['Invalid Jivo user.'])[0])},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        user = add_jivo_user(
+            jivo,
             phone=(data.get('phone') or '').strip() or None,
             role=role, is_active=True, is_staff=False, is_superuser=False,
             created_by=request.user,
         )
-        user.set_password(password)
-        try:
-            user.save()
-        except IntegrityError:
-            return Response({'detail': 'Could not create user (duplicate?).'},
-                            status=http.HTTP_400_BAD_REQUEST)
         return Response(_serialize_tracker_user(user), status=http.HTTP_201_CREATED)
 
 
@@ -257,10 +280,7 @@ class TrackerUserDetail(APIView):
             return err
         data = request.data
 
-        if 'name' in data:
-            user.name = (data.get('name') or '').strip() or user.username
-        if 'email' in data:
-            user.email = (data.get('email') or '').strip() or None
+        # `name`, `email` and `password` are Jivo Auth's: ignored if sent.
         if 'phone' in data:
             user.phone = (data.get('phone') or '').strip() or None
         if 'is_active' in data:
@@ -276,10 +296,6 @@ class TrackerUserDetail(APIView):
                 return Response({'detail': 'Tracker role not found.'},
                                 status=http.HTTP_400_BAD_REQUEST)
             user.role = role
-        # Optional password reset — only when a non-empty value is sent.
-        if (data.get('password') or '').strip():
-            user.set_password(data['password'])
-
         user.updated_by = request.user
         user.save()
         return Response(_serialize_tracker_user(user))

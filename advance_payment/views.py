@@ -1269,17 +1269,20 @@ class RequestPayoutView(_RequestView):
 
 
 class RequestConfirmPasswordView(_RequestView):
-    """POST /requests/<id>/confirm-password/ {password} -> {token}
+    """POST /requests/<id>/confirm-password/ {access} -> {token}
 
-    The Payment user's password, before typing the payee's bank account by
-    hand. The token goes back with the payout as `manual_token`.
+    The Payment user confirms it is them, with their password, before typing
+    the payee's bank account by hand. The password goes to Jivo Auth, not
+    here: `access` is the token of the fresh Jivo sign-in it made (see
+    `flow_service.confirm_password`). The token returned goes back with the
+    payout as `manual_token`.
     """
 
     def post(self, request, pk):
         advance = self._get(request, pk)
         try:
             token = flow_service.confirm_password(
-                advance, user=request.user, password=request.data.get('password') or '')
+                advance, user=request.user, access=request.data.get('access') or '')
         except flow_service.FlowError as exc:
             return _flow_error(exc)
         return ok({'token': token, 'expires_in': flow_service.MANUAL_TOKEN_SECONDS},

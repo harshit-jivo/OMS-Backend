@@ -2,7 +2,8 @@ from django.urls import path
 
 from .admin_views import (
     LookupAdminDetail, LookupAdminListCreate, StageAdminDetail,
-    StageAdminListCreate, TrackerUserDetail, TrackerUserListCreate,
+    StageAdminListCreate, TrackerJivoUsersView, TrackerUserDetail,
+    TrackerUserListCreate,
     UserStageListView, UserStageSetView,
 )
 from .views import (
@@ -43,6 +44,7 @@ urlpatterns = [
     path('admin/users/', UserStageListView.as_view(), name='tracker-admin-users'),
     path('admin/users/<int:user_id>/stages/', UserStageSetView.as_view(), name='tracker-admin-user-stages'),
     # Tracker user CRUD (create / list / delete tracker users only)
+    path('admin/jivo-users/', TrackerJivoUsersView.as_view(), name='tracker-admin-jivo-users'),
     path('admin/tracker-users/', TrackerUserListCreate.as_view(), name='tracker-admin-tracker-users'),
     path('admin/tracker-users/<int:user_id>/', TrackerUserDetail.as_view(), name='tracker-admin-tracker-user'),
 ]

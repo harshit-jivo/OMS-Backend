@@ -155,9 +155,10 @@ ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 EXPOSE 8000
 
-# Hits a real Django URL through the full WSGI stack. `/api/auth/login/`
-# answers 405 to GET (it is POST-only), which proves routing and middleware
-# are alive — so the status is matched explicitly rather than trusting a 2xx.
+# Hits a real Django URL through the full WSGI stack: the liveness probe
+# (core/health.py), which answers 200 from routing and middleware alone, with
+# no database or external call. (It used to curl `/api/auth/login/` for its
+# 405; that route now answers 410 since sign-in moved to Jivo Auth.)
 #
 # X-Forwarded-Proto is REQUIRED here, not decoration. With DEBUG=false
 # settings.py turns on SECURE_SSL_REDIRECT (defaulting to true) and trusts
@@ -168,7 +169,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD curl -sS -o /dev/null -w '%{http_code}' \
         -H 'X-Forwarded-Proto: https' \
-        http://127.0.0.1:8000/api/auth/login/ | grep -qE '^(200|405)$' || exit 1
+        http://127.0.0.1:8000/api/health/live/ | grep -qE '^200$' || exit 1
 
 # 3 workers × 4 threads. Threads rather than more processes because this app's
 # slow paths are WAITING — SAP Service Layer, HANA, the NIC e-invoice API —

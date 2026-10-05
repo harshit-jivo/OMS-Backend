@@ -44,6 +44,9 @@ inflection==0.5.1
 reportlab==4.2.5
 PyMuPDF==1.28.2
 itsdangerous==2.2.0
+# Verifies Jivo Auth (auth.jivo.in) tokens. Pinned to a commit of the public
+# repo; see docs/jivo-auth-integration.md.
+jivo-auth-client @ git+https://github.com/Nareshkumar124/jivo-auth.git@98cfb48d986ceb40269fe969eb04ff7fbe6b7b87#subdirectory=packages/jivo-auth-client
 Jinja2==3.1.6
 jsonpatch==1.33
 jsonpointer==3.1.1

@@ -241,6 +241,17 @@ class User(AbstractUser):
     last_name = None
     
     username = models.CharField(max_length=150, unique=True)
+
+    # The user's ID in Jivo Auth (auth.jivo.in), the central sign-in service.
+    # NULL until the user is linked by `link_jivo_users` or their first Jivo
+    # sign-in. The primary key stays the OMS id that every FK points at;
+    # this column only maps a Jivo token's `sub` to that row.
+    # See docs/jivo-auth-integration.md.
+    auth_id = models.UUIDField(
+        null=True, blank=True, unique=True, editable=False,
+        help_text="The user's ID in Jivo Auth.",
+    )
+
     name = models.CharField(max_length=150)
     email = models.EmailField(max_length=150, blank=True, null=True)
     phone = models.CharField(max_length=15, blank=True, null=True)

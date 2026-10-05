@@ -1,13 +1,13 @@
 from django.urls import path
-from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,BulkPartyProductsView,BulkUpdatePartyProductRatesView,CategoryListView,PagePermissionsView,ComboMappingsView,PermissionRegistryView,RolePermissionsListView,RolePermissionsUpdateView,RoleCreateView,RoleUpdateView,RoleDeleteView
+from .views import DeleteUserView,JivoLoginGoneView,JivoUsersView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,BulkPartyProductsView,BulkUpdatePartyProductRatesView,CategoryListView,PagePermissionsView,ComboMappingsView,PermissionRegistryView,RolePermissionsListView,RolePermissionsUpdateView,RoleCreateView,RoleUpdateView,RoleDeleteView
 from django.views.decorators.csrf import csrf_exempt
 
 
 urlpatterns = [
 
-    path('login/', LoginView.as_view(), name='login'),
-    path('refresh/', AuthTokenRefreshView.as_view(), name='token-refresh'),
-    path('logout/', LogoutView.as_view(), name='logout'),
+    # Sign-in, refresh and logout happen at Jivo Auth now. The old login URL
+    # answers 410 with where to go; refresh/ and logout/ are gone (404).
+    path('login/', JivoLoginGoneView.as_view(), name='login'),
     path('profile/', ProfileView.as_view(), name='profile'),
 
     # Master data APIS
@@ -16,6 +16,9 @@ urlpatterns = [
     path('mainGroup/', MainGroupListView.as_view(), name='mainGroup'),
     path('categories/', CategoryListView.as_view(), name='categories'),
     path('users/create/', CreateUserView.as_view(), name='create-user'),
+    # Jivo users with OMS access, and which of them have an OMS user yet:
+    # what the create form picks from.
+    path('jivo-users/', JivoUsersView.as_view(), name='jivo-users'),
     path('roles/', RoleListView.as_view(), name='roles-list'),
     path('users/list/', UserListForAssignmentView.as_view(), name='users-list'),
     path('users/<int:user_id>/page-permissions/', PagePermissionsView.as_view(), name='user-page-permissions'),

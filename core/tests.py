@@ -37,14 +37,11 @@ from users.models import User, UserRole
 # ---------------------------------------------------------------------------
 
 PUBLIC_ROUTES = {
-    # Credentials are exchanged here, so there is nothing to authenticate with
-    # yet. Throttled by the `login` scope instead — see users.views.LoginView.
+    # The retired OMS login: sign-in moved to Jivo Auth (auth.jivo.in). It
+    # only answers 410 with where to sign in now, for clients that haven't
+    # moved yet, and checks no credentials — see users.views.JivoLoginGoneView.
+    # OMS's refresh endpoint is gone with it: refreshing happens at Jivo Auth.
     '/api/auth/login/',
-
-    # The credential is the refresh token in the request body. Requiring a
-    # bearer token would make this unusable exactly when it is needed: after
-    # the access token expired.
-    '/api/auth/refresh/',
 
     # Rendered by the browser as `<img src>`, in a print popup, and through
     # `window.open` — none of which can attach an Authorization header, and the

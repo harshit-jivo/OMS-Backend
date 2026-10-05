@@ -8,9 +8,10 @@ may reach every endpoint around it.
 
 Two jobs here.
 
-1. **Characterisation** — pin the behaviour that must NOT change: the login
-   response shape both clients parse, the inactive-account refusal, the
-   profile payload.
+1. **Characterisation** — pin the behaviour that must NOT change: the
+   profile payload both clients parse, and what a client that still calls
+   the retired OMS login gets (sign-in moved to Jivo Auth; the token path,
+   inactive-account refusal included, is in `users/tests_jivo_auth.py`).
 2. **Authorization** — assert 401/403 on every endpoint that used to be
    `AllowAny`. These are the regression tests for the privilege-escalation
    hole: `POST /auth/users/create/` accepted an anonymous request whose body
@@ -23,10 +24,11 @@ Run with::
 """
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth.hashers import identify_hasher
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -66,73 +68,41 @@ class _ApiTestCase(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Characterisation — the login contract two clients depend on
+# Characterisation — sign-in has moved to Jivo Auth
 # ---------------------------------------------------------------------------
 
-class LoginContractTests(_ApiTestCase):
-    """The response shape here is parsed by the React web client AND by
-    `OMS-app` (React Native), which is not in this workspace and cannot be
-    updated in lockstep. Changing these keys breaks a client nobody here can
-    inspect."""
+class SignInMovedTests(_ApiTestCase):
+    """OMS no longer signs anyone in: clients sign in at Jivo Auth and send
+    its access token (see users/tests_jivo_auth.py for that path). What is
+    left here is what a client that hasn't moved yet runs into — the React
+    Native `OMS-app` ships separately and can't be updated in lockstep."""
 
-    def test_login_returns_both_tokens_and_the_user(self):
-        """Pins the exact envelope, nesting included: the tokens live under
-        `data.tokens`, NOT at `data` level, and carry `token_type` /
-        `expires_in` alongside. Flattening this would break both clients."""
+    def test_the_old_login_answers_410_with_where_to_sign_in(self):
+        for method in ('get', 'post'):
+            res = getattr(self.anon, method)(
+                reverse('login'), {'username': 't-staff', 'password': 'CorrectHorse9!'},
+                format='json')
+            self.assertEqual(res.status_code, 410, method)
+            body = res.json()
+            self.assertFalse(body['success'])
+            self.assertEqual(body['sign_in_url'], 'https://auth.jivo.in/api/v1/auth/login/')
+
+    def test_the_old_login_never_issues_a_token(self):
         res = self.anon.post(reverse('login'),
                              {'username': 't-staff', 'password': 'CorrectHorse9!'},
                              format='json')
-        self.assertEqual(res.status_code, 200)
-        body = res.json()
-        self.assertTrue(body['success'])
-        data = body['data']
-        self.assertEqual(data['user']['username'], 't-staff')
-        tokens = data['tokens']
-        self.assertIn('access', tokens)
-        self.assertIn('refresh', tokens)
-        self.assertEqual(tokens['token_type'], 'Bearer')
-        self.assertEqual(tokens['expires_in'], 86400)
+        self.assertNotIn('data', res.json())
 
-    def test_login_rejects_a_wrong_password(self):
-        """401, not the 400 a DRF ValidationError would normally produce —
-        `LoginView` translates it deliberately. Clients branch on this code."""
-        res = self.anon.post(reverse('login'),
-                             {'username': 't-staff', 'password': 'wrong'},
-                             format='json')
-        self.assertEqual(res.status_code, 401)
+    def test_a_stale_oms_token_still_gets_the_410(self):
+        """Not a 401 the client would try to refresh against an OMS refresh
+        endpoint that no longer exists."""
+        res = self.anon.post(reverse('login'), {}, format='json',
+                             HTTP_AUTHORIZATION='Bearer an.old.oms-token')
+        self.assertEqual(res.status_code, 410)
 
-    def test_login_rejects_a_deactivated_account(self):
-        """`DeleteUserView` is a soft delete — it only clears `is_active`. If
-        that stopped blocking login, "removing" a user would remove nothing."""
-        self.staff.is_active = False
-        self.staff.save(update_fields=['is_active'])
-        res = self.anon.post(reverse('login'),
-                             {'username': 't-staff', 'password': 'CorrectHorse9!'},
-                             format='json')
-        self.assertEqual(res.status_code, 401)
-
-    def test_login_stays_reachable_without_a_token(self):
-        """The endpoint that MUST remain AllowAny. Asserted by a successful
-        anonymous login rather than by a status code on an empty body — a bad
-        body also answers 401 here, so that would not distinguish "rejected the
-        credentials" from "rejected the anonymous caller"."""
-        res = self.anon.post(reverse('login'),
-                             {'username': 't-admin', 'password': 'CorrectHorse9!'},
-                             format='json')
-        self.assertEqual(res.status_code, 200)
-
-    def test_refresh_stays_reachable_without_a_token(self):
-        """A refresh carries its credential in the BODY, so requiring a bearer
-        token here would make the endpoint unusable exactly when it is needed —
-        after the access token expired."""
-        login = self.anon.post(reverse('login'),
-                               {'username': 't-staff', 'password': 'CorrectHorse9!'},
-                               format='json').json()
-        res = self.anon.post(reverse('token-refresh'),
-                             {'refresh': login['data']['tokens']['refresh']},
-                             format='json')
-        self.assertEqual(res.status_code, 200)
-        self.assertIn('access', res.json())
+    def test_refresh_and_logout_are_gone(self):
+        for path in ('/api/auth/refresh/', '/api/auth/logout/'):
+            self.assertEqual(self.anon.post(path, {}, format='json').status_code, 404, path)
 
     def test_profile_requires_a_login_and_returns_the_caller(self):
         self.assertEqual(self.anon.get(reverse('profile')).status_code, 401)
@@ -227,13 +197,19 @@ class PrivilegeEscalationTests(_ApiTestCase):
         self.assertFalse(User.objects.filter(username='sneak').exists())
 
     def test_an_admin_can_still_create_a_user(self):
-        """The lockdown must not break the legitimate admin flow."""
-        res = self.as_admin.post(reverse('create-user'), {
-            'name': 'New Hire', 'username': 'newhire',
-            'password': 'CorrectHorse9!', 'role': _role('salesman').pk,
-        }, format='json')
+        """The lockdown must not break the legitimate admin flow: adding a
+        Jivo user who has OMS access (users/tests_jivo_auth.py covers the
+        rest of it)."""
+        auth_id = '7d4c8f8e-5b1a-4f7e-9a51-0d6f0b8f2c11'
+        jivo = {'id': auth_id, 'email': 'new.hire@jivo.in', 'first_name': 'New',
+                'last_name': 'Hire', 'employee_code': '', 'is_active': True}
+        with mock.patch('users.jivo.AuthClient') as client:
+            client.return_value.get_users.return_value = [jivo]
+            res = self.as_admin.post(reverse('create-user'), {
+                'auth_id': auth_id, 'role': _role('salesman').pk,
+            }, format='json')
         self.assertEqual(res.status_code, 201, res.content)
-        self.assertTrue(User.objects.filter(username='newhire').exists())
+        self.assertTrue(User.objects.filter(auth_id=auth_id, email='new.hire@jivo.in').exists())
 
     def test_a_non_admin_cannot_reset_another_users_password(self):
         """`PUT /auth/users/<id>/` accepts `password`, so while it was AllowAny
@@ -261,33 +237,28 @@ class PrivilegeEscalationTests(_ApiTestCase):
         self.assertTrue(self.admin.is_active)
 
 
-class PasswordPolicyTests(_ApiTestCase):
-    """`CreateUserSerializer` declared `min_length=6` and called `set_password()`
-    directly, which does not validate — so AUTH_PASSWORD_VALIDATORS, configured
-    in settings, applied to nothing created through the API."""
+class JivoOwnedFieldsTests(_ApiTestCase):
+    """Passwords, names and emails belong to Jivo Auth now. The user edit
+    endpoint used to set all three; it must ignore them, while every OMS
+    field keeps working."""
 
-    def test_a_common_password_is_rejected(self):
-        res = self.as_admin.post(reverse('create-user'), {
-            'name': 'Weak', 'username': 'weak', 'password': 'password123',
+    def test_an_update_ignores_password_name_and_email(self):
+        email_before = self.staff.email
+        res = self.as_admin.put(reverse('user-detail', args=[self.staff.pk]), {
+            'name': 'Renamed', 'email': 'someone.else@jivo.in',
+            'password': 'Attacker9Pass!', 'phone': '9876543210',
         }, format='json')
-        self.assertEqual(res.status_code, 400)
-        self.assertIn('password', res.json()['errors'])
-
-    def test_a_short_password_is_rejected(self):
-        res = self.as_admin.post(reverse('create-user'), {
-            'name': 'Short', 'username': 'short', 'password': 'Ab3!x',
-        }, format='json')
-        self.assertEqual(res.status_code, 400)
-
-    def test_an_update_that_omits_the_password_still_works(self):
-        """The validators must not fire on the "leave it alone" case — the edit
-        form posts `password: ""` on every save."""
-        res = self.as_admin.put(reverse('user-detail', args=[self.staff.pk]),
-                                {'name': 'Renamed', 'password': ''}, format='json')
         self.assertEqual(res.status_code, 200, res.content)
         self.staff.refresh_from_db()
-        self.assertEqual(self.staff.name, 'Renamed')
+        self.assertEqual(self.staff.name, 't-staff')
+        self.assertEqual(self.staff.email, email_before)
+        self.assertFalse(self.staff.check_password('Attacker9Pass!'))
         self.assertTrue(self.staff.check_password('CorrectHorse9!'))
+        self.assertEqual(self.staff.phone, '9876543210')
+
+    def test_a_user_payload_carries_the_jivo_id(self):
+        res = self.as_staff.get(reverse('profile'))
+        self.assertIn('auth_id', res.json()['data'])
 
 
 class ScopedAccessTests(_ApiTestCase):
@@ -319,42 +290,6 @@ class ScopedAccessTests(_ApiTestCase):
         self.assertEqual(res.status_code, 403)
         self.staff.refresh_from_db()
         self.assertFalse(self.staff.extra_pages)
-
-
-class LoginThrottleTests(_ApiTestCase):
-    """Login had no rate limit of any kind, so passwords could be guessed as
-    fast as the network allowed — on an AllowAny endpoint reachable from the
-    internet.
-
-    Rates are disabled in `OMS/test_settings.py` (a process-global throttle
-    cache makes every other test order-dependent), so this class turns them
-    back on for itself and clears the cache, which persists across tests.
-    """
-
-    def setUp(self):
-        super().setUp()
-        from django.core.cache import cache
-        cache.clear()
-        self.addCleanup(cache.clear)
-
-    @override_settings(REST_FRAMEWORK={
-        **settings.REST_FRAMEWORK,
-        'DEFAULT_THROTTLE_RATES': {'anon': None, 'user': None, 'login': '3/min'},
-    })
-    def test_repeated_failed_logins_are_throttled(self):
-        from rest_framework.throttling import ScopedRateThrottle
-        ScopedRateThrottle.THROTTLE_RATES = settings.REST_FRAMEWORK[
-            'DEFAULT_THROTTLE_RATES']
-
-        seen = [
-            self.anon.post(reverse('login'),
-                           {'username': 't-staff', 'password': f'guess-{i}'},
-                           format='json').status_code
-            for i in range(5)
-        ]
-        self.assertIn(429, seen, f'no 429 in {seen} — guessing is unlimited')
-        # The throttle must not swallow the earlier attempts' real answer.
-        self.assertEqual(seen[0], 401)
 
 
 class SecuritySettingsTests(TestCase):

@@ -10,6 +10,10 @@ This is the group the Phase 1 security work was about. `CreateUserView` and
 the API could create an admin account or change an existing user's role.
 `users.serializers.assert_may_assign_roles` is the guard that now stops role
 escalation, and it is enforced here.
+
+Accounts themselves live in Jivo Auth (auth.jivo.in): "create" gives an
+existing Jivo user an OMS row, picked from `JivoUsersView`, and no endpoint
+here sets a password, name or email. See docs/jivo-auth-integration.md.
 """
 import logging
 
@@ -20,7 +24,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from core.permissions import IsAdminRole
-from users.serializers import UpdateUserSerializer, UserSerializer, StateSerializer, CompanySerializer, MainGroupSerializer, CreateUserSerializer, CategorySerializer
+from users.serializers import UpdateUserSerializer, UserSerializer, StateSerializer, CompanySerializer, MainGroupSerializer, AddJivoUserSerializer, CategorySerializer
+from users.jivo import jivo_directory
 from rest_framework.generics import ListAPIView
 from users.models import State, Company, MainGroup, UserRole, User
 from orders.models import Categories, RateApproverRule
@@ -185,9 +190,45 @@ class CategoryListView(ListAPIView):
     serializer_class = CategorySerializer
     queryset = Categories.objects.all().order_by('category')
 
-#Creating User
+#: `GET /api/auth/jivo-users/` 200.
+JIVO_USERS_RESPONSE = inline_serializer(name='JivoUsers', fields={
+    'success': serializers.BooleanField(),
+    'data': inline_serializer(name='JivoUser', fields={
+        'auth_id': serializers.UUIDField(),
+        'email': serializers.EmailField(),
+        'name': serializers.CharField(),
+        'is_active': serializers.BooleanField(),
+        'oms_user_id': serializers.IntegerField(allow_null=True),
+    }, many=True),
+})
+
+
+@extend_schema(
+    responses={200: JIVO_USERS_RESPONSE},
+    description='Every Jivo Auth user granted OMS, with the OMS user each one '
+                'already has (`oms_user_id`, null when none). The create form '
+                'offers the ones with none. 503 when Jivo Auth is unreachable.',
+)
+class JivoUsersView(APIView):
+    """The people an administrator can add to OMS. Administrators only.
+
+    Read live from Jivo Auth with the application's API key, so someone just
+    granted OMS there shows up straight away.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        return Response({'success': True, 'data': jivo_directory()})
+
+
 class CreateUserView(APIView):
-    """Create a user account. Administrators only.
+    """Give an existing Jivo user an OMS account. Administrators only.
+
+    The body names the Jivo user by `auth_id` and sets OMS's own fields
+    (role, scope, phone); see `AddJivoUserSerializer`. 400 when that person
+    has no OMS access in Jivo Auth or already has an OMS user, 503 when Jivo
+    Auth can't be reached.
 
     This endpoint was `AllowAny` while its serializer accepted a `role` bound to
     `UserRole.objects.all()` — so any anonymous caller who could reach the API
@@ -200,7 +241,7 @@ class CreateUserView(APIView):
     permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request):
-        serializer = CreateUserSerializer(
+        serializer = AddJivoUserSerializer(
             data=request.data, context={'request': request})
 
         if serializer.is_valid():
@@ -223,9 +264,10 @@ class UserDetailView(APIView):
     """Read or update any user account. Administrators only.
 
     Previously `AllowAny`, which made `PUT /auth/users/<id>/` an anonymous
-    account-takeover: `UpdateUserSerializer` accepts `password`, `role` and
+    account-takeover: `UpdateUserSerializer` accepted `password`, `role` and
     `is_active`, so anyone could reset the password of any account — including
-    an admin's — and log in as them.
+    an admin's — and log in as them. Passwords are Jivo Auth's now and this
+    endpoint no longer takes one.
 
     A user reading their OWN record does not need this endpoint; `/auth/profile/`
     already serves that and is authenticated.

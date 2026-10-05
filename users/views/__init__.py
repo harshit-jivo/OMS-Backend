@@ -4,7 +4,7 @@
 This package is the seam that let it be split without touching `users/urls.py`
 or any caller: `users.views.<anything>` still resolves.
 
-    auth.py             login, token refresh, logout, profile, page permissions
+    auth.py             profile, page permissions, the retired login (410)
     assignments.py      which users may sell which parties, and which products
     accounts.py         user CRUD and the lookup lists the admin screens need
     role_permissions.py the Role Permissions matrix: registry + role bundles

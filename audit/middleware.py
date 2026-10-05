@@ -1,10 +1,10 @@
 """Request-level audit capture.
 
-Identifies who is making each admin-page change (from the JWT) and shares that
-with the model signals. If a recognised admin change happened but no model
-signal logged it (e.g. a bulk ``queryset.update()`` or an endpoint whose model
-isn't individually audited), the middleware writes one simple fallback row so
-the change is never lost.
+Identifies who is making each admin-page change (from the Jivo access token)
+and shares that with the model signals. If a recognised admin change happened
+but no model signal logged it (e.g. a bulk ``queryset.update()`` or an
+endpoint whose model isn't individually audited), the middleware writes one
+simple fallback row so the change is never lost.
 """
 import logging
 
@@ -24,10 +24,12 @@ _ACTION_BY_METHOD = {
 
 
 def _resolve_user(request):
-    """Identify the user from the JWT (works even on AllowAny views)."""
+    """Identify the user from the Jivo access token (works even on AllowAny
+    views, which DRF never authenticates for us). The same class as
+    settings.REST_FRAMEWORK, so it resolves the same OMS row the view sees."""
     try:
-        from rest_framework_simplejwt.authentication import JWTAuthentication
-        result = JWTAuthentication().authenticate(request)
+        from jivo_auth.authentication import JivoJWTAuthentication
+        result = JivoJWTAuthentication().authenticate(request)
         if result is not None:
             return result[0]
     except Exception:

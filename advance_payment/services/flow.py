@@ -42,12 +42,19 @@ Same shape as PRDO and BackDate: the flow row says where the request waits,
 the log says what happened, the engine's configuration says what is ahead.
 """
 import logging
+from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+
+from jivo_auth.exceptions import AuthServiceError, AuthServiceUnavailable, InvalidToken
+from jivo_auth.http import request_json
+from jivo_auth.tokens import decode_access_token, has_app_access
 
 from workflow.exceptions import WorkflowError
 from workflow.services import replacements, selection
@@ -575,11 +582,22 @@ def send_back(advance, *, user, remarks, version=None):
 # The payee's account is normally PICKED from the accounts SAP holds for
 # them. Typing one by hand (a vendor with none, or a new one; every Employee,
 # whose advance account is a G/L with no bank details) is where money goes to
-# a wrong account, so the Payment user confirms their password first:
+# a wrong account, so the Payment user confirms their password first.
 #
-#   POST /requests/<id>/confirm-password/  ->  a token, good for this request,
-#                                              this user, MANUAL_TOKEN_SECONDS
+# The password belongs to Jivo Auth (auth.jivo.in), so OMS never sees it: the
+# client signs in to Jivo Auth again with it, under the device name
+# CONFIRM_DEVICE_NAME, and sends that sign-in's access token here.
+#
+#   POST /requests/<id>/confirm-password/ {access}  ->  a token, good for this
+#                                   request, this user, MANUAL_TOKEN_SECONDS
 #   PUT  /requests/<id>/payout/  {..., manual_token}
+#
+# A fresh `iat` would NOT prove the password was typed: a refresh mints a new
+# access token too, from the refresh token any signed-in browser holds. A
+# password sign-in is what creates a Jivo Auth *session*, so OMS asks Jivo
+# Auth (with that token) for the user's sessions and requires an active one
+# under CONFIRM_DEVICE_NAME created in the last FRESH_SIGN_IN_SECONDS. It then
+# revokes that session, so one sign-in confirms once.
 #
 # The server decides what is "by hand": an account (and IFSC) that is not one
 # of the payee's SAP accounts. The client's `to_account_manual` is not
@@ -588,28 +606,85 @@ def send_back(advance, *, user, remarks, version=None):
 MANUAL_TOKEN_SALT = 'advance-payment.manual-account'
 #: How long one password confirmation unlocks typing, in seconds.
 MANUAL_TOKEN_SECONDS = 30 * 60
-#: Wrong passwords allowed per user in MANUAL_LOCK_SECONDS before refusing.
+#: Failed confirmations allowed per user in MANUAL_LOCK_SECONDS before
+#: refusing. Wrong passwords themselves are refused (and rate-limited) by Jivo
+#: Auth before the client ever gets here.
 MANUAL_MAX_FAILURES = 5
 MANUAL_LOCK_SECONDS = 15 * 60
+#: The device name the client signs in to Jivo Auth with to confirm.
+CONFIRM_DEVICE_NAME = 'OMS payment confirmation'
+#: How recent that sign-in must be, in seconds.
+FRESH_SIGN_IN_SECONDS = 120
 
 
 def _failures_key(user):
     return f'advance-payment:manual-pw-failures:{user.pk}'
 
 
-def confirm_password(advance, *, user, password):
-    """The Payment user's password, for typing an account. Returns a token."""
+def _jivo_api(method, path, access):
+    """Call Jivo Auth as the user, with their own access token."""
+    return request_json(
+        method,
+        f"{settings.JIVO_AUTH['URL'].rstrip('/')}/api/v1{path}",
+        headers={'Authorization': f'Bearer {access}'},
+        timeout=settings.JIVO_AUTH.get('TIMEOUT', 5),
+    )
+
+
+def _fresh_sign_in(user, access):
+    """The Jivo Auth session `access` proves `user` just signed in with
+    their password for this, or None. See the comment above MANUAL_TOKEN_SALT.
+
+    Raises FlowError(503) when Jivo Auth can't be reached.
+    """
+    try:
+        claims = decode_access_token(access or '')
+    except InvalidToken:
+        return None
+    if (not has_app_access(claims) or not user.auth_id
+            or str(claims['sub']) != str(user.auth_id)):
+        return None
+    try:
+        sessions = _jivo_api('GET', '/auth/sessions/', access)
+    except AuthServiceUnavailable as exc:
+        logger.error('ADVANCE: Jivo Auth unreachable confirming a sign-in: %s', exc)
+        raise FlowError("Jivo Auth can't be reached. Try again shortly.", status=503) from exc
+    except AuthServiceError as exc:
+        logger.warning('ADVANCE: Jivo Auth refused the confirmation token: %s', exc)
+        return None
+    oldest = timezone.now() - timedelta(seconds=FRESH_SIGN_IN_SECONDS)
+    for session in sessions or []:
+        created = parse_datetime(session.get('created_at') or '')
+        if (session.get('is_active') and session.get('device_name') == CONFIRM_DEVICE_NAME
+                and created is not None and created >= oldest):
+            return session
+    return None
+
+
+def confirm_password(advance, *, user, access):
+    """The Payment user's fresh Jivo sign-in, for typing an account.
+    Returns a token. `access` is that sign-in's access token."""
     flow = RequestFlow.objects.select_related('current_stage').get(request=advance)
     if not is_actor(flow, user) or flow.current_role != StageRole.PAYMENT:
         raise FlowError('Only the Payment stage user may enter a bank account by hand.', status=403)
     failures = cache.get(_failures_key(user), 0)
     if failures >= MANUAL_MAX_FAILURES:
-        raise FlowError('Too many wrong passwords. Try again in 15 minutes.', status=429)
-    if not password or not user.check_password(password):
+        raise FlowError('Too many failed confirmations. Try again in 15 minutes.', status=429)
+    session = _fresh_sign_in(user, access)
+    if session is None:
         cache.set(_failures_key(user), failures + 1, MANUAL_LOCK_SECONDS)
-        logger.warning('ADVANCE: wrong password confirming a manual account on %s by user %s',
+        logger.warning('ADVANCE: unconfirmed sign-in for a manual account on %s by user %s',
                        advance.pk, user.pk)
-        raise FlowError('That password is not right.', status=403)
+        raise FlowError('Confirm with your password again.', status=403)
+    # One sign-in confirms once: end that Jivo session before answering.
+    try:
+        _jivo_api('POST', f"/auth/sessions/{session['id']}/revoke/", access)
+    except AuthServiceUnavailable as exc:
+        raise FlowError("Jivo Auth can't be reached. Try again shortly.", status=503) from exc
+    except AuthServiceError as exc:
+        # Already revoked (used twice at once): refuse rather than confirm twice.
+        logger.warning('ADVANCE: could not end the confirmation session: %s', exc)
+        raise FlowError('Confirm with your password again.', status=403) from exc
     cache.delete(_failures_key(user))
     return signing.dumps({'r': advance.pk, 'u': user.pk}, salt=MANUAL_TOKEN_SALT)
 

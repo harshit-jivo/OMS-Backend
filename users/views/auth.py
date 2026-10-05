@@ -1,12 +1,19 @@
-"""Authentication: login, token refresh, logout, and what the UI may show.
+"""Authentication: what is left of it in OMS, and what the UI may show.
 
-Split out of `users/views.py` (plan item 3.3). These are the only endpoints in
-the project that answer unauthenticated requests — `LoginView` and
-`AuthTokenRefreshView` declare `AllowAny` explicitly, and
-`core.tests.PublicEndpointAllowlistTests` fails if a third one appears.
+Users sign in at Jivo Auth (auth.jivo.in), not here. Every request carries a
+Jivo access token, verified by `jivo_auth.authentication.JivoJWTAuthentication`
+(settings.REST_FRAMEWORK), which hands the view the OMS `users.User` row whose
+`auth_id` is the token's subject. See docs/jivo-auth-integration.md.
 
-Both are throttled by the `login` scope rather than the general `anon` bucket,
-because they check credentials: this is the brute-force control.
+OMS's own login, token refresh and logout are gone with it. `/auth/login/`
+stays only as `JivoLoginGoneView`, answering 410 with where to sign in, for
+clients that haven't moved yet (the React Native OMS-app ships separately).
+It is the one endpoint here that answers unauthenticated requests, and
+`core.tests.PublicEndpointAllowlistTests` fails if another appears.
+
+`ProfileView` is how a client learns which OMS user it is after signing in at
+Jivo Auth: the Jivo token names the Jivo user, while every OMS screen keys on
+the OMS id, roles and pages this returns.
 
 `PagePermissionsView` decides which pages a user is offered. It answers by
 role, and deliberately does NOT treat a superuser as an admin — see
@@ -15,21 +22,15 @@ project's several definitions of "admin" legitimately diverge.
 """
 
 import logging
+from django.conf import settings
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.throttling import ScopedRateThrottle
 from core.permissions import is_admin
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.settings import api_settings as jwt_settings
-from rest_framework_simplejwt.serializers import TokenRefreshSerializer
-from rest_framework_simplejwt.views import TokenRefreshView
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from django.contrib.auth.models import update_last_login
-from users.serializers import LoginSerializer, UserSerializer
+from users.serializers import UserSerializer
 from users.models import User
 
 logger = logging.getLogger(__name__)
@@ -46,30 +47,11 @@ logger = logging.getLogger(__name__)
 # declaration is worse than none: the compiler would then agree with the lie.
 # ---------------------------------------------------------------------------
 
-#: `POST /api/auth/login/` 200. Note there is no `errors` key on this branch.
-LOGIN_SUCCESS_RESPONSE = inline_serializer(name='LoginSuccess', fields={
+#: `/api/auth/login/` 410, whatever the method.
+LOGIN_GONE_RESPONSE = inline_serializer(name='LoginGone', fields={
     'success': serializers.BooleanField(),
     'message': serializers.CharField(),
-    'data': inline_serializer(name='LoginSuccessData', fields={
-        'user': UserSerializer(),
-        'tokens': inline_serializer(name='LoginTokens', fields={
-            'access': serializers.CharField(),
-            'refresh': serializers.CharField(),
-            'token_type': serializers.CharField(),
-            'expires_in': serializers.IntegerField(),
-        }),
-    }),
-})
-
-#: `POST /api/auth/login/` 401 — a genuinely different shape: no `data` at all,
-#: and an `errors` key that exists only here. `errors` is `serializer.errors`
-#: verbatim, i.e. field name -> list of messages, with the credential check
-#: itself reported under `non_field_errors`.
-LOGIN_FAILURE_RESPONSE = inline_serializer(name='LoginFailure', fields={
-    'success': serializers.BooleanField(),
-    'message': serializers.CharField(),
-    'errors': serializers.DictField(
-        child=serializers.ListField(child=serializers.CharField())),
+    'sign_in_url': serializers.CharField(),
 })
 
 #: `GET /api/auth/profile/` 200. Deliberately has no `message` key — the view
@@ -80,133 +62,38 @@ PROFILE_RESPONSE = inline_serializer(name='Profile', fields={
 })
 
 
+def jivo_sign_in_url():
+    return f"{settings.JIVO_AUTH['URL'].rstrip('/')}/api/v1/auth/login/"
+
+
 @extend_schema(
-    request=LoginSerializer,
-    responses={
-        200: LOGIN_SUCCESS_RESPONSE,
-        401: LOGIN_FAILURE_RESPONSE,
-    },
-    description='Exchange credentials for a JWT pair. Returns two materially '
-                'different bodies: 200 carries `data.user` and `data.tokens`, '
-                'while 401 carries `errors` and no `data` at all.',
+    request=None,
+    responses={410: LOGIN_GONE_RESPONSE},
+    description='Retired. OMS no longer signs anyone in: sign in at Jivo Auth '
+                '(`sign_in_url`) and send its access token as '
+                '`Authorization: Bearer`.',
 )
-class LoginView(APIView):
-    """Exchange credentials for a JWT pair.
+class JivoLoginGoneView(APIView):
+    """The old `/auth/login/`: 410 Gone, saying where sign-in lives now.
 
-    Necessarily `AllowAny`, and therefore the one endpoint that most needs a
-    rate limit: nothing throttled it, so passwords could be guessed at whatever
-    speed the network allowed. `ScopedRateThrottle` applies the `login` rate
-    from settings (10/min per IP by default) rather than the looser `anon` one.
-
-    Keyed by IP, which is the only identifier available before authentication.
-    A shared office NAT therefore shares one bucket — the rate is set high
-    enough that ordinary humans never reach it and low enough that guessing is
-    hopeless.
+    `AllowAny` with no authentication, so a client still holding an old OMS
+    token gets this answer rather than a 401 it would try to refresh. It
+    checks no credentials and never reads the body, so it needs no login
+    throttle; the global `anon` rate still applies.
     """
 
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
+    authentication_classes = []
 
-    def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-
-        if serializer.is_valid():
-            user = serializer.validated_data['user']
-            refresh = RefreshToken.for_user(user)
-            update_last_login(None, user)
-
-            access_lifetime = jwt_settings.ACCESS_TOKEN_LIFETIME
-            logger.info("Login successful user_id=%s", user.id)
-
-            return Response({
-                'success': True,
-                'message': 'Login successful',
-                'data': {
-                    'user': UserSerializer(user).data,
-                    # Existing fields kept exactly (clients read data.tokens.*);
-                    # token_type + expires_in are additive (Task 4).
-                    'tokens': {
-                        'access': str(refresh.access_token),
-                        'refresh': str(refresh),
-                        'token_type': 'Bearer',
-                        'expires_in': int(access_lifetime.total_seconds()),
-                    },
-                }
-            })
-
-        logger.warning(
-            "Login failed for username=%s",
-            str(request.data.get('username', ''))[:150],
-        )
+    def _gone(self, request, *args, **kwargs):
         return Response({
             'success': False,
-            'message': 'Login failed',
-            'errors': serializer.errors
-        }, status=status.HTTP_401_UNAUTHORIZED)
+            'message': 'OMS sign-in has moved to Jivo Auth. Sign in there '
+                       'with your email and password.',
+            'sign_in_url': jivo_sign_in_url(),
+        }, status=status.HTTP_410_GONE)
 
-
-class ActiveUserTokenRefreshSerializer(TokenRefreshSerializer):
-    """Refresh serializer that also rejects tokens whose user is now missing or
-    inactive (Task 7). The parent already handles expired/invalid tokens and,
-    with BLACKLIST_AFTER_ROTATION, rotates + blacklists the old refresh token.
-    """
-
-    def validate(self, attrs):
-        # Decode/verify the refresh token BEFORE rotation so we can look up the
-        # subject. This raises for expired/invalid/blacklisted tokens.
-        token = RefreshToken(attrs['refresh'])
-        user_id = token.get(jwt_settings.USER_ID_CLAIM)
-        try:
-            user = User.objects.get(**{jwt_settings.USER_ID_FIELD: user_id})
-        except User.DoesNotExist:
-            raise InvalidToken('No active account found for this token')
-        if not user.is_active:
-            raise InvalidToken('User account is disabled')
-
-        return super().validate(attrs)
-
-
-class AuthTokenRefreshView(TokenRefreshView):
-    """POST /api/auth/refresh/ — exchange a refresh token for a new access
-    token, honouring rotation/blacklist settings and blocking inactive users.
-    """
-
-    permission_classes = [AllowAny]
-    serializer_class = ActiveUserTokenRefreshSerializer
-    # Also credential-checking and also unauthenticated: the body carries a
-    # refresh token, so an unthrottled endpoint is a token-guessing oracle.
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
-
-
-class LogoutView(APIView):
-    """POST /api/auth/logout/ — blacklist the refresh token so it cannot be
-    reused (server-side invalidation, not just a client-side clear)."""
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        refresh_token = (
-            request.data.get('refresh')
-            or request.data.get('refresh_token')
-            or ''
-        )
-        if not refresh_token:
-            return Response(
-                {'success': False, 'message': 'Refresh token is required'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            RefreshToken(refresh_token).blacklist()
-        except TokenError:
-            # Already expired/invalid/blacklisted — logout is idempotent.
-            logger.info("Logout with already-invalid refresh user_id=%s", request.user.id)
-            return Response({'success': True, 'message': 'Logged out'})
-
-        logger.info("Logout success user_id=%s", request.user.id)
-        return Response({'success': True, 'message': 'Logged out'})
+    get = post = put = patch = delete = _gone
 
 @extend_schema(
     responses={200: PROFILE_RESPONSE},

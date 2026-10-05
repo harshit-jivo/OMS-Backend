@@ -6,7 +6,7 @@ Django REST backend for the Order Management System. The project handles user au
 - Python
 - Django
 - Django REST Framework
-- Simple JWT authentication
+- Jivo Auth (auth.jivo.in) sign-in, via `jivo-auth-client`
 - PostgreSQL
 - SAP/HANA integration through SQL Server and SAP Service Layer
 - APScheduler for scheduled sync jobs
@@ -100,8 +100,9 @@ http://127.0.0.1:8000/
 
 Base path: `/api/auth/`
 
-- `POST /api/auth/login/`
-- `GET /api/auth/profile/`
+- `GET /api/auth/profile/` (the signed-in OMS user: id, roles, pages)
+- `GET /api/auth/jivo-users/` (admin: Jivo users with OMS access)
+- `POST /api/auth/users/create/` (admin: give a Jivo user an OMS account)
 - `GET /api/auth/states/`
 - `GET /api/auth/companies/`
 - `GET /api/auth/mainGroup/`
@@ -148,11 +149,20 @@ Base path: `/api/sap/`
 
 ## Authentication
 
-The API uses JWT authentication through `rest_framework_simplejwt`. Login returns tokens that should be sent on protected routes using:
+Users sign in at Jivo Auth, the central sign-in service, not at OMS:
+`POST https://auth.jivo.in/api/v1/auth/login/` with `{email, password, device_name}`
+returns `{access, refresh}`, and `POST https://auth.jivo.in/api/v1/auth/refresh/`
+renews them. Send the access token on every OMS request:
 
 ```http
-Authorization: Bearer <access_token>
+Authorization: Bearer <Jivo access token>
 ```
+
+OMS verifies it locally and resolves the OMS user whose `auth_id` is the
+token's subject; then call `GET /api/auth/profile/` for the OMS user. Accounts
+and passwords are managed in Jivo Auth; OMS keeps roles, scope and every
+business record. The old `POST /api/auth/login/` answers `410 Gone`. Settings:
+`JIVO_AUTH_*` in `.env.example`. Full details: `docs/jivo-auth-integration.md`.
 
 ## Development Commands
 
