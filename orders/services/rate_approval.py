@@ -130,16 +130,31 @@ def _get_rate_approval_reason(item, authorised_rate, basic_price):
         return None
     authorised_rate = float(authorised_rate)
     if authorised_rate <= 0:
-        # A zero agreed rate means no rate was ever agreed, not that the item
-        # is free. For commodities that is the norm rather than an omission --
-        # the price tracks the market -- so there is no benchmark to clear and
-        # the line goes for approval on every order. Non-commodity lines stay
-        # exempt: a zero there is unmapped master data.
+        # A zero agreed rate means no rate was ever agreed, not that the item is
+        # free, so there is no benchmark the line can be said to clear. It now
+        # goes for approval whatever the sub group.
+        #
+        # This used to exempt everything except the commodity sub groups, on the
+        # grounds that a zero elsewhere was unmapped master data rather than a
+        # discount. That reasoning let ORD-20260912-0007 through: both lines
+        # (CANOLA, OLIVE -- both PREMIUM) had basic_rate 0 on the party's
+        # assignments, so neither flagged, the order skipped Rate Approval
+        # entirely and landed on the auditor, who rejected it with "need
+        # approval". One of those lines was 100 x EXTRA LIGHT OLIVE 5 LTR at
+        # Rs 0.0010. Nothing in the flow looked at it.
+        #
+        # Priced lines with no agreed rate are ~63% of recent lines (1218 of
+        # 1925 over 60 days), so this sends materially more orders to Rate
+        # Approval until `party_product_assignments.basic_rate` is populated.
+        # That is the intended trade: an unmapped pair is exactly the case where
+        # nobody has agreed a price, and it is the salesperson's own number that
+        # would otherwise stand unchecked.
+        item_name = item.get('item_name') or item.get('item_code') or 'Item'
         if _is_commodity_item(item):
-            item_name = item.get('item_name') or item.get('item_code') or 'Item'
             return (f"{item_name}: commodity sold at Rs {basic_price} with no "
                     f"agreed rate on record")
-        return None
+        return (f"{item_name}: sold at Rs {basic_price} with no agreed rate "
+                f"on record")
 
     if basic_price < authorised_rate - RATE_APPROVAL_TOLERANCE:
         item_name = item.get('item_name') or item.get('item_code') or 'Item'

@@ -41,7 +41,13 @@ class InvoiceLogSerializer(serializers.ModelSerializer):
         # source is genuinely REJECTED — never taken from the request body.
         # The delete stamps are set only by the delete/restore endpoints, which
         # enforce the status rules; a PATCH must not be able to bypass them.
+        # Status moves through update-status (review decisions) and
+        # post-to-sap (the SAP outcome and its document numbers) only, so a
+        # create or a /log/<id>/ PATCH cannot mark an invoice posted.
         read_only_fields = [
+            'status',
+            'sap_doc_num',
+            'sap_doc_entry',
             'supersedes',
             'is_deleted',
             'deleted_at',

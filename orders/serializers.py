@@ -5,6 +5,7 @@ from users.models import SchemeProduct, State
 from sap_sync.models import PartyAddress as SapPartyAddress
 from sap_sync.models import Product as SapProduct
 from sap_sync.models import Party as SapParty
+from sap_sync import product_lookup
 from decimal import Decimal
 
 def get_scheme_item_code_raw(scheme_id):
@@ -267,29 +268,24 @@ class OrderItemSchemeSerializer(serializers.ModelSerializer):
         return (getattr(obj, 'benefit_item_code', '') or '').strip() or None
 
     def get_scheme_item_name(self, obj):
-        """The giveaway item's NAME.
+        """The giveaway item's NAME, read in the category of the line that earned it.
 
         The approval table showed a code where every other line showed a name.
         A STATE- or VENDOR-scoped scheme gives away items the party holds no
         assignment for, so the client's own catalogues cannot name them — which
         is why this is resolved here.
+
+        The category is not decoration: one code is a different product in each
+        (`sap_sync.product_lookup`), so resolving on the code alone labelled an
+        OIL order's free YELLOW MUSTARD OIL as GLASS BOTTLE 200 MLS BLUEBERRY.
+        The earning line carries the category, and prefetching `items__schemes`
+        caches it on the row, so reading it costs nothing on the order views.
         """
         item_code = self.get_scheme_item_code(obj)
         if not item_code:
             return None
-        from django.apps import apps
-
-        try:
-            Product = apps.get_model('sap_sync', 'Product')
-        except LookupError:
-            return None
-        name = (
-            Product.objects
-            .filter(item_code__iexact=item_code)
-            .values_list('item_name', flat=True)
-            .first()
-        )
-        return (name or '').strip() or None
+        category = getattr(getattr(obj, 'order_item', None), 'category', '')
+        return product_lookup.name(item_code, category) or None
 
     class Meta:
         model = OrderItemScheme
@@ -470,9 +466,12 @@ class OrderRateApprovalSerializer(serializers.ModelSerializer):
 class OrderListByUserIdSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source="status.name")
     # items = OrderItemSerializer(many=True, read_only=True)
-    # items_count = serializers.IntegerField(source="items.count", read_only=True)
+    # The order-list rows never carried a line count, so the web "Items" column
+    # fell back to 0. `OrdersByUserView` already prefetches `items`, so this
+    # `.count()` reads the prefetch cache — no extra query per row.
+    items_count = serializers.IntegerField(source="items.count", read_only=True)
     # categories = serializers.SerializerMethodField()
-    status_display = serializers.CharField(source="status.name", read_only=True)
+    status_display = serializers.SerializerMethodField()
     created_by = serializers.IntegerField(source="created_by_id", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     # rate_approvals = OrderRateApprovalSerializer(many=True, read_only=True)
@@ -489,6 +488,22 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return obj.created_by.username
         return None
+
+    def get_status_display(self, obj):
+        """What the ORDER OWNER (distributor) should see.
+
+        A distributor must not see their Mart order as "Approved" until it is
+        actually booked in SAP (status Completed = 9). While it is only
+        "Approved" (Mart Approved = 6 — the desk approved it but the SAP push has
+        not yet succeeded), show the pending "Mart Approval" label instead: the
+        distributor cares about their order, not the SAP push. The Mart Approval
+        desk still sees the real state (and the SAP-failed badge + Resend) on its
+        own queue, which reads the order status directly, not this serializer.
+        """
+        # 6 = Approved (Mart Approved), 9 = Completed — see orders/services/mart_posting.py
+        if obj.order_type == 'DISTRIBUTOR' and obj.status_id == 6:
+            return 'Mart Approval'
+        return obj.status.name if obj.status_id else ''
 
     class Meta:
         model = Order
@@ -515,11 +530,11 @@ class OrderListByUserIdSerializer(serializers.ModelSerializer):
             "status_display",
             "created_by",
             "created_by_name",
-            "created_at",   
-            "delivery_date",  
+            "created_at",
+            "delivery_date",
             # "sap_doc_number",
             # "items",
-            # "items_count",
+            "items_count",
             # "categories",
             # "rate_approvals",
         ]

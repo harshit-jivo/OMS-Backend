@@ -30,7 +30,6 @@ from .models import (
     CollectionPerson,
     PaymentAllocation,
     PaymentMethodEntry,
-    PaymentMethodMapping,
     PaymentReceipt,
     PaymentStatusHistory,
 )
@@ -111,8 +110,22 @@ class PaymentMethodEntrySerializer(serializers.ModelSerializer):
         model = PaymentMethodEntry
         fields = ['id', 'method', 'amount', 'upi_reference', 'cheque_number',
                   'bank_name', 'cheque_date', 'sap_check_key', 'denominations',
-                  'deposit_account']
-        read_only_fields = ['sap_check_key']
+                  'deposit_account',
+                  # The account the user chose. `account_key` is the only one a
+                  # client may send; the rest are the server's snapshot of what
+                  # that key resolved to, so a caller can never name the G/L
+                  # its money posts to.
+                  'account_key', 'gl_account', 'bank_code',
+                  'receiving_bank_name', 'account_number', 'branch']
+        read_only_fields = ['sap_check_key', 'gl_account', 'bank_code',
+                            'receiving_bank_name', 'account_number', 'branch']
+        extra_kwargs = {
+            # Optional during the transition: app builds released before the
+            # account picker send no key, and must keep working. Those receipts
+            # carry no snapshot and still resolve through the method mapping at
+            # posting time, exactly as they do today.
+            'account_key': {'required': False, 'allow_blank': True},
+        }
 
     def get_deposit_account(self, obj):
         """Our account for this tender, or None when not configured.
@@ -134,26 +147,27 @@ class PaymentMethodEntrySerializer(serializers.ModelSerializer):
         if isinstance(root, serializers.ListSerializer):
             return None
 
-        company = getattr(obj.receipt, 'company', None)
-        if not company:
+        # READ FROM THE LINE, never resolved again.
+        #
+        # This used to ask `PaymentMethodMapping` what account the method maps
+        # to TODAY, which meant an old receipt displayed wherever the current
+        # configuration points — not where its money actually went. The line
+        # now carries the account it was received into, so the answer is the
+        # historical one.
+        #
+        # Blank for a line raised before the picker and already settled: those
+        # were deliberately not back-filled, because the mapping had been
+        # edited since they posted and stamping today's value would have
+        # recorded an account SAP may never have used. Saying nothing is
+        # honest; guessing is not.
+        if not (obj.gl_account or '').strip():
             return None
-        if obj.method == PaymentMethodEntry.Method.CASH:
-            resolver = bank_master.PaymentAccountResolver(company)
-            gl = resolver.cash_gl()
-            return ({'bank_name': 'Cash', 'gl_account': gl,
-                     'account_number': '', 'branch': ''} if gl else None)
-        try:
-            found = bank_master.PaymentAccountResolver(company).resolve(
-                obj.method)
-        except Exception:                                   # noqa: BLE001
-            # Never let a SAP outage break reading a payment.
-            return None
-        if not found:
-            return None
-        return {'bank_name': found['bank_name'],
-                'gl_account': found['gl_account'],
-                'account_number': found['account_number'],
-                'branch': found['branch']}
+        return {'bank_name': obj.receiving_bank_name or (
+                    'Cash' if obj.method == PaymentMethodEntry.Method.CASH
+                    else ''),
+                'gl_account': obj.gl_account,
+                'account_number': obj.account_number,
+                'branch': obj.branch}
 
     def validate(self, attrs):
         method = attrs.get('method')
@@ -569,41 +583,150 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
         }
 
     def get_approval(self, obj):
-        # Sorted in PYTHON, not with .order_by(). The view prefetches
-        # `approvals`, but any queryset method on that manager — order_by,
-        # filter — clones it and silently discards the prefetched rows,
-        # issuing a fresh query PER RECEIPT. That was 50 queries for a
-        # 49-row list; iterating `.all()` reuses what was already fetched.
-        requests = sorted(
-            obj.approvals.all(),
-            key=lambda r: (r.created_at is not None, r.created_at),
-            reverse=True,
-        )
-        request = requests[0] if requests else None
-        if not request:
+        """Where this document stands in its approval, for the clients.
+
+        Reads payments' OWN flow (payments/models.py) — the engine keeps no
+        runtime. `stage_label` is rendered from the flow's position rather than
+        stored, and the rejection reason comes from this module's append-only
+        history, so it survives configuration changes.
+        """
+        flow = getattr(obj, 'flow', None)
+        if flow is None:
             return None
-        # The last REJECT of the CURRENT round, so a creator opening a rejected
-        # entry sees why without hunting through the approval history. Scoped to
-        # the round: an older round's rejection was already acted on.
-        #
-        # Filtered in Python for the same reason as above.
-        rejections = [
-            a for a in request.actions.all()
-            if a.action == 'REJECT' and a.round_number == request.round_number
-        ]
-        rejections.sort(key=lambda a: a.sequence, reverse=True)
-        rejection = rejections[0] if rejections else None
-        return {
-            'id': request.id,
-            'status': request.status,
-            'current_level': request.current_level,
-            'total_levels': request.total_levels,
-            'level_label': request.level_label,
-            'round_number': request.round_number,
-            'rejection_reason': (rejection.remarks or '') if rejection else '',
-            'rejected_by': (rejection.approver_username or '') if rejection else '',
-            'rejected_at': rejection.acted_at if rejection else None,
+
+        # Prefetched by the LIST querysets (`views._rejection_prefetch`), which
+        # is what keeps this off the per-row path. The detail views do not
+        # prefetch, so the query below remains as the fallback — absence of the
+        # attribute is the signal, not an empty list, which means "prefetched,
+        # and there were no rejections".
+        rejections = getattr(obj, '_rejections', None)
+        if rejections is not None:
+            rejection = rejections[0] if rejections else None
+        else:
+            from django.contrib.contenttypes.models import ContentType
+
+            from .models import PaymentStatusHistory
+
+            rejection = (PaymentStatusHistory.objects
+                         .filter(content_type=ContentType.objects.get_for_model(
+                             obj.__class__),
+                             object_id=obj.pk,
+                             action=PaymentStatusHistory.Action.REJECTED)
+                         .order_by('-created_at')
+                         .first())
+        stage_sequence = None
+        if flow.current_stage_id:
+            stage_sequence = getattr(flow.current_stage, 'sequence', None)
+
+        from . import workflow_flow
+
+        payload = {
+            'id': flow.id,
+            'status': flow.status,
+            # WHICH BUSINESS WORKFLOW THIS IS. Receipts and deposits are two
+            # separate workflows under one module, and a client that has to
+            # infer the difference from a document number prefix will get it
+            # wrong the first time a number is entered by hand.
+            'document_kind': workflow_flow.kind_of(obj),
+            'current_stage': flow.current_stage_id,
+            'current_stage_sequence': stage_sequence,
+            'total_stage': flow.total_stage,
+            'stage_label': (f'Stage {stage_sequence} of {flow.total_stage}'
+                            if stage_sequence else ''),
+            'rejection_reason': (rejection.reason or '') if rejection else '',
+            'rejected_by': ((rejection.changed_by_username or '')
+                            if rejection else ''),
+            'rejected_at': rejection.created_at if rejection else None,
         }
+
+        # THE LADDER, ON DETAIL VIEWS ONLY. Building it costs a history read
+        # and a name lookup per document, which a list of fifty would pay fifty
+        # times over for something no table row shows. The list already carries
+        # `stage_label`, which is what a row needs.
+        if self.context.get('include_stages'):
+            payload['stages'] = workflow_flow.stage_progress(obj, flow)
+            current = next((s for s in payload['stages']
+                            if s['state'] == 'CURRENT'), None)
+            payload['current_approver'] = current['approver'] if current else ''
+            payload['current_approver_name'] = (
+                current['approver_name'] if current else '')
+
+        return payload
+
+
+#: Columns a resolved receiving account fills in on a method entry. Listed once
+#: so a tender that resolves nothing clears every one of them rather than
+#: leaving half of a previous account behind on an edit.
+RECEIVING_ACCOUNT_FIELDS = ('account_key', 'gl_account', 'bank_code',
+                            'receiving_bank_name', 'account_number', 'branch')
+
+_BLANK_RECEIVING_ACCOUNT = {field: '' for field in RECEIVING_ACCOUNT_FIELDS}
+
+
+def resolve_receiving_account(company, method, account_key):
+    """The account `account_key` names, as the snapshot to store on the entry.
+
+    The client sends a KEY and nothing else. Everything stored is read back
+    from the company's own SAP list, which is what makes three separate rules
+    hold at once without trusting the caller:
+
+      * company isolation — another company's account is not in this company's
+        list, so it cannot resolve;
+      * method agreement — cash keys resolve only against the cash list and
+        bank keys only against the house-bank list, so CASH cannot be pointed
+        at a bank account or vice versa;
+      * availability — a frozen or non-postable account is absent from the
+        list, so a retired drawer refuses exactly like one that never existed.
+
+    CHEQUE and UPI share one list deliberately: SAP draws no distinction, and
+    the same house bank legitimately receives both.
+
+    Returns a dict of snapshot values, or None when no key was sent (a client
+    released before the account picker). Raises DRF ValidationError when a key
+    was sent and could not be resolved — silently dropping it would post the
+    money somewhere the user did not choose.
+    """
+    key = (account_key or '').strip()
+    if not key:
+        return None
+
+    is_cash = method == PaymentMethodEntry.Method.CASH
+    try:
+        if is_cash:
+            account = bank_master.find_cash_account(company, key)
+        else:
+            # EXACT key only — never find_bank, whose G/L and bare-bank-code
+            # fallbacks would let "INB" silently choose one of several
+            # accounts. Deposits keep find_bank; this path must not.
+            account = bank_master.find_bank_exact(company, key)
+    except bank_master.BankMasterUnavailable as error:
+        # Refuse rather than fall through to an unverified account: the money
+        # is about to be told where to go.
+        raise serializers.ValidationError({'methods': str(error)})
+    except DjangoValidationError as error:
+        message = getattr(error, 'messages', None) or [str(error)]
+        raise serializers.ValidationError({'methods': message[0]})
+
+    if not account:
+        raise serializers.ValidationError(
+            {'methods': f"'{key}' is not a valid receiving account for "
+                        f'{company}.'})
+
+    if is_cash:
+        # A drawer has no house bank, so the bank columns stay blank — they are
+        # not unknown, they do not apply.
+        return {**_BLANK_RECEIVING_ACCOUNT,
+                'account_key': account['gl_account'],
+                'gl_account': account['gl_account'],
+                'receiving_bank_name': account.get('account_name', ''),
+                }
+
+    return {'account_key': account['key'],
+            'gl_account': account['gl_account'],
+            'bank_code': account['bank_code'],
+            'receiving_bank_name': account['display_name'],
+            'account_number': account.get('account_number', ''),
+            'branch': account.get('branch', '')}
 
 
 class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
@@ -694,6 +817,20 @@ class PaymentReceiptCreateSerializer(serializers.ModelSerializer):
                     'method. Create separate receipts for CASH, UPI or '
                     f'CHEQUE. This one has: {", ".join(distinct_methods)}.'
                 )})
+
+        # Resolve the chosen receiving account against THIS receipt's company,
+        # and freeze what it resolved to onto the line. Done here rather than
+        # in the entry serializer because only the receipt knows the company,
+        # and the company is the whole basis of the check.
+        if 'methods' in attrs:
+            company = current('company')
+            for entry in attrs['methods'] or []:
+                resolved = resolve_receiving_account(
+                    company, entry.get('method'), entry.get('account_key'))
+                # No key sent -> no snapshot. Blank, never a leftover: method
+                # rows are replaced wholesale on an edit, and a half-filled
+                # account would be worse than none.
+                entry.update(resolved or _BLANK_RECEIVING_ACCOUNT)
 
         if 'allocations' in attrs:
             allocations = attrs['allocations'] or []
@@ -1024,6 +1161,21 @@ class BankDepositLineSerializer(serializers.ModelSerializer):
     # Null until the receipt posts, and on receipts that never did.
     receipt_posted_at = serializers.DateTimeField(
         source='receipt.sap_posted_at', read_only=True)
+    # WHERE THE RECEIPT LANDED IN SAP.
+    #
+    # A deposit posts its CASH share and nothing else: a cheque reached the
+    # bank when its OWN receipt posted, so re-posting it here would debit the
+    # bank twice. That is correct accounting and completely invisible to the
+    # approver, who sees a deposit for the full amount and one SAP document
+    # covering only part of it.
+    #
+    # This is the missing half of that story — the document number the cheque
+    # is actually recorded under — so the detail screen can say where each
+    # tender ended up instead of leaving the cheques unaccounted for.
+    receipt_sap_doc_num = serializers.IntegerField(
+        source='receipt.sap_doc_num', read_only=True)
+    receipt_sap_doc_entry = serializers.IntegerField(
+        source='receipt.sap_doc_entry', read_only=True)
     # Cash / cheque lines, each with its cheque number, payer bank and date.
     methods = PaymentMethodEntrySerializer(
         source='receipt.methods', many=True, read_only=True)
@@ -1031,7 +1183,8 @@ class BankDepositLineSerializer(serializers.ModelSerializer):
     class Meta:
         model = BankDepositLine
         fields = ['id', 'receipt', 'receipt_no', 'card_name', 'card_code',
-                  'payment_date', 'receipt_posted_at', 'receipt_status',
+                  'payment_date', 'receipt_posted_at', 'receipt_sap_doc_num',
+                  'receipt_sap_doc_entry', 'receipt_status',
                   'receipt_total', 'receipt_remarks', 'collected_by',
                   'methods', 'amount']
 
@@ -1086,159 +1239,97 @@ class BankDepositSerializer(serializers.ModelSerializer):
         from — and `bank_display_name` already carries the destination number,
         which made the header repeat one side twice and never show the other.
 
-        Resolved from the company mapping rather than stored on the deposit,
-        because it is configuration, not a per-document fact. Returns None when
-        unconfigured, so the UI omits the row instead of printing a blank
-        account number.
+        STORED FIRST. A deposit submitted from this phase onward froze the
+        drawer its receipts were received into, and that is a per-document
+        fact: reading it back from configuration would let a later mapping
+        edit rewrite what an old deposit says it emptied.
+
+        The live lookup remains only for a deposit that has no stored value —
+        one submitted before this phase, or still a draft — which is the value
+        it would have posted then. Returns None when there is nothing to show,
+        so the UI omits the row instead of printing a blank account number.
         """
-        company = getattr(obj, 'company', None)
-        if not company:
-            return None
-        try:
-            return bank_master.PaymentAccountResolver(company).deposit_source_gl() or None
-        except Exception:                                   # noqa: BLE001
-            # Never let a SAP or config outage break reading a deposit.
-            return None
+        stored = (getattr(obj, 'source_gl_account', '') or '').strip()
+        if stored:
+            return stored
+
+        # Nothing to fall back to any more: the account a deposit empties is
+        # frozen on the deposit at submit, and deposits raised before that had
+        # theirs written from their own receipts. A blank here means the
+        # deposit genuinely records no drawer — a cheque-only deposit, which
+        # empties none.
+        return None
 
     def get_approval(self, obj):
-        # Sorted in PYTHON, not with .order_by(). The view prefetches
-        # `approvals`, but any queryset method on that manager — order_by,
-        # filter — clones it and silently discards the prefetched rows,
-        # issuing a fresh query PER RECEIPT. That was 50 queries for a
-        # 49-row list; iterating `.all()` reuses what was already fetched.
-        requests = sorted(
-            obj.approvals.all(),
-            key=lambda r: (r.created_at is not None, r.created_at),
-            reverse=True,
-        )
-        request = requests[0] if requests else None
-        if not request:
+        """Where this document stands in its approval, for the clients.
+
+        Reads payments' OWN flow (payments/models.py) — the engine keeps no
+        runtime. `stage_label` is rendered from the flow's position rather than
+        stored, and the rejection reason comes from this module's append-only
+        history, so it survives configuration changes.
+        """
+        flow = getattr(obj, 'flow', None)
+        if flow is None:
             return None
-        # The last REJECT of the CURRENT round, so a creator opening a rejected
-        # entry sees why without hunting through the approval history. Scoped to
-        # the round: an older round's rejection was already acted on.
-        #
-        # Filtered in Python for the same reason as above.
-        rejections = [
-            a for a in request.actions.all()
-            if a.action == 'REJECT' and a.round_number == request.round_number
-        ]
-        rejections.sort(key=lambda a: a.sequence, reverse=True)
-        rejection = rejections[0] if rejections else None
-        return {
-            'id': request.id,
-            'status': request.status,
-            'current_level': request.current_level,
-            'total_levels': request.total_levels,
-            'level_label': request.level_label,
-            'round_number': request.round_number,
-            'rejection_reason': (rejection.remarks or '') if rejection else '',
-            'rejected_by': (rejection.approver_username or '') if rejection else '',
-            'rejected_at': rejection.acted_at if rejection else None,
-        }
 
-
-class PaymentMethodMappingSerializer(serializers.ModelSerializer):
-    """Admin CRUD for the method -> SAP account mapping.
-
-    The resolved SAP fields are read-only extras so the admin table can show
-    the bank, G/L and account number without a second request — and so a
-    mapping whose account has vanished from SAP shows up as invalid rather
-    than as a plausible-looking row.
-    """
-
-    resolved = serializers.SerializerMethodField()
-
-    class Meta:
-        model = PaymentMethodMapping
-        fields = ['id', 'company', 'payment_method', 'bank_key', 'gl_account',
-                  'priority', 'is_active', 'resolved', 'created_at',
-                  'updated_at']
-        # The partial unique constraint reports "must make a unique set",
-        # naming neither the method nor the row already holding it. validate()
-        # below owns the message; the DB still backs it up.
-        validators = []
-
-    def get_resolved(self, obj):
-        try:
-            found = bank_master.find_bank(obj.company, obj.bank_key)
-        except (bank_master.BankMasterUnavailable, DjangoValidationError):
-            return None
-        if not found:
-            return None
-        return {
-            'bank_code': found['bank_code'],
-            'bank_name': found['display_name'],
-            'gl_account': found['gl_account'],
-            'account_number': found['account_number'],
-            'branch': found['branch'],
-            'bank_key': found['key'],
-        }
-
-    def validate(self, attrs):
-        def current(field, default=None):
-            if field in attrs:
-                return attrs[field]
-            if self.instance is not None:
-                return getattr(self.instance, field, default)
-            return default
-
-        company = current('company')
-        method = current('payment_method')
-
-        # CASH and the banked tenders are configured the opposite way round,
-        # and each is refused the other's field rather than silently ignoring
-        # it — a row carrying both would leave which account it posts to
-        # ambiguous.
-        #
-        # CASH used to be rejected outright here, on the grounds that a cash
-        # drawer is not a house bank. That is still true, but the conclusion
-        # changed: the cash G/L moved INTO this table (migration 0033), so
-        # this is now exactly where CASH belongs.
-        is_cash = method == PaymentMethodEntry.Method.CASH
-        gl_account = (current('gl_account') or '').strip()
-        bank_key_value = (current('bank_key') or '').strip()
-
-        if is_cash:
-            if not gl_account:
-                raise serializers.ValidationError({'gl_account': (
-                    'Cash needs a G/L account — it has no house bank to '
-                    'resolve one from.')})
-            if bank_key_value:
-                raise serializers.ValidationError({'bank_key': (
-                    'Cash does not use a house bank account. Leave the bank '
-                    'blank and set the G/L account instead.')})
+        # Prefetched by the LIST querysets (`views._rejection_prefetch`), which
+        # is what keeps this off the per-row path. The detail views do not
+        # prefetch, so the query below remains as the fallback — absence of the
+        # attribute is the signal, not an empty list, which means "prefetched,
+        # and there were no rejections".
+        rejections = getattr(obj, '_rejections', None)
+        if rejections is not None:
+            rejection = rejections[0] if rejections else None
         else:
-            if not bank_key_value:
-                raise serializers.ValidationError({'bank_key': (
-                    f'{method} is banked, so it needs a house bank account.')})
-            if gl_account:
-                raise serializers.ValidationError({'gl_account': (
-                    'A banked tender takes its G/L from the house bank '
-                    'account in SAP, so it must not be set here.')})
+            from django.contrib.contenttypes.models import ContentType
 
-        if current('is_active', True) and company and method:
-            clash = PaymentMethodMapping.objects.filter(
-                company=company, payment_method=method, is_active=True)
-            if self.instance is not None:
-                clash = clash.exclude(pk=self.instance.pk)
-            if clash.exists():
-                raise serializers.ValidationError({'payment_method': (
-                    f'{method} is already mapped for {company}. Edit that '
-                    f'mapping instead of adding a second one.')})
+            from .models import PaymentStatusHistory
 
-        # A mapping that does not resolve would post to nothing, so it is
-        # refused at entry rather than discovered at posting time.
-        bank_key = current('bank_key')
-        if bank_key:
-            try:
-                bank_master.find_bank(company, bank_key)
-            except bank_master.BankMasterUnavailable as exc:
-                raise serializers.ValidationError({'bank_key': str(exc)}) from exc
-            except DjangoValidationError as exc:
-                raise serializers.ValidationError(
-                    {'bank_key': exc.messages}) from exc
-        return attrs
+            rejection = (PaymentStatusHistory.objects
+                         .filter(content_type=ContentType.objects.get_for_model(
+                             obj.__class__),
+                             object_id=obj.pk,
+                             action=PaymentStatusHistory.Action.REJECTED)
+                         .order_by('-created_at')
+                         .first())
+        stage_sequence = None
+        if flow.current_stage_id:
+            stage_sequence = getattr(flow.current_stage, 'sequence', None)
+
+        from . import workflow_flow
+
+        payload = {
+            'id': flow.id,
+            'status': flow.status,
+            # WHICH BUSINESS WORKFLOW THIS IS. Receipts and deposits are two
+            # separate workflows under one module, and a client that has to
+            # infer the difference from a document number prefix will get it
+            # wrong the first time a number is entered by hand.
+            'document_kind': workflow_flow.kind_of(obj),
+            'current_stage': flow.current_stage_id,
+            'current_stage_sequence': stage_sequence,
+            'total_stage': flow.total_stage,
+            'stage_label': (f'Stage {stage_sequence} of {flow.total_stage}'
+                            if stage_sequence else ''),
+            'rejection_reason': (rejection.reason or '') if rejection else '',
+            'rejected_by': ((rejection.changed_by_username or '')
+                            if rejection else ''),
+            'rejected_at': rejection.created_at if rejection else None,
+        }
+
+        # THE LADDER, ON DETAIL VIEWS ONLY. Building it costs a history read
+        # and a name lookup per document, which a list of fifty would pay fifty
+        # times over for something no table row shows. The list already carries
+        # `stage_label`, which is what a row needs.
+        if self.context.get('include_stages'):
+            payload['stages'] = workflow_flow.stage_progress(obj, flow)
+            current = next((s for s in payload['stages']
+                            if s['state'] == 'CURRENT'), None)
+            payload['current_approver'] = current['approver'] if current else ''
+            payload['current_approver_name'] = (
+                current['approver_name'] if current else '')
+
+        return payload
 
 
 class BankDepositCreateSerializer(serializers.ModelSerializer):
@@ -1281,8 +1372,10 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
         else:
             receipt_ids = []
 
+        # `methods` is prefetched because the cash total walks every entry of
+        # every receipt; without it each selected receipt costs a query.
         receipts = PaymentReceipt.objects.filter(
-            id__in=receipt_ids, company=company)
+            id__in=receipt_ids, company=company).prefetch_related('methods')
         if receipts.count() != len(set(receipt_ids)):
             raise serializers.ValidationError({
                 'receipt_ids':
@@ -1302,12 +1395,16 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'receipt_ids': f'Already deposited: {", ".join(already)}.'})
 
-        collected = sum((r.total_amount for r in receipts), Decimal('0'))
+        # CASH ONLY — see services.cash_total_for_receipts. A cheque in these
+        # receipts is already in SAP under the receipt that took it, so it is
+        # carried as a record of the day it was handed in, not as an amount.
+        collected = payment_services.cash_total_for_receipts(receipts)
         deposit_amount = current('deposit_amount')
         if deposit_amount > collected:
             raise serializers.ValidationError({
                 'deposit_amount':
-                    f'Cannot deposit {deposit_amount}; only {collected} was collected.'})
+                    f'Cannot bank {deposit_amount}; these payments hold only '
+                    f'{collected} in cash.'})
         if deposit_amount < collected and not (
                 current('shortfall_reason') or '').strip():
             raise serializers.ValidationError({
@@ -1333,8 +1430,24 @@ class BankDepositCreateSerializer(serializers.ModelSerializer):
             attrs['bank_gl_account'] = bank['gl_account']
             attrs['bank_display_name'] = bank['label']
 
+        # One cash drawer per deposit. Refused while the user is still picking
+        # receipts, rather than at submit, because the fix is to change the
+        # SELECTION. The same rule is enforced again in validate_deposit, so
+        # no other path can reach SAP with two sources.
+        try:
+            payment_services.check_one_cash_source(
+                payment_services.cash_sources_for_receipts(
+                    company, receipts))
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(
+                {'receipt_ids': exc.messages}) from exc
+
         attrs['_receipts'] = list(receipts)
         attrs['_collected'] = collected
+        # DERIVED, never taken from the client. The old picker let a user tag
+        # a pure-cash deposit as MIXED, and most of them did — the label said
+        # nothing about the contents. It now follows the cash.
+        attrs['deposit_type'] = payment_services.derive_deposit_type(collected)
         return attrs
 
     @transaction.atomic

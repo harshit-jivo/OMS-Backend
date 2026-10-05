@@ -18,13 +18,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from approvals import services as approval_services
-from approvals.permissions import IsApprovalAdmin
-from approvals.views import request_context
+from . import permissions as payment_permissions
+from . import workflow_flow
 from attachments import services as attachment_services
 from attachments.models import AttachmentType
 from attachments.serializers import AttachmentSerializer
-from core.pagination import StandardPagination
+from core.pagination import StandardPagination, ordering_from
 from core.responses import created, fail, ok
 from sap_sync.models import Party as SapParty
 
@@ -38,6 +37,7 @@ from .permissions import (
     CanCreatePayment,
     CanVerifyPayment,
     CanViewPaymentsDashboard,
+    IsPaymentsApprovalAdmin,
     PAYMENTS_VERIFY,
     ReadOrCreateDeposit,
     ReadOrCreatePayment,
@@ -50,7 +50,6 @@ from .models import (
     BankDeposit,
     CollectionPerson,
     PaymentMethodEntry,
-    PaymentMethodMapping,
     PaymentReceipt,
     PaymentStatusHistory,
 )
@@ -59,7 +58,6 @@ from .serializers import (
     BankDepositSerializer,
     CollectionPersonSerializer,
     PaymentReceiptCreateSerializer,
-    PaymentMethodMappingSerializer,
     PaymentReceiptSerializer,
     PaymentStatusHistorySerializer,
     TECHNICAL_HISTORY_ACTIONS,
@@ -456,119 +454,60 @@ class BankAccountListView(APIView):
                                  'source': meta['source']}
         return response
 
-class PaymentMethodMappingAdminView(ListCreateAPIView):
-    """Admin CRUD for payment method -> SAP account mapping.
+class CashAccountListView(APIView):
+    """Cash G/L accounts a CASH payment may be received into, for a company.
 
-    Gated like every other Masters view. It previously required only
-    IsAuthenticated despite being admin CRUD, so any logged-in user could
-    rewrite the GL and bank accounts that decide where receipt money lands in
-    SAP — the highest-value rows in the module.
+    The cash counterpart of BankAccountListView: SAP is the master, the list is
+    the postable children of the configured cash node, and a drawer frozen in
+    SAP disappears from it on the next refresh with no OMS change.
+
+    The client sends only the company key. The HANA schema is resolved
+    server-side and never accepted from — or returned to — the caller.
     """
 
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
-    serializer_class = PaymentMethodMappingSerializer
-
-    def get_queryset(self):
-        qs = PaymentMethodMapping.objects.all()
-        company = (self.request.query_params.get('company') or '').strip().upper()
-        if company:
-            qs = qs.filter(company=company)
-        return qs
-
-
-class PaymentMethodMappingAdminDetailView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
-    serializer_class = PaymentMethodMappingSerializer
-    queryset = PaymentMethodMapping.objects.all()
-
-
-class PaymentMethodMappingStatusView(APIView):
-    """One row per payment method: what it maps to, and whether SAP still has it.
-
-    Drives the admin page. Returns EVERY method, mapped or not, so a missing
-    mapping is as visible as a broken one — an absent row is the commonest
-    configuration fault and would otherwise simply not appear.
-
-    Read-only, but gated with the rest of the Masters tab it feeds: it reports
-    the SAP account each method posts to, which is configuration detail rather
-    than something an ordinary collector needs.
-    """
-
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         company = (request.query_params.get('company') or '').strip().upper()
         if not company:
             return fail('A company is required.')
 
-        resolver = bank_master.PaymentAccountResolver(company)
-        banks, meta = bank_master.get_company_banks(
+        accounts, meta = bank_master.get_company_cash_accounts(
             company, force_refresh=_flag(request, 'refresh'))
-        by_key = {b['key'].upper(): b for b in banks}
+        if not meta['available']:
+            # Same distinction the bank list draws: "SAP says there are none"
+            # is an empty list, "we could not ask" is a failure. An empty
+            # dropdown would read as the former and hide a misconfiguration.
+            return fail(
+                'Unable to verify cash accounts because SAP is currently '
+                'unavailable, or no cash account group is configured.',
+                errors={'available': False})
 
-        stored = {m.payment_method: m for m in PaymentMethodMapping.objects
-                  .filter(company=company, is_active=True)}
-
-        rows = []
-        for value, label in PaymentMethodEntry.Method.choices:
-            if value == PaymentMethodEntry.Method.CASH:
-                # `mapping_id` is the row's own id now, not None. CASH lives in
-                # this table like every other tender, so the admin screen needs
-                # the id to PATCH it — returning None left the row uneditable.
-                cash_row = stored.get(value)
-                gl = resolver.cash_gl()
-                rows.append({
-                    'payment_method': value, 'label': label,
-                    'is_cash': True,
-                    'mapping_id': cash_row.id if cash_row else None,
-                    'bank_key': '',
-                    'gl_account': gl, 'bank_code': '', 'bank_name': '',
-                    # Cash has no house bank, but it DOES have a G/L, and that
-                    # account has a name in the chart of accounts. Reading it
-                    # gives the row a real label instead of a dash.
-                    'account_name': (
-                        hana_queries.fetch_account_name(company=company,
-                                                        gl_account=gl)
-                        if gl else ''),
-                    'account_number': '', 'branch': '',
-                    'configured': bool(gl), 'valid': bool(gl),
-                    'error': '' if gl else
-                             'No cash G/L account set for this company.',
-                })
-                continue
-
-            row = stored.get(value)
-            bank = by_key.get(row.bank_key.upper()) if row else None
-            rows.append({
-                'payment_method': value, 'label': label, 'is_cash': False,
-                'mapping_id': row.id if row else None,
-                'bank_key': row.bank_key if row else '',
-                'gl_account': bank['gl_account'] if bank else '',
-                'bank_code': bank['bank_code'] if bank else '',
-                'bank_name': bank['display_name'] if bank else '',
-                # The ACCOUNT's name from SAP's chart of accounts, which
-                # already carries the account number — so the table can show
-                # one column instead of three.
-                'account_name': bank.get('account_name', '') if bank else '',
-                'account_number': bank['account_number'] if bank else '',
-                'branch': bank['branch'] if bank else '',
-                'configured': row is not None,
-                'valid': bank is not None,
-                'error': ('' if bank is not None else
-                          ('Not mapped.' if row is None else
-                           f'Mapped account "{row.bank_key}" no longer exists '
-                           f'in SAP.')),
-            })
-
-        response = ok(rows)
-        response.data['meta'] = {
-            'synced_at': meta['synced_at'], 'stale': meta['stale'],
-            'source': meta['source'], 'available': meta['available'],
-            'bank_count': len(banks),
-            # One flag the UI can trust for the "Configuration Error" banner.
-            'has_errors': any(not r['valid'] for r in rows),
-        }
+        response = ok(accounts)
+        response.data['meta'] = {'synced_at': meta['synced_at'],
+                                 'stale': meta['stale'],
+                                 'source': meta['source']}
         return response
+
+
+def _rejection_prefetch():
+    """The latest rejection per document, fetched for the WHOLE list at once.
+
+    `get_approval` shows why a document came back, which lives in the
+    append-only history. Read per row that is an N+1 — one query per receipt
+    on every list render. Prefetching into `_rejections` lets the serializer
+    take element 0 instead of querying, and the detail views that do not
+    prefetch still work: the serializer falls back to its own query when the
+    attribute is absent.
+    """
+    from django.db.models import Prefetch
+
+    return Prefetch(
+        'status_history',
+        queryset=(PaymentStatusHistory.objects
+                  .filter(action=PaymentStatusHistory.Action.REJECTED)
+                  .order_by('-created_at')),
+        to_attr='_rejections')
 
 
 def _receipt_queryset(user):
@@ -581,12 +520,13 @@ def _receipt_queryset(user):
     """
     return (
         PaymentReceipt.objects
-        .select_related('received_from_person', 'created_by')
-        # `approvals__actions` is here because the serializer reads each
-        # request's rejection reason: without it every row cost a second query
-        # for its actions, on top of the one for the request itself.
+        # `flow` and its stage are here because the serializer renders the
+        # approval position on every row: without them each row cost a query
+        # for the flow and another for the stage it is parked at.
+        .select_related('received_from_person', 'created_by',
+                        'flow', 'flow__current_stage')
         .prefetch_related('methods__denominations', 'allocations',
-                          'attachments', 'approvals__actions')
+                          'attachments', _rejection_prefetch())
     )
 
 
@@ -602,8 +542,8 @@ class PaymentReceiptListCreateView(APIView):
         # a PENDING_APPROVAL receipt is waiting on THIS user depends on which
         # rung it stopped at, which lives on the approval request.
         if view := (request.query_params.get('approval_view') or '').strip():
-            ids = approval_services.document_ids_for_view(
-                request.user, view, 'PAYMENT', PaymentReceipt)
+            ids = workflow_flow.document_ids_for_view(
+                request.user, view, PaymentReceipt)
             if ids is not None:
                 qs = qs.filter(id__in=ids)
 
@@ -662,6 +602,30 @@ class PaymentReceiptListCreateView(APIView):
                 )
             ).order_by('_rank', '-payment_date', '-id')
 
+        # EXPLICIT ORDERING, opt-in.
+        #
+        # The model's own default is `-payment_date, -id` — the date the
+        # receipt says it happened, which a user TYPES. So an entry raised
+        # today for a payment_date of last week sorts below one raised a week
+        # ago, and a list nobody has filtered does not read newest-first. The
+        # grouping above makes it jump further still: under "All" the rows are
+        # ordered by what must be DONE about them, so they appear to move up
+        # and down as their statuses change.
+        #
+        # `-id` is the serial the receipt was created with, so it is the one
+        # ordering that always means "latest first". Requested per call rather
+        # than changed in the model, because the default is what the web app
+        # and the reports already read, and because the list is PAGINATED:
+        # sorting on the client would reorder one page of 25 while the server
+        # decided which 25 those were.
+        #
+        # Allow-listed via `ordering_from` — never interpolate a query param
+        # into order_by().
+        ordering = ordering_from(
+            request, {'id', 'payment_date', 'created_at'}, '')
+        if ordering:
+            qs = qs.order_by(ordering)
+
         paginator = StandardPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         return paginator.get_paginated_response(
@@ -680,6 +644,15 @@ class PaymentReceiptListCreateView(APIView):
                        message='Receipt created.')
 
 
+#: Serializer context for any response that returns ONE document. It turns on
+#: the approval ladder (`get_approval` -> `stages`), which is built per
+#: document and therefore belongs on detail responses only — a list would pay
+#: for it once per row to show something no row displays. Every single-document
+#: response uses it, including the ones returned after approve/reject/edit, so
+#: a client re-rendering from the response never loses the ladder.
+DETAIL_CONTEXT = {'include_stages': True}
+
+
 def _document_permissions(document, user):
     """What `user` may do with `document` — a receipt OR a deposit.
 
@@ -693,7 +666,7 @@ def _document_permissions(document, user):
     approvers narrow a level), and self-approval is forbidden.
     """
     Status = document.__class__.Status
-    approval = document.approvals.order_by('-created_at').first()
+    flow = workflow_flow.flow_of(document)
     # A document already in SAP is finished, whatever its approval request
     # still says. Approving it again would post a second payment for the same
     # money; rejecting it would claim to undo something SAP has committed and
@@ -704,10 +677,8 @@ def _document_permissions(document, user):
     already_in_sap = bool(
         document.sap_doc_entry
         or document.status in (Status.POSTED, Status.CANCELLED_IN_SAP))
-    can_decide = bool(
-        not already_in_sap
-        and approval is not None
-        and approval_services.can_act(user, approval))
+    allowed, _reason = payment_permissions.may_act_on(user, flow, document)
+    can_decide = bool(not already_in_sap and allowed)
 
     # Who may still change the figures, and when.
     #
@@ -728,10 +699,17 @@ def _document_permissions(document, user):
     #   PENDING_ERROR      SAP refused, so nothing is committed there
     #
     # A posted document is never editable by anyone: it must match SAP.
-    approved_already = bool(
-        approval is not None
-        and approval.actions.filter(
-            action='APPROVE', round_number=approval.round_number).exists())
+    #
+    # "An approver has committed" is read from the ENGINE's own position: a
+    # flow still parked at sequence 1 has had no decision taken on it, and one
+    # that has moved past it has. This replaces counting APPROVE rows in the
+    # old engine's current round — the new engine has no round, and it does not
+    # need one here: a rejection sends the document back to the creator and a
+    # resubmission starts a fresh flow at sequence 1, so the position alone
+    # already answers the question for the current attempt.
+    stage_sequence = (getattr(flow.current_stage, 'sequence', None)
+                      if flow is not None and flow.current_stage_id else None)
+    approved_already = bool(stage_sequence and stage_sequence > 1)
     creator_may_edit = (
         document.created_by_id == user.id
         and (
@@ -758,8 +736,45 @@ def _document_permissions(document, user):
         # not gain an edit right from a permission they cannot exercise on it.
         and document.created_by_id != user.id
     )
+    # A RETRY IS AN APPROVAL AT THE FINAL STAGE, but it is a different thing
+    # to offer: "Approve" and "Retry SAP posting" mean different things to the
+    # person holding the document, and the client must not have to work out
+    # which one to show by inspecting the status itself. The backend decides,
+    # here, using the same `can_decide` it already computed — so a retry can
+    # never be offered to someone who may not act.
+    #
+    # THREE statuses mean "owed a SAP posting that has not happened", and all
+    # three are retryable by the effective approver:
+    #
+    #   PENDING_ERROR    SAP answered "no". Nothing was committed there.
+    #   SAP_UNKNOWN      SAP never answered. It may or may not hold it.
+    #   POSTING_TO_SAP   with no live call — the worker died, or the call never
+    #                    left. This is the one that used to have no way out at
+    #                    all (RCP-OIL-20260919-000003, stuck 43 hours).
+    #
+    # The last two are only safe to offer because a retry is no longer blind:
+    # `sap_settlement.settle` asks SAP for the document by its own reference
+    # before posting, so it adopts an existing posting rather than duplicating
+    # it. `can_decide` still gates all of them, so a retry can never reach
+    # somebody who may not act.
+    from . import sap_settlement
+
+    owes_sap_post = (
+        document.status in (Status.PENDING_ERROR, Status.SAP_UNKNOWN)
+        or (document.status == Status.POSTING_TO_SAP
+            and not sap_settlement.posting_is_in_flight(document))
+    )
+    can_retry_sap = bool(
+        can_decide
+        and owes_sap_post
+        and not document.sap_doc_entry
+        and workflow_flow.is_at_final_stage(flow))
+
     return {
         'can_decide': can_decide,
+        # True only when the ACTION to offer is a SAP retry rather than a
+        # first-time approval. `can_decide` stays true as well; this narrows it.
+        'can_retry_sap': can_retry_sap,
         'can_verify': verifier_may_edit,
         'can_edit': (
             not document.sap_doc_entry
@@ -772,8 +787,7 @@ def _document_permissions(document, user):
             and document.status in (Status.DRAFT,
                                    Status.REJECTED,
                                    Status.PENDING_ERROR)
-            and not document.approvals.filter(
-                status__in=['DRAFT', 'PENDING']).exists()
+            and not (flow is not None and flow.is_open)
         ),
     }
 
@@ -783,7 +797,8 @@ class PaymentReceiptDetailView(APIView):
 
     def get(self, request, pk):
         receipt = get_object_or_404(_receipt_queryset(request.user), pk=pk)
-        data = PaymentReceiptSerializer(receipt).data
+        data = PaymentReceiptSerializer(
+            receipt, context=DETAIL_CONTEXT).data
         data['permissions'] = _document_permissions(receipt, request.user)
         return ok(data)
 
@@ -818,7 +833,8 @@ class PaymentReceiptDetailView(APIView):
         except DjangoValidationError as exc:
             return fail('; '.join(exc.messages))
 
-        data = PaymentReceiptSerializer(receipt).data
+        data = PaymentReceiptSerializer(
+            receipt, context=DETAIL_CONTEXT).data
         data['permissions'] = _document_permissions(receipt, request.user)
         return ok(data, message='Receipt updated.')
 
@@ -929,7 +945,8 @@ class PaymentReceiptVerifyView(APIView):
             return fail('; '.join(exc.messages))
 
         receipt.refresh_from_db()
-        data = PaymentReceiptSerializer(receipt).data
+        data = PaymentReceiptSerializer(
+            receipt, context=DETAIL_CONTEXT).data
         data['permissions'] = _document_permissions(receipt, request.user)
         return ok(data, message='Payment verified and submitted for approval.')
 
@@ -1004,7 +1021,8 @@ def _deposit_queryset(user):
     """Deposits visible to `user` — see _receipt_queryset."""
     return (
         BankDeposit.objects
-        .select_related('deposited_by', 'created_by')
+        .select_related('deposited_by', 'created_by',
+                        'flow', 'flow__current_stage')
         .prefetch_related(
             # The line serializer reads each receipt's methods and collector,
             # so both are prefetched: without them a deposit with N receipts
@@ -1014,7 +1032,7 @@ def _deposit_queryset(user):
             'lines__receipt__methods',
             'lines__receipt__received_from_person',
             'attachments',
-            'approvals',
+            _rejection_prefetch(),
         )
     )
 
@@ -1036,8 +1054,8 @@ class BankDepositListCreateView(APIView):
         # deposit is waiting on THIS user depends on which rung it stopped at,
         # which lives on the approval request rather than the deposit.
         if view := (request.query_params.get('approval_view') or '').strip():
-            ids = approval_services.document_ids_for_view(
-                request.user, view, 'DEPOSIT', BankDeposit)
+            ids = workflow_flow.document_ids_for_view(
+                request.user, view, BankDeposit)
             if ids is not None:
                 qs = qs.filter(id__in=ids)
 
@@ -1078,6 +1096,30 @@ class BankDepositListCreateView(APIView):
                 )
             ).order_by('_rank', '-deposit_date', '-id')
 
+        # EXPLICIT ORDERING, opt-in.
+        #
+        # The model's own default is `-deposit_date, -id` — the date the
+        # deposit says it happened, which a user TYPES. So an entry raised
+        # today for a deposit_date of last week sorts below one raised a week
+        # ago, and a list nobody has filtered does not read newest-first. The
+        # grouping above makes it jump further still: under "All" the rows are
+        # ordered by what must be DONE about them, so they appear to move up
+        # and down as their statuses change.
+        #
+        # `-id` is the serial the deposit was created with, so it is the one
+        # ordering that always means "latest first". Requested per call rather
+        # than changed in the model, because the default is what the web app
+        # and the reports already read, and because the list is PAGINATED:
+        # sorting on the client would reorder one page of 25 while the server
+        # decided which 25 those were.
+        #
+        # Allow-listed via `ordering_from` — never interpolate a query param
+        # into order_by().
+        ordering = ordering_from(
+            request, {'id', 'deposit_date', 'created_at'}, '')
+        if ordering:
+            qs = qs.order_by(ordering)
+
         paginator = StandardPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         return paginator.get_paginated_response(
@@ -1100,7 +1142,8 @@ class BankDepositDetailView(APIView):
 
     def get(self, request, pk):
         deposit = get_object_or_404(_deposit_queryset(request.user), pk=pk)
-        data = BankDepositSerializer(deposit).data
+        data = BankDepositSerializer(
+            deposit, context=DETAIL_CONTEXT).data
         # Same shape a receipt returns, from the same helper — so the app can
         # gate the approve/reject bar identically for both documents.
         data['permissions'] = _document_permissions(deposit, request.user)
@@ -1138,7 +1181,8 @@ class BankDepositDetailView(APIView):
         except DjangoValidationError as exc:
             return fail('; '.join(exc.messages))
 
-        data = BankDepositSerializer(deposit).data
+        data = BankDepositSerializer(
+            deposit, context=DETAIL_CONTEXT).data
         data['permissions'] = _document_permissions(deposit, request.user)
         return ok(data, message='Deposit updated.')
 
@@ -1334,7 +1378,7 @@ class CollectionPersonAdminListCreateView(ListCreateAPIView):
     OIL and BEVERAGES.
     """
 
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
+    permission_classes = [IsAuthenticated, IsPaymentsApprovalAdmin]
     serializer_class = CollectionPersonSerializer
 
     def get_queryset(self):
@@ -1347,9 +1391,20 @@ class CollectionPersonAdminListCreateView(ListCreateAPIView):
 
 
 class CollectionPersonAdminDetailView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsApprovalAdmin]
+    permission_classes = [IsAuthenticated, IsPaymentsApprovalAdmin]
     serializer_class = CollectionPersonSerializer
     queryset = CollectionPerson.objects.all()
+
+
+
+def request_context(request):
+    """IP and user agent for the audit trail, from the request alone."""
+    forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    return {
+        'ip': (forwarded.split(',')[0].strip()
+               or request.META.get('REMOTE_ADDR')),
+        'user_agent': request.META.get('HTTP_USER_AGENT', '')[:400],
+    }
 
 
 class MyPaymentPermissionsView(APIView):
@@ -1372,4 +1427,177 @@ class MyPaymentPermissionsView(APIView):
                 for k in ACTION_PERMISSION_KEYS
             ],
             'can': {k: (k in keys) for k in ACTION_PERMISSION_KEYS},
+        })
+
+
+# ---------------------------------------------------------------------------
+# Approval — payments' own, over the Workflow Engine
+# ---------------------------------------------------------------------------
+#
+# These replace the old generic `/api/approvals/requests/<id>/act/`. The engine
+# owns configuration and selection only; deciding a payment is payments' job,
+# so the endpoint lives here beside the document it decides.
+
+
+class _DecisionView(APIView):
+    """Shared body for approve / reject / cancel on either document type.
+
+    Authorisation is deliberately two-part and the two failures are told apart:
+    403 when this user may not act, 409 when the document is not in a state to
+    be acted on. A client that cannot distinguish them shows "permission
+    denied" to someone whose only problem is that a colleague got there first.
+    """
+
+    permission_classes = [IsAuthenticated]
+    model = None
+
+    def _load(self, request, pk):
+        document = get_object_or_404(self.model, pk=pk)
+        flow = workflow_flow.flow_of(document)
+        allowed, reason = payment_permissions.may_act_on(
+            request.user, flow, document)
+        if not allowed:
+            return document, flow, fail(reason,
+                                        status=http_status.HTTP_403_FORBIDDEN)
+        return document, flow, None
+
+
+class _ApproveView(_DecisionView):
+    def post(self, request, pk):
+        document, flow, refusal = self._load(request, pk)
+        if refusal is not None:
+            return refusal
+        try:
+            workflow_flow.approve(flow, user=request.user,
+                                  remarks=(request.data.get('remarks') or ''))
+        except DjangoValidationError as exc:
+            return fail('; '.join(exc.messages),
+                        status=http_status.HTTP_409_CONFLICT)
+
+        # THE SAP POST, HERE, EXPLICITLY — not on `transaction.on_commit`.
+        #
+        # `approve()` has returned and its transaction has committed, so the
+        # intent (POSTING_TO_SAP) is durable. This call settles it. It is
+        # deliberately OUTSIDE the try above: a SAP refusal is not an approval
+        # failure, it is an outcome, and it comes back on the document for the
+        # approver to read and retry.
+        #
+        # Never raises for a SAP-side problem — `post_document` records the
+        # failure on the document and returns it. Only an unreachable HANA
+        # during the interrupted-post VERIFICATION can raise, and that must not
+        # lose the approval either: the intent stays committed and the retry
+        # stays available.
+        fresh = document.__class__.objects.get(pk=pk)
+        try:
+            workflow_flow.settle_after_approval(fresh, user=request.user)
+        except Exception:                                        # noqa: BLE001
+            logger.exception('SAP settlement failed for %s %s',
+                             document.__class__.__name__, pk)
+
+        return ok(self.serializer(document.__class__.objects.get(pk=pk)).data,
+                  message='Approved.')
+
+
+class _RejectView(_DecisionView):
+    def post(self, request, pk):
+        document, flow, refusal = self._load(request, pk)
+        if refusal is not None:
+            return refusal
+        remarks = (request.data.get('remarks') or '').strip()
+        if not remarks:
+            # A validation problem, not a state conflict: the client can fix it
+            # by asking for a reason.
+            return fail('A reason is required when rejecting.')
+        try:
+            workflow_flow.reject(flow, user=request.user, remarks=remarks)
+        except DjangoValidationError as exc:
+            return fail('; '.join(exc.messages),
+                        status=http_status.HTTP_409_CONFLICT)
+        return ok(self.serializer(document.__class__.objects.get(pk=pk)).data,
+                  message='Rejected.')
+
+
+class _CancelView(APIView):
+    """Withdraw a document from approval. The SUBMITTER's escape hatch.
+
+    Not `may_act_on`: cancelling is the creator's right over their own
+    document, not an approver's decision.
+    """
+
+    permission_classes = [IsAuthenticated]
+    model = None
+
+    def post(self, request, pk):
+        document = get_object_or_404(self.model, pk=pk)
+        if document.created_by_id != request.user.id \
+                and not request.user.is_staff:
+            return fail('Only the person who raised this document may cancel '
+                        'it.', status=http_status.HTTP_403_FORBIDDEN)
+        flow = workflow_flow.flow_of(document)
+        try:
+            workflow_flow.cancel(flow, user=request.user,
+                                 remarks=(request.data.get('remarks') or ''))
+        except DjangoValidationError as exc:
+            return fail('; '.join(exc.messages),
+                        status=http_status.HTTP_409_CONFLICT)
+        return ok(self.serializer(document.__class__.objects.get(pk=pk)).data,
+                  message='Cancelled.')
+
+
+class PaymentReceiptApproveView(_ApproveView):
+    model = PaymentReceipt
+    serializer = staticmethod(PaymentReceiptSerializer)
+
+
+class PaymentReceiptRejectView(_RejectView):
+    model = PaymentReceipt
+    serializer = staticmethod(PaymentReceiptSerializer)
+
+
+class PaymentReceiptCancelView(_CancelView):
+    model = PaymentReceipt
+    serializer = staticmethod(PaymentReceiptSerializer)
+
+
+class BankDepositApproveView(_ApproveView):
+    model = BankDeposit
+    serializer = staticmethod(BankDepositSerializer)
+
+
+class BankDepositRejectView(_RejectView):
+    model = BankDeposit
+    serializer = staticmethod(BankDepositSerializer)
+
+
+class BankDepositCancelView(_CancelView):
+    model = BankDeposit
+    serializer = staticmethod(BankDepositSerializer)
+
+
+class PaymentApprovalQueueView(APIView):
+    """Everything waiting for THIS user to decide, both document types.
+
+    Replaces the old generic inbox. Resolved from the workflow stages the user
+    may act at today — including stages they cover as a stand-in — never from a
+    user copied onto a row when it was created.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = (request.query_params.get('company') or '').strip().upper()
+
+        receipts = PaymentReceipt.objects.filter(
+            id__in=workflow_flow.pending_receipt_ids(request.user))
+        deposits = BankDeposit.objects.filter(
+            id__in=workflow_flow.pending_deposit_ids(request.user))
+        if company:
+            receipts = receipts.filter(company=company)
+            deposits = deposits.filter(company=company)
+
+        return ok({
+            'receipts': PaymentReceiptSerializer(
+                receipts.order_by('-payment_date', '-id'), many=True).data,
+            'deposits': BankDepositSerializer(
+                deposits.order_by('-deposit_date', '-id'), many=True).data,
         })

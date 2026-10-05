@@ -672,6 +672,83 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 5.0)
         self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
 
+    def _preform_order(self):
+        item = SimpleNamespace(
+            item_code="PM0000852",
+            category="OIL",
+            sub_group="PREFORM",
+            qty=150000,
+            boxes=150000,
+            price_list_basic=7.425,
+            basic_price=7.425,
+            qty_scheme=0,
+        )
+        return SimpleNamespace(
+            id=91,
+            card_code="ORGC000016",
+            delivery_date=date(2026, 9, 20),
+            ship_to_id=None,
+            bill_to_id=None,
+            ship_to_address="RAVINDER SINGH DELHI",
+            bill_to_address="RAVINDER SINGH DELHI",
+            dispatch_from_id=2,
+            items=SimpleNamespace(all=lambda: [item]),
+        )
+
+    def _map_with_oprc(self, order, oprc):
+        """Map `order`, resolving profit centres from the dict `oprc` (PrcName
+        -> PrcCode) instead of HANA. Returns (payload, names_looked_up)."""
+        looked_up = []
+
+        def get_costing_code(prc_name, branch):
+            looked_up.append(prc_name)
+            return oprc.get(prc_name)
+
+        service = SyncService(triggered_by="test")
+        with patch("sap_sync.services.sync_service.SalesOrderService") as sos, \
+                patch("sap_sync.services.sync_service.timezone.localdate",
+                      return_value=date(2026, 9, 18)):
+            sos.return_value.get_costing_code.side_effect = get_costing_code
+            payload = service.map_order_to_sap(order)
+        return payload, looked_up
+
+    def test_preform_line_is_costed_to_the_canola_profit_centre(self):
+        """A PREFORM line has no profit centre of its own, so it must be
+        redirected to CANOLA (SAP team, 2026-09-18). Without this the line goes
+        out with no CostingCode and SAP rejects the whole document with -1116
+        "Please Select the Variety Column".
+        """
+        payload, looked_up = self._map_with_oprc(
+            self._preform_order(), {"CANOLA": "CANOLA"})
+
+        line = payload["DocumentLines"][0]
+        self.assertEqual(line["CostingCode"], "CANOLA")
+        # The alias redirects the OPRC lookup itself -- PREFORM is never asked for.
+        self.assertEqual(looked_up, ["CANOLA"])
+        # ...but the scheme field still carries the line's real sub_group.
+        self.assertEqual(line["U_SchemeAgst"], "PREFORM")
+
+    def test_aliased_subgroup_inactive_in_this_company_sends_no_costing_code(self):
+        """The alias is a profit-centre NAME, still resolved through OPRC. CANOLA
+        is Active='N' in the BEVERAGE company, and an unresolvable name must omit
+        CostingCode rather than send a code that company would misbook.
+        """
+        payload, _ = self._map_with_oprc(self._preform_order(), {})
+
+        self.assertNotIn("CostingCode", payload["DocumentLines"][0])
+
+    def test_unaliased_subgroup_resolves_its_own_profit_centre(self):
+        """Only the listed sub-groups are redirected; everything else still maps
+        by its own name, including where PrcName != PrcCode (SUNFLOWER/SUNFLOWR).
+        """
+        order = self._preform_order()
+        order.items.all()[0].sub_group = "SUNFLOWER"
+
+        payload, looked_up = self._map_with_oprc(order, {"SUNFLOWER": "SUNFLOWR"})
+
+        self.assertEqual(looked_up, ["SUNFLOWER"])
+        self.assertEqual(payload["DocumentLines"][0]["CostingCode"], "SUNFLOWR")
+
 
 class FocTokenUnitPriceTests(SimpleTestCase):
     """An FOC line must reach SAP at the token rate: never 0 (a zero-value

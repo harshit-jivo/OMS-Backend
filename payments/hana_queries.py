@@ -15,6 +15,7 @@ so it comes from the environment — an allow-list — and never from a request.
 """
 import logging
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 
 from django.core.cache import cache
@@ -278,6 +279,107 @@ def fetch_account_name(*, company, gl_account):
         logger.warning('Could not read the name of G/L %s in %s: %s',
                        gl, company, error)
         return ''
+
+
+def cash_accounts_sql(schema):
+    """The company's selectable cash drawers, from the chart of accounts.
+
+    A cash drawer has no DSC1 row — DSC1 holds house BANK accounts — so cash
+    is identified by where it sits in the account tree instead: the postable
+    children of the configured cash node (settings.SAP_CASH_PARENT_ACCOUNT,
+    verified as 1105000 "CASH IN HAND" in all three company databases).
+
+    Why this rule and not another, all checked against live data:
+      * The parent itself is a summary node (Postable='N'), so `Postable='Y'`
+        excludes it without naming it.
+      * `Frozen='N'` is what retires a drawer: freezing it in SAP removes it
+        from this list with no OMS change.
+      * OACT."CashBox" is 'N' on every account that actually receives cash in
+        this deployment, so SAP's own cash flag cannot be the rule.
+      * `Finanse='Y'` and `GroupMask=1` match every bank account and most
+        assets — far too broad.
+      * Matching AcctName on "CASH" would pick up the summary node and is
+        string matching, not an accounting classification.
+
+    Cross-checked against posting history: ORCT."CashAcct" over real documents
+    returns exactly this set and nothing else.
+
+    The parent is a BIND PARAMETER; only the schema is interpolated, and that
+    comes from the environment allow-list, never from a request.
+    """
+    return f'''
+        SELECT
+            T0."AcctCode" AS "gl_account",
+            T0."AcctName" AS "account_name"
+        FROM "{schema}"."OACT" AS T0
+        WHERE T0."FatherNum" = ?
+          AND T0."Postable"  = 'Y'
+          AND T0."Frozen"    = 'N'
+        ORDER BY T0."AcctCode"
+    '''
+
+
+def fetch_company_cash_accounts(*, company):
+    """Live read of the company's selectable cash G/L accounts.
+
+    Raises if SAP is unreachable, or if the cash node is not configured —
+    caching and outage behaviour belong to the service layer above, exactly as
+    for `fetch_company_banks`.
+    """
+    parent = str(getattr(settings, 'SAP_CASH_PARENT_ACCOUNT', '') or '').strip()
+    if not parent:
+        raise ValidationError(
+            'No cash account group is configured. Set SAP_CASH_PARENT_ACCOUNT '
+            'to the chart-of-accounts node that holds the cash drawers.')
+
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(cash_accounts_sql(schema), [parent])
+
+    out = []
+    for row in rows:
+        gl = str(row.get('gl_account') or '').strip()
+        if not gl:
+            continue
+        name = str(row.get('account_name') or '').strip() or gl
+        out.append({
+            'gl_account': gl,
+            'account_name': name,
+            # The same shape a bank account exposes, so one dropdown component
+            # and one `account_key` contract serve both. A cash drawer has no
+            # bank, so `key` is the G/L itself.
+            'key': gl,
+            'label': f'{gl} - {name}',
+        })
+    return out
+
+
+def fetch_account_classification(*, company, gl_account):
+    """One account's tree position and flags, or None when it cannot be read.
+
+    Used to validate the CONFIGURED cash node (that it exists and is a summary
+    account), never to decide whether a payment may use an account.
+    """
+    code = str(gl_account or '').strip()
+    if not code:
+        return None
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(
+            f'SELECT "AcctCode" AS "gl_account", "AcctName" AS "account_name", '
+            f'"Postable" AS "postable", "Frozen" AS "frozen", '
+            f'"Levels" AS "levels" FROM "{schema}"."OACT" '
+            f'WHERE "AcctCode" = ?', [code])
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        'gl_account': str(row.get('gl_account') or '').strip(),
+        'account_name': str(row.get('account_name') or '').strip(),
+        'postable': str(row.get('postable') or '').strip().upper(),
+        'frozen': str(row.get('frozen') or '').strip().upper(),
+        'levels': row.get('levels'),
+    }
 
 
 def fetch_company_banks(*, company):
@@ -584,3 +686,71 @@ def fetch_payment_trans_id(*, company, doc_entry):
         logger.warning('Could not read TransId for DocEntry %s in %s: %s',
                        doc_entry, company, error)
     return None
+
+
+def payment_by_reference_sql(schema):
+    """Find an Incoming Payment by the OMS reference inside its Comments.
+
+    SAP holds no OMS id in any structured field — ORCT has no user-defined
+    columns for it (see `sap_payloads.build_incoming_payment`) — so Comments is
+    the only link, and `sap_payloads.with_reference` guarantees the document
+    number is always in it.
+
+    `LIKE` over a 254-character column with no index on it is an acceptable
+    cost here: this runs only when a posting was interrupted and OMS has to
+    find out whether SAP took the document, which is rare and never in a hot
+    path. Being correct matters; being fast does not.
+
+    Cancelled documents are RETURNED, not filtered out. "SAP has a document for
+    this reference" is the question; a cancelled one still means the reference
+    was used, and re-posting over it is a decision for a person rather than
+    something to do silently.
+    """
+    return f'''
+        SELECT
+            T0."DocEntry"  AS "doc_entry",
+            T0."DocNum"    AS "doc_num",
+            T0."TransId"   AS "trans_id",
+            T0."Canceled"  AS "canceled",
+            T0."DocTotal"  AS "doc_total",
+            T0."Comments"  AS "comments"
+        FROM "{schema}"."ORCT" AS T0
+        WHERE T0."Comments" LIKE ?
+        ORDER BY T0."DocEntry"
+    '''
+
+
+def fetch_payment_by_reference(*, company, reference):
+    """Every Incoming Payment in SAP whose Comments name this OMS document.
+
+    THE IDEMPOTENCY KEY. When a posting was interrupted — the worker died
+    mid-call, or SAP never answered — OMS cannot know whether the document
+    exists there. Posting again risks a DUPLICATE customer payment, which is
+    the worst outcome in this module; never posting leaves the document stuck
+    for ever. This answers the question instead of guessing.
+
+    Returns a list of dicts (usually empty or one). A list rather than a single
+    row because finding TWO is itself the news: it means a duplicate already
+    happened and a person has to look.
+
+    RAISES on failure — deliberately, unlike `fetch_payment_cancellation`,
+    which returns None so reconciliation can skip a document quietly. Here a
+    silent None would be read as "SAP does not have it", and the caller would
+    post a second payment on the strength of a failed query. An unreachable
+    SAP must stop the retry, not license it.
+    """
+    schema = _schema_for(company)
+    with HANAConnection() as conn:
+        rows = conn.execute(payment_by_reference_sql(schema),
+                            [f'%{reference}%'])
+    found = []
+    for row in rows or []:
+        found.append({
+            'doc_entry': row.get('doc_entry'),
+            'doc_num': row.get('doc_num'),
+            'trans_id': row.get('trans_id'),
+            'canceled': str(row.get('canceled') or '').strip().upper() == 'Y',
+            'doc_total': row.get('doc_total'),
+            'comments': row.get('comments') or '',
+        })
+    return found

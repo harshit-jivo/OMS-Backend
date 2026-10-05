@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,CategoryListView,PagePermissionsView,ComboMappingsView,PermissionRegistryView,RolePermissionsListView,RolePermissionsUpdateView,RoleCreateView,RoleUpdateView,RoleDeleteView
+from .views import DeleteUserView,LoginView,LogoutView,AuthTokenRefreshView,PartyUsersView,AssignPartiesView, BulkAssignUsersPartiesView, ProfileView,StateListView, UserDetailView,UserPartiesView,UpdateProductRateView,RemoveProductFromPartyView,RemovePartyAssignmentView,PartyProductsView,AssignProductToPartyView,BulkAssignProductsToPartyView,UserListForAssignmentView,CompanyListView,MainGroupListView,CreateUserView,RoleListView,BulkAssignPartyToProductView,BulkPartyProductsView,BulkUpdatePartyProductRatesView,CategoryListView,PagePermissionsView,ComboMappingsView,PermissionRegistryView,RolePermissionsListView,RolePermissionsUpdateView,RoleCreateView,RoleUpdateView,RoleDeleteView
 from django.views.decorators.csrf import csrf_exempt
 
 
@@ -48,6 +48,14 @@ urlpatterns = [
 
     path('users/<int:user_id>/', UserDetailView.as_view(), name='user-detail'),
     path('users/<int:user_id>/delete/', DeleteUserView.as_view(), name='delete-user'),
-    path('bulk-party/assign-products/', BulkAssignPartyToProductView.as_view())
+    path('bulk-party/assign-products/', BulkAssignPartyToProductView.as_view(),
+         name='bulk-assign-party-products'),
+
+    # Re-pricing a whole set of parties at once: what they are assigned,
+    # then one rate revision written across all of them.
+    path('bulk-party/products/', BulkPartyProductsView.as_view(),
+         name='bulk-party-products'),
+    path('bulk-party/update-rates/', BulkUpdatePartyProductRatesView.as_view(),
+         name='bulk-party-update-rates'),
     
 ]

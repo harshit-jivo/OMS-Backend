@@ -646,8 +646,9 @@ class UnresolvedNameTests(TestCase):
     #: Every first-party app. Third-party packages are not ours to police.
     APPS = (
         'orders', 'users', 'sap_sync', 'hana', 'payments', 'notifications',
-        'tracker', 'invoice', 'einvoice', 'ewaybill', 'devices', 'approvals',
+        'tracker', 'invoice', 'einvoice', 'ewaybill', 'devices',
         'attachments', 'core', 'legal', 'audit', 'uilabels', 'serviceLayer',
+        'workflow',
         'SKU', 'HAIS',
     )
 

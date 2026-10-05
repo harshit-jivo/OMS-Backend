@@ -118,6 +118,12 @@ class WhatOmsHolds(SimpleTestCase):
             (14008, 0, Decimal('99'), 4, RequestStatus.REJECTED),
             (14008, 0, Decimal('99'), 5, RequestStatus.CANCELLED)]
 
+    def setUp(self):
+        # The advisory lock is Postgres's; there is no database here.
+        patcher = mock.patch.object(reservations, 'lock')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_in_approval_reserves_completed_pays_rejected_releases(self):
         with _usage_rows(*self.ROWS):
             use = reservations.usage('OIL', DocumentKind.PO, [(14008, 0)])[(14008, 0)]

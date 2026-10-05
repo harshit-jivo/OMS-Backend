@@ -38,6 +38,7 @@ configuration. That is the engine's normal path and needs no special support.
 import logging
 
 from django.db import transaction
+from django.utils import timezone
 from django.db.models import Q
 
 from workflow.exceptions import WorkflowError
@@ -167,6 +168,66 @@ def _guard(flow):
         raise BackDateError('This request is not waiting at any stage.')
 
 
+def _guard_not_expired(flow):
+    """An EXPIRED request must not be approved. Refuse, and say what to do.
+
+    `time_limit` is when the SAP rights stop. The serializer already refuses to
+    SAVE one in the past, but nothing stopped a request sitting in a queue
+    until its own expiry went by and then being approved: `OPEN_BKDT` would be
+    called with an expiry that has already passed, granting rights that are
+    over before they begin. Nobody would see a failure — SAP accepts it — and
+    the requester would simply find they still cannot post.
+
+    Refused rather than silently extended. The expiry is what the approver is
+    agreeing to, and moving it for them would approve something they were never
+    shown. The fix is an EDIT, which they are allowed to make on the request
+    they are holding, and the message says so.
+
+    Only on approval. A rejection of an expired request is perfectly sensible
+    and must stay possible.
+    """
+    backdate = flow.backdate
+    if backdate.time_limit and backdate.time_limit < timezone.now():
+        raise BackDateError(
+            f'These rights expired on '
+            f'{timezone.localtime(backdate.time_limit):%d %b %Y %H:%M} and '
+            f'cannot be approved as they stand. Edit the request to set a new '
+            f'expiry, then approve it.')
+
+
+def following_stages(flow):
+    """The active stages still ahead of this flow's current one.
+
+    Re-read from the workflow as configured RIGHT NOW rather than remembered,
+    so a stage deactivated mid-flight is skipped rather than deadlocking the
+    request. Empty means the current stage is the LAST — the one whose
+    approval calls SAP.
+
+    ONE DEFINITION, used by `approve` to decide whether to call SAP and by
+    `is_final_stage` to tell the screen so. Two copies of this rule would be
+    how a page says "moves to the next approver" over an approval that is in
+    fact writing to SAP. Comparing `current_stage_sequence` with
+    `total_stage` on the client is exactly such a copy, and a wrong one:
+    `total_stage` is the count at SUBMISSION, and sequences need not run 1..N.
+    """
+    stages = stages_for(flow)
+    current = next((s for s in stages if s.id == flow.current_stage_id), None)
+    if current is None:
+        return []
+    return [s for s in stages if s.sequence > current.sequence]
+
+
+def is_final_stage(flow):
+    """Whether approving the CURRENT stage is the one that writes to SAP.
+
+    False for a flow that is not pending — there is no current stage to
+    approve, so there is nothing about to call SAP.
+    """
+    if flow.status != FlowStatus.PENDING or not flow.current_stage_id:
+        return False
+    return not following_stages(flow)
+
+
 @transaction.atomic
 def approve(flow, *, user, remarks=''):
     """Approve the current stage. Advances, or completes the flow.
@@ -194,16 +255,12 @@ def approve(flow, *, user, remarks=''):
     """
     flow = _locked(flow)
     _guard(flow)
+    # Before anything is written or sent: an expired grant is worthless, and
+    # approving one looks like success to everybody involved.
+    _guard_not_expired(flow)
 
     decided_stage_id = flow.current_stage_id
-
-    # The NEXT active stage as configured right now. Re-read rather than
-    # remembered, so a stage deactivated mid-flight is skipped rather than
-    # deadlocking the request.
-    stages = stages_for(flow)
-    current = next((s for s in stages if s.id == decided_stage_id), None)
-    following = ([s for s in stages if s.sequence > current.sequence]
-                 if current else [])
+    following = following_stages(flow)
 
     if not following:
         # Last stage: SAP first. A refusal raises, and this transaction —
@@ -240,6 +297,9 @@ def reject(flow, *, user, remarks):
 
     flow = _locked(flow)
     _guard(flow)
+    # NO expiry guard here. Rejecting an expired request is exactly what an
+    # approver should be able to do — refusing it would strand the request
+    # with no way out at all.
 
     decided_stage_id = flow.current_stage_id
     log(flow.backdate, action=LogAction.REJECT, user=user,
@@ -322,16 +382,42 @@ def status_q(status, prefix=''):
 def decided_backdate_ids(user, status=None):
     """Requests this user has approved or rejected, optionally by outcome.
 
-    A user decides one STAGE, not the request: approving stage 1 of three
-    leaves the flow pending. So the set is "requests I acted on", narrowed by
-    the flow's CURRENT status.
+    THE OUTCOME IS THEIRS, NOT THE FLOW'S. A user decides one STAGE, not the
+    request: approving stage 1 of three leaves the flow PENDING. This used to
+    narrow by the flow's current status, so a stage-1 approver asking for what
+    they had approved was answered with "requests that are fully approved" —
+    and everything they had approved that was still moving through the stages
+    above them appeared in NO view at all. Not in Approved, because the flow
+    was not; not in the pending queue, because it was no longer awaiting them.
+    A person who had just approved something could not find it again.
+
+    So APPROVED and REJECTED read the user's own log entry. `COMPLETED` stays
+    a question about the flow — it means the grant actually reached SAP, which
+    is not something one approver's decision can settle — and so does a bare
+    `PENDING`, which asks where the request is now.
+
+    A request can legitimately land in both sets: one user holding two stages
+    may approve at one and reject at the other. Both answers are true, and the
+    row's own status shows where it ended up.
     """
-    ids = (BackDateActionLog.objects
-           .filter(acted_by=user,
-                   action__in=[LogAction.APPROVE, LogAction.REJECT])
-           .values_list('backdate_id', flat=True))
-    qs = BackDateFlow.objects.filter(backdate_id__in=set(ids))
-    condition = status_q(status)
-    if condition is not None:
-        qs = qs.filter(condition)
-    return set(qs.values_list('backdate_id', flat=True))
+    logs = (BackDateActionLog.objects
+            .filter(acted_by=user,
+                    action__in=[LogAction.APPROVE, LogAction.REJECT]))
+
+    wanted = (status or '').upper()
+    own_action = {
+        FlowStatus.APPROVED: LogAction.APPROVE,
+        FlowStatus.REJECTED: LogAction.REJECT,
+    }.get(wanted)
+    if own_action is not None:
+        return set(logs.filter(action=own_action)
+                   .values_list('backdate_id', flat=True))
+
+    ids = set(logs.values_list('backdate_id', flat=True))
+    condition = status_q(wanted)
+    if condition is None:
+        return ids
+    return set(BackDateFlow.objects
+               .filter(backdate_id__in=ids)
+               .filter(condition)
+               .values_list('backdate_id', flat=True))

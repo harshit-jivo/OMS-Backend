@@ -115,10 +115,25 @@ def _ctx(request):
 # ---------------------------------------------------------------------------
 
 class SapUserListView(APIView):
-    """SAP logins for one company, for the request form's picker."""
+    """SAP logins for one company, for the request form's picker.
+
+    EITHER KEY OPENS THIS, and the reason is the edit form. An approver holds
+    `BackDate_Approval` and usually NOT `BackDate` — they never raise a request
+    of their own — but they ARE allowed to edit the one they are holding, which
+    is how a request SAP refused gets corrected and approved.
+
+    Gated on the requester key alone, both master endpoints answered 403 for
+    exactly those users, every time. The form read that as "SAP's lists are
+    unavailable" and fell back to free text, so the person most likely to be
+    fixing a wrong SAP user was the one person who had to TYPE it — the failure
+    mode the picker exists to prevent.
+
+    `CanReadRequests` is the same either-key rule the detail and history views
+    already use: seeing what SAP offers is reading, not raising.
+    """
 
     def get_permissions(self):
-        return [IsAuthenticated(), HasKey(bkdt_perms.REQUEST_KEY)]
+        return [IsAuthenticated(), bkdt_perms.CanReadRequests()]
 
     def get(self, request):
         company = (request.query_params.get('company') or '').strip().upper()
@@ -129,10 +144,10 @@ class SapUserListView(APIView):
 
 
 class DocumentTypeListView(APIView):
-    """SAP object types for one company."""
+    """SAP object types for one company. Either key — see `SapUserListView`."""
 
     def get_permissions(self):
-        return [IsAuthenticated(), HasKey(bkdt_perms.REQUEST_KEY)]
+        return [IsAuthenticated(), bkdt_perms.CanReadRequests()]
 
     def get(self, request):
         company = (request.query_params.get('company') or '').strip().upper()
@@ -472,11 +487,13 @@ class ApprovalInsightsView(APIView):
     """Counts for the approval desk — the KPI cards above its list.
 
     `pending` is what is waiting on this user RIGHT NOW (the queue), while
-    `approved` and `rejected` are what they have already decided. Those three
-    are disjoint, so `total` is their sum: a request cannot be both awaiting
-    this user's decision and already carrying it.
+    `approved` and `rejected` are the stages THIS USER decided — see
+    `flow.decided_backdate_ids`. Those are not disjoint: one user configured
+    on two stages approves at the first and the request returns to them at the
+    second, so it is both decided by them and awaiting them. `total` is
+    therefore the UNION of the three, never their sum.
 
-    `completed` is NOT in that sum. It counts the approved ones whose rights
+    `completed` is outside all of it. It counts the approved ones whose rights
     actually reached SAP — a subset of `approved`, not a fourth state.
     """
 
@@ -494,19 +511,26 @@ class ApprovalInsightsView(APIView):
             return BackDate.objects.filter(
                 company, _search_filter(request), pk__in=ids).count()
 
+        pending_ids = set(_pending_ids(request.user))
+        approved_ids = flow_service.decided_backdate_ids(
+            request.user, FlowStatus.APPROVED)
+        rejected_ids = flow_service.decided_backdate_ids(
+            request.user, FlowStatus.REJECTED)
+
         counts = {
-            'pending': count(_pending_ids(request.user)),
-            'approved': count(flow_service.decided_backdate_ids(
-                request.user, FlowStatus.APPROVED)),
-            'rejected': count(flow_service.decided_backdate_ids(
-                request.user, FlowStatus.REJECTED)),
+            'pending': count(pending_ids),
+            'approved': count(approved_ids),
+            'rejected': count(rejected_ids),
             # Approved AND the grant is in SAP — a subset of `approved`.
             'completed': count(flow_service.decided_backdate_ids(
                 request.user, flow_service.COMPLETED)),
         }
-        # The three disjoint states only; `completed` is inside `approved`.
-        counts['total'] = (counts['pending'] + counts['approved']
-                           + counts['rejected'])
+        # THE UNION, not the sum. `approved` and `rejected` now mean "I
+        # decided this", which is no longer disjoint from `pending`: one user
+        # configured on two stages approves at the first and the request comes
+        # straight back to them at the second. Adding the three counted that
+        # request twice and made Total larger than the list it opens.
+        counts['total'] = count(pending_ids | approved_ids | rejected_ids)
         return ok(counts)
 
 

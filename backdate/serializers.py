@@ -87,6 +87,18 @@ class BackDateFlowSerializer(serializers.ModelSerializer):
     #: chasing an approval needs to be told the truth.
     effective_user_username = serializers.SerializerMethodField()
     has_active_replacement = serializers.SerializerMethodField()
+    #: Whether approving the CURRENT stage is the one that calls SAP.
+    #:
+    #: Decided here, by the same rule `flow.approve` uses, so the approval
+    #: dialog can say "calling SAP" to the last approver and to nobody else.
+    #: A client comparing `current_stage_sequence` with `total_stage` would be
+    #: guessing: `total_stage` is the count at SUBMISSION, and a stage
+    #: deactivated since then moves where the SAP call happens.
+    is_final_stage = serializers.SerializerMethodField()
+
+    def get_is_final_stage(self, obj):
+        from backdate.services import flow as flow_service
+        return flow_service.is_final_stage(obj)
 
     class Meta:
         model = BackDateFlow
@@ -96,7 +108,7 @@ class BackDateFlowSerializer(serializers.ModelSerializer):
                   'effective_user_username', 'has_active_replacement',
                   'current_stage', 'current_stage_name',
                   'current_stage_sequence', 'total_stage',
-                  'created_at', 'updated_at']
+                  'is_final_stage', 'created_at', 'updated_at']
         read_only_fields = fields
 
     def _assignment(self, obj):
@@ -124,8 +136,11 @@ class BackDateSerializer(serializers.ModelSerializer):
     #: See `BackDate`.
     action_label = serializers.CharField(read_only=True)
     company_label = serializers.CharField(read_only=True)
-    #: The company as a one-element list, so a client that renders badges does
-    #: not need a second code path.
+    #: The companies as a list, so a client renders one badge each without
+    #: splitting the string itself. `company` remains the canonical stored
+    #: value (`"OIL,MART"`) and `company_label` its readable form
+    #: (`"Oil, Mart"`) — three views of one fact, so no client has to invent
+    #: a fourth.
     companies = serializers.ListField(
         child=serializers.CharField(), read_only=True)
     flow = BackDateFlowSerializer(read_only=True)
@@ -238,11 +253,16 @@ class _BackDateWriteSerializer(serializers.ModelSerializer):
         return matched[0]
 
     def validate_company(self, value):
-        """Exactly ONE company. A list is accepted, with one entry in it.
+        """One or more companies, normalised to their canonical spelling.
 
-        Refusing a two-entry list here rather than quietly taking the first is
-        deliberate: a form that sent two and got one request back would grant
-        rights in one company and silently drop the other.
+        A list is accepted — a form sends the ticked boxes — and so is an
+        already-joined string, so a client may send `["OIL","MART"]` or
+        `"OIL,MART"` and get the same request either way. Order and case are
+        forgiven and duplicates collapse; an unknown code is refused.
+
+        ONE POST, ONE REQUEST. A multi-company selection must never become
+        several POSTs or several rows: the approval is one decision, and the
+        companies only separate at the SAP call.
         """
         code, error = normalise_company(value)
         if error:

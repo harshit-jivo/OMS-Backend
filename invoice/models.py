@@ -46,6 +46,10 @@ class InvoiceLog(models.Model):
         ('REJECTED', 'Rejected'),
         ('EDITED' , 'Edited'),
         ('ERROR', 'Error'),
+        # Set by the post-to-sap endpoint before it calls SAP, and cleared by
+        # the answer. A log left here had no recorded answer (a timeout, a
+        # killed worker), so the next attempt checks SAP before posting again.
+        ('POSTING', 'Posting to SAP'),
         ('POSTED_TO_SAP' , 'Posted to SAP'),
         ('CL_RAISED' , 'CL Raised')
     ]

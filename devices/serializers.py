@@ -174,7 +174,16 @@ class AdminUserDeviceSerializer(serializers.ModelSerializer):
         policy = policies.get(obj.platform)
         if not policy:
             return "unknown"
-        return "latest" if obj.build_number == policy["required_build"] else "old"
+        # A blank required build means the gate is off; nothing is "old".
+        required_build = policy.get("required_build")
+        if required_build in (None, ""):
+            return "unknown"
+        # At or ABOVE the floor is current. This was `==`, which labelled a
+        # device that had taken a newer release "old" and asked it to update
+        # to a build below the one it was already running.
+        if obj.build_number is None:
+            return "old"
+        return "latest" if obj.build_number >= int(required_build) else "old"
 
 
 class VersionPolicySerializer(serializers.ModelSerializer):
@@ -203,7 +212,7 @@ class VersionPolicySerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def validate_required_version(self, value):
-        value = (value or "").strip()
-        if not value:
-            raise serializers.ValidationError("Required version cannot be blank.")
-        return value
+        # Blank is allowed and meaningful: together with a blank required_build
+        # it switches the gate off for this platform, which is how an admin
+        # lets every app version through during an incident.
+        return (value or "").strip()

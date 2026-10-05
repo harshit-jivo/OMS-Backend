@@ -19,7 +19,7 @@ row points at `stage_id`; responsibility is resolved from the stage's CURRENT
 configuration every time it is asked. Copying the user onto each task at
 creation time is what makes a reassignment step necessary, and it is exactly
 what modules are told not to do — see
-`docs/architecture/WORKFLOW_MODULE_INTEGRATION.md`.
+`docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md`.
 
 Two kinds of change, deliberately different:
 

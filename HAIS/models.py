@@ -53,6 +53,13 @@ class AssetType(_Option):
     # so adding a new category is fully DB-driven — no code change.
     id_prefix = models.CharField(max_length=8, blank=True, default="")
 
+    # Which optional asset fields this type shows on the create/edit form, as a
+    # list of field keys (e.g. ["processor", "memory", "warranty_ends"]). This is
+    # DATA, not schema: admins tick the fields for a type from the web, so a
+    # Laptop can show RAM/SSD while a Keyboard shows none of them — with no DB
+    # change. An EMPTY list means "show every field" (the legacy default).
+    field_config = models.JSONField(default=list, blank=True)
+
     class Meta(_Option.Meta):
         db_table = _t("tbl_AssetType")
         verbose_name = "Asset Type"

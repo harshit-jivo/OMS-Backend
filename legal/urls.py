@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import LabelCheckHistoryView , LabelCheckDetailView , FeedtoAIView , LabelItemListCreateView , NutritionUOMListCreatView , LabelNutritionListCreateView , LabelItemRetrieveUpdateDestroyView, NutritionUOMRetrieveUpdateDestroyView ,  LabelNutritionRetrieveUpdateDestroyView ,NutrientByItemView , ComplianceRuleListCreateView , ComplianceRuleDetailView
+from .views import LabelCheckHistoryView , LabelCheckDetailView , LabelPreviewView , FeedtoAIView , LabelItemListCreateView , NutritionUOMListCreatView , LabelNutritionListCreateView , LabelItemRetrieveUpdateDestroyView, NutritionUOMRetrieveUpdateDestroyView ,  LabelNutritionRetrieveUpdateDestroyView ,NutrientByItemView , ComplianceRuleListCreateView , ComplianceRuleDetailView
 
 
 urlpatterns = [
@@ -7,6 +7,9 @@ urlpatterns = [
 
     path('history/' , LabelCheckHistoryView.as_view()),
     path('history/<int:id>/' , LabelCheckDetailView.as_view()),
+    # The label artwork itself. An endpoint rather than a media path
+    # because MEDIA_URL is served only under DEBUG — see legal/previews.py.
+    path('history/<int:id>/preview/' , LabelPreviewView.as_view()),
 
     path('rules/' , ComplianceRuleListCreateView.as_view()),
     path('rules/<int:id>/' , ComplianceRuleDetailView.as_view()),

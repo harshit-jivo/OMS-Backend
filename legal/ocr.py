@@ -17,6 +17,7 @@ degrading when a table is missing, and for the same reason: the half that
 works should keep working.
 """
 import logging
+import os
 import re
 from dataclasses import dataclass
 
@@ -44,7 +45,25 @@ def _tesseract():
     # Windows installs Tesseract outside PATH more often than not, so the
     # location is configurable. Empty (the default) means "trust PATH", which
     # is the normal case on the Linux host this deploys to.
+    #
+    # THE SETTING IS VERIFIED, NOT TRUSTED, and that is worth a paragraph.
+    # `.env` is per-host (compose `env_file`), so a deployment file seeded
+    # from a developer's is a normal thing to happen — and it carries
+    # `TESSERACT_CMD=C:\Program Files\...`, which on the Linux host names
+    # nothing. Assigning it would override a `tesseract` that IS installed and
+    # IS on PATH (the image apt-installs it), and the whole deterministic half
+    # of the pipeline would go quiet behind "OCR unavailable, AI review only"
+    # — a banner that reads as "not installed" and sends you to fix the wrong
+    # thing. A path that is not there cannot be what was meant, so PATH wins
+    # and the log says why.
     binary = getattr(settings, 'TESSERACT_CMD', '') or ''
+    if binary and not os.path.exists(binary):
+        logger.warning(
+            'TESSERACT_CMD points at %s, which does not exist on this host — '
+            'ignoring it and looking for tesseract on PATH. Clear the '
+            'setting in the .env for this host if the binary is on PATH here.',
+            binary)
+        binary = ''
     if binary:
         pytesseract.pytesseract.tesseract_cmd = binary
     return pytesseract

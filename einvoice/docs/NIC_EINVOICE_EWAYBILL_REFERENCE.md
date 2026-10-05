@@ -177,10 +177,19 @@ GET {ServiceLayer}/Invoices?$select=DocEntry,VATRegNum&$orderby=DocEntry desc&$t
 **Mart status (verified 2026-09-04 against `JIVO_MART_HANADB`):** Mart issues from
 **two** GSTINs — Haryana `06AAFCJ4102J1ZU` (the dominant one, ~19/20 recent invoices)
 and Delhi `07AAFCJ4102J1ZS` (rare). Delhi's credentials are wired (`API_MART_DL` in
-production, `Jivo_Mart` in sandbox). **Haryana `06AAFCJ4102J1ZU` has no username/**
-**password yet**, so its IRNs will fail until one is created on the e-invoice portal
-under that GSTIN and added as `MART_EINV_06AAFCJ4102J1ZU_USERNAME/PASSWORD`. (Sandbox
-only registers the 07 test GSTIN, so sandbox testing exercises Delhi only.)
+production, `Jivo_Mart` in sandbox). (Sandbox only registers the 07 test GSTIN, so
+sandbox testing exercises Delhi only.)
+
+> ✅ **Resolved — 2026-09-19.** The warning that used to sit here, that Haryana
+> `06AAFCJ4102J1ZU` had no username/password and its IRNs would fail, **no longer
+> applies.** `.env` now wires **six** Mart GSTINs, each with its own
+> `MART_EINV_<GSTIN>_USERNAME/PASSWORD`:
+> `06AAFCJ4102J1ZU` (Haryana), `07AAFCJ4102J1ZS` (Delhi), `03AAFCJ4102J1Z0`,
+> `08AAFCJ4102J1ZQ`, `09AAFCJ4102J1ZO`, `29AAFCJ4102J1ZM`.
+>
+> `MART_EINV_GSTINS` tolerates spaces after the commas — `settings.py` strips each
+> entry (`[g.strip() for g in …split(',')]`), so the per-GSTIN
+> `MART_EINV_<GSTIN>_*` lookups still resolve.
 
 ## 4. e-Invoice schema (v1.1) — blocks & business validations
 

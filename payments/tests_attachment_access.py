@@ -50,9 +50,9 @@ class AttachmentVisibilityTests(TestCase):
     def test_verifier_may_see_the_attachment_before_approval_exists(self):
         """The regression: no approval row exists yet at verification time."""
         verifier = _user('att_verifier', [PAYMENTS_VERIFY])
-        self.assertFalse(
-            self.receipt.approvals.exists(),
-            'precondition: verification happens before the approval chain')
+        self.assertIsNone(
+            getattr(self.receipt, 'flow', None),
+            'precondition: verification happens before the approval flow')
         self.assertTrue(self.receipt.can_be_viewed_by(verifier))
 
     def test_creator_may_see_their_own(self):
@@ -66,23 +66,48 @@ class AttachmentVisibilityTests(TestCase):
     def test_user_with_no_keys_may_not(self):
         self.assertFalse(self.receipt.can_be_viewed_by(_user('att_none', [])))
 
-    def test_approver_still_may(self):
-        """The pre-existing path must keep working."""
-        from django.contrib.contenttypes.models import ContentType
-
-        from approvals.models import ApprovalRequest, ApprovalWorkflow
+    def test_the_approver_holding_it_may(self):
+        """Resolved from the STAGE, so a stand-in sees it and nobody else."""
+        from .models import FlowStatus, PaymentReceiptFlow
+        from .tests_workflow_fixtures import payments_workflow
 
         approver = _user('att_approver', [PAYMENTS_APPROVE])
-        workflow = ApprovalWorkflow.objects.create(
-            code='PAY_ATT', name='Att', document_type='PAYMENT', company='OIL')
-        ApprovalRequest.objects.create(
-            workflow=workflow,
-            content_type=ContentType.objects.get_for_model(PaymentReceipt),
-            object_id=self.receipt.pk, company='OIL',
-            amount=self.receipt.total_amount,
-            document_number=self.receipt.receipt_no,
-            status=ApprovalRequest.Status.PENDING)
+        workflow, stages = payments_workflow(
+            approver, company='OIL', code='PAY_ATT', documents='receipts')
+        PaymentReceiptFlow.objects.create(
+            receipt=self.receipt, workflow=workflow,
+            status=FlowStatus.PENDING, current_stage=stages[0], total_stage=1)
+        self.receipt.refresh_from_db()
+
         self.assertTrue(self.receipt.can_be_viewed_by(approver))
+
+    def test_an_approver_who_does_not_hold_it_may_not(self):
+        """Holding the key is not the same as being this document's stage."""
+        from .models import FlowStatus, PaymentReceiptFlow
+        from .tests_workflow_fixtures import payments_workflow
+
+        holder = _user('att_holder', [PAYMENTS_APPROVE])
+        bystander = _user('att_bystander', [PAYMENTS_APPROVE])
+        workflow, stages = payments_workflow(
+            holder, company='OIL', code='PAY_ATT2', documents='receipts')
+        PaymentReceiptFlow.objects.create(
+            receipt=self.receipt, workflow=workflow,
+            status=FlowStatus.PENDING, current_stage=stages[0], total_stage=1)
+        self.receipt.refresh_from_db()
+
+        self.assertFalse(self.receipt.can_be_viewed_by(bystander))
+
+    def test_someone_who_already_decided_it_still_may(self):
+        """History is the second route in: a past approver keeps access."""
+        from .models import PaymentStatusHistory
+        from .services import log_status
+
+        past = _user('att_past', [PAYMENTS_APPROVE])
+        log_status(self.receipt, to_status=self.receipt.status, user=past,
+                   action=PaymentStatusHistory.Action.APPROVED,
+                   reason='approved earlier')
+
+        self.assertTrue(self.receipt.can_be_viewed_by(past))
 
 
 class AttachmentUploadIsNotAlwaysAnEditTests(TestCase):

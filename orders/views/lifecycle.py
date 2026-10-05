@@ -866,9 +866,11 @@ class CreateOrderView(APIView):
             _create_order_item(order, item, _to_float, _to_bool)
 
         order.company = DISTRIBUTOR_COMPANY
-        # Distributor orders always dispatch from the factory.
-        order.dispatch_from_id = DISTRIBUTOR_DISPATCH_ID
-        order.dispatch_from_name = DISTRIBUTOR_DISPATCH_NAME
+        # Distributor orders default to the factory, but the Mart editor may
+        # send an explicit dispatch location — honour it when present.
+        if not order.dispatch_from_id:
+            order.dispatch_from_id = DISTRIBUTOR_DISPATCH_ID
+            order.dispatch_from_name = DISTRIBUTOR_DISPATCH_NAME
         # Default every distributor order to GP-FGM, regardless of what the client
         # sent, so the warehouse is always stored. An explicit choice (e.g. Mart
         # Approval switching to DL-MP on the edit screen) is preserved.

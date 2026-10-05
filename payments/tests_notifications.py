@@ -33,7 +33,11 @@ class PaymentsNotificationTests(TestCase):
         cls.company_a = Company.objects.create(name="Pay Co A")
         cls.company_b = Company.objects.create(name="Pay Co B")
         cls.submitter = User.objects.create(username="p_sub", name="Submitter", company=cls.company_a)
-        cls.approver = User.objects.create(username="p_appr", name="Approver", company=cls.company_a)
+        cls.approver = User.objects.create(
+            username="p_appr", name="Approver", company=cls.company_a,
+            # Being the stage's user is not enough: approving also
+            # requires the action key (payments.permissions.may_act_on).
+            extra_pages=["Payments_Approve"])
         cls.other_company_user = User.objects.create(username="p_other", name="Other", company=cls.company_b)
 
     def _receipt(self, no="RC-N-1"):
@@ -98,7 +102,10 @@ class PaymentsNotificationTests(TestCase):
         receipt = self._receipt()
         created = publish_receipt_decision(receipt, None, approved=True)
         self.assertEqual(created, [])
-        self.assertEqual(Notification.objects.count(), 0)
+        # Scoped to THIS document: the shared TEST database already holds
+        # notifications for real ones.
+        self.assertEqual(
+            Notification.objects.filter(object_id=receipt.id).count(), 0)
 
     # 13 (mobile provider gets correct payload)
     def test_mobile_provider_receives_payment_payload(self):
@@ -146,23 +153,35 @@ class PaymentsNotificationTests(TestCase):
                 created = publish_receipt_decision(receipt, self.submitter, approved=True)
         self.assertEqual(len(created), 1)  # notification still created; no raise
 
-    # 16 (successful hook path creates a notification)
-    def test_approval_hook_creates_notification(self):
-        from payments.hooks import _on_receipt_approved
+    # 16 (the real approval path creates a notification)
+    #
+    # Was `payments.hooks._on_receipt_approved` driven with a mocked
+    # ApprovalRequest. That hook is gone with the old engine, and mocking its
+    # replacement would prove nothing about the path production takes, so this
+    # now approves a REAL receipt through `workflow_flow` on a real one-stage
+    # workflow. What is asserted is unchanged: completing the chain notifies
+    # the submitter, once, about that receipt.
+    def test_approval_completes_and_notifies_the_submitter(self):
+        from payments import workflow_flow
+        from payments.tests_workflow_fixtures import payments_workflow
 
-        receipt = self._receipt()
-        approval_request = mock.Mock()
-        approval_request.document = receipt
-        approval_request.submitted_by = self.submitter
-        approval_request._acting_user = self.approver
-        approval_request.pk = 1
-        # on_commit (SAP post) is NOT executed here → no SAP call, no push.
-        _on_receipt_approved(approval_request)
-        n = Notification.objects.filter(
-            user=self.submitter, event_type=PAYMENT_APPROVED
-        ).first()
-        self.assertIsNotNone(n)
-        self.assertEqual(n.object_id, receipt.id)
+        payments_workflow(self.approver, documents='receipts')
+        receipt = self._receipt('RC-N-APPROVE')
+        receipt.created_by = self.submitter
+        # Deliberately NOT company 'OIL': the engine selects a workflow by
+        # running configured queries, so a test pinned to a company that live
+        # configuration also targets would be testing that configuration.
+        receipt.company = 'MART'
+        receipt.save(update_fields=['created_by', 'company'])
+        flow = workflow_flow.start(receipt, user=self.submitter)
+
+        # on_commit (the SAP post) is NOT executed here → no SAP call, no push.
+        workflow_flow.approve(flow, user=self.approver)
+
+        notes = Notification.objects.filter(
+            user=self.submitter, event_type=PAYMENT_APPROVED,
+            object_id=receipt.id)
+        self.assertEqual(notes.count(), 1)
 
     # 17 (rollback → no records, no delivery)
     def test_rollback_no_records_no_delivery(self):

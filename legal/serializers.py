@@ -1,7 +1,7 @@
 import os
 
+from . import previews
 from .models import ComplianceRule , LabelData , LabelItem , NutritionUOM , LabelNutrition
-from .service import IMAGE_SUFFIXES
 from rest_framework import serializers
 
 
@@ -22,8 +22,8 @@ class ComplianceRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ComplianceRule
         fields = [
-            'id', 'code', 'name', 'rule_text', 'critical_tokens',
-            'is_critical', 'is_active', 'sort_order',
+            'id', 'code', 'name', 'rule_text', 'check_type', 'params',
+            'critical_tokens', 'is_critical', 'is_active', 'sort_order',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -34,6 +34,21 @@ class ComplianceRuleSerializer(serializers.ModelSerializer):
         # normal case, not an error worth rejecting.
         validated_data.pop('code', None)
         return super().update(instance, validated_data)
+
+    def validate_params(self, value):
+        """A JSON object, or nothing.
+
+        Same reasoning as `validate_critical_tokens`: `JSONField` will store a
+        list or a bare string quite happily, and `dimensions` reads this with
+        `.get()`. A rule whose settings silently do not apply is worse than
+        one that refuses to save.
+        """
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'Expected an object, e.g. {"tolerance_de": 10}.')
+        return value
 
     def validate_critical_tokens(self, value):
         """A list of non-blank strings, or nothing.
@@ -100,39 +115,23 @@ class LabelCheckListSerializer(serializers.ModelSerializer):
     def get_image_url(self, obj):
         """A URL a browser can actually put in an `<img>`, or ''.
 
-        The fallback used to be `label_file.url`, which is a PDF for almost
-        every check — and a PDF in an `<img>` is a broken image, not a
-        fallback. Every row written before `preview_image` existed took that
-        path, so the whole history rendered broken thumbnails.
+        TWO bugs live behind this method, and the second is why it is now one
+        line.
 
-        Three steps, in order of confidence:
+        The first: the fallback used to be `label_file.url`, which is a PDF
+        for almost every check — and a PDF in an `<img>` is a broken image,
+        not a fallback. Every row written before `preview_image` existed took
+        that path, so the whole history rendered broken thumbnails.
 
-        1. the stored preview path;
-        2. the path `service.save_preview` WOULD have written, if that file is
-           still on disk — true for every historic check here, because the
-           previews were always generated, only the path was never recorded;
-        3. the upload itself, but ONLY when it is already an image.
-
-        Otherwise '' — and the client shows its own explanation rather than a
-        broken image icon.
+        The second: what it returned was a MEDIA url, and `OMS/urls.py` serves
+        `MEDIA_URL` only under `DEBUG`. So the fix above worked on a
+        developer's machine and the deployed build showed the broken icon
+        anyway, for a different reason. It now names the authenticated view
+        that streams the bytes; `legal/previews.py` holds the resolution order
+        and the reasoning, and the same module is what that view opens, so the
+        two cannot disagree about whether a preview exists.
         """
-        if obj.preview_image:
-            return obj.preview_image
-
-        name = obj.label_file.name if obj.label_file else ''
-        if not name:
-            return ''
-
-        from django.core.files.storage import default_storage
-
-        stem = os.path.splitext(os.path.basename(name))[0]
-        derived = f'labels/previews/{stem}.png'
-        if default_storage.exists(derived):
-            return default_storage.url(derived)
-
-        if os.path.splitext(name)[1].lower() in IMAGE_SUFFIXES:
-            return obj.label_file.url
-        return ''
+        return previews.image_url(obj)
 
     def get_checked_by_name(self, obj):
         user = obj.checked_by
@@ -152,10 +151,13 @@ class LabelCheckDetailSerializer(LabelCheckListSerializer):
     findings = serializers.SerializerMethodField()
     ocr_available = serializers.SerializerMethodField()
     rule_count = serializers.SerializerMethodField()
+    skipped = serializers.SerializerMethodField()
+    package_spec = serializers.SerializerMethodField()
 
     class Meta(LabelCheckListSerializer.Meta):
         fields = LabelCheckListSerializer.Meta.fields + [
-            'findings', 'ocr_available', 'rule_count',
+            'findings', 'ocr_available', 'rule_count', 'skipped',
+            'package_spec',
         ]
 
     def get_findings(self, obj):
@@ -172,3 +174,20 @@ class LabelCheckDetailSerializer(LabelCheckListSerializer):
         if 'rule_count' in report:
             return report['rule_count']
         return len(report.get('findings') or [])
+
+    def get_skipped(self, obj):
+        """Rules that did not apply to this pack, with the reason.
+
+        Empty for every check run before the dimensional rules existed, which
+        is the right answer for them: nothing was skipped, because there was
+        nothing skippable.
+        """
+        return (obj.report_json or {}).get('skipped') or []
+
+    def get_package_spec(self, obj):
+        """The dimensions the measurement findings were computed from.
+
+        None when the reviewer left the panel alone — and None for every
+        historic check, where it means the same thing.
+        """
+        return (obj.report_json or {}).get('package_spec')

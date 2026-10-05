@@ -63,82 +63,6 @@ def _display_name(user):
             or "someone")
 
 
-def _open_request_for(document):
-    """The document's single OPEN (PENDING) approval request, or None.
-
-    Filters by the exact (content_type, object_id) of THIS document, so a
-    recipient is never resolved from some other document's workflow.
-    """
-    from approvals.models import ApprovalRequest
-
-    return (ApprovalRequest.objects
-            .filter(status=ApprovalRequest.Status.PENDING)
-            .filter(content_type__app_label=document._meta.app_label,
-                    content_type__model=document._meta.model_name,
-                    object_id=document.pk)
-            .select_related('workflow')
-            .order_by('-created_at')
-            .first())
-
-
-def _current_level_recipients(request, submitter):
-    """Approvers of ``request``'s CURRENT level, minus the submitter, de-duped.
-
-    This is the Orders-parity rule: only the stage that now owns the document is
-    notified — never every level at once. Recipient resolution stays in
-    approvals (``current_level_approvers``, the single source of truth); this
-    helper only removes the submitter and collapses duplicates. Returns a list of
-    distinct ``User`` instances (possibly empty).
-    """
-    from approvals.services import current_level_approvers
-
-    if request is None:
-        return []
-    submitter_id = getattr(submitter, "pk", None)
-    seen = set()
-    recipients = []
-    for approver in current_level_approvers(request):
-        if approver.pk == submitter_id:
-            continue          # the submitter never approves their own document
-        if approver.pk in seen:
-            continue          # de-dupe (same person named on the rung twice)
-        seen.add(approver.pk)
-        recipients.append(approver)
-    return recipients
-
-
-def _notify_current_approvers(document, submitter, *, event_type, title, noun,
-                              request=None):
-    """Shared body: notify the current level's approvers that a decision is due.
-
-    Used by BOTH the submission path (current level = level 1) and the
-    level-advanced path (current level = the new rung). The message mirrors the
-    Orders wording ("… from {creator} needs your approval.").
-    """
-    request = request if request is not None else _open_request_for(document)
-    recipients = _current_level_recipients(request, submitter)
-    if not recipients:
-        logger.info(
-            "payments notification skipped: %s %s has no current-level approver",
-            noun, getattr(document, "pk", None),
-        )
-        return []
-
-    from notifications.services import notify
-
-    number = getattr(document, "receipt_no", None) or getattr(
-        document, "deposit_no", "")
-    creator = _display_name(submitter)
-    return notify(
-        event_type=event_type,
-        title=title,
-        message=f"{noun} {number} from {creator} needs your approval.",
-        recipients=recipients,
-        entity=document,
-        actor=submitter,
-    )
-
-
 def publish_receipt_verification_required(receipt, creator):
     """Tell the eligible VERIFIERS that a new receipt needs checking.
 
@@ -241,56 +165,54 @@ def publish_receipt_posted(receipt):
     )
 
 
-def publish_receipt_submitted(receipt, submitter, request=None):
-    """Notify the CURRENT level's approvers that a receipt needs approval.
+def publish_stage_awaiting(document, flow, submitter=None):
+    """Tell whoever must act now that a document is waiting at their stage.
 
-    Fired from the approval engine's ``submitted`` hook, so the current level is
-    level 1. One notification per approver at THAT level only; the submitter is
-    excluded; company isolation is inherited from ``notify`` (each approver is
-    scoped to their own ``users.Company``). ``request`` may be passed by the hook
-    to avoid a re-query; otherwise it is looked up by (content_type, object_id).
+    Fired at submission AND at every advance — one event, because from the
+    recipient's side they are the same fact: this is now yours to decide.
+
+    THE RECIPIENT COMES FROM THE ENGINE, NOT FROM A STORED COPY. It is resolved
+    at send time from `flow.current_stage_id`, so a stage reassigned or a
+    temporary replacement started since the document was submitted routes this
+    to the person who may actually act today. `flow.current_user` is never
+    consulted — it is display state.
+
+    A stage with no resolvable assignment (deleted configuration) notifies
+    nobody and is logged rather than raised: a notification is a side effect,
+    never a reason to fail an approval.
     """
-    return _notify_current_approvers(
-        receipt, submitter,
-        event_type=PAYMENT_SUBMITTED, title="Payment approval required",
-        noun="Payment", request=request,
-    )
+    from django.contrib.auth import get_user_model
+    from workflow.services.assignments import get_stage_assignment
 
+    if not getattr(flow, 'current_stage_id', None):
+        return []
 
-def publish_receipt_next_level(receipt, request, actor=None):
-    """Notify the NEXT level's approvers after an intermediate approval.
+    assignment = get_stage_assignment(flow.current_stage_id)
+    if assignment is None or not assignment.effective_user_id:
+        logger.warning(
+            'payments notification skipped: stage %s has no assignment',
+            flow.current_stage_id)
+        return []
 
-    Fired from the ``level_advanced`` approval hook: the request's current_level
-    has already moved to the new rung, so ``_current_level_recipients`` resolves
-    exactly that rung. The original submitter (``request.submitted_by``) is
-    excluded as always.
-    """
-    return _notify_current_approvers(
-        receipt, getattr(request, "submitted_by", None),
-        event_type=PAYMENT_SUBMITTED, title="Payment approval required",
-        noun="Payment", request=request,
-    )
+    recipients = list(get_user_model().objects
+                      .filter(pk=assignment.effective_user_id))
+    if not recipients:
+        return []
 
+    is_receipt = hasattr(document, 'receipt_no')
+    number = document.receipt_no if is_receipt else document.deposit_no
+    noun = 'Payment' if is_receipt else 'Deposit'
 
-def publish_deposit_submitted(deposit, submitter, request=None):
-    """Notify the CURRENT level's approvers that a deposit needs approval.
+    from notifications.services import notify
 
-    Fired from the approval engine's ``submitted`` hook. Same rules as
-    :func:`publish_receipt_submitted`.
-    """
-    return _notify_current_approvers(
-        deposit, submitter,
-        event_type=DEPOSIT_SUBMITTED, title="Deposit approval required",
-        noun="Deposit", request=request,
-    )
-
-
-def publish_deposit_next_level(deposit, request, actor=None):
-    """Notify the NEXT level's approvers after an intermediate deposit approval."""
-    return _notify_current_approvers(
-        deposit, getattr(request, "submitted_by", None),
-        event_type=DEPOSIT_SUBMITTED, title="Deposit approval required",
-        noun="Deposit", request=request,
+    return notify(
+        event_type=PAYMENT_SUBMITTED if is_receipt else DEPOSIT_SUBMITTED,
+        title=f'{noun} approval required',
+        message=(f'{noun} {number} from {_display_name(submitter)} needs your '
+                 f'approval ({assignment.stage_name}).'),
+        recipients=recipients,
+        entity=document,
+        actor=submitter,
     )
 
 

@@ -33,10 +33,14 @@ logger = logging.getLogger(__name__)
 
 #: Event names this module owns. The framework only validates the shape
 #: (`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$`); the meaning is ours.
-BACKDATE_SUBMITTED = 'BACKDATE_SUBMITTED'
+#: A request has reached a stage and somebody must act. Fired on submission
+#: AND on every advance, because "it is now yours" is the same fact either
+#: time — there is no separate SUBMITTED event, which would have told the
+#: first approver the same thing twice under two names.
+BACKDATE_AWAITING_APPROVAL = 'BACKDATE_AWAITING_APPROVAL'
+#: The chain finished. Sent to the REQUESTER, not to the approvers.
 BACKDATE_APPROVED = 'BACKDATE_APPROVED'
 BACKDATE_REJECTED = 'BACKDATE_REJECTED'
-BACKDATE_AWAITING_APPROVAL = 'BACKDATE_AWAITING_APPROVAL'
 
 
 def _users(ids):
@@ -45,7 +49,14 @@ def _users(ids):
 
 
 def _describe(request_obj):
-    return (f'{request_obj.sap_username} · {request_obj.company} · '
+    """One line naming the request, for a notification's subtitle.
+
+    `company_label`, not `company`: a request covering two companies stores
+    `OIL,MART` and reads `Oil, Mart`. ONE notification either way — the
+    approval is one decision on one request, and the SAP fan-out after final
+    approval is not something an approver is notified about twice.
+    """
+    return (f'{request_obj.sap_username} · {request_obj.company_label} · '
             f'{request_obj.from_date} to {request_obj.to_date}')
 
 

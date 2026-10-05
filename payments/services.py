@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from approvals import services as approval_services
+from . import workflow_flow
 
 from . import bank_master, hana_queries
 from . import sap_company
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 def log_status(document, *, to_status, from_status='', user=None,
                actor_kind='USER', reason='', ip=None,
-               action=None, level=None, level_label='',
+               action=None, level=None, level_label='', stage_id=None,
                sap_doc_entry=None, sap_doc_num=None, change_data=None):
     """Append one row to the activity timeline. Never updated after insert.
 
@@ -64,6 +64,9 @@ def log_status(document, *, to_status, from_status='', user=None,
         reason=reason or '',
         level=level,
         level_label=level_label or '',
+        # WHICH workflow stage this happened at, by reference. `level` above is
+        # the rendered position; this survives a stage being renamed.
+        stage_id=stage_id,
         changed_by_username=getattr(user, 'username', '') or '',
         change_data=change_data,
     )
@@ -291,11 +294,12 @@ def validate_receipt(receipt):
         raise ValidationError(
             'Select the SAP branch this advance belongs to.')
 
-    _validate_gl_accounts(receipt.company, {m.method for m in methods})
+    _validate_gl_accounts(receipt.company, {m.method for m in methods},
+                          receipt=receipt)
     return True
 
 
-def _validate_gl_accounts(company, methods_used):
+def _validate_gl_accounts(company, methods_used, *, receipt=None):
     """Every method on the document must resolve to a SAP account.
 
     Without this the payload builder simply OMITS the account field and SAP
@@ -303,24 +307,25 @@ def _validate_gl_accounts(company, methods_used):
     possible moment to discover a configuration gap. Failing at submit puts the
     error in front of someone who can act on it.
 
-    Also catches a mapping whose account has since been removed from SAP, so a
-    payment can never post to a ledger that no longer exists.
+    Resolved exactly as posting will resolve it (`_bank_accounts_for`), so a
+    line carrying its own account needs no mapping at all, and only a keyless
+    legacy line is checked against the mapping — including a mapping whose
+    account has since been removed from SAP.
     """
-    accounts = _bank_accounts_for(company)
+    accounts = _bank_accounts_for(company, receipt)
     missing = sorted({m for m in methods_used if not accounts.get(m)})
     if not missing:
         return
 
     labels = dict(PaymentMethodEntry.Method.choices)
     names = ', '.join(labels.get(m, m) for m in missing)
-    if missing == ['CASH']:
-        where = ('Set the cash G/L account for this company under '
-                 'Payments > Configuration > Company mapping.')
-    else:
-        where = ('Map each of them to a SAP bank account under '
-                 'Payments > Configuration > Payment Method Mapping.')
+    # Only a keyless legacy line can get here: a line with a snapshot always
+    # names its account. So the remedy is to choose one — or, until the
+    # mapping is retired, to configure it there.
     raise ValidationError(
-        f'No SAP account is configured for {names} in {company}. {where}')
+        f'No receiving account is set for {names} in {company}. Edit the '
+        f'payment and select the receiving account, or configure it under '
+        f'Payments > Payment Method Mapping.')
 
 
 @transaction.atomic
@@ -341,14 +346,12 @@ def submit_receipt(receipt, user, ctx=None):
     # still open and the approver retries from their own queue. Without this the
     # creator would hit the raw "already has an open approval request" from the
     # engine, which does not explain who now holds the document.
-    open_approval = receipt.approvals.filter(
-        status__in=['DRAFT', 'PENDING']).first()
-    if open_approval is not None:
+    open_flow = workflow_flow.flow_of(receipt)
+    if open_flow is not None and open_flow.is_open:
         raise ValidationError(
-            f'{receipt.receipt_no} is still with its approver '
-            f'({open_approval.level_label}). They can retry the SAP posting '
-            f'from their pending list once the problem is fixed — it does not '
-            f'need resubmitting.')
+            f'{receipt.receipt_no} is still with its approver. They can retry '
+            f'the SAP posting from their pending list once the problem is '
+            f'fixed — it does not need resubmitting.')
     if receipt.status not in (PaymentReceipt.Status.DRAFT,
                               PaymentReceipt.Status.REJECTED,
                               PaymentReceipt.Status.PENDING_ERROR):
@@ -374,26 +377,19 @@ def submit_receipt(receipt, user, ctx=None):
     validate_receipt(receipt)
     previous = receipt.status
 
-    approval_services.submit(
-        document=receipt,
-        user=user,
-        company=receipt.company,
-        amount=receipt.total_amount,
-        document_number=receipt.receipt_no,
-        document_type='PAYMENT',
-        ctx=ctx,
-    )
+    # Route through the Workflow Engine and open payments' own flow. Raises
+    # when nothing routes it, which rolls this whole transaction back — a
+    # document that cannot be approved must not sit in PENDING_APPROVAL.
+    workflow_flow.start(receipt, user=user)
+
     receipt.status = PaymentReceipt.Status.PENDING_APPROVAL
     receipt.save(update_fields=['status', 'updated_at'])
     # PENDING_APPROVAL, not the STATUS_CHANGED default: entering the approval
     # chain is the business event, and an untagged row read as an anonymous
     # transition sitting between VERIFIED and APPROVED. The status assignment
     # above is untouched.
-    log_status(receipt, from_status=previous, to_status=receipt.status,
-               user=user,
-               action=PaymentStatusHistory.Action.PENDING_APPROVAL,
-               reason='Submitted for approval.',
-               ip=(ctx or {}).get('ip'))
+    # NOTE the history row for entering approval is written by
+    # workflow_flow.start(), which knows the stage it landed on.
 
     # Only a resubmission after a SAP failure belongs in the SAP history — a
     # first submission has not involved SAP at all, and logging it there would
@@ -406,11 +402,9 @@ def submit_receipt(receipt, user, ctx=None):
             response='Payment resubmitted after correction.',
             user=user,
         )
-    # The "approval required" notification to the current level's approvers is
-    # fired by the approval engine's `submitted` hook (payments.hooks), inside
-    # the same transaction opened by approval_services.submit above — so the
-    # Notification commits with the submission and rolls back with it. No SAP is
-    # involved in this path.
+    # The "approval required" notification is fired by workflow_flow.start(),
+    # inside this transaction — so it commits with the submission and rolls
+    # back with it. No SAP is involved in this path.
     return receipt
 
 
@@ -495,38 +489,172 @@ def verify_receipt(receipt_id, user, *, remarks='', ctx=None):
     return receipt
 
 
+#: The receiving-account snapshot columns on PaymentMethodEntry. All blank on
+#: a line entered before the account picker existed (migration 0035 added them
+#: with DEFAULT ''), and never blank on one entered with it.
+_SNAPSHOT_FIELDS = ('account_key', 'gl_account', 'bank_code',
+                    'receiving_bank_name', 'account_number', 'branch')
+
+
+def snapshot_gl_account(entry):
+    """The G/L this line's own snapshot names, or None for a legacy line.
+
+    Three outcomes, deliberately distinct:
+
+      * every snapshot column blank  -> None. A LEGACY line, entered before the
+        user chose accounts; the caller falls back to the method mapping.
+      * a complete, self-consistent snapshot -> its `gl_account`.
+      * anything in between -> ValidationError. A half-written or contradictory
+        snapshot is never "close enough", and falling back to the mapping would
+        post the money somewhere the user did not choose.
+
+    "Self-consistent" is checked against the key the account was chosen by:
+    a cash line's key IS its G/L; a banked line's key is BANKCODE:GLACCOUNT.
+    The check needs nothing but the row itself — it never asks SAP or the
+    mapping, which is what makes the snapshot authoritative after either
+    changes.
+    """
+    values = {f: (getattr(entry, f, '') or '').strip() for f in _SNAPSHOT_FIELDS}
+    if not any(values.values()):
+        return None
+
+    key, gl, bank_code = (values['account_key'], values['gl_account'],
+                          values['bank_code'])
+    if entry.method == PaymentMethodEntry.Method.CASH:
+        consistent = bool(key and gl and key == gl)
+    else:
+        consistent = bool(key and gl and bank_code
+                          and key == f'{bank_code}:{gl}')
+    if not consistent:
+        raise ValidationError(
+            f'The receiving account stored on this {entry.method} payment is '
+            f'incomplete or inconsistent (account {key or "-"}, G/L '
+            f'{gl or "-"}). Edit the payment and select the receiving account '
+            f'again.')
+    return gl
+
+
 def _bank_accounts_for(company, receipt=None):
     """method -> SAP G/L account, for payload building.
 
-    Every G/L comes from SAP's own House Bank Accounts, chosen by the
-    administrator's payment-method mapping. No user ever types or picks a G/L:
-    they choose a tender, and the account follows from configuration.
+    THE ACCOUNT IS THE ONE THE COLLECTOR CHOSE, frozen on the line when the
+    payment was saved. That is what posts, regardless of what the bank master
+    or any configuration says now: re-resolving it here would let a later edit
+    move money the user already directed elsewhere.
 
-        CASH   -> the CASH method mapping's gl_account (not a house bank)
-        UPI    -> the account mapped for UPI
-        CHEQUE -> the account mapped for cheques; the payer's bank is a
-                  separate field on the line and is sent as BankCode
+    It used to fall back to `PaymentMethodMapping` — one admin-configured
+    account per method per company — for lines raised before the picker
+    existed. That table has been retired: every line that could still be
+    posted or deposited was stamped with the account the mapping would have
+    chosen (`backfill_receiving_accounts`), so the fallback had nothing left
+    to answer.
 
-    Raises BankMasterUnavailable when SAP cannot be reached and nothing is
-    cached, and ValidationError when a mapping points at an account SAP no
-    longer has — posting to a stale ledger is worse than failing loudly.
+    A line with no account is therefore a real gap now, not a legacy shape. It
+    is reported by `validate_accounts_available` at submit — in front of
+    someone who can fix it by opening the receipt and choosing an account —
+    rather than guessed at here.
+
+    Per method, because SAP holds one CashAccount and one TransferAccount per
+    document: every line of a method must name the same account, and a method
+    whose lines disagree is refused rather than merged.
+
+    Raises ValidationError on an inconsistent or ambiguous method.
     """
-    resolver = bank_master.PaymentAccountResolver(company)
-    accounts = {'CASH': resolver.cash_gl()}
+    if receipt is None:
+        return {}
 
-    methods = None
-    if receipt is not None:
-        methods = {m.method for m in receipt.methods.all()}
+    by_method = {}
+    for entry in receipt.methods.all():
+        by_method.setdefault(entry.method, []).append(entry)
 
-    for method in PaymentMethodEntry.Method.values:
-        if method == PaymentMethodEntry.Method.CASH:
+    accounts = {}
+    for method, entries in by_method.items():
+        snapshots = [snapshot_gl_account(entry) for entry in entries]
+        if all(gl is None for gl in snapshots):
+            # No account on any line of this method. Left out of the result so
+            # `validate_accounts_available` names it.
             continue
-        if methods is not None and method not in methods:
-            continue
-        found = resolver.resolve(method)
-        accounts[method] = found['gl_account'] if found else ''
+        if any(gl is None for gl in snapshots):
+            raise ValidationError(
+                f'This receipt has {method} lines both with and without a '
+                f'receiving account. Edit it and select the account for every '
+                f'line.')
+        if len(set(snapshots)) > 1:
+            raise ValidationError(
+                f'This receipt has {method} lines received into different '
+                f'accounts ({", ".join(sorted(set(snapshots)))}). SAP allows '
+                f'one account per method on a payment, so split it into '
+                f'separate receipts.')
+        accounts[method] = snapshots[0]
 
     return accounts
+
+def cash_sources_for_receipts(company, receipts):
+    """The DISTINCT cash G/Ls a set of receipts would empty, sorted.
+
+    One entry means the deposit clears one drawer and can post. Several means
+    the user picked receipts from different drawers: SAP takes one source
+    account per deposit document, and merging them — or silently picking one —
+    would credit a drawer that never held the money. The caller refuses and
+    names both accounts so the user can split the deposit.
+
+    Read per cash line from the account the collector chose. A line with no
+    account contributes nothing; it used to fall back to the CASH method
+    mapping, which has been retired.
+
+    Cheque lines contribute nothing: a cheque reached the bank when its own
+    receipt posted, so a deposit re-posting it would double-debit. An empty
+    result therefore means "no cash to post" — a cheque-only deposit.
+
+    Blank is not a source: a line with no account is reported by the caller as
+    "no cash G/L configured", the message it has always used.
+    """
+    sources = set()
+    for receipt in receipts:
+        for entry in receipt.methods.all():
+            if entry.method not in PaymentMethodEntry.SAP_POSTABLE_DEPOSIT_METHODS:
+                continue
+            # The drawer the line itself names. A line with none contributes
+            # nothing, and the caller reports "no cash G/L" — the same message
+            # it gave when the mapping could not answer either.
+            gl = snapshot_gl_account(entry)
+            if (gl or '').strip():
+                sources.add(gl.strip())
+    return sorted(sources)
+
+
+def deposit_cash_sources(deposit):
+    """`cash_sources_for_receipts` for the receipts already on a deposit."""
+    receipts = [line.receipt
+                for line in deposit.lines.select_related('receipt')]
+    return cash_sources_for_receipts(deposit.company, receipts)
+
+
+def freeze_deposit_source(deposit):
+    """Set (and return) the drawer this deposit empties. Does not save.
+
+    Called from submit, beside the destination-bank re-snapshot. Separate from
+    it so the rule can be tested without a database: submit runs inside a
+    transaction, and this is the part with the accounting in it.
+    """
+    deposit.source_gl_account = check_one_cash_source(
+        deposit_cash_sources(deposit))
+    return deposit.source_gl_account
+
+
+def check_one_cash_source(sources):
+    """Refuse a deposit that spans more than one cash account.
+
+    Shared by the serializer (so the error arrives while the user is still
+    choosing receipts) and by validate_deposit (so no other path can get past
+    it). Returns the single source, or '' when there is no cash at all.
+    """
+    if len(sources) > 1:
+        raise ValidationError(
+            f'Cannot create this deposit because the selected receipts belong '
+            f'to different CASH SALE accounts ({" and ".join(sources)}). '
+            f'Please create separate deposits for each CASH SALE account.')
+    return sources[0] if sources else ''
 
 
 def post_receipt_to_sap(receipt, user=None):
@@ -574,6 +702,42 @@ def post_receipt_to_sap(receipt, user=None):
 # Deposits
 # ---------------------------------------------------------------------------
 
+def cash_total_for_receipts(receipts):
+    """The CASH in these receipts — the only money a deposit actually moves.
+
+    A cheque in the same receipt is deliberately ignored. It debited the bank
+    when the RECEIPT posted (Dr bank / Cr receivable), so its value is already
+    in SAP; the deposit records the day the paper was carried in and nothing
+    more. Summing cash and cheques together would give a figure that is not
+    the SAP posting, not the shortfall base, and not anything countable.
+
+    Reads `SAP_POSTABLE_DEPOSIT_METHODS`, the same definition the payload
+    builder uses, so the two cannot drift apart.
+    """
+    total = Decimal('0')
+    for receipt in receipts:
+        for entry in receipt.methods.all():
+            if entry.method in PaymentMethodEntry.SAP_POSTABLE_DEPOSIT_METHODS:
+                total += entry.amount
+    return total
+
+
+def cash_total_for_lines(lines):
+    """`cash_total_for_receipts` for deposit lines. See it for the reasoning."""
+    return cash_total_for_receipts([line.receipt for line in lines])
+
+
+def derive_deposit_type(cash_total):
+    """What a deposit IS, read from its contents rather than from a picker.
+
+    There is no MIXED any more (see BankDeposit.DepositType): with the
+    arithmetic cash-only, a deposit either moves cash or it moves none, and a
+    cheque riding along on a cash deposit is a record, not a second kind.
+    """
+    return (BankDeposit.DepositType.CASH if cash_total > 0
+            else BankDeposit.DepositType.CHEQUE)
+
+
 def validate_deposit(deposit):
     lines = list(deposit.lines.select_related('receipt'))
     if not lines:
@@ -598,13 +762,20 @@ def validate_deposit(deposit):
             f'reached the bank electronically and are already accounted for: '
             f'{", ".join(not_depositable)}.')
 
-    collected = sum((line.amount for line in lines), Decimal('0'))
+    # CASH ONLY. The cheques in these receipts are not added in: each one
+    # reached the bank when its own receipt posted to SAP, so its value is
+    # already accounted for and this deposit only records the day the paper
+    # was handed over. Adding it here would produce a total that matches
+    # neither the SAP document nor the notes in the employee's hand.
+    collected = cash_total_for_lines(lines)
     if collected != deposit.collected_amount:
         raise ValidationError(
-            f'Selected payments total {collected} but collected_amount is '
-            f'{deposit.collected_amount}.')
+            f'Selected payments hold {collected} in cash but collected_amount '
+            f'is {deposit.collected_amount}.')
     if deposit.deposit_amount > collected:
-        raise ValidationError('Deposit amount cannot exceed the collected amount.')
+        raise ValidationError(
+            f'Cannot bank {deposit.deposit_amount}; these payments hold only '
+            f'{collected} in cash.')
     if deposit.deposit_amount < collected and not deposit.shortfall_reason.strip():
         raise ValidationError('A reason is required when depositing less than collected.')
 
@@ -618,6 +789,11 @@ def validate_deposit(deposit):
         raise ValidationError(
             'This deposit has no SAP G/L account. Select the bank it was paid '
             'into before submitting.')
+
+    # One cash drawer per deposit. Checked here as well as in the serializer
+    # because submit is the last point before the approval chain opens, and
+    # the receipts can be edited after the deposit was first saved.
+    check_one_cash_source(deposit_cash_sources(deposit))
     return True
 
 
@@ -652,20 +828,20 @@ def submit_deposit(deposit, user, ctx=None):
     deposit.bank_code = bank['bank_code']
     deposit.bank_gl_account = bank['gl_account']
     deposit.bank_display_name = bank['label']
+
+    # Freeze the SOURCE — the drawer being emptied — beside the DESTINATION
+    # bank above. From here the deposit posts the account its receipts were
+    # actually received into, whatever the mapping is changed to afterwards.
+    # Blank for a cheque-only deposit, which posts nothing.
+    freeze_deposit_source(deposit)
+
     deposit.save(update_fields=['bank_key', 'bank_code', 'bank_gl_account',
-                                'bank_display_name', 'updated_at'])
+                                'bank_display_name', 'source_gl_account',
+                                'updated_at'])
 
     previous = deposit.status
 
-    approval_services.submit(
-        document=deposit,
-        user=user,
-        company=deposit.company,
-        amount=deposit.deposit_amount,
-        document_number=deposit.deposit_no,
-        document_type='DEPOSIT',
-        ctx=ctx,
-    )
+    workflow_flow.start(deposit, user=user)
     deposit.status = BankDeposit.Status.PENDING_APPROVAL
     deposit.save(update_fields=['status', 'updated_at'])
     log_status(deposit, from_status=previous, to_status=deposit.status,
@@ -677,23 +853,31 @@ def submit_deposit(deposit, user, ctx=None):
 
 
 def sap_postable_amount(deposit):
-    """The part of a deposit that still needs a SAP entry.
+    """The part of a deposit that still needs a SAP entry: the cash banked.
 
-    CASH only. A cheque debited the bank when its RECEIPT posted (verified:
-    DR bank / CR receivable), so the cheque is already in SAP; the OMS deposit
-    records the physical hand-over and nothing more. Posting it again would
-    debit the bank twice and credit a clearing account that never held it.
+    This is `deposit_amount` ITSELF, with no arithmetic on top, because
+    `deposit_amount` now means "cash actually paid in" and nothing else. The
+    SAP document and this field are the same number by construction, which is
+    the whole point: what SAP says left the drawer is what the employee says
+    they handed over.
 
-    Summed from the METHOD LINES, not from deposit.deposit_amount, because a
-    mixed deposit's total covers cash and cheques together and only the cash
-    share may reach SAP.
+    A cheque never appears here. It debited the bank when its RECEIPT posted
+    (verified: DR bank / CR receivable), so it is already in SAP; the deposit
+    records the day the paper was carried in. Posting it again would debit the
+    bank twice and credit a clearing account that never held it.
+
+    WHY NOT THE METHOD LINES. This used to sum the CASH entries of the linked
+    receipts and ignore `deposit_amount` entirely. That is right only when the
+    full collection is banked. The AP team routinely spends part of a
+    collection before it reaches the bank — which is what `shortfall_reason`
+    is for — and the old sum posted the whole cash share regardless. Observed
+    on DEP-OIL-20260919-000002: 618,000 credited out of the drawer in SAP
+    against 2,091 actually banked, overstating the emptying by 615,909.
+
+    Zero is a legitimate answer, for a cheque-only deposit or one where every
+    rupee of cash was spent; the caller routes that to the no-SAP-needed path.
     """
-    total = Decimal('0')
-    for line in deposit.lines.select_related('receipt'):
-        for entry in line.receipt.methods.all():
-            if entry.method in PaymentMethodEntry.SAP_POSTABLE_DEPOSIT_METHODS:
-                total += entry.amount
-    return total
+    return deposit.deposit_amount
 
 
 def post_deposit_to_sap(deposit, user=None):
@@ -708,7 +892,9 @@ def post_deposit_to_sap(deposit, user=None):
         deposit.company_db = company_db
         deposit.save(update_fields=['company_db', 'updated_at'])
 
-    # Cheque-only: there is no SAP document to create. Complete the OMS record
+    # No cash banked: there is no SAP document to create. Either the deposit
+    # carries cheques only, or every rupee of its cash was spent before it
+    # reached the bank (a full shortfall). Complete the OMS record
     # and leave sap_doc_entry / sap_doc_num / sap_trans_id NULL — fabricating
     # identifiers for a document that does not exist would be worse than
     # leaving the truth visible. `already_posted()` accepts status==POSTED on
@@ -719,14 +905,24 @@ def post_deposit_to_sap(deposit, user=None):
         deposit.status = BankDeposit.Status.POSTED
         deposit.sap_posted_at = timezone.now()
         deposit.sap_response = (
-            'Recorded in OMS. No SAP posting is required: the cheques in this '
-            'deposit were already accounted for in SAP when their receipts '
-            'posted.')
+            'Recorded in OMS. No SAP posting is required: this deposit banked '
+            'no cash. Any cheques it carries were already accounted for in '
+            'SAP when their receipts posted.')
         deposit.save(update_fields=['status', 'sap_posted_at', 'sap_response',
                                     'updated_at'])
         log_status(deposit, from_status=previous, to_status=deposit.status,
                    user=user, actor_kind='SYSTEM',
                    reason='Cheque-only deposit — recorded in OMS, no SAP entry.')
+
+        # COMPLETE THE APPROVAL TOO. The final approval leaves the flow at its
+        # last stage until a SAP post succeeds, and this deposit will never
+        # make one — there is nothing for SAP to record. Without this the
+        # deposit would read POSTED while its flow sat waiting for an approver
+        # forever. "SAP accepted it" and "SAP was not needed" are different
+        # reasons to be finished, and both finish it.
+        from . import workflow_flow
+        workflow_flow.complete_after_sap(deposit)
+
         logger.info(
             'deposit %s completed without a SAP post (cheque-only)',
             deposit.deposit_no)
@@ -738,20 +934,25 @@ def post_deposit_to_sap(deposit, user=None):
     # permanently NULL now that receipts stop sending PaymentChecks — so the
     # guard would block every mixed deposit for a reason that no longer exists.
 
-    # Mixed deposit: SAP receives the CASH share only. The OMS record keeps the
-    # full physical amount (cash + cheques), which is what the employee
-    # actually carried to the bank; the two figures answer different questions
-    # and must not be reconciled into one.
+    # SAP receives the cash that was banked — `deposit_amount`, exactly. Any
+    # cheques on this deposit are recorded beside it and contribute nothing:
+    # they were posted under their own receipts.
     # The G/L being emptied — the same account the RECEIPTS debited, so the
     # clearing account provably nets to zero. Verified against live SAP:
     # deposits 21977 and 21963 posted Dr 2201102 / Cr 1105001 with 1105001 as
     # the CardCode. Fail here rather than post a document with a blank one.
-    source_gl = bank_master.PaymentAccountResolver(
-        deposit.company).deposit_source_gl()
+    # The account frozen at submit, which is the one its receipts were
+    # received into. Never re-resolved: an administrator's later edit must not
+    # move money out of a drawer that never held it.
+    #
+    # Deposits raised before the freeze had theirs written from their own
+    # receipts by `backfill_receiving_accounts`, so none is left without one.
+    source_gl = (deposit.source_gl_account or '').strip()
     if not source_gl:
         raise ValidationError(
-            f'No cash G/L is configured for {deposit.company}. Set it on the '
-            f'CASH payment-method mapping before depositing.')
+            f'This deposit does not record which cash account it empties. '
+            f'Select the receiving account on its receipts and submit it '
+            f'again before depositing.')
 
     payload = build_deposit(
         deposit,

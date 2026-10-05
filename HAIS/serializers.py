@@ -18,7 +18,7 @@ from .models import Asset, AssetLog, AssetStorageType, AssetType, Department, St
 class AssetTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = AssetType
-        fields = ["id", "name", "id_prefix", "sort_order", "is_active"]
+        fields = ["id", "name", "id_prefix", "field_config", "sort_order", "is_active"]
 
 
 class DepartmentSerializer(serializers.ModelSerializer):

@@ -26,8 +26,12 @@ Two rules follow, and they are the whole convention:
 Builders that take a value return `(sql, params)`; `execute` accepts that pair
 directly, so callers in `services.py` are unchanged.
 """
+import logging
+
 from hdbcli import dbapi
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 class HanaSchemaError(ValueError):
@@ -56,11 +60,28 @@ class HANAConnection:
                 password=cfg['PASSWORD'],
             )
             self.cursor =  self.connection.cursor()
-            print("Connected to HANA successfully")
+            # NEVER print() here. Under nssm this process has a stdout pipe
+            # that nothing reads (AppStdout is unset), so a write to it raises
+            # OSError [WinError 233] "No process is on the other end of the
+            # pipe". That is not hypothetical: these two lines used to be
+            # print() calls, and they broke EVERY HANA-backed feature in the
+            # deployed service while working perfectly in a dev terminal,
+            # which has a real console attached.
+            #
+            # Worse, the print in the except branch raised the same OSError
+            # while handling the first one, which discarded the ConnectionError
+            # below and let a bare OSError escape — so the logged cause read
+            # "No process is on the other end of the pipe" and pointed
+            # investigation at SAP, which was healthy the whole time.
+            logger.debug('Connected to HANA at %s:%s', cfg['HOST'], cfg['PORT'])
             return True
               
         except Exception as e:
-            print(e)
+            # No password in this message: cfg['PASSWORD'] is deliberately not
+            # interpolated.
+            logger.warning('HANA connect failed for %s@%s:%s: %s',
+                           cfg.get('USER'), cfg.get('HOST'), cfg.get('PORT'), e,
+                           exc_info=True)
             raise ConnectionError(f"SAP connection failed: {str(e)}")
         
     def disconnect(self):
@@ -341,7 +362,44 @@ class Queries():
         """, entries
 
     @staticmethod
+    def _scheme_from_sub_group(schema, sub_group_expr):
+        """SQL for the profit-centre CODE that stands for an item sub-group.
+
+        U_SchemeAgst holds an OPRC "PrcCode" (SUNFLOWR, GROUNDNT, RICEBRAN),
+        never the sub-group name (SUNFLOWER, GROUNDNUT, RICE BRAN) -- on every
+        posted invoice line it equals the line's costing code. Sub-groups are
+        keyed sometimes by code and sometimes by name, so match either, in
+        dimension 1 (product varieties) and active only, like
+        `get_costing_code`. MIN() keeps this a scalar even if a sub-group
+        matched two rows.
+        """
+        return (
+            f'(SELECT MIN(P."PrcCode") FROM "{schema}"."OPRC" AS P'
+            f' WHERE P."DimCode" = 1 AND P."Active" = \'Y\''
+            f' AND (P."PrcCode" = {sub_group_expr} OR P."PrcName" = {sub_group_expr}))'
+        )
+
+    @staticmethod
+    def _order_line_scheme(schema):
+        """The U_SchemeAgst an invoice line drawn from this order line must carry.
+
+        SAP's transaction validation rejects an A/R invoice line with it blank
+        ("(1310325) Please Select the SchemeAgst Column"). In order: the order
+        line's own value; the order line's costing code, which is already a
+        PrcCode; the profit-centre code for the item's sub-group.
+        """
+        return (
+            'COALESCE(NULLIF(T1."U_SchemeAgst", \'\'), NULLIF(T1."OcrCode", \'\'), '
+            + Queries._scheme_from_sub_group(schema, 'T2."U_Sub_Group"')
+            + ') AS "SchemeAgst"'
+        )
+
+    @staticmethod
     def get_sales_orders_for_party(party_code , branch):
+        """Open sales-order lines for one customer, in the branch's company DB.
+
+        "SchemeAgst" -- see `_order_line_scheme`.
+        """
         s = Queries._schema_for_branch(branch)
         branches = [
             f"""
@@ -354,10 +412,13 @@ class Queries():
                 T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
                 T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
                 T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
-                T1."OcrCode", T1."LineStatus"
+                T1."OcrCode", T1."LineStatus",
+                {Queries._order_line_scheme(s)}
             FROM "{s}"."ORDR" AS T0
             INNER JOIN "{s}"."RDR1" AS T1
                 ON T0."DocEntry" = T1."DocEntry"
+            LEFT JOIN "{s}"."OITM" AS T2
+                ON T2."ItemCode" = T1."ItemCode"
             WHERE T0."CardCode" = ?
               AND T0."CANCELED" = 'N'
               AND T0."DocStatus" = 'O'
@@ -399,10 +460,13 @@ class Queries():
                 T1."OpenQty", T1."Price", T1."PriceBefDi", T1."DiscPrcnt",
                 T1."LineTotal", T1."VatPrcnt", T1."VatGroup", T1."WhsCode",
                 T1."TaxCode", T1."ShipDate", T1."AcctCode", T1."Project",
-                T1."OcrCode", T1."LineStatus"
+                T1."OcrCode", T1."LineStatus",
+                {Queries._order_line_scheme(s)}
             FROM "{s}"."ORDR" AS T0
             INNER JOIN "{s}"."RDR1" AS T1
                 ON T0."DocEntry" = T1."DocEntry"
+            LEFT JOIN "{s}"."OITM" AS T2
+                ON T2."ItemCode" = T1."ItemCode"
             WHERE T1."ItemCode" = ?
               AND T0."CANCELED" = 'N'
               AND T0."DocStatus" = 'O'
@@ -584,7 +648,8 @@ class Queries():
         	T0."U_Variety",
         	T0."U_Sub_Group",
         	T0."U_SKU",
-        	SUM(T1."Quantity") AS "TotalQty"
+        	SUM(T1."Quantity") AS "TotalQty",
+        	{Queries._scheme_from_sub_group(s, 'T0."U_Sub_Group"')} AS "SchemeAgst"
         FROM "{s}"."OITM" AS T0 
         LEFT JOIN "{s}"."OIBT" AS T1
         ON	T0."ItemCode" = T1."ItemCode"
@@ -656,10 +721,13 @@ class Queries():
         every warehouse (~450 items x 58 warehouses), and all but a few hundred
         of those are zeros that would only be summed back to nothing.
         """
-        if branch == 'BEVERAGE':
-            s = Queries.BEVERAGE_SCHEMA
-        else:
-            s = Queries.OIL_SCHEMA
+        # Resolve through the one gate that knows every company DB. The old
+        # `BEVERAGE -> beverage else -> oil` fork silently served OIL data for
+        # a MART request — exactly the cross-company leak _schema_for_branch
+        # exists to prevent (see HanaSchemaError). MART holds warehouse-wise FG
+        # stock the same way, and its OITM carries the same U_* UDFs this query
+        # selects, so no branch-specific SQL is needed.
+        s = Queries._schema_for_branch(branch)
 
         filters = [
             'T0."ItemCode" LIKE \'FG%\'',
@@ -891,9 +959,29 @@ class Queries():
 
     @staticmethod
     def get_batch_details(item_code, whs_code,branch):
+        """Batches of one item in one warehouse that may actually be sold.
+
+        Stock on hand is not the same as sellable stock. OIBT answers "how
+        much is in this warehouse", but whether a batch may leave it lives in
+        the batch master, OBTN."Status": 0 released, 1 not accessible,
+        2 locked. Quality holds and blocked lots sit in OIBT with a positive
+        quantity like anything else.
+
+        Without the join this query offered them to the FEFO picker, which
+        takes the nearest expiry and does not know the difference, and SAP
+        refused the post at the very end -- "batch ... is locked or not
+        accessible" (10001133), and on a second attempt the blanker "No
+        matching records found" (ODBC -2028). Measured on FG0000386 in BH-SC,
+        two of seven batches carried Status 2, and one of them, 160426, held
+        41,890 units with no expiry date, so it sorted first on its in-date
+        and swallowed every allocation the invoice asked for.
+
+        The join is INNER on purpose: a batch row with no master is not one
+        this app may pick either.
+        """
         s = Queries._schema_for_branch(branch)
         return f"""
-        SELECT 
+        SELECT
             T0."SysNumber",
             T0."BatchNum",
             T0."ItemCode",
@@ -905,12 +993,16 @@ class Queries():
             T0."Quantity",
             T0."BaseType",
             T0."BaseNum",
-            T0."BaseEntry" 
-            
+            T0."BaseEntry"
+
         FROM "{s}"."OIBT" AS T0
+        INNER JOIN "{s}"."OBTN" AS T1
+                ON T1."ItemCode" = T0."ItemCode"
+               AND T1."SysNumber" = T0."SysNumber"
         WHERE T0."ItemCode" = ?
           AND T0."WhsCode" = ?
           AND T0."Quantity" > 0
+          AND T1."Status" = '0'
         """, [item_code, whs_code]
         
     @staticmethod

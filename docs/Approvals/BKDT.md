@@ -1,10 +1,11 @@
 # BKDT — BackDate
 
 **BKDT = the BackDate module.** A user asks for permission to post SAP documents
-of one type, in one company, with a posting date inside a bounded past
-window. The request is approved through a configured chain, and the final
-approval writes the grant into SAP's HANA database — SAP first, and the request
-is only marked approved if SAP accepted it.
+of one type, in one or more companies, with a posting date inside a bounded
+past window. The request is approved through a configured chain — ONE chain,
+however many companies it names — and the final approval writes the grant into
+SAP's HANA database, one call per company (§9). SAP first, and the request is
+only marked approved if SAP accepted it.
 
 This document is the technical source of truth for:
 
@@ -37,7 +38,7 @@ approvals document lives under `docs/Approvals/`; there is no copy under
 
 Related documents:
 `docs/Approvals/BKDT_TO_OMS_MIGRATION_PLAN.md` (the migration analysis) and
-`docs/architecture/WORKFLOW_MODULE_INTEGRATION.md` (how any module plugs into
+`docs/Approvals/WORKFLOW_MODULE_INTEGRATION.md` (how any module plugs into
 the engine).
 
 ---
@@ -73,6 +74,105 @@ document, and what stages/users are configured?*
 The engine never calls HANA and never stores a BKDT row. BKDT never decides
 which workflow applies. The only thing crossing the boundary is a stage id.
 **[OMS]**
+
+### 1.1 Eight tables in total
+
+Five belong to the engine and are shared by every Workflow-enabled module.
+Three belong to BKDT alone. A new module adds its own three and reuses the same
+five — see `WORKFLOW_MODULE_INTEGRATION.md` §0.
+
+| Owner | Table | One row per | Written by |
+|---|---|---|---|
+| engine | `workflow.workflow_modules` | module | the module, once, at startup |
+| engine | `workflow.workflows` | approval route | an administrator, in the UI |
+| engine | `workflow.workflow_queries` | condition that picks a route | an administrator |
+| engine | `workflow.workflow_stages` | step in a route | an administrator |
+| engine | `workflow.workflow_user_replacements` | stand-in, for a date window | an administrator |
+| BKDT | `backdate.backdate` | request | the requester, once |
+| BKDT | `backdate.backdate_flow` | request (UNIQUE) | the module, on every move |
+| BKDT | `backdate.backdate_action_logs` | event | the module, append-only |
+
+### 1.2 One request, end to end
+
+A worked example, with the row each step writes. Request #108, OIL, two stages.
+
+**1 — The requester submits.** One row in `backdate.backdate`:
+
+| id | company | sap_username | document_type_name | from_date | to_date | time_limit | action | created_by_id |
+|---|---|---|---|---|---|---|---|---|
+| 108 | OIL | USER01 | G/L Accounts | 2026-09-16 | 2026-09-19 | 2026-09-16 17:30+05:30 | A,U | 1 |
+
+**2 — The engine picks the route.** In the same transaction, BKDT calls
+`select_for_module(module_code='BKDT', document_id=108, company='OIL')`. The
+engine runs every active, validated query belonging to an active BKDT workflow
+and returns the one whose SQL matched. Zero matches or two are both errors, and
+**the request rolls back with them** — a request that cannot be routed is never
+stored. One row in `backdate.backdate_flow`:
+
+| backdate_id | status | workflow_id | current_stage | total_stage | hana_status |
+|---|---|---|---|---|---|
+| 108 | PENDING | 12 | **135** | 2 | NULL |
+
+`current_stage` is the engine's `workflow_stages.id` — the ONLY thing crossing
+the boundary. The approver's name is not stored anywhere on the flow; it is
+resolved from that id on every read, which is why reassigning a stage re-routes
+requests already waiting at it.
+
+**3 — Every event appends to `backdate.backdate_action_logs`:**
+
+| id | backdate_id | action | acted_by_id | stage_id | remarks | action_data |
+|---|---|---|---|---|---|---|
+| 61 | 108 | CREATE | 1 | NULL | month-end close | NULL |
+| 62 | 108 | UPDATE | 8 | NULL | wrong document type | `{"document_type_name": {"old": "Delivery", "new": "G/L Accounts"}}` |
+| 63 | 108 | APPROVE | 8 | 135 | looks right | NULL |
+| 64 | 108 | APPROVE | 9 | 136 | | NULL |
+
+`stage_id` is NULL on CREATE and UPDATE because neither is a stage decision,
+and set on APPROVE and REJECT to the stage being decided. `action_data` is
+populated on UPDATE only, holding **just the fields that changed**, old and new.
+
+**4 — The last approval writes SAP first.** `OPEN_BKDT` is called before the
+flow is marked approved, and only a success commits it. The flow then reads:
+
+| backdate_id | status | current_stage | hana_status | sap_payload | hana_status_text |
+|---|---|---|---|---|---|
+| 108 | APPROVED | NULL | SUCCESS | the 11 parameters sent | what SAP said, as JSON |
+
+`current_stage` and `current_user` both become NULL: nothing is left claiming
+to be waiting.
+
+### 1.3 Where each question is answered
+
+| Question | Read |
+|---|---|
+| What was asked for? | `backdate.backdate` |
+| Where is it now, and who holds it? | `backdate.backdate_flow.current_stage` → `workflow_stages` → `get_stage_assignment()` |
+| Which route applied, and how many steps? | `backdate_flow.workflow_id`, `total_stage` |
+| What has happened to it? | `backdate.backdate_action_logs`, ordered by `acted_at, id` |
+| Who said what, and why? | the same log — `acted_by_id` + `remarks` on each row |
+| What changed in an edit? | that row's `action_data` |
+| Did the rights reach SAP, and what did SAP say? | `backdate_flow.hana_status`, `hana_status_text`, `sap_payload` |
+
+### 1.4 How the log is maintained
+
+Every write goes through one function, `flow.log(...)`, so no caller can invent
+a different shape:
+
+* **Append-only.** Nothing in the module updates or deletes a log row. A
+  correction is a new row, not an edit of an old one.
+* **Four actions**: `CREATE`, `UPDATE`, `APPROVE`, `REJECT`.
+* **`acted_by_id` is always the authenticated user** — never taken from a
+  request body.
+* **`remarks` is event-specific.** The reason for raising, for an edit, an
+  approver's note and a rejection reason are four different statements by up to
+  four different people, so each lives on its own row. There is no remarks
+  column on the request.
+* **`action_data` describes only what moved** — `{field: {old, new}}`, and NULL
+  when nothing tracked changed, so a row never claims an edit it cannot
+  describe.
+* **Stage names and sequences are not copied in.** They resolve through
+  `stage_id`, so a renamed stage reads correctly in old history too.
+* **Order by `acted_at, id`** — there is no stored sequence number.
 
 ---
 
@@ -245,7 +345,8 @@ request** (UNIQUE `backdate_id`).
 `bkdt_flow_stage_idx (current_stage)`, `bkdt_flow_workflow_idx (workflow)`.
 
 `hana_status` has **two** values plus NULL. There is no `PARTIAL`: one request
-is one company and one call, so the call either landed or it did not.
+may be several companies and therefore several calls, so each one's
+outcome is recorded separately (§9).
 
 **`COMPLETED` is a filter, not a status.** `status = APPROVED` **and**
 `hana_status = SUCCESS` — "a person said yes AND the rights are actually in
@@ -451,7 +552,7 @@ One call, from `backdate/services/flow.py`:
 selection.select_for_module(
     module_code='BKDT',
     document_id=backdate.pk,
-    company=backdate.company,     # the request's one company (§9)
+    company=company,              # one call per company (§9)
 )
 ```
 
@@ -546,9 +647,26 @@ on rejection. **[JSAP]**
 
 ### 7.3 Edit
 
-`PATCH /api/backdate/requests/<pk>/` — the requester, and only while nothing has
-been decided. Once any stage has approved, the request is frozen: letting the
-dates move underneath an approval already given would make the record untrue.
+`PATCH /api/backdate/requests/<pk>/`. **Two people may edit a pending request:**
+
+| Who | When |
+|---|---|
+| the **requester** | while nothing has been decided |
+| the **approver currently reviewing it** — the effective user of the stage it waits at | while nothing has been decided, and after a SAP refusal |
+
+The approver is included because they are the one who can see what is wrong
+with it. A document type SAP will not take, or a window off by a day, was
+previously a rejection and a re-raise; now it is a correction followed by an
+approval. The change is logged against **them**, so the record shows an
+approver amended the request rather than implying the requester did.
+
+Holding `BackDate_Approval` is not enough — it must be THIS person's stage.
+`may_edit` calls the same `may_act_on` that decides whether they may approve,
+so the right to correct and the right to decide cannot drift apart.
+
+Once any stage has approved, the request is frozen: letting the dates move
+underneath an approval already given would make the record untrue. A later
+approver editing what an earlier one agreed to is refused with a 409.
 
 **One exception: a request SAP has refused.** While `flow.hana_status = FAILED`
 and the flow is still `PENDING`, the approver currently holding it may edit it
@@ -615,43 +733,157 @@ The single resolution point for all of this is
 
 ---
 
-## 9. One company per request
+## 9. Multi-Company BackDate Behavior
 
-**A BackDate request covers exactly ONE company.** `company` holds one code —
-`OIL`, `BEVERAGES` or `MART` — and a CHECK constraint holds that list.
+**A BackDate request covers ONE OR MORE companies, and is always ONE request.**
+`company` holds a canonical set — `OIL`, `OIL,MART`, `OIL,BEVERAGES,MART` — and
+a CHECK constraint enumerates the seven legal sets.
 
 ```
-ONE OMS request → ONE company → ONE flow → ONE workflow selection
-                                              ↓
-                                       final approval
-                                              ↓
-                                     ONE OPEN_BKDT call
+                       BACKDATE #500
+                            │
+                    company = OIL,MART
+                            │
+                       ONE WORKFLOW
+                            │
+                   ONE APPROVAL CHAIN
+                            │
+                     FINAL APPROVAL
+                            │
+                 ┌──────────┴──────────┐
+               OIL                   MART
+                 │                     │
+            OPEN_BKDT             OPEN_BKDT
+             branch 1              branch 3
+                 │                     │
+          JIVO_OIL_HANADB      JIVO_MART_HANADB
 ```
 
-The API accepts either a bare string or a **one-element list** (the form sends
-its ticked boxes). Two companies is a **400 that says so** — never a silent
-drop of the second:
+Everything above the final approval is singular: one row in
+`backdate.backdate`, one row in `backdate.backdate_flow`, one workflow
+selection, one stage chain, one action-log history, one notification per stage.
+**Only the SAP write fans out.**
 
-> A BackDate request covers ONE company. Raise one request per company.
+### Why this is one request and not several
 
-The page ticks companies in one form and raises one request per ticked company,
-reporting how many were raised. Each is approved on its own and written to its
-own SAP schema, so a refusal in one cannot half-grant another.
+The rights being asked for are the *same* rights in each named database, so
+they are one business decision. Raising one request per company made a single
+decision into two or three approval chains that could be decided differently,
+approved at different times, or left half-finished — and gave the requester
+several request numbers to chase for one question.
 
-| Input | Requests | Flows | HANA calls | HANA rows |
-|---|---|---|---|---|
-| `OIL` + `A` | 1 | 1 | 1 | 1 |
-| `OIL` + `A,U` | 1 | 1 | **1** | 1 |
-| `OIL`, `BEVERAGES` ticked + `A,U` | **2** | 2 | 2 | 2 |
+### Why this used to be forbidden, and what changed
 
-**Action never multiplies anything.** `A,U` is one request with a wider recorded
-scope, because `OPEN_BKDT` has no ACTION parameter — so splitting it would write
-SAP rows identical in every column SAP reads. JSAP stored the pair on one row
-for the same reason (`action = 'A,U'`, 821 rows). **[JSAP]**
+This was deliberately restricted to one company per request, for a real
+reason: **JSAP** also accepted a comma-separated branch list and looped the SAP
+writes, but kept *no per-branch record*. When one company landed and another
+failed there was no way to tell which, and the request reported success.
 
-**Routing consequence.** `company = 'OIL'` is an exact match and matches every
-OIL request, because no request ever names more than one company. There is no
-multi-company workflow to configure and none should be created.
+The answer is to record every call and every answer, which
+`services/hana.apply_grant` already did. A partial outcome is now **visible**
+rather than prevented:
+
+* `hana_status` is `SUCCESS` only when **every** company's call succeeded.
+* One failure makes it `FAILED` — the requester does not have what they asked
+  for until all of them do.
+* `hana_status_text` keeps **each** company's exact answer, so the successful
+  one is not lost because another failed.
+* `sap_payload.calls` keeps **each** company's actual payload.
+
+SAP gives no cross-schema transaction, so a partial outcome is possible and is
+stated plainly instead of being smoothed over.
+
+### Canonical storage
+
+One set has exactly one spelling. `core.companies.canonical_company_set` is the
+only writer: it deduplicates and orders by `COMPANY_CHOICES`
+(`OIL` → `BEVERAGES` → `MART`), so `MART,OIL`, `OIL,MART` and
+`["oil","mart"]` all store `OIL,MART`. The database CHECK enumerates the legal
+sets rather than matching a pattern, so `MART,OIL` and `OIL,OIL` are refused
+by the database as well as the application — a bug cannot write a spelling the
+application would never produce.
+
+The API offers the same fact three ways so no screen splits the string itself:
+
+| Field | Value | Use |
+|---|---|---|
+| `company` | `"OIL,MART"` | the canonical stored value |
+| `companies` | `["OIL","MART"]` | one badge per company |
+| `company_label` | `"Oil, Mart"` | readable, for a detail row or a notification |
+
+### One call per company, same details
+
+Each `OPEN_BKDT` call is built by `build_payload(backdate, company)` from the
+**request**, never from the approval. Only the company's SAP context differs —
+verified by asserting that of the eleven parameters exactly one, `BRANCH`,
+varies between the calls of a multi-company request.
+
+| Company | `BRANCH` | Schema |
+|---|---|---|
+| `OIL` | 1 | `JIVO_OIL_HANADB` |
+| `BEVERAGES` | 2 | `JIVO_BEVERAGES_HANADB` |
+| `MART` | 3 | `JIVO_MART_HANADB` |
+
+`USERID`, `TRANSTYPE`, `FROMDATE`, `TODATE`, `TIMELIMIT`, `RIGHTS`,
+`CREATEDBY`, `CREATEDON`, `DELETEDBY` and `DELETEDON` are identical across the
+calls. The mapping lives in `services/hana._BRANCH_NAME` and the schema
+resolution in `Queries._schema_for_branch`; neither is duplicated here.
+
+**One thing a multi-company request cannot check for you.** The SAP user and
+document type are picked from *one* company's masters (the first selected).
+Document types are safe — the same 75 objects with the same names exist in all
+three schemas — but a SAP *login* that exists in OIL need not exist in MART.
+Both create forms say so when more than one company is ticked. An unknown
+login fails only its own company's call, with SAP's own message recorded
+against it.
+
+| Input | Requests | Flows | Workflows | Approval chains | `OPEN_BKDT` calls |
+|---|---|---|---|---|---|
+| `OIL` + `A` | 1 | 1 | 1 | 1 | 1 |
+| `OIL` + `A,U` | 1 | 1 | 1 | 1 | **1** |
+| `OIL,MART` + `A,U` | **1** | **1** | **1** | **1** | **2** |
+| `OIL,BEVERAGES,MART` + `A,U` | **1** | **1** | **1** | **1** | **3** |
+
+**Action never multiplies anything.** `A,U` is one request with a wider
+recorded scope, because `OPEN_BKDT` has no ACTION parameter — so splitting it
+would write SAP rows identical in every column SAP reads.
+
+Confirmed against live JSAP data rather than assumed: 12 recent JSAP entries
+were correlated to their live HANA rows, and every `A,U` entry produced
+**exactly one** row — the same count as an `A`-only entry. Across all of JSAP
+823 entries are `A,U` and a further 150 are `U,A` (the same choice, spelled the
+other way round); none of them doubles up. **[JSAP]** OMS normalises to `A,U`,
+so one choice has one spelling and a diff never reports a reordering as a
+change.
+
+### Routing consequence
+
+`company = 'OIL'` is an exact match and therefore matches **only**
+single-company OIL requests. A request naming several companies needs a query
+that recognises a set — the established pattern is:
+
+```sql
+SELECT id FROM backdate.backdate WHERE company LIKE '%,%'
+```
+
+Two such workflows already exist (`BKDT_MULTI`, `BACKDATE_MULTI_COMPANY`).
+
+> **Configuration warning.** A multi-company workflow only takes effect once
+> its workflow is active, and the engine **refuses ambiguity**: if two
+> workflows match one request it raises `AmbiguousWorkflowSelection` and the
+> submission fails. `BKDT_OIL_BEFORE` and `BKDT_OIL_AFTER` currently have no
+> `WHERE` clause at all, so they match *every* request — activating a
+> multi-company workflow alongside them would make every multi-company submit
+> fail until their queries filter by company. Fix the queries first, then
+> activate.
+
+### Editing the company set
+
+`company` is **not** editable after submission, and that is deliberate: it
+decides which workflow applies and the request has already been routed by it.
+Changing it would either leave the flow pointing at a workflow chosen for a
+different set, or move the request to different approvers mid-decision.
+Raising a new request is the honest way to ask for a different set.
 
 ---
 
@@ -713,7 +945,7 @@ raise"**. That is a property of the procedure, not an omission.
 
 | Parameter | Source | Note |
 |---|---|---|
-| `BRANCH` | the company NAME (`OIL`/`BEVERAGES`/`MART`) | the request's one company |
+| `BRANCH` | the company NAME (`OIL`/`BEVERAGES`/`MART`) | the company of THIS call (§9) |
 | `USERID` | `backdate.sap_username` | truncated to 20 |
 | `TRANSTYPE` | resolved from `document_type_name` via `MOBJ` at call time | real int; never stored |
 | `FROMDATE` / `TODATE` | `from_date` / `to_date` | real `date` objects |
@@ -733,6 +965,138 @@ approving. **[JSAP]** The approver is not lost: they are in
 
 `RIGHTS` is always `'NO'`, which is what JSAP always sent. **[JSAP]** Whether SAP
 expects something else for UPDATE is **[UNKNOWN]** — do not invent a value.
+
+### 11.2.1 The SAP row carries the OMS request id
+
+`OPEN_BKDT` inserts 11 columns and never writes `BKDT."id"`, so **every row it
+has ever written has `id = NULL`** — 1,292 of them across the three live
+schemas, with nothing tying a SAP row back to the request that asked for it.
+Finding one meant matching on `userid` + `createdOn` and hoping. **[JSAP]**
+
+After a successful call this module stamps the OMS request id into that column:
+
+```sql
+UPDATE "<schema>"."BKDT" SET "id" = ?
+WHERE "id" IS NULL AND "userid" = ? AND "createdOn" = ?
+```
+
+so a row is then findable directly:
+
+```sql
+SELECT * FROM "JIVO_OIL_HANADB"."BKDT" WHERE "id" = 108;
+```
+
+Each entry in `hana_status_text` carries **`sap_row_id`** — the id written, or
+`null` where it could not be. The `response` sentence stays one sentence: what
+SAP accepted, or on a refusal its exact error. The lookup query is NOT embedded
+in it; a query pasted into the middle of a response buries the one thing an
+approver is reading it for. The query lives in the runbook (§18.4), where
+somebody is actually looking for one, and the page shows the id as its own
+**SAP row id** field.
+
+**The match is the WHOLE row, not a convenient corner of it.**
+`("userid", "createdOn")` alone is NOT unique here: JSAP truncates `createdOn`
+to the whole second — 536 of 641 live OIL rows have no sub-second part, some are
+`00:00:00` — and live OIL already holds **44 duplicated pairs** (BEVERAGES 25,
+MART 8). An OMS timestamp landing exactly on a whole second is improbable, not
+impossible, so the `WHERE` names every column `OPEN_BKDT` was just given:
+`branch`, `userid`, `transtype`, `fromDate`, `toDate`, `timeLimit`, `rights`,
+`createdBy`, `createdOn`. A false match would have to be identical in all nine,
+which makes it indistinguishable from the row we wrote. Proved with a decoy row
+sharing `userid` and `createdOn` to the microsecond: only ours was tagged. **[OMS]**
+
+**Checked before writing anything to that column [OMS]:**
+
+| Question | Answer |
+|---|---|
+| Is `id` constrained? | Plain nullable INTEGER — no default, no generated value |
+| Does `BKDT` have a key? | **No** primary key, **no** unique index, **no** constraint at all |
+| Does SAP READ it? | `SBO_SP_TRANSACTIONNOTIFICATION` has 14 BKDT lookups and references `id` in **none** of them — writing it cannot change what SAP permits |
+| Is there an existing scheme? | The only 6 non-NULL ids in live data are all the literal `70`, left by an older tool. The `"id" IS NULL` guard never touches them |
+
+**Why a second statement and not a 12th parameter.** `OPEN_BKDT` is SHARED WITH
+JSAP. A defaulted 12th parameter WOULD be backward compatible — verified on a
+throwaway probe: HANA accepts a call that omits a trailing defaulted `IN`
+parameter, so JSAP's 11-argument calls would keep working. **[OMS]** It is still
+not worth doing:
+
+* `OPEN_BKDT` exists as **six independent objects** (3 live + 3 test) that would
+  all have to be replaced and stay in step; drift means one company silently
+  behaving differently.
+* `CREATE OR REPLACE` needs `CREATE ANY` on the schema, which the connected user
+  has on `TEST_JIVO_OIL_HANADB` only — live needs the SAP owner and change
+  control either way.
+* JSAP would keep calling with 11 arguments and keep writing NULL, so `BKDT`
+  ends up half-tagged regardless.
+* A botched replace stops backdate grants for **both** systems in that company.
+  A failed `UPDATE` can only fail to label a row.
+
+An `UPDATE` needs no SAP object change and leaves JSAP untouched.
+
+**It is best effort, and that is load-bearing.** Past the `CALL` the rights
+EXIST in SAP. Labelling must never be able to turn a real grant into a reported
+failure, so the stamp is wrapped at the call site as well as inside the helper —
+belt and braces, because the failure being guarded against is telling an
+approver their grant was refused after SAP had already given it. When the stamp
+does not land, the recorded response says so plainly rather than implying a tag
+that is not there.
+
+**WHERE IT DOES NOT HAPPEN, AND WHY THAT IS FINE.** The tag needs `UPDATE` on
+the schema. The connected HANA user holds it on five of the six BKDT schemas but
+**not on live `JIVO_BEVERAGES_HANADB`**, and that grant is not going to be
+given. **[OMS]**
+
+| schema | SELECT | INSERT | UPDATE | tagging |
+|---|---|---|---|---|
+| TEST_JIVO_OIL / BEVERAGES / MART | yes | yes | yes | works |
+| JIVO_OIL_HANADB | yes | yes | yes | works |
+| **JIVO_BEVERAGES_HANADB** | yes | yes | **no** | **rows keep `id = NULL`** |
+| JIVO_MART_HANADB | yes | yes | yes | works |
+
+So in production **BEVERAGES grants are correct but untagged**, and that is a
+permanent, expected state — not a fault to chase. Three things make it safe:
+
+1. **A refused tag cannot take the grant with it.** `HANAConnection.execute`
+   commits a statement returning no result set, so the `CALL` has already
+   committed before the `UPDATE` runs; the rollback that follows a failure
+   undoes nothing. Verified against a real failure, not reasoned about.
+2. **The schema is remembered** (`_TAGGING_REFUSED`), so a statement that cannot
+   succeed is attempted once per process rather than on every approval. Learned
+   rather than configured — a hard-coded list would be a second copy of the
+   deployment's privileges to keep in step — and cleared by a restart, so if the
+   grant is ever given, tagging simply starts working.
+3. **`sap_row_id` is simply `null`** on such a row. The response sentence is
+   unchanged either way — where the row is, is a field, not a paragraph.
+
+**Matching.** `createdOn` is the request's own timestamp to the microsecond, so
+the pair identifies one request. If a request somehow wrote two rows (SAP has no
+unique constraint to prevent it — see §18.4) BOTH receive the same id, which is
+exactly how a duplicate should surface.
+
+### 11.2.2 Clocks
+
+`BKDT."timeLimit"` and `"createdOn"` are bare TIMESTAMPs with no zone, and SAP's
+posting validator compares `timeLimit` against **`CURRENT_TIMESTAMP` — the HANA
+server's own clock, which runs at UTC+05:30**. Measured, not assumed:
+`CURRENT_TIMESTAMP` 12:43 against `CURRENT_UTCTIMESTAMP` 07:13. **[OMS]**
+
+JSAP has always written local time here: its `userDocument.timeLimit` and the
+HANA row it produced are identical to the second on live rows. **[JSAP]** OMS
+stores timestamps as UTC, so both are converted to SAP's wall clock on the way
+out — `services.hana.to_sap_clock`, driven by `SAP_TIME_ZONE`
+(default `Asia/Kolkata`). Every call also re-reads the server's real offset and
+logs an error if it has drifted from the setting, because a silent mismatch
+would put every expiry out by hours.
+
+The same clock has to be right on the way IN. `<input type="datetime-local">`
+yields a wall clock with no zone (`"2026-09-16T14:00"`), and a zoneless
+timestamp is read as UTC — so the page converts it to the instant it denotes
+before sending. The number is then identical at every step:
+
+```
+user types 14:00 IST → page sends 08:30Z → Postgres 08:30+00:00
+                     → SAP holds 14:00   → page shows 14:00
+```
 
 ### 11.3 Why `time_limit` is mandatory
 
@@ -873,7 +1237,8 @@ WHERE company = 'OIL'
 
 ### 12.4 Matching a company
 
-One request names one company (§9), so the match is plain equality:
+A request may name a SET of companies (§9), so equality matches only the
+single-company case:
 
 ```sql
 WHERE company = 'OIL'
@@ -1172,11 +1537,39 @@ WHERE backdate_id = :id;
 
 ### 18.4 Did the row reach SAP?
 
+Rows written by THIS module carry the request id (§11.2.1), so start there:
+
+```sql
+SELECT * FROM "TEST_JIVO_OIL_HANADB"."BKDT" WHERE "id" = 108;
+```
+
+For a row written before that — or by JSAP, which leaves `id` NULL:
+
 ```sql
 SELECT * FROM "TEST_JIVO_OIL_HANADB"."BKDT"
 WHERE "userid" = 'USER01'
 ORDER BY "createdOn" DESC;
 ```
+
+**`BKDT` IS THREE TABLES, ONE PER COMPANY.** A request for BEVERAGES is not in
+the OIL schema, and querying one schema after raising requests across several
+is the usual reason entries look "missing". To see them all at once:
+
+```sql
+SELECT 'OIL' AS "COMPANY", "id", "userid", "transtype", "createdOn"
+FROM "TEST_JIVO_OIL_HANADB"."BKDT"       WHERE "createdOn" >= '2026-09-16'
+UNION ALL
+SELECT 'BEVERAGES', "id", "userid", "transtype", "createdOn"
+FROM "TEST_JIVO_BEVERAGES_HANADB"."BKDT" WHERE "createdOn" >= '2026-09-16'
+UNION ALL
+SELECT 'MART', "id", "userid", "transtype", "createdOn"
+FROM "TEST_JIVO_MART_HANADB"."BKDT"      WHERE "createdOn" >= '2026-09-16'
+ORDER BY "createdOn" DESC;
+```
+
+The other reason a row is absent is simply that the request is not finished:
+SAP is written on the FINAL approval only, so anything still `PENDING` has no
+row and should not have one.
 
 **Order by `createdOn`, never by `id`.** The HANA `BKDT.id` column has no
 identity or default and `OPEN_BKDT` never sets it, so every row the procedure

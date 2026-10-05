@@ -27,14 +27,20 @@ so the fallback stays until the bundle is ticked on the Role Permissions
 matrix and verified live. Then every gate here drops to `HasKey('Legal')`.
 """
 import logging
+import mimetypes
 
-from django.shortcuts import render
+from django.core.files.storage import default_storage
+from django.http import FileResponse
+from django.shortcuts import get_object_or_404, redirect, render
 from rest_framework.views import APIView
 from rest_framework import status
+from .metrology import PackageSpec
 from .service import LabelCheckError, run_label_check
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from core.permissions import HasKeyOrRole
+from core.responses import fail
+from . import previews
 from .serializers import (ComplianceRuleSerializer, LabelCheckDetailSerializer,
     LabelCheckListSerializer, LabelUploadSerializer, LabelItemSerializer ,
     NutritionUOMSerializer , LabelNutritionSerializers)
@@ -76,7 +82,14 @@ class FeedtoAIView(LegalEndpointGate, APIView):
          "findings": [{"rule_id", "rule_name", "status", "remarks",
                        "ocr_verified"}],
          "summary": {"total", "passed", "failed", "compliant"},
-         "ocr_available": bool, "rule_count": int}
+         "ocr_available": bool, "rule_count": int,
+         "skipped": [{"rule_id", "rule_name", "reason"}],
+         "package_spec": {...} | null}
+
+    `skipped` is the measurement rules that did not apply to this pack — an
+    unfortified product does not fail the fortification rules, it is not asked
+    them. `rule_count` stays the count of ACTIVE rules, so the two together
+    say "21 of 26 checked, and here is why the other five were not".
 
     `ocr_text` is deliberately NOT returned. It is stored (for explaining a
     finding later) but it is a page of OCR noise that no reviewer reads, and
@@ -109,8 +122,17 @@ class FeedtoAIView(LegalEndpointGate, APIView):
         instance = serializer.save()
 
         try:
-            report = run_label_check(instance.label_file.path,
-                                     request.data.get('item_id'))
+            report = run_label_check(
+                instance.label_file.path,
+                request.data.get('item_id'),
+                # The physical facts the artwork cannot supply. Parsed
+                # tolerantly (`PackageSpec.from_request` keeps anything blank
+                # or unparseable as None) rather than validated into a 400:
+                # the dimensional rules are optional, and refusing an upload
+                # over a mistyped circumference would cost the reviewer the
+                # twenty-one checks that do not need it.
+                spec=PackageSpec.from_request(request.data),
+            )
         except LabelCheckError as exc:
             # The upload row stays: a failed check is worth being able to look
             # at afterwards, and the file is already on disk either way.
@@ -128,6 +150,11 @@ class FeedtoAIView(LegalEndpointGate, APIView):
             'summary': report['summary'],
             'ocr_available': report['ocr_available'],
             'rule_count': report['rule_count'],
+            # Stored, not merely returned: a dimensional finding is
+            # unexplainable without the dimensions it was computed from, and
+            # a reopened check that cannot explain itself is not a record.
+            'skipped': report['skipped'],
+            'package_spec': report['package_spec'],
         }
         instance.preview_image = report.get('preview_url') or ''
         instance.checked_by = request.user if request.user.is_authenticated else None
@@ -145,15 +172,20 @@ class FeedtoAIView(LegalEndpointGate, APIView):
         return Response({
             'success': True,
             'file': instance.label_file.name,
-            # The rasterised preview, not the upload: a PDF cannot be shown in
-            # an <img>, and that is the common case. Falls back to the original
-            # when the preview could not be written — for an image upload that
-            # is still displayable.
-            'image_url': report.get('preview_url') or instance.label_file.url,
+            # The rasterised preview, not the upload: a PDF cannot be shown
+            # in an <img>, and that is the common case. Resolved through
+            # `previews` rather than from `report['preview_url']` directly, so
+            # a fresh check and a reopened one name the SAME url — and so this
+            # response stops handing back a `/media/` path, which no deployed
+            # build serves. The fallback to the upload lives there too, and
+            # applies only when the upload is itself an image.
+            'image_url': previews.image_url(instance),
             'findings': report['findings'],
             'summary': report['summary'],
             'ocr_available': report['ocr_available'],
             'rule_count': report['rule_count'],
+            'skipped': report['skipped'],
+            'package_spec': report['package_spec'],
         }, status=status.HTTP_201_CREATED)
 
 
@@ -217,6 +249,58 @@ class LabelCheckDetailView(LegalEndpointGate, generics.RetrieveAPIView):
     queryset = LabelData.objects.select_related('checked_by', 'label_item')
     serializer_class = LabelCheckDetailSerializer
     lookup_field = 'id'
+
+
+class LabelPreviewView(LegalEndpointGate, APIView):
+    """Stream one check's label artwork, behind the module's gate.
+
+    WHY THIS EXISTS AT ALL, rather than a media URL: `OMS/urls.py` serves
+    `MEDIA_URL` only under `DEBUG`, so `/media/labels/previews/x.png` is a 404
+    in every deployed build and the report rendered beside a broken image icon
+    on the one machine where it is actually read. `legal/previews.py` has the
+    long version, including why unconditional media serving was the wrong fix.
+
+    Inline, unlike `AttachmentDownloadView` — this is an `<img>` the reviewer
+    is looking at, not a file they asked to keep. `nosniff` still applies: the
+    type comes from a filename, and a filename is not a guarantee.
+    """
+
+    def get(self, request, id):
+        check = get_object_or_404(LabelData, id=id)
+        resolved = previews.resolve(check)
+
+        if not resolved:
+            # The same '' the serializer reports, as a status code. Not a 500:
+            # a check that predates stored previews is an ordinary, expected
+            # row, and the page already has wording for it.
+            return fail('No stored artwork for this check.',
+                        status=status.HTTP_404_NOT_FOUND)
+
+        if previews.is_remote(resolved):
+            # Remote storage: the serializer hands that URL to the browser
+            # directly and never names this view, so arriving here means a
+            # client built the URL itself. Send it where the bytes are.
+            return redirect(resolved)
+
+        try:
+            handle = default_storage.open(resolved, 'rb')
+        except FileNotFoundError:
+            # `previews.resolve` confirmed the file a moment ago, so this is a
+            # race or a cleanup, not the predates-previews case above.
+            logger.warning('Label preview %s vanished between check and open '
+                           'for check %s', resolved, id)
+            return fail('The stored artwork could not be read.',
+                        status=status.HTTP_404_NOT_FOUND)
+
+        content_type = mimetypes.guess_type(resolved)[0] or 'application/octet-stream'
+        response = FileResponse(handle, content_type=content_type)
+        response['X-Content-Type-Options'] = 'nosniff'
+        # Private, because the gate above is the whole point: a shared proxy
+        # must not hand one reviewer's artwork to the next request. Long-lived
+        # because the bytes never change — a preview is written once under a
+        # de-duplicated name and is never rewritten.
+        response['Cache-Control'] = 'private, max-age=86400'
+        return response
 
 
 class ComplianceRuleDetailView(LegalEndpointGate, generics.RetrieveUpdateDestroyAPIView):

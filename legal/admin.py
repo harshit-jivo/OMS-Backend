@@ -17,25 +17,39 @@ from .models import ComplianceRule, LabelData
 
 @admin.register(ComplianceRule)
 class ComplianceRuleAdmin(admin.ModelAdmin):
-    list_display = ('sort_order', 'code', 'name', 'is_active', 'is_critical',
-                    'updated_at')
+    list_display = ('sort_order', 'code', 'name', 'check_type', 'is_active',
+                    'is_critical', 'updated_at')
     list_display_links = ('code', 'name')
     # The two fields most often changed in bulk: turning a rule off, and
     # moving it up the checklist.
     list_editable = ('sort_order', 'is_active')
-    list_filter = ('is_active', 'is_critical')
+    list_filter = ('check_type', 'is_active', 'is_critical')
     search_fields = ('code', 'name', 'rule_text')
     ordering = ('sort_order', 'code')
     readonly_fields = ('created_at', 'updated_at')
 
     fieldsets = (
         (None, {
-            'fields': ('code', 'name', 'rule_text'),
+            'fields': ('code', 'name', 'check_type', 'rule_text'),
             'description':
                 'Write the rule the way you would explain it to a reviewer. '
                 'The sentence is sent to the AI verbatim, so wording is the '
                 'whole configuration — be specific about what counts as a '
                 'failure, and ask for the label wording to be quoted back.',
+        }),
+        ('Measurement rules', {
+            'fields': ('params',),
+            'description':
+                'Only for rules whose type is Measurement. Those are computed '
+                'from the package dimensions entered on the check form and are '
+                'never sent to the AI, so their rule text is documentation '
+                'rather than a prompt — and their CODE selects which '
+                'measurement runs. Use only codes the backend implements '
+                '(PDP_AREA, SMALL_PACKAGE_PDP, VEG_MARK_SIZE, FORT_LOGO_SIZE, '
+                'FORT_LOGO_COLOUR); any other code reports itself as '
+                'unimplemented rather than passing quietly. Params are '
+                'per-check settings, e.g. {"tolerance_de": 10}.',
+            'classes': ('collapse',),
         }),
         ('OCR cross-check', {
             'fields': ('critical_tokens', 'is_critical'),
@@ -45,7 +59,9 @@ class ComplianceRuleAdmin(admin.ModelAdmin):
                 'label, e.g. ["Best Before"] — matching tolerates OCR errors. '
                 'A PASS is only ever overturned to FAIL when the rule is '
                 'ALSO marked critical, because OCR misses small print and a '
-                'false failure costs a reviewer more than an unverified pass.',
+                'false failure costs a reviewer more than an unverified pass. '
+                'Both are ignored for a measurement rule: there is no model '
+                'verdict to cross-check.',
         }),
         ('Checklist', {'fields': ('is_active', 'sort_order')}),
         ('History', {'fields': ('created_at', 'updated_at'),

@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView , InvoiceRefLogCreateView ,UpdateInvoiceLogView , CreditLimitCardsView , CreditLimitRequestView ,GetCreditLimitJSAPFlow ,GetPrintReport , InvoiceLogListwoWhsView , InvoiceLogDeleteView , UsedSalesOrdersView , ReservedBatchesView
+from .views import InvoiceLogCreateView , InvoiceLogListView , InvoicelogStatusUpdateView ,InvoiceHistoryView , InvoiceRefLogCreateView ,UpdateInvoiceLogView , CreditLimitCardsView , CreditLimitRequestView ,GetCreditLimitJSAPFlow ,GetPrintReport , InvoiceLogListwoWhsView , InvoiceLogDeleteView , InvoicePostToSapView , UsedSalesOrdersView , ReservedBatchesView
 
 urlpatterns = [
     path('pending/', InvoiceLogCreateView.as_view(), name='invoice-log-pending'),
@@ -7,6 +7,8 @@ urlpatterns = [
     path('refLogs/' , InvoiceRefLogCreateView.as_view() ),
     path('history/<int:pk>/', InvoiceHistoryView.as_view(), name='invoice-history'),
     path('<int:pk>/update-status/', InvoicelogStatusUpdateView.as_view(), name='invoice-log-update-status'),
+    # The one way an invoice reaches SAP: posts the stored payload, records the outcome.
+    path('<int:pk>/post-to-sap/', InvoicePostToSapView.as_view(), name='invoice-log-post-to-sap'),
     # DELETE removes the entry from the review screen; POST restores it.
     path('<int:pk>/delete/', InvoiceLogDeleteView.as_view(), name='invoice-log-delete'),
     path('log/<int:id>/' , UpdateInvoiceLogView.as_view()),

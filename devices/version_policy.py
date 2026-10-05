@@ -4,8 +4,9 @@ Two mobile platforms (ANDROID, IOS) can be version-gated; the web never is.
 The middleware reads the version headers the mobile client already sends
 (``X-Platform`` / ``X-Build-Number`` / ``X-App-Version``) and, when an active
 :class:`~devices.models.VersionPolicy` exists for that platform, requires the
-client to be on the EXACT required build and version. A mismatch returns HTTP
+client's build to be AT LEAST the required build. A client below it gets HTTP
 426 with an ``APP_UPDATE_REQUIRED`` body so the app can show an update screen.
+Clearing the required build switches the gate off for that platform.
 
 Kept out of ``models.py`` / ``admin_views.py`` so the enforcement path is small
 and self-contained.
@@ -62,10 +63,22 @@ def evaluate(platform, build_number, app_version, policies=None):
     policy, else ``None`` (allowed through).
 
     Rules, in order:
-      * platform not gated (web/desktop/unknown) -> None
-      * no active policy for the platform        -> None (nothing to enforce)
-      * build == required AND version == required -> None (up to date)
-      * otherwise                                -> update-required payload
+      * platform not gated (web/desktop/unknown)  -> None
+      * no active policy for the platform         -> None (nothing to enforce)
+      * policy has no required_build (blank)      -> None (gate switched off)
+      * build >= required_build                   -> None (up to date)
+      * otherwise                                 -> update-required payload
+
+    The comparison is a MINIMUM on the build number, and the version label is
+    never compared. Both of those are fixes, not preferences:
+
+    * This was `build == required`, so a device on a NEWER build than the
+      policy was told to update -- with nothing newer to install, it could
+      never clear. Anyone who took a Play Store update before the admin bumped
+      the policy was locked out of the app entirely.
+    * `required_version` was also compared as a STRING, so "1.0.10" != "1.0.9"
+      blocked a device that was ahead on both counts. The version is a label
+      for humans; the build is the orderable one.
     """
     if platform not in GATED_PLATFORMS:
         return None
@@ -75,20 +88,22 @@ def evaluate(platform, build_number, app_version, policies=None):
     if not policy:
         return None
 
+    # A blank required_build switches the gate off for this platform, letting
+    # every version through. That is the intended escape hatch: an admin clears
+    # the field when a bad policy is locking people out.
+    required_build = policy.get("required_build")
+    if required_build in (None, ""):
+        return None
+
     # The client's build must parse to an int to be comparable. A missing or
-    # unparseable build fails the check (treated as "not the required build")
-    # rather than being waved through — the header is required for gated apps.
+    # unparseable build fails the check (treated as below the floor) rather
+    # than being waved through — the header is required for gated apps.
     try:
         client_build = int(str(build_number).strip())
     except (TypeError, ValueError):
         client_build = None
 
-    up_to_date = (
-        client_build is not None
-        and client_build == policy["required_build"]
-        and str(app_version or "").strip() == policy["required_version"]
-    )
-    if up_to_date:
+    if client_build is not None and client_build >= int(required_build):
         return None
 
     return {

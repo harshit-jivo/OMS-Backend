@@ -29,6 +29,7 @@ from .models import (
     PaymentReceipt,
 )
 from .permissions import PAYMENTS_DASHBOARD, granted_keys
+from .tests_support import uniq
 from .views import (
     CollectionPerformanceView,
     PaymentDashboardView,
@@ -96,7 +97,7 @@ class ParticipationTests(DashboardFixtureMixin, TestCase):
     def test_a_receipt_creator_is_listed(self):
         """Path 3: the login that recorded the receipt."""
         user = get_user_model().objects.create_user(
-            username='dash-recorder', password='x')
+            username=uniq('dash-recorder-'), password='x')
         self.receipt(1000, creator=user)
 
         row = {r['key']: r for r in self.people()}[f'user:{user.id}']
@@ -106,7 +107,7 @@ class ParticipationTests(DashboardFixtureMixin, TestCase):
     def test_a_deposit_submitter_is_listed(self):
         """Path 4: the login that raised the deposit."""
         user = get_user_model().objects.create_user(
-            username='dash-submitter', password='x')
+            username=uniq('dash-submitter-'), password='x')
         self.deposit(500, creator=user)
 
         row = {r['key']: r for r in self.people()}[f'user:{user.id}']
@@ -129,7 +130,7 @@ class ParticipationTests(DashboardFixtureMixin, TestCase):
         people. A bare integer key would merge them and double one figure.
         """
         user = get_user_model().objects.create_user(
-            username='dash-collides', password='x')
+            username=uniq('dash-collides-'), password='x')
         CollectionPerson.objects.filter(pk=self.person.pk).update(id=user.id)
         person = CollectionPerson.objects.get(pk=user.id)
 
@@ -260,7 +261,7 @@ class PersonDetailTests(DashboardFixtureMixin, TestCase):
     def test_a_user_drilldown_reads_created_by_not_the_person_link(self):
         """kind decides WHICH relationship is being asked about."""
         user = get_user_model().objects.create_user(
-            username='dash-detail-user', password='x')
+            username=uniq('dash-detail-user-'), password='x')
         self.receipt(800, creator=user)
         self.receipt(250, person=self.person)      # different participant
 
@@ -318,17 +319,17 @@ class DashboardPermissionTests(TestCase):
     def setUpTestData(cls):
         User = get_user_model()
         cls.granted = User.objects.create_user(
-            username='dash-perm-granted', password='x',
+            username=uniq('dash-perm-granted-'), password='x',
             extra_pages=[PAYMENTS_DASHBOARD])
         # Every ACTION permission but NOT the dashboard grant.
         cls.worker = User.objects.create_user(
-            username='dash-perm-worker', password='x',
+            username=uniq('dash-perm-worker-'), password='x',
             extra_pages=['Payments_Create', 'Payments_Approve',
                          'Deposit_Create', 'Deposit_Approve'])
         cls.nobody = User.objects.create_user(
-            username='dash-perm-nobody', password='x', extra_pages=[])
+            username=uniq('dash-perm-nobody-'), password='x', extra_pages=[])
         cls.admin = User.objects.create_user(
-            username='dash-perm-admin', password='x', is_superuser=True)
+            username=uniq('dash-perm-admin-'), password='x', is_superuser=True)
 
     def call(self, view, user, path='/api/payments/dashboard/', **kwargs):
         request = APIRequestFactory().get(path)

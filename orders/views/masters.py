@@ -15,7 +15,6 @@ behind — the closure came back empty in both directions.
 from urllib import request
 import re
 from drf_spectacular.utils import (
-    OpenApiParameter,
     OpenApiResponse,
     extend_schema,
     extend_schema_serializer,
@@ -626,64 +625,57 @@ class ProductListView(APIView):
 
 
 @extend_schema(
-    parameters=[
-        OpenApiParameter(
-            name='category',
-            description="Business line to list branches for — OIL, BEVERAGES "
-                        "or MART, matching the party's own category. Omitted "
-                        "or blank returns every active branch across all "
-                        "three, in which case `bpl_id` REPEATS (it is unique "
-                        "only within a category) and a client must key on "
-                        "(category, bpl_id).",
-            required=False,
-            type=str,
-        ),
-    ],
     responses={200: _OrdersBranchSchema(many=True)},
-    description='Dispatch locations for the "dispatch from" selector, for one '
-                'business line. A bare array. Note `bpl_id` is a STRING here '
-                'even though the column is an integer — see `orders.'
-                'serializers.BranchSerializer` for why that is deliberate.',
+    description='Every active dispatch location for the "dispatch from" '
+                'selector, deduplicated by name (DISTINCT ON bpl_name). A bare '
+                'array. Note `bpl_id` is a STRING here even though the column '
+                'is an integer — see `orders.serializers.BranchSerializer` for '
+                'why that is deliberate.',
 )
 class BranchView(APIView):
-    """Dispatch locations, for the "dispatch from" selector.
+    """Every active dispatch location, for the "dispatch from" selector.
 
     Reads `sap_sync.Branch` — the model the SAP sync writes and the one that
     matches the table. It used to read `orders.Branches`, a second unmanaged
     model on the same table that declared every column wrongly.
 
-    Narrowed by `?category=`, which is the same OIL/BEVERAGES/MART value the
-    party carries, so the selector offers the branches belonging to the
-    order's business line.
+    It used to return only branches named FACTORY. The form now lists them
+    all and picks the factory as the default itself, so a depot or a second
+    plant can be chosen when an order really ships from there.
 
-    This used to filter `bpl_name__icontains='FACTORY'` and then collapse the
-    result with `.distinct('bpl_name')`, on the assumption that a "dispatch
-    location" is a factory and that one physical factory merely repeats across
-    the three company databases. Neither holds:
-
-    * Only OIL and BEVERAGES have a branch named FACTORY. MART has none, so a
-      Mart order was offered nothing at all.
-    * Those two rows are both named exactly 'FACTORY', so DISTINCT ON
-      (bpl_name) treated them as one place and dropped the second. They are
-      not one place — they are two business lines' branches that happen to
-      share a name.
-
-    Together those two lines turned 22 rows into 1. Branches are already
-    distinct within a category, so there is nothing to de-duplicate once the
-    category is known; the filter does the narrowing the DISTINCT was
-    reaching for.
+    `distinct('bpl_name')` is deliberate and Postgres-specific (DISTINCT ON):
+    the table is unique on (bpl_id, category), so one physical branch appears
+    once per company DB it exists in, and the selector wants it once.
     """
 
     def get(self, request):
-        branches = Branch.objects.filter(is_active=True)
-
-        category = str(request.query_params.get('category') or '').strip().upper()
-        if category:
-            branches = branches.filter(category=category)
-
-        serializer = BranchSerializer(branches.order_by('category', 'bpl_id'),
-                                      many=True)
+        branches = (Branch.objects
+                    .filter(is_active=True)
+                    .order_by("bpl_name")
+                    .distinct('bpl_name'))
+        serializer = BranchSerializer(branches, many=True)
         return Response(serializer.data)
+
+
+class OrderDefaultsView(APIView):
+    """What a new order starts with, read from the environment.
+
+    The warehouse default lives in `HANA_WAREHOUSE_CODE` (and the beverages
+    variant) and is applied by the SAP push when an order carries none. The
+    order form used to hardcode its own idea of the default, which is how an
+    order could show one warehouse on screen and ship from another. This
+    hands the form the same answer the push would give, per category.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from sap_sync.services.sync_service import default_warehouse_code_for_category
+        return Response({
+            'warehouse_code': {
+                category: default_warehouse_code_for_category(category)
+                for category in ('OIL', 'BEVERAGES', 'MART')
+            },
+        })
 
 
 class StaffProductsAPIView(APIView):
