@@ -22,7 +22,7 @@ def page_link(user, page):
     """The relative link (on this backend) that opens `page` for `user`."""
     if page not in PAGES:
         raise NotAllowed(f'Unknown Control Panel page {page!r}.')
-    path, page_keys = PAGES[page]
-    if not set(page_keys) & set(cp_keys(user)):
+    path, key = PAGES[page]
+    if key not in cp_keys(user):
         raise NotAllowed('You do not have access to this Control Panel page.')
     return f'/cp/session/?ticket={oms_session.issue(user, path)}'

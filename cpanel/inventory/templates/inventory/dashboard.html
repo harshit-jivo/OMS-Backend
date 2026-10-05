@@ -3613,52 +3613,30 @@
     }
 
     // ── AUTH ──
-    const ADMIN_USER = 'admin', ADMIN_PASS = 'jivoadmin';
+    // Values are shown to users with Inventory › Show values (₹) (C_Panel's
+    // inventory_admin; `can_manage`), who can also hide them with the lock button.
+    // Everyone else sees quantities with the rupee values blurred. (C_Panel's own
+    // admin-password unlock is gone: access comes from OMS permissions.)
     const body = document.getElementById('inventoryDashboard');
-    function initAuth() {
-      if (sessionStorage.getItem('adminAuth') === 'true') {
-        body.classList.remove('locked');
-        const btn = document.getElementById('lockBtn');
-        if (btn) { btn.innerHTML = '<i class="ic ic-lock-open"></i>'; btn.title = 'Logged in as admin · Click to lock'; }
-      } else {
-        body.classList.add('locked');
-      }
-    }
-    function showLoginModal() {
-      if (!body.classList.contains('locked')) return;
-      document.getElementById('loginModal').style.display = 'flex';
-      setTimeout(() => document.getElementById('loginUser').focus(), 50);
-    }
-    function closeLoginModal() {
-      document.getElementById('loginModal').style.display = 'none';
-      document.getElementById('loginErr').style.display = 'none';
-      document.getElementById('loginUser').value = '';
-      document.getElementById('loginPass').value = '';
-    }
-    function doLogin() {
-      const u = document.getElementById('loginUser').value.trim();
-      const p = document.getElementById('loginPass').value;
-      if (u === ADMIN_USER && p === ADMIN_PASS) {
-        sessionStorage.setItem('adminAuth', 'true');
-        body.classList.remove('locked');
-        const btn = document.getElementById('lockBtn');
-        if (btn) { btn.innerHTML = '<i class="ic ic-lock-open"></i>'; btn.title = 'Logged in as admin · Click to lock'; }
-        closeLoginModal();
-      } else {
-        document.getElementById('loginErr').style.display = 'block';
-      }
-    }
-    function toggleLock() {
-      if (body.classList.contains('locked')) { showLoginModal(); }
-      else {
-        sessionStorage.removeItem('adminAuth');
-        body.classList.add('locked');
-        const btn = document.getElementById('lockBtn');
-        if (btn) { btn.innerHTML = '<i class="ic ic-lock"></i>'; btn.title = 'Click to login'; }
-      }
-    }
     body.classList.remove('locked');
-    showLockedMessage = function () {};
+    let lockedHintTimer;
+    function showLockedMessage() {
+      if (window.inventoryUser.can_manage) return;
+      let tip = document.getElementById('lockedHint');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'lockedHint';
+        tip.setAttribute('role', 'status');
+        tip.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:999;' +
+          'background:#1f2937;color:#fff;font:600 13px Inter,system-ui,sans-serif;padding:10px 16px;' +
+          'border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.2);max-width:90vw;text-align:center';
+        document.body.appendChild(tip);
+      }
+      tip.textContent = 'Values are hidden for your access. Ask an admin for Control Panel › Inventory › Show values (₹).';
+      tip.style.display = 'block';
+      clearTimeout(lockedHintTimer);
+      lockedHintTimer = setTimeout(() => { tip.style.display = 'none'; }, 3500);
+    }
     toggleLock = function () {
       if (!window.inventoryUser.can_manage) return;
       const locked = !body.classList.contains('locked');
@@ -3684,7 +3662,7 @@
         body.classList.add('locked');
         if (btn) {
           btn.innerHTML = '<i class="ic ic-lock"></i>';
-          btn.title = 'View access: values are locked';
+          btn.title = 'Values hidden - needs Inventory › Show values (₹)';
           btn.disabled = true;
           btn.style.opacity = '0.65';
           btn.style.cursor = 'not-allowed';

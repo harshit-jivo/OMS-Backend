@@ -449,8 +449,6 @@ SAP_HANA = {
     'USER': DATABASES['hana']['USER'],
     'PASSWORD': DATABASES['hana']['PASSWORD'],
 }
-# The Inventory page's AI assistant (Groq). Blank disables it.
-GROQ_API_KEY = config('GROQ_API_KEY', default='')
 
 # DSR credit-limit service (external project; proxied because it has no CORS)
 DSR_API_BASE = config('JSAP_API_BASE')
