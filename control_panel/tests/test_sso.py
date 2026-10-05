@@ -105,12 +105,18 @@ class AccessBridgeTests(SimpleTestCase):
         self.assertEqual(self._flags({perms.FINANCE})[0], {'expenses_viewer', 'salaries_viewer'})
 
     def test_admin_gets_every_page_and_nothing_else(self):
-        # Admins hold the scope keys too; they must not narrow an admin.
         groups, flags = self._flags(ALL_KEYS, admin=True)
         self.assertIn('realise_admin', groups)
-        opened = {k for k, v in flags.items() if v}
-        self.assertEqual(opened, {'can_edit', 'can_realise', 'can_inventory', 'inventory_can_edit',
-                                  'can_sales', 'can_expenses', 'can_salaries'})
+        closed = {k for k, v in flags.items() if not v}
+        # Only COGS stays closed: OMS does not show that page.
+        self.assertEqual(closed, {'can_cogs'})
+
+    def test_a_report_key_opens_its_own_flag_only(self):
+        _, flags = self._flags({perms.REPORT_KEY['claims']})
+        self.assertEqual({k for k, v in flags.items() if v}, {'can_claims'})
+        # Rate List rides on the Realise Calculator's flag, as in C_Panel.
+        _, flags = self._flags({perms.REPORT_KEY['rate_list']})
+        self.assertEqual({k for k, v in flags.items() if v}, {'can_realise_calculator'})
 
     def test_no_key_opens_nothing(self):
         groups, flags = self._flags({'Reports'})
@@ -135,6 +141,13 @@ class PageGuardTests(SimpleTestCase):
         self.assertEqual(self._get('/realise/', {perms.SALES}), 'refused')
         self.assertEqual(self._get('/realise/', {perms.OILS_SALE}), 'page')
         self.assertEqual(self._get('/realise/targets/', {perms.OILS_SALE}), 'refused')
+
+    def test_shared_flag_pages_stay_apart(self):
+        # Rate List and the Calculator share a flag; the guard keeps them separate.
+        rate = perms.REPORT_KEY['rate_list']
+        self.assertEqual(self._get('/realise/rate-list/', {rate}), 'page')
+        self.assertEqual(self._get('/realise/realise-calculator/', {rate}), 'refused')
+        self.assertEqual(self._get('/realise/customer-aging/', {perms.REPORT_KEY['beverages_gst']}), 'refused')
 
     def test_other_paths_pass_through(self):
         # The JSON endpoints stay with C_Panel's own group checks.
@@ -176,3 +189,12 @@ class CompanySettingsTests(SimpleTestCase):
         quoted = re.compile(r'''["']JIVO_(OIL|BEVERAGES|MART)_HANADB["']''')
         hits = [str(p.relative_to(root)) for p in root.rglob('*.py') if quoted.search(p.read_text(encoding='utf-8'))]
         self.assertEqual(hits, [])
+
+
+class AccessImportTests(SimpleTestCase):
+    def test_every_mapped_key_is_a_real_control_panel_key(self):
+        from control_panel.management.commands.import_cpanel_access import GROUP_KEYS
+        mapped = {k for keys in GROUP_KEYS.values() for k in keys}
+        self.assertTrue(mapped <= set(perms.ALL_CP_KEYS), mapped - set(perms.ALL_CP_KEYS))
+        # Every report is reachable from some C_Panel group.
+        self.assertEqual({k for k in mapped if '.report.' in k}, set(perms.REPORT_KEY.values()))
