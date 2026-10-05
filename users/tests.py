@@ -71,6 +71,13 @@ class _ApiTestCase(TestCase):
 # Characterisation — sign-in has moved to Jivo Auth
 # ---------------------------------------------------------------------------
 
+# Addressed by PATH, not by reverse('login'): the Control Panel's routes
+# (cpanel/urls.py) also name a route `login`, and being mounted last they win
+# the name, so reverse('login') is /cp/login/. What an un-updated client
+# posts to is this path, which makes it the truer test anyway.
+OLD_LOGIN = '/api/auth/login/'
+
+
 class SignInMovedTests(_ApiTestCase):
     """OMS no longer signs anyone in: clients sign in at Jivo Auth and send
     its access token (see users/tests_jivo_auth.py for that path). What is
@@ -80,7 +87,7 @@ class SignInMovedTests(_ApiTestCase):
     def test_the_old_login_answers_410_with_where_to_sign_in(self):
         for method in ('get', 'post'):
             res = getattr(self.anon, method)(
-                reverse('login'), {'username': 't-staff', 'password': 'CorrectHorse9!'},
+                OLD_LOGIN, {'username': 't-staff', 'password': 'CorrectHorse9!'},
                 format='json')
             self.assertEqual(res.status_code, 410, method)
             body = res.json()
@@ -88,7 +95,7 @@ class SignInMovedTests(_ApiTestCase):
             self.assertEqual(body['sign_in_url'], 'https://auth.jivo.in/api/v1/auth/login/')
 
     def test_the_old_login_never_issues_a_token(self):
-        res = self.anon.post(reverse('login'),
+        res = self.anon.post(OLD_LOGIN,
                              {'username': 't-staff', 'password': 'CorrectHorse9!'},
                              format='json')
         self.assertNotIn('data', res.json())
@@ -96,7 +103,7 @@ class SignInMovedTests(_ApiTestCase):
     def test_a_stale_oms_token_still_gets_the_410(self):
         """Not a 401 the client would try to refresh against an OMS refresh
         endpoint that no longer exists."""
-        res = self.anon.post(reverse('login'), {}, format='json',
+        res = self.anon.post(OLD_LOGIN, {}, format='json',
                              HTTP_AUTHORIZATION='Bearer an.old.oms-token')
         self.assertEqual(res.status_code, 410)
 
