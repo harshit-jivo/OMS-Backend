@@ -253,6 +253,11 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'sub_budget_name': advance.sub_budget_name,
         'purpose_code': advance.purpose_code,
         'purpose_label': advance.purpose_label,
+        # The HOD picked from the employee master, and the login that approves for them.
+        'department_head_employee': ({'employee_code': advance.department_head_employee.employee_code,
+                                      'employee_name': advance.department_head_employee.employee_name}
+                                     if advance.department_head_employee_id else None),
+        'department_head': _user(advance.department_head) if advance.department_head_id else None,
         'remarks': advance.remarks,
         'owner_employee_id': advance.owner_employee_id,
         'owner_label': advance.owner_label,

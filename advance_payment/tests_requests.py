@@ -81,9 +81,25 @@ BUDGETS = [
 ]
 
 
+#: The employee master's HODs, by code: `{code: (employee, their OMS login or None)}`.
+HEADS = {
+    'TEMP0001': (SimpleNamespace(employee_code='TEMP0001', employee_name='Nirmal Didi'),
+                 SimpleNamespace(pk=7, name='Nirmal Didi Ji', username='nirmal')),
+    'JWPL3005': (SimpleNamespace(employee_code='JWPL3005', employee_name='Arshdeep Singh'), None),
+}
+
+
 def _clean(data):
-    """`requests.clean` with SAP's budgets stood in for."""
-    with mock.patch('advance_payment.services.sap.budgets', return_value=BUDGETS):
+    """`requests.clean` with SAP's budgets and the employee master stood in for.
+
+    An Employee or Employee Imprest request names HOD TEMP0001 unless the
+    test says otherwise: those always go to a Department Head.
+    """
+    if data.get('request_type') in ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST'):
+        data.setdefault('department_head_code', 'TEMP0001')
+    with mock.patch('advance_payment.services.sap.budgets', return_value=BUDGETS), \
+            mock.patch('advance_payment.services.heads.head_by_code',
+                       side_effect=lambda code: HEADS.get(code.strip().upper(), (None, None))):
         return request_service.clean(data)
 
 
@@ -167,7 +183,8 @@ class WhatTheServerAccepts(SimpleTestCase):
             {k: cleaned.fields[k] for k in ('budget_code', 'budget_name', 'sub_budget_code', 'sub_budget_name',
                                             'purpose_code', 'purpose_label')},
             {'budget_code': 'BackOff', 'budget_name': 'Back Office', 'sub_budget_code': '',
-             'sub_budget_name': '', 'purpose_code': 'RAW_MATERIAL', 'purpose_label': 'Raw Material Purchase'})
+             'sub_budget_name': '', 'purpose_code': 'RAW_MATERIAL',
+             'purpose_label': 'Raw Material – Other than Oil (incl. Ghee)'})
 
     def test_the_department_is_required(self):
         with self.assertRaisesRegex(request_service.RequestInvalid, 'Choose the Department'):
@@ -182,7 +199,8 @@ class WhatTheServerAccepts(SimpleTestCase):
             _clean(vendor_bill_request(purpose_code='bribes'))
 
     def test_a_purpose_code_is_matched_in_any_case(self):
-        self.assertEqual(_clean(vendor_bill_request(purpose_code='rent')).fields['purpose_code'], 'RENT')
+        cleaned = _clean(vendor_bill_request(purpose_code='rent', department_head_code='TEMP0001'))
+        self.assertEqual(cleaned.fields['purpose_code'], 'RENT')
 
     def test_refuses_a_department_sap_does_not_have(self):
         with self.assertRaisesRegex(request_service.RequestInvalid,

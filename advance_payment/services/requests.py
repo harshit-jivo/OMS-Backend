@@ -18,6 +18,8 @@ So `clean()` re-checks everything that decides money or routing:
     inside the save under a per-document lock;
   * the Department is one of the company's budget heads in SAP, and the
     Payment Purpose one of `advance_payment.purposes`;
+  * a request approved by department names its Department Head, an HOD of
+    the employee master with an OMS login to approve with;
   * the dates the case asks for are there.
 
 It does NOT re-read SAP for the documents. The snapshot is what the creator
@@ -50,7 +52,7 @@ from advance_payment.models import (
     RequestType,
     ReturnMethod,
 )
-from advance_payment.purposes import purpose_label
+from advance_payment.purposes import needs_department_head, purpose_label
 from core.companies import COMPANY_CODES
 
 #: The form's `NOT_IN_SAP_PREFIX`: an employee from the master with no SAP
@@ -194,6 +196,8 @@ def clean(data):
         problems.append('Enter the Remarks.')
 
     routing = _clean_routing(company, data, problems)
+    routing['department_head_employee'], routing['department_head'] = _clean_department_head(
+        company, request_type, routing.get('purpose_code', ''), data, problems)
 
     # The form shows owners as "Preshit Singh (JWPL0030)": the code in the
     # brackets finds them in the employee master. A label with no code (a
@@ -379,6 +383,32 @@ def _clean_routing(company, data, problems):
     return out
 
 
+def _clean_department_head(company, request_type, purpose, data, problems):
+    """`(employee, user)`: the HOD the requester picked and the login that approves; Nones where none is asked.
+
+    The head is an HOD of the employee master, sent by employee code; the
+    route's "Department Head Approval" stage goes to their OMS login, matched
+    here (`services.heads`). Asked only when the purpose (or an Employee /
+    Imprest request) is approved by department; otherwise any value sent is
+    dropped, so a request that changes purpose does not carry a stale head.
+    """
+    from advance_payment.services import heads
+
+    if not needs_department_head(company, request_type, purpose):
+        return None, None
+    code = _text(data.get('department_head_code'), 20)
+    if not code:
+        problems.append('Choose the Department Head who approves this request.')
+        return None, None
+    employee, user = heads.head_by_code(code)
+    if employee is None:
+        problems.append(f'"{code}" is not an active HOD in the employee master.')
+    elif user is None:
+        problems.append(f'{employee.employee_name} ({employee.employee_code}) has no OMS login to approve '
+                        f'with. Ask an administrator to create one, or choose another Department Head.')
+    return employee, user
+
+
 def _clean_repayment(data, problems):
     """Employee Advance: how the money comes back."""
     method = _text(data.get('return_method')).upper()
@@ -506,6 +536,9 @@ _COMPARED = {
     'owner': lambda a: a.owner_label,
     'budget': lambda a: ' — '.join(v for v in (a.budget_code, a.budget_name) if v) or None,
     'purpose': lambda a: a.purpose_label or a.purpose_code or None,
+    'department_head': lambda a: (f'{a.department_head_employee.employee_name} '
+                                  f'({a.department_head_employee.employee_code})')
+    if a.department_head_employee_id else None,
 }
 
 

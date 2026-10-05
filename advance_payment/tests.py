@@ -458,9 +458,14 @@ class ThePaymentPurposes(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.data["data"]
         self.assertEqual(data["groups"], ["Goods", "Services", "People", "Statutory", "Finance"])
-        self.assertEqual(data["count"], 38)
+        self.assertEqual(data["count"], 41)
         self.assertEqual(data["results"][0],
-                         {"code": "RAW_MATERIAL", "label": "Raw Material Purchase", "group": "Goods"})
+                         {"code": "OIL_PURCHASE", "label": "Oil Purchase – Imported or Domestic",
+                          "group": "Goods", "needs_head": False})
+        codes = [r["code"] for r in data["results"]]
+        self.assertIn("FA_CIVIL", codes)
+        self.assertNotIn("FIXED_ASSETS", codes)  # split into P&M, Civil, Others
+        self.assertTrue(next(r for r in data["results"] if r["code"] == "RENT")["needs_head"])
         self.assertEqual(data["results"][-1]["code"], "CAPITAL")
 
     def test_every_purpose_is_in_a_listed_group_and_codes_are_unique(self, _perm):
