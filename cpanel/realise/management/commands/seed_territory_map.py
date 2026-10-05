@@ -15,7 +15,7 @@ Usage:
 
 from django.core.management.base import BaseCommand
 
-from cpanel.core import sap_connector
+from cpanel.core import companies, sap_connector
 from cpanel.realise import services
 from cpanel.realise.models import TerritoryMapping
 
@@ -45,11 +45,11 @@ def _seed_persons():
 
 def _fetch_grid_cells():
     """Distinct (channel, state_code, state_name) cells from OCRD, blanks dropped."""
-    sql = '''
+    sql = f'''
         SELECT DISTINCT
             COALESCE(TRIM("U_Main_Group"), '') AS "G",
             COALESCE(TRIM("State1"), '')       AS "ST"
-        FROM "JIVO_OIL_HANADB"."OCRD"
+        FROM "{companies.OIL}"."OCRD"
         WHERE COALESCE(TRIM("U_Main_Group"), '') <> ''
     '''
     rows = sap_connector.execute_query(sql)

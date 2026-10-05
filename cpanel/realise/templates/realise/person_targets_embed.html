@@ -13,6 +13,12 @@
 <link rel="stylesheet" href="{% static 'realise/person_targets.css' %}?v={{ asset_ver }}">
   {% include 'core/_numerals.html' %}
   <style>body{font-family:'CPNum','Inter',system-ui,sans-serif;}</style>
+  {% comment %}
+    Inside OMS the way back is the OMS breadcrumb (Control Panel › … › Targets).
+    The app's own "Back to Dashboard" opens the bare page in the whole tab
+    (target="_top" — OMS's window), so it is hidden.
+  {% endcomment %}
+  <style>.pt-back{display:none!important}</style>
 </head>
 <body>
 <div id="root"></div>

@@ -4,7 +4,7 @@ The Control Panel is four pages, as the OMS sidebar shows it, and every page
 is granted per sub-tab:
 
     Oils Sale   Overview · Map · Realise
-    Sales       Sales Channel Dashboard · Beverages Sale · Realise Dashboard · Sales · Targets
+    Sales       Sales Channel · Beverages Sale · Realise Dashboard · Sales · Targets
     Inventory   Dashboard · Stock & Warehouses · Stock Movement · Moving / Non-Moving ·
                 FG Not Billed · ABC-XYZ Analysis · Aging Analysis · Item Trace ·
                 Inventory Planning   (+ the AI assistant, on top of a sub-tab)
@@ -66,7 +66,7 @@ TREE = {
         OILS_REALISE: 'Realise',
     },
     'Sales': {
-        SALES_CHANNEL: 'Sales Channel Dashboard',
+        SALES_CHANNEL: 'Sales Channel',
         BEVERAGES: 'Beverages Sale',
         REALISE_DASHBOARD: 'Realise Dashboard',
         SALES: 'Sales',

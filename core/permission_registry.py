@@ -188,7 +188,7 @@ REGISTRY: dict[str, dict[str, str]] = {
         'control_panel.oils_sale.overview':     'Control Panel — Oils Sale › Overview',
         'control_panel.oils_sale.map':          'Control Panel — Oils Sale › Map',
         'control_panel.oils_sale.realise':      'Control Panel — Oils Sale › Realise',
-        'control_panel.sales.channel':          'Control Panel — Sales › Sales Channel Dashboard',
+        'control_panel.sales.channel':          'Control Panel — Sales › Sales Channel',
         'control_panel.sales.beverages':        'Control Panel — Sales › Beverages Sale',
         'control_panel.sales.realise_dashboard': 'Control Panel — Sales › Realise Dashboard',
         'control_panel.sales.sales':            'Control Panel — Sales › Sales',
