@@ -21,6 +21,7 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /employee-directory/     ?roles=1,2&search=&not_in_sap=1&company=  (request form pickers)
   GET /departments/            (departments with their sub-departments; the form no longer asks)
   GET /payment-purposes/       (Payment Purpose: the Payment Desk's list)
+  GET /department-heads/       (?search=: the employee master's HODs, each with their OMS login)
   GET /open-invoices/         ?company=&party_type=vendor|customer&offset=&from_date=
                               &card_code=&search=&limit=
   GET /open-documents/        ?company=&card_code=&limit=
@@ -90,6 +91,8 @@ urlpatterns = [
          name='advance-payment-departments'),
     path('payment-purposes/', views.PaymentPurposesView.as_view(),
          name='advance-payment-payment-purposes'),
+    path('department-heads/', views.DepartmentHeadsView.as_view(),
+         name='advance-payment-department-heads'),
     path('open-invoices/', views.OpenInvoicesView.as_view(),
          name='advance-payment-open-invoices'),
     path('open-documents/', views.OpenDocumentsView.as_view(),

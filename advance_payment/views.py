@@ -527,11 +527,12 @@ class PaymentPurposesView(APIView):
     (`advance_payment.purposes`), in the form's order:
 
         {"groups": ["Goods", ...],
-         "results": [{"code": "RAW_MATERIAL", "label": "Raw Material Purchase",
-                      "group": "Goods"}, ...]}
+         "results": [{"code": "OIL_PURCHASE", "label": "Oil Purchase – Imported or Domestic",
+                      "group": "Goods", "needs_head": false}, ...]}
 
     The same for every company. The code is what a request stores and what
-    workflow queries may match on.
+    workflow queries match on. `needs_head`: outside Mart, a request with this
+    purpose names its Department Head, who approves it.
     """
 
     def get_permissions(self):
@@ -540,6 +541,31 @@ class PaymentPurposesView(APIView):
     def get(self, request):
         results = purposes()
         return ok({'count': len(results), 'groups': list(PURPOSE_GROUPS), 'results': results})
+
+
+class DepartmentHeadsView(APIView):
+    """GET /api/advance-payments/department-heads/?search=
+
+    Who may be picked as a request's Department Head: the employee master's
+    active HODs (`?search=` narrows by name or code), each with the OMS login
+    that approves for them, matched roughly (`services.heads`), or null when
+    none matches. The request's "Department Head Approval" stage goes to that
+    login; an HOD without one cannot be submitted.
+
+        [{"employee_code": "JWPL0018", "employee_name": "Gagan Vg",
+          "user": {"id": 92, "name": "Gagan", "username": "gagan"}}, ...]
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanViewLookups()]
+
+    def get(self, request):
+        from advance_payment.services import heads
+
+        rows = [{'employee_code': e.employee_code, 'employee_name': e.employee_name,
+                 'user': ({'id': u.pk, 'name': u.name or u.username, 'username': u.username} if u else None)}
+                for e, u in heads.heads(request.query_params.get('search'))]
+        return ok({'count': len(rows), 'results': rows})
 
 
 class EmployeeDirectoryView(_Lookup):
@@ -1044,7 +1070,8 @@ def _is_desk(user):
 
 def _requests():
     return (AdvanceRequest.objects
-            .select_related('department', 'sub_department', 'created_by', 'flow__workflow',
+            .select_related('department', 'sub_department', 'created_by', 'department_head',
+                            'department_head_employee', 'flow__workflow',
                             'flow__current_stage', 'flow__current_user', 'payout__updated_by')
             .prefetch_related(
                 'documents',

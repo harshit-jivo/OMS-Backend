@@ -246,6 +246,16 @@ class StageRole(models.TextChoices):
 #: The fixed stages, in the order a route must end with them.
 FIXED_ROLES = (StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL)
 
+#: An approval stage with this exact name is not handled by its configured
+#: user: it goes to the Department Head the requester picked on the request
+#: (`AdvanceRequest.department_head`). The stage's own user is a placeholder.
+DEPARTMENT_HEAD_STAGE = 'Department Head Approval'
+
+
+def is_department_head_stage(stage_name):
+    """Whether an engine stage is the Department Head's (case and spacing ignored)."""
+    return ' '.join(str(stage_name or '').split()).lower() == DEPARTMENT_HEAD_STAGE.lower()
+
 #: The stages that may send a request back to its creator: every approval
 #: stage, and Payment (which finds what is wrong with the request itself while
 #: filling the payment). Audit and Final send back to Payment instead.
@@ -255,11 +265,16 @@ RETURN_TO_CREATOR_ROLES = (StageRole.APPROVAL, StageRole.PAYMENT)
 class AdvanceRequest(models.Model):
     """One payment request, as its creator raised it.
 
-    Company, the budget head (the form's "Department") and the payment purpose
-    are what the Workflow Engine's queries read to choose the approval route:
+    Company, the request type and the payment purpose are what the Workflow
+    Engine's queries read to choose the approval route: one workflow per
+    purpose (`manage.py seed_payment_workflows`), e.g.
 
         SELECT id FROM advance_payment_request
-        WHERE budget_code = 'BackOff' AND purpose_code IN ('IT_SOFTWARE', 'RENT')
+        WHERE company IN ('OIL', 'BEVERAGES') AND purpose_code = 'FA_CIVIL'
+          AND request_type NOT IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')
+
+    The budget head (the form's "Department") is kept for SAP and reports, and
+    narrows one route only (factory salaries).
 
     Requests raised before 2026-10-01 also carry an OMS department and
     sub-department; new ones leave them empty.
@@ -324,6 +339,16 @@ class AdvanceRequest(models.Model):
     #: label as it was when raised.
     purpose_code = models.CharField(max_length=30, blank=True, default='')
     purpose_label = models.CharField(max_length=100, blank=True, default='')
+    #: The Department Head the requester picked: an HOD of the employee
+    #: master. Asked when the purpose (or an Employee / Imprest request) is
+    #: approved "by department"; empty otherwise.
+    department_head_employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, null=True, blank=True, related_name='headed_requests')
+    #: That HOD's OMS login, matched when the request is saved
+    #: (`services.heads.match_user`): who handles the route's "Department Head
+    #: Approval" stage.
+    department_head = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
 
     # ── Ownership: information only, no say in the approval ──────────────
     owner_employee = models.ForeignKey(
