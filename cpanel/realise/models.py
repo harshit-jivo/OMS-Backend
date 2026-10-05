@@ -2,6 +2,8 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from cpanel.core.db import c_panel_table
+
 
 class MonthlyTarget(models.Model):
     PRODUCT_TYPES = [('PREMIUM', 'Premium'), ('COMMODITY', 'Commodity')]
@@ -21,6 +23,7 @@ class MonthlyTarget(models.Model):
     )
 
     class Meta:
+        db_table = c_panel_table('realise_monthlytarget')
         unique_together = ('product_type', 'sub_group', 'month', 'year')
         ordering = ['-year', '-month', 'product_type', 'sub_group']
         indexes = [
@@ -34,78 +37,6 @@ class MonthlyTarget(models.Model):
 
     def __str__(self):
         return f"{self.key} {self.month}/{self.year}"
-
-
-class MainGroupMaster(models.Model):
-    name = models.CharField(max_length=50, unique=True)
-
-    class Meta:
-        ordering = ['name']
-
-    def __str__(self):
-        return self.name
-
-
-class StateMaster(models.Model):
-    name = models.CharField(max_length=100, unique=True)
-
-    class Meta:
-        ordering = ['name']
-
-    def __str__(self):
-        return self.name
-
-
-class TargetMaster(models.Model):
-    main_group = models.ForeignKey(MainGroupMaster, on_delete=models.CASCADE)
-    state = models.ForeignKey(StateMaster, null=True, blank=True, on_delete=models.SET_NULL)
-    sales_person = models.CharField(max_length=100, null=True, blank=True)
-    target_ltrs = models.DecimalField(max_digits=12, decimal_places=2)
-    month = models.IntegerField()
-    year = models.IntegerField()
-
-    class Meta:
-        unique_together = ('main_group', 'state', 'sales_person', 'month', 'year')
-        ordering = ['-year', '-month', 'main_group__name', 'state__name', 'sales_person']
-        indexes = [
-            models.Index(fields=['year', 'month']),
-            models.Index(fields=['main_group']),
-        ]
-
-    def __str__(self):
-        state = self.state.name if self.state_id else 'ALL'
-        sales_person = self.sales_person or 'ALL'
-        return f"{self.main_group.name} {state} {sales_person} {self.month}/{self.year}"
-
-
-class SegmentTarget(models.Model):
-    """Flat per-value target for a single dimension (main group, state or person)."""
-
-    SEGMENT_TYPES = [
-        ('main_group', 'Main Group'),
-        ('state', 'State'),
-        ('person', 'Person'),
-        ('premium_item', 'Premium Items'),
-        ('commodity_item', 'Commodity Items'),
-    ]
-
-    segment_type = models.CharField(max_length=20, choices=SEGMENT_TYPES)
-    segment_value = models.CharField(max_length=100)
-    month = models.IntegerField()
-    year = models.IntegerField()
-    target_ltrs = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    target_realise_value = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = ('segment_type', 'segment_value', 'month', 'year')
-        ordering = ['segment_type', 'segment_value']
-        indexes = [
-            models.Index(fields=['segment_type', 'year', 'month']),
-        ]
-
-    def __str__(self):
-        return f"{self.segment_type}:{self.segment_value} {self.month}/{self.year}"
 
 
 class TerritoryMapping(models.Model):
@@ -136,6 +67,7 @@ class TerritoryMapping(models.Model):
     )
 
     class Meta:
+        db_table = c_panel_table('realise_territorymapping')
         unique_together = ('channel', 'state_name')
         ordering = ['channel', 'state_name']
         indexes = [
@@ -163,6 +95,7 @@ class CityOwner(models.Model):
         null=True, blank=True, related_name='city_owners')
 
     class Meta:
+        db_table = c_panel_table('realise_cityowner')
         unique_together = ('channel', 'state_name', 'city')
         ordering = ['channel', 'state_name', 'city']
         indexes = [models.Index(fields=['channel', 'state_name'])]
@@ -195,6 +128,7 @@ class TerritoryProductTarget(models.Model):
         null=True, blank=True, related_name='territory_product_targets')
 
     class Meta:
+        db_table = c_panel_table('realise_territoryproducttarget')
         unique_together = ('channel', 'state_name', 'product_type', 'sub_group', 'month', 'year')
         ordering = ['channel', 'state_name', 'product_type', 'sub_group']
         indexes = [
@@ -259,6 +193,7 @@ class TerritoryItemTarget(models.Model):
         null=True, blank=True, related_name='territory_item_targets')
 
     class Meta:
+        db_table = c_panel_table('realise_territoryitemtarget')
         unique_together = ('channel', 'state_name', 'item_code', 'month', 'year')
         ordering = ['channel', 'state_name', 'product_type', 'sub_group', 'item_code']
         indexes = [
@@ -287,6 +222,7 @@ class TargetNode(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = c_panel_table('realise_targetnode')
         unique_together = ('main_group', 'state', 'sales_person', 'segment', 'month', 'year')
         ordering = ['main_group', 'state', 'sales_person']
         indexes = [
@@ -312,6 +248,10 @@ class ClosingRemark(models.Model):
     def __str__(self):
         return f"{self.card_code}: {self.remark[:40]}"
 
+    class Meta:
+        db_table = c_panel_table('realise_closingremark')
+
+
 
 class CreditLock(models.Model):
     """A global freeze of the Required Credit Limit report's Total Outstanding and
@@ -331,6 +271,10 @@ class CreditLock(models.Model):
         state = 'active' if self.active else 'cleared'
         return f"CreditLock {self.locked_at:%Y-%m-%d} → {self.lock_until} ({state})"
 
+    class Meta:
+        db_table = c_panel_table('realise_creditlock')
+
+
 
 class CreditLockSnapshot(models.Model):
     """Frozen Total Outstanding / Required Limit for one party row, captured when a
@@ -344,6 +288,7 @@ class CreditLockSnapshot(models.Model):
     required_limit = models.FloatField(default=0.0)
 
     class Meta:
+        db_table = c_panel_table('realise_creditlocksnapshot')
         indexes = [models.Index(fields=['lock', 'row_key'])]
 
     def __str__(self):
@@ -363,6 +308,7 @@ class AgingRemark(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = c_panel_table('realise_agingremark')
         unique_together = ('card_code', 'row_key')
         indexes = [models.Index(fields=['card_code'])]
 
@@ -386,6 +332,7 @@ class AgingRemarkLine(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = c_panel_table('realise_agingremarkline')
         ordering = ['position', 'id']
         indexes = [models.Index(fields=['card_code', 'row_key'])]
 
@@ -426,6 +373,7 @@ class Claim(models.Model):
     updated_at      = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = c_panel_table('realise_claim')
         ordering = ['-claim_date', '-id']
         indexes = [
             models.Index(fields=['claim_date']),
@@ -453,6 +401,10 @@ class AgingDueConfig(models.Model):
     def __str__(self):
         return f"{self.card_code}: {self.grace_days}d"
 
+    class Meta:
+        db_table = c_panel_table('realise_agingdueconfig')
+
+
 
 class RateList(models.Model):
     """A saved Realise-Calculator result (a named 'rate list'), tagged by state. Stores a JSON
@@ -474,6 +426,7 @@ class RateList(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
+        db_table = c_panel_table('realise_ratelist')
         ordering = ['-created_at']
 
     def __str__(self):

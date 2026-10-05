@@ -13,3 +13,9 @@ class CoreConfig(AppConfig):
     name = 'cpanel.core'
     label = 'cp_core'
     verbose_name = 'Control Panel — core'
+
+    def ready(self):
+        from django.core.checks import register
+
+        from .companies import check_companies
+        register(check_companies)

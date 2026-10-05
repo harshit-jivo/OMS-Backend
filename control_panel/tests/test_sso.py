@@ -151,3 +151,31 @@ class SubTabTests(SimpleTestCase):
             _keys(stack, {perms.INVENTORY_TABS['trace'], perms.INVENTORY_TABS['stock']})
             self.assertEqual(perms.allowed_tabs(_user(), perms.INVENTORY_TABS), ['stock', 'trace'])
             self.assertEqual(perms.allowed_tabs(_user(), perms.OILS_TABS), [])
+
+
+class CompanySettingsTests(SimpleTestCase):
+    """The Control Panel's SAP companies come from OMS's .env, never C_Panel's names."""
+
+    def test_companies_are_the_oms_settings(self):
+        from django.conf import settings
+
+        from cpanel.core import companies
+        self.assertEqual((companies.OIL, companies.BEVERAGES, companies.MART),
+                         (settings.HANA_OIL_COMPANY_DB, settings.HANA_BEVERAGE_COMPANY_DB,
+                          settings.HANA_MART_COMPANY_DB))
+
+    def test_a_blank_company_stops_the_server(self):
+        from django.test import override_settings
+
+        from cpanel.core.companies import check_companies
+        self.assertEqual(check_companies(), [])
+        with override_settings(HANA_MART_COMPANY_DB=''):
+            self.assertEqual([e.id for e in check_companies()], ['cpanel.E001'])
+
+    def test_no_company_name_is_hard_coded(self):
+        import pathlib
+        import re
+        root = pathlib.Path(__file__).resolve().parents[2] / 'cpanel'
+        quoted = re.compile(r'''["']JIVO_(OIL|BEVERAGES|MART)_HANADB["']''')
+        hits = [str(p.relative_to(root)) for p in root.rglob('*.py') if quoted.search(p.read_text(encoding='utf-8'))]
+        self.assertEqual(hits, [])

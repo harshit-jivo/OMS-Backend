@@ -740,8 +740,8 @@ td.ecell input.locked{background:var(--surface2);color:var(--text3);cursor:not-a
 
       <main class="wb-canvas">
         <div class="wb-tabs" role="tablist" aria-label="View" hidden>
-          {# Only the sub-tabs this user holds (control_panel/permissions.py); the
-             script after state_map.js opens the first of them. #}
+          {% comment %}Only the sub-tabs this user holds (control_panel/permissions.py); the
+             script after state_map.js opens the first of them.{% endcomment %}
           {% if 'overview' in cp_oils_tabs %}<button type="button" class="on" data-pane="wbOverview" role="tab" aria-selected="true">Overview</button>{% endif %}
           {% if 'map' in cp_oils_tabs %}<button type="button" data-pane="wbMap" role="tab" aria-selected="false">Map</button>{% endif %}
           {% if 'realise' in cp_oils_tabs %}<button type="button" data-pane="wbRealise" role="tab" aria-selected="false">Realise</button>{% endif %}

@@ -2,8 +2,8 @@ import calendar
 import re
 from datetime import date
 
-from django.conf import settings
 
+from cpanel.core import companies
 from cpanel.dashboard.sap_connector import run_call, run_query
 
 CATEGORIES = (
@@ -139,7 +139,7 @@ def _is_salary_row(gl_norm, budget_norm):
 
 
 def _schema():
-    return settings.SAP_HANA.get('SCHEMA') or 'JIVO_OIL_HANADB'
+    return companies.OIL
 
 
 def _month_bounds(month, year):
