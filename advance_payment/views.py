@@ -637,8 +637,8 @@ def ledger_key(row):
 class AssignmentRecipientsView(APIView):
     """GET /api/advance-payments/assignment-recipients/
 
-    Who a bill or PO may be sent to: active users holding the Advance Payment
-    User or Approver role (primary or extra). `[{id, name, username}]`.
+    Who a bill or PO may be sent to: active users who hold `Advance_Payment`,
+    by role or granted alone (`assignments.recipients`). `[{id, name, username}]`.
     """
 
     def get_permissions(self):

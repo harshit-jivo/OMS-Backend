@@ -1,8 +1,7 @@
-"""Bills and POs sent to an Advance Payment User or Approver, to raise a payment request from.
+"""Bills and POs sent to someone who raises payment requests, to raise one from.
 
     sender (Advance_Payment_Dispatch)  ticks open SAP bills / POs, picks a user
-                                        holding `advance_payment_user` or
-                                        `advance_payment_approver`
+                                        who holds `Advance_Payment` (see `recipients`)
     recipient                           sees them under "Assigned to Me"; raising a
                                         request from one links it (RAISED), or they
                                         dismiss it
@@ -16,7 +15,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 
 from advance_payment.models import AssignmentStatus, DocumentAssignment, DocumentKind
-from advance_payment.permissions import RECIPIENT_ROLES
+from advance_payment.permissions import VIEW_KEY
 from core.companies import COMPANY_CODES
 
 KINDS = {'BILL': DocumentKind.BILL, 'PO': DocumentKind.PO}
@@ -30,12 +29,26 @@ class AssignmentInvalid(Exception):
 
 
 def recipients():
-    """Active users holding an Advance Payment User or Approver role, primary or extra, by name."""
+    """Active users who may raise a payment request, by name.
+
+    Whoever holds `Advance_Payment`, however they hold it — the same sources
+    `core.permissions.effective_keys` reads, as one query: an active role
+    (primary or extra) whose bundle has the key, or the key granted to the
+    user alone (`extra_pages`, the Page Permissions screen). Not by role NAME:
+    a person given the key on its own (a BackDate user who also raises
+    payments) is someone a bill can go to.
+
+    Administrators, who hold every key implicitly, are listed only when they
+    hold it explicitly too: every admin account is not someone bills are
+    sent to.
+    """
+    from users.models import RolePermissions  # local: users imports core
+
     User = get_user_model()
-    role = Q()
-    for name in RECIPIENT_ROLES:
-        role |= Q(role__name__iexact=name) | Q(extra_roles__name__iexact=name)
-    return User.objects.filter(role, is_active=True).distinct().order_by('name', 'username')
+    roles = list(RolePermissions.objects.filter(role__is_active=True, keys__contains=[VIEW_KEY])
+                 .values_list('role_id', flat=True))
+    holds = Q(extra_pages__contains=[VIEW_KEY]) | Q(role_id__in=roles) | Q(extra_roles__in=roles)
+    return User.objects.filter(holds, is_active=True).distinct().order_by('name', 'username')
 
 
 def send(*, company, recipient_id, documents, note, user):
@@ -52,7 +65,7 @@ def send(*, company, recipient_id, documents, note, user):
         problems.append('Company must be one of: ' + ', '.join(COMPANY_CODES) + '.')
     recipient = recipients().filter(pk=recipient_id).first() if str(recipient_id or '').isdigit() else None
     if recipient is None:
-        problems.append('Choose who to send them to: an active Advance Payment User or Approver.')
+        problems.append('Choose who to send them to: an active user who can raise payment requests.')
     wanted = []
     for raw in documents or []:
         kind = KINDS.get(str((raw or {}).get('kind') or '').upper())

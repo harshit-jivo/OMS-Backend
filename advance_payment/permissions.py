@@ -32,12 +32,8 @@ class CanViewLookups(HasKey):
         super().__init__(VIEW_KEY)
 
 
-#: Send SAP bills and POs to Advance Payment Users and Approvers to raise requests from.
+#: Send SAP bills and POs to the people who raise payment requests.
 DISPATCH_KEY = 'Advance_Payment_Dispatch'
-
-#: Who a bill or PO may be sent to: holders of these roles (primary or extra).
-#: Both can raise requests (both bundles carry `Advance_Payment`).
-RECIPIENT_ROLES = ('advance_payment_user', 'advance_payment_approver')
 
 
 class CanDispatch(HasKey):

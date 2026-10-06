@@ -32,14 +32,19 @@ def _send(documents=None, recipient=RAHUL, live=None, **kwargs):
 
 
 class WhoMayReceive(SimpleTestCase):
-    def test_advance_payment_users_and_approvers_primary_or_extra(self):
+    def test_whoever_holds_the_raise_key_by_role_or_alone(self):
         User = mock.Mock()
-        with mock.patch.object(assignments, 'get_user_model', return_value=User):
+        bundles = mock.Mock()
+        bundles.filter.return_value.values_list.return_value = [19, 20]
+        with mock.patch.object(assignments, 'get_user_model', return_value=User),                 mock.patch('users.models.RolePermissions.objects', bundles):
             assignments.recipients()
+        # Roles whose bundle carries the key, and only active ones.
+        self.assertEqual(bundles.filter.call_args.kwargs,
+                         {'role__is_active': True, 'keys__contains': ['Advance_Payment']})
         condition = str(User.objects.filter.call_args.args[0])
-        for name in ('advance_payment_user', 'advance_payment_approver'):
-            self.assertIn(f"('role__name__iexact', '{name}')", condition)
-            self.assertIn(f"('extra_roles__name__iexact', '{name}')", condition)
+        self.assertIn("('extra_pages__contains', ['Advance_Payment'])", condition)
+        self.assertIn("('role_id__in', [19, 20])", condition)
+        self.assertIn("('extra_roles__in', [19, 20])", condition)
         self.assertEqual(User.objects.filter.call_args.kwargs, {'is_active': True})
 
 
@@ -52,7 +57,7 @@ class Sending(SimpleTestCase):
         self.assertEqual(one.note, 'Please pay by Friday')
 
     def test_only_to_an_advance_payment_user(self):
-        with self.assertRaisesRegex(assignments.AssignmentInvalid, 'an active Advance Payment User or Approver'):
+        with self.assertRaisesRegex(assignments.AssignmentInvalid, 'an active user who can raise payment requests'):
             _send(recipient=None)
 
     def test_refuses_a_document_not_open_in_sap(self):
