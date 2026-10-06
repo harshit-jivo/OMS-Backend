@@ -174,6 +174,11 @@ REGISTRY: dict[str, dict[str, str]] = {
         # Send SAP bills and POs to Advance Payment Users, who raise the
         # payment request from them (the "Send Bills & POs" page).
         'Advance_Payment_Dispatch':  'Advance Payment — send bills & POs to users',
+
+        # Budget approval of SAP drafts (replaces JSAP's `bud`). The key opens
+        # the desk; deciding also needs being the item's current stage user.
+        'Budget_Approval':           'Budget — approval desk',
+        'Budget_Settings':           'Budget — auto-approval settings',
     },
 
     # --- Payments actions (legacy keys, verbatim from

@@ -174,6 +174,10 @@ INSTALLED_APPS = [
     # employee advance accounts). It gains a model when it has an OMS fact of
     # its own to store — the request, who approved it, what it produced.
     'advance_payment',
+    # BUDGET — budget approval of SAP drafts (replaces JSAP's `bud`). Owns its
+    # own `budget` Postgres schema; drafts arrive via
+    # `manage.py sync_budget_drafts`, never from a user.
+    'budget',
 ]
 
 MIDDLEWARE = [
@@ -334,6 +338,21 @@ HANA_MART_COMPANY_DB = config(
 )
 # Test / non-production company DB (blank when not testing).
 HANA_TEST_COMPANY_DB = config('HANA_DB_TEST_NAME', default='')
+
+
+def _company_schemas(raw):
+    """`OIL=SCHEMA,BEVERAGES=SCHEMA` -> {'OIL': 'SCHEMA', ...}."""
+    pairs = (p.split('=', 1) for p in (raw or '').split(',') if '=' in p)
+    return {k.strip().upper(): v.strip() for k, v in pairs if k.strip() and v.strip()}
+
+
+# BUDGET: the SAP company schemas the budget module reads drafts from and
+# writes its decisions to (OMS_BUDGET_APPROVALS). Its OWN setting, deliberately
+# not the company DBs above: a dev checkout reads LIVE companies, and budget
+# approval must only ever touch the companies switched over to OMS
+# (`manage.py budget_gate`). Unset = the module does nothing. e.g.
+#   BUDGET_SAP_SCHEMAS=OIL=TEST_JIVO_OIL_HANADB,BEVERAGES=TEST_JIVO_BEVERAGES_HANADB
+BUDGET_SAP_SCHEMAS = _company_schemas(config('BUDGET_SAP_SCHEMAS', default=''))
 # The chart-of-accounts node whose children are the company's cash drawers
 # (OACT."FatherNum"). It says WHERE to look for cash accounts — never which one
 # to use: there is no default cash G/L, the user picks one per payment.

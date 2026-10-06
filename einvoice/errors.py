@@ -13,6 +13,9 @@ from __future__ import annotations
 IRN_ERROR_CODES = {
     "1002": "Invalid login / credentials.",
     "1005": "Invalid or expired AuthToken — re-authenticate.",
+    # Auth refusals, as NIC's sandbox answered them on 2026-10-05 (HTTP 200, Status 0):
+    "1010": "Invalid Client-ID / Client-Secret — check EINV CLIENT_ID and CLIENT_SECRET for this GSTIN.",
+    "1019": "Incorrect password — check the API user's password for this GSTIN on the e-invoice portal.",
     "2150": "Duplicate IRN: an IRN already exists for this GSTIN + DocType + DocNo + FY.",
     "2172": "Intra-state supply: IGST is not applicable, only CGST + SGST.",
     "2174": "Inter-state supply: CGST/SGST must be 0 (IGST applies).",

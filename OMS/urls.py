@@ -87,6 +87,8 @@ api_urlpatterns = [
     path('production/', include('production.urls')),
     # Advance Payment — SAP lookups only for now (no models, no migration).
     path('advance-payments/', include('advance_payment.urls')),
+    # BUDGET — budget approval of SAP drafts (own `budget` schema).
+    path('budget/', include('budget.urls')),
 ]
 
 urlpatterns = [

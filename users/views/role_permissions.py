@@ -140,12 +140,24 @@ class RolePermissionsUpdateView(APIView):
             return Response({'success': False, 'message': '`keys` must be a list'},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        # A key the role ALREADY holds is kept even when this build does not
+        # register it — a grant written by another branch's code. The page
+        # sends the whole bundle back, so rejecting it would refuse every save
+        # of that role (the Advance Payment Approver role could not be given
+        # Budget_Approval because it carried `Credit_Limit_Approval`). It stays
+        # inert here: `effective_keys` ignores unknown keys on read. Only keys
+        # being ADDED must be registered — that is the typo check.
+        try:
+            held = set(RolePermissions.objects.filter(role=role)
+                       .values_list('keys', flat=True).first() or [])
+        except DatabaseError:
+            held = set()  # not migrated; the save below says so
         cleaned, unknown = [], []
         for key in keys:
             key = str(key).strip()
             if not key or key in cleaned:
                 continue
-            (cleaned if key in ALL_KEYS else unknown).append(key)
+            (cleaned if key in ALL_KEYS or key in held else unknown).append(key)
         if unknown:
             return Response(
                 {'success': False,

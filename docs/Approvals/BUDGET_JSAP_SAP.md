@@ -370,6 +370,44 @@ the `RetrySapView` pattern in the `production` app.**
 
 ---
 
+## 8a. OMS's own gate table ("option B") — applied to the TEST companies, 2026-10-06
+
+OMS does not write JSAP's `tbl_Draft_Approvals`. Each company schema gets:
+
+| object | what it is |
+|---|---|
+| `OMS_BUDGET_APPROVALS` (table, owner `DSRN`) | OMS's decisions, one row per draft line, key `(ObjType, DocEntry, LineNum)`: `ApprovedStatus` A / V / R / NULL, `VerifiedStatus` (`V` once fully approved), budget, amount, `OmsRequestId`, `DecidedBy`, `DecidedAt` |
+| `tbl_Draft_Approvals_JSAP` (table) | JSAP's table, renamed; history only |
+| `tbl_Draft_Approvals` (view) | what SAP's gate reads: `OMS_BUDGET_APPROVALS` shaped exactly like JSAP's table (same column names and types, unused ones NULL) |
+
+So none of the 33 (Oil) / 39 (Beverages) places in `SBO_SP_TRANSACTIONNOTIFICATION`
+change. At the switch, JSAP's rows are copied into OMS's table once (`DecidedBy =
+'JSAP'`; its duplicate lines never disagree on status), so a draft JSAP already
+approved stays postable.
+
+SAP's procedures are owned by `SYSTEM` and run with its rights, so the view is
+granted `SELECT` to them. That is only possible because the view reads OMS's
+table alone — an earlier attempt that also read JSAP's table (owned by
+`SYSTEM`) failed the recompile with *insufficient privilege*.
+
+Run with `python manage.py budget_gate --schema <schema> [--apply | --rollback]`
+(`hana/management/commands/budget_gate.py`). It refuses a schema not starting
+with `TEST_` unless `--allow-live`, proves the view compiles before renaming,
+recompiles every procedure that reads the gate and requires them valid, and puts
+JSAP's table back on any failure after the rename.
+
+Verified on `TEST_JIVO_OIL_HANADB` (2,026 JSAP rows → 2,025 lines) and
+`TEST_JIVO_BEVERAGES_HANADB` (7,903 → 7,878): **0 lines** answer the gate
+differently through the view, and the gate procedure runs through it as `SYSTEM`
+(a replayed Beverages A/P invoice: `0, Entry approved for addition.`).
+
+**Live cut-over, per company:** stop JSAP's budget jobs for it first — once the
+name is a view, JSAP's write-back to it fails — then `budget_gate --apply
+--allow-live`. Live Oil's table holds 630,175 rows on 4,807 lines (most rows are
+repeats of 67 lines); the import keeps one per line.
+
+---
+
 ## 9. Open questions
 
 1. How do Beverage and Mart documents enter budget approval, when
