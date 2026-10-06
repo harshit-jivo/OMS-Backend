@@ -148,7 +148,7 @@ class SubDepartment(models.Model):
 #
 # The APPROVAL ROUTE is not stored here: it is the Workflow Engine's
 # configuration (module ADVANCE_PAYMENT), chosen by the engine's queries
-# against this request's company / department / sub-department. The flow row
+# against this request's company / budget head / payment purpose. The flow row
 # points at the stage it waits at, and "who may act now?" is always answered
 # by `workflow.services.assignments.get_stage_assignment(stage)`, so changing
 # a stage's user in the Workflows page moves pending requests with it.
@@ -165,6 +165,9 @@ class RequestType(models.TextChoices):
     VENDOR = 'VENDOR', 'Vendor'
     EMPLOYEE_ADVANCE = 'EMPLOYEE_ADVANCE', 'Employee'
     EMPLOYEE_IMPREST = 'EMPLOYEE_IMPREST', 'Employee Imprest'
+    #: A REFUND: money a customer is owed back (they paid more than they were
+    #: invoiced). Posted as an outgoing payment to the customer (rCustomer).
+    CUSTOMER = 'CUSTOMER', 'Customer'
 
 
 class PaymentAgainst(models.TextChoices):
@@ -172,6 +175,12 @@ class PaymentAgainst(models.TextChoices):
     AGAINST_BILL = 'AGAINST_BILL', 'Against Bill'
     AGAINST_PO = 'AGAINST_PO', 'Against PO'
     ALL = 'ALL', 'All'
+    #: Customer refund against their open ledger items: payments received and
+    #: credit memos less the invoices they still owe.
+    AGAINST_LEDGER = 'AGAINST_LEDGER', 'Against Ledger'
+    #: Customer refund of a typed amount, applied to nothing (e.g. a cheque
+    #: dishonour charge), as SAP's own on-account payments are.
+    ON_ACCOUNT = 'ON_ACCOUNT', 'On Account'
     #: A typed answer; the text is in `payment_against_other`.
     OTHER = 'OTHER', 'Other'
 
@@ -237,18 +246,38 @@ class StageRole(models.TextChoices):
 #: The fixed stages, in the order a route must end with them.
 FIXED_ROLES = (StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL)
 
-#: The stages that may send a request back to its creator.
-RETURN_TO_CREATOR_ROLES = (StageRole.APPROVAL,)
+#: An approval stage with this exact name is not handled by its configured
+#: user: it goes to the Department Head the requester picked on the request
+#: (`AdvanceRequest.department_head`). The stage's own user is a placeholder.
+DEPARTMENT_HEAD_STAGE = 'Department Head Approval'
+
+
+def is_department_head_stage(stage_name):
+    """Whether an engine stage is the Department Head's (case and spacing ignored)."""
+    return ' '.join(str(stage_name or '').split()).lower() == DEPARTMENT_HEAD_STAGE.lower()
+
+#: The stages that may send a request back to its creator: every approval
+#: stage, and Payment (which finds what is wrong with the request itself while
+#: filling the payment). Audit and Final send back to Payment instead.
+RETURN_TO_CREATOR_ROLES = (StageRole.APPROVAL, StageRole.PAYMENT)
 
 
 class AdvanceRequest(models.Model):
     """One payment request, as its creator raised it.
 
-    Company, department and sub-department are what the Workflow Engine's
-    queries read to choose the approval route:
+    Company, the request type and the payment purpose are what the Workflow
+    Engine's queries read to choose the approval route: one workflow per
+    purpose (`manage.py seed_payment_workflows`), e.g.
 
         SELECT id FROM advance_payment_request
-        WHERE department_id = 35 AND sub_department_id IN (87, 92)
+        WHERE company IN ('OIL', 'BEVERAGES') AND purpose_code = 'FA_CIVIL'
+          AND request_type NOT IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')
+
+    The budget head (the form's "Department") is kept for SAP and reports, and
+    narrows one route only (factory salaries).
+
+    Requests raised before 2026-10-01 also carry an OMS department and
+    sub-department; new ones leave them empty.
 
     The creator may edit or cancel it only while no stage has approved it in
     the current round, or while it is RETURNED to them (see `RequestFlow`).
@@ -261,9 +290,11 @@ class AdvanceRequest(models.Model):
     payment_against = models.CharField(max_length=20, choices=PaymentAgainst.choices)
     payment_against_other = models.CharField(max_length=120, blank=True, default='')
 
-    # ── Routing: read by the workflow queries ──────────────────────────────
+    # ── Old routing, kept for requests raised before budget heads ─────────
+    #: No longer asked: the form's Department is now the SAP budget head
+    #: (`budget_code`). Empty on every request raised since 2026-10-01.
     department = models.ForeignKey(
-        Department, on_delete=models.PROTECT, related_name='requests')
+        Department, on_delete=models.PROTECT, null=True, blank=True, related_name='requests')
     sub_department = models.ForeignKey(
         SubDepartment, on_delete=models.PROTECT, null=True, blank=True, related_name='requests',
         help_text='Empty for a department that has no sub-departments.')
@@ -291,16 +322,33 @@ class AdvanceRequest(models.Model):
     expected_from_date = models.DateField(null=True, blank=True)
     expected_to_date = models.DateField(null=True, blank=True)
     payment_date = models.DateField()
+    #: No longer asked or shown (2026-10-01); the column keeps its default.
     priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.MEDIUM)
     remarks = models.TextField(blank=True, default='')
 
-    # ── Payment purpose: SAP's Budget and Sub Budget cost centres ─────────
-    #: OPRC codes of dimension 3 (Budget) and 4 (Sub Budget), with their
-    #: names as they were when raised.
+    # ── Routing: read by the workflow queries ──────────────────────────────
+    #: The form's "Department": SAP's budget head, an OPRC code of dimension 3,
+    #: with its name as it was when raised.
     budget_code = models.CharField(max_length=20, blank=True, default='')
     budget_name = models.CharField(max_length=100, blank=True, default='')
+    #: Sub Budget (OPRC dimension 4): asked only until 2026-10-01; kept on the
+    #: requests raised before then, empty since.
     sub_budget_code = models.CharField(max_length=20, blank=True, default='')
     sub_budget_name = models.CharField(max_length=100, blank=True, default='')
+    #: What the money is for: a code of `advance_payment.purposes`, with its
+    #: label as it was when raised.
+    purpose_code = models.CharField(max_length=30, blank=True, default='')
+    purpose_label = models.CharField(max_length=100, blank=True, default='')
+    #: The Department Head the requester picked: an HOD of the employee
+    #: master. Asked when the purpose (or an Employee / Imprest request) is
+    #: approved "by department"; empty otherwise.
+    department_head_employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, null=True, blank=True, related_name='headed_requests')
+    #: That HOD's OMS login, matched when the request is saved
+    #: (`services.heads.match_user`): who handles the route's "Department Head
+    #: Approval" stage.
+    department_head = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
 
     # ── Ownership: information only, no say in the approval ──────────────
     owner_employee = models.ForeignKey(
@@ -339,6 +387,16 @@ class DocumentKind(models.TextChoices):
     BILL = 'BILL', 'A/P invoice'
     PO = 'PO', 'Purchase order'
     OTHER = 'OTHER', 'Other open document'
+    #: One open item on a customer's ledger (JDT1): an incoming payment, a
+    #: credit memo, an invoice or a journal line.
+    LEDGER = 'LEDGER', 'Ledger item'
+
+
+class LedgerDirection(models.TextChoices):
+    #: Owed TO the customer: an incoming payment, a credit memo, a credit JE.
+    CREDIT = 'CREDIT', 'Credit'
+    #: Owed BY the customer: an invoice, a debit JE. Reduces the refund.
+    DEBIT = 'DEBIT', 'Debit'
 
 
 class AllocationMode(models.TextChoices):
@@ -351,12 +409,27 @@ class RequestDocument(models.Model):
 
     A SNAPSHOT: open amounts move as SAP is paid, and a request must keep
     saying what its creator saw. The SAP document is identified by
-    `(company, kind, sap_doc_entry)`.
+    `(company, kind, sap_doc_entry, sap_line)`.
+
+    These rows are also OMS's record of what is RESERVED and PAID against each
+    SAP document (`services/reservations.py`): a line of a request in approval
+    reserves its amount, a completed one has paid it, a rejected or cancelled
+    one has released it.
     """
 
     request = models.ForeignKey(AdvanceRequest, on_delete=models.CASCADE, related_name='documents')
     kind = models.CharField(max_length=10, choices=DocumentKind.choices)
+    #: The key SAP's PaymentInvoices wants: the document's DocEntry for a
+    #: bill, PO, A/R invoice or credit memo; the journal TransId for a ledger
+    #: item that is a receipt or a journal entry (with `sap_line`).
     sap_doc_entry = models.IntegerField()
+    #: The JDT1 line of a ledger item addressed through the journal; 0 otherwise.
+    sap_line = models.PositiveIntegerField(default=0)
+    #: A ledger item's SAP object type: 13 A/R invoice, 14 A/R credit memo,
+    #: 24 incoming payment, 30 journal entry. Null for bills and POs.
+    sap_object = models.PositiveIntegerField(null=True, blank=True)
+    #: A ledger item's side: CREDIT (owed to the customer) or DEBIT.
+    direction = models.CharField(max_length=6, choices=LedgerDirection.choices, blank=True, default='')
     sap_doc_num = models.CharField(max_length=30, blank=True, default='')
     #: Other open documents (goods receipts, credit memos…): SAP's object type.
     sap_doc_type = models.CharField(max_length=60, blank=True, default='')
@@ -382,8 +455,8 @@ class RequestDocument(models.Model):
         db_table = 'advance_payment_request_document'
         ordering = ['request', 'id']
         constraints = [
-            models.UniqueConstraint(fields=['request', 'kind', 'sap_doc_entry'],
-                                    name='ap_request_document_once'),
+            models.UniqueConstraint(fields=['request', 'kind', 'sap_doc_entry', 'sap_line'],
+                                    name='ap_request_document_line_once'),
             models.CheckConstraint(condition=Q(amount__gt=0), name='ap_request_document_amount_positive'),
             models.CheckConstraint(condition=Q(amount__lte=F('open_amount')),
                                    name='ap_request_document_within_open'),
@@ -446,6 +519,15 @@ class Payout(models.Model):
     to_ifsc = models.CharField(max_length=11, blank=True, default='')
     #: Typed by hand rather than chosen from the payee's SAP bank accounts.
     to_account_manual = models.BooleanField(default=False)
+    # ── TDS deducted at payment (vendor requests, Payment stage only) ──────
+    #: SAP withholding-tax code (OWHT) the TDS is booked under: it fixes the
+    #: rate, the section and the 2133xxx payable account. Blank: no TDS.
+    tds_code = models.CharField(max_length=20, blank=True, default='')
+    tds_label = models.CharField(max_length=150, blank=True, default='')
+    tds_rate = models.DecimalField(max_digits=6, decimal_places=3, null=True, blank=True)
+    tds_account = models.CharField(max_length=20, blank=True, default='')
+    #: Rounded to the rupee. The methods pay the request's amount less this.
+    tds_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
     updated_on = models.DateTimeField(auto_now=True)
@@ -590,6 +672,10 @@ class SapVoucher(models.Model):
     cancelled_on = models.DateTimeField(null=True, blank=True)
     #: SAP's cancellation document, where SAP makes one.
     cancel_doc_entry = models.IntegerField(null=True, blank=True)
+    #: The journal entry that booked this attempt's TDS (Dr vendor, Cr TDS
+    #: payable), if any. Left in SAP only when the payment itself posted, or
+    #: may have; cancelled when SAP refused the payment.
+    tds_trans_id = models.IntegerField(null=True, blank=True)
     replaced_by = models.OneToOneField(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='replaces')
 
@@ -668,3 +754,62 @@ class RequestLog(models.Model):
 
     def __str__(self):
         return f'{self.request_id} {self.action}'
+
+
+# ===========================================================================
+# Bills and POs sent to a requester
+# ===========================================================================
+
+class AssignmentStatus(models.TextChoices):
+    #: Waiting in the recipient's "Assigned to Me".
+    OPEN = 'OPEN', 'Open'
+    #: The recipient raised a payment request from it (`request`).
+    RAISED = 'RAISED', 'Request raised'
+    #: The recipient set it aside without raising one.
+    DISMISSED = 'DISMISSED', 'Dismissed'
+    #: The sender took it back before anything was raised.
+    WITHDRAWN = 'WITHDRAWN', 'Withdrawn'
+
+
+class DocumentAssignment(models.Model):
+    """One SAP bill or PO sent to an Advance Payment User or Approver to raise a request from.
+
+    The document's facts are copied from SAP when it is sent, for the lists;
+    raising the request re-reads it live, so nothing here is paid from.
+    """
+
+    company = models.CharField(max_length=20, choices=COMPANY_CHOICES)
+    kind = models.CharField(max_length=10, choices=DocumentKind.choices)
+    sap_doc_entry = models.IntegerField()
+    sap_doc_num = models.CharField(max_length=30, blank=True, default='')
+    card_code = models.CharField(max_length=50)
+    card_name = models.CharField(max_length=200, blank=True, default='')
+    vendor_ref = models.CharField(max_length=100, blank=True, default='')
+    doc_date = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    doc_total = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+    #: SAP's open amount when it was sent.
+    open_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+    note = models.TextField(blank=True, default='')
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='payment_assignments')
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    status = models.CharField(max_length=10, choices=AssignmentStatus.choices, default=AssignmentStatus.OPEN)
+    request = models.ForeignKey(
+        AdvanceRequest, on_delete=models.SET_NULL, null=True, blank=True, related_name='assignments')
+    created_on = models.DateTimeField(default=timezone.now)
+    updated_on = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'advance_payment_document_assignment'
+        ordering = ['-created_on']
+        indexes = [models.Index(fields=['assigned_to', 'status'], name='ap_assignment_inbox_idx')]
+        constraints = [
+            # One open assignment of a document to a person at a time.
+            models.UniqueConstraint(fields=['company', 'kind', 'sap_doc_entry', 'assigned_to'],
+                                    condition=Q(status='OPEN'), name='ap_assignment_open_once'),
+        ]
+
+    def __str__(self):
+        return f'{self.kind} {self.sap_doc_num} -> {self.assigned_to_id}'

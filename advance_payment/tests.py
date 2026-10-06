@@ -444,3 +444,31 @@ class TheDepartments(SimpleTestCase):
             {"id": 40, "name": "Cyber Security", "sub_departments": []},
             {"id": 35, "name": "Finance", "sub_departments": [{"id": 92, "name": "AP"}, {"id": 88, "name": "AR"}]},
         ])
+
+
+@mock.patch.object(views.ap_perms.CanViewLookups, "has_permission", return_value=True)
+class ThePaymentPurposes(SimpleTestCase):
+    def _get(self):
+        request = APIRequestFactory().get("/api/advance-payments/payment-purposes/")
+        force_authenticate(request, user=SimpleNamespace(pk=1, id=1, is_authenticated=True, is_active=True))
+        return views.PaymentPurposesView.as_view()(request)
+
+    def test_lists_the_payment_desks_purposes_in_order(self, _perm):
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        data = response.data["data"]
+        self.assertEqual(data["groups"], ["Goods", "Services", "People", "Statutory", "Finance"])
+        self.assertEqual(data["count"], 41)
+        self.assertEqual(data["results"][0],
+                         {"code": "OIL_PURCHASE", "label": "Oil Purchase – Imported or Domestic",
+                          "group": "Goods", "needs_head": False})
+        codes = [r["code"] for r in data["results"]]
+        self.assertIn("FA_CIVIL", codes)
+        self.assertNotIn("FIXED_ASSETS", codes)  # split into P&M, Civil, Others
+        self.assertTrue(next(r for r in data["results"] if r["code"] == "RENT")["needs_head"])
+        self.assertEqual(data["results"][-1]["code"], "CAPITAL")
+
+    def test_every_purpose_is_in_a_listed_group_and_codes_are_unique(self, _perm):
+        results = self._get().data["data"]["results"]
+        self.assertEqual(len({p["code"] for p in results}), len(results))
+        self.assertTrue(all(p["group"] in ("Goods", "Services", "People", "Statutory", "Finance") for p in results))

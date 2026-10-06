@@ -6,6 +6,16 @@ cash up to 10,000), the same cash note rule, the same payee checks. Saving
 is allowed with gaps (no accounts or cheque details yet), though every line
 needs its amount; APPROVING is not, and `problems()` is what it checks.
 
+TDS
+---
+On a VENDOR request the Payment stage may deduct TDS: a SAP TDS code, which
+fixes the rate (1 / 2 / 10%; 5% once SAP has a code at it), the section and
+the 2133xxx payable account. The TDS is the request's amount at that rate,
+rounded to the rupee; the methods then pay the rest. Not on a bill SAP
+already deducted TDS on — that would deduct it twice. Only the Payment stage
+saves a payout (`flow.save_payout`), so only it can set or change the TDS;
+after it, the TDS is read-only like the rest of the payout.
+
 ONE SAP PAYMENT, SO ONE BANK AND ONE DRAWER
 -------------------------------------------
 SAP's outgoing payment has a single TransferAccount and a single CashAccount.
@@ -18,7 +28,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.utils import timezone
 
-from advance_payment.models import Payout, PayoutLine, PayoutMethod
+from advance_payment.models import DocumentKind, Payout, PayoutLine, PayoutMethod, RequestType
 
 CENT = Decimal('0.01')
 
@@ -70,6 +80,50 @@ def _notes(raw):
     return out
 
 
+RUPEE = Decimal('1')
+
+
+def tds_amount(amount, rate):
+    """TDS on `amount` at `rate` percent, rounded to the rupee (as the Act rounds it)."""
+    return (Decimal(amount) * Decimal(rate) / 100).quantize(RUPEE, rounding=ROUND_HALF_UP)
+
+
+def _clean_tds(advance, raw):
+    """The payout's TDS fields from `{"code": "C194"}` (or nothing: no TDS). Raises `PayoutInvalid`."""
+    from advance_payment.services import sap as sap_service
+
+    code = _text((raw or {}).get('code') if isinstance(raw, dict) else '', 20)
+    if not code:
+        return {'tds_code': '', 'tds_label': '', 'tds_rate': None, 'tds_account': '', 'tds_amount': Decimal('0')}
+    if advance.request_type != RequestType.VENDOR:
+        raise PayoutInvalid(['TDS is deducted on vendor payments only.'])
+    try:
+        known = {c['code']: c for c in sap_service.tds_codes(advance.company, advance.partner_code)}
+        bills = [d.sap_doc_entry for d in advance.documents.all() if d.kind == DocumentKind.BILL]
+        taxed = sap_service.bills_with_tds(advance.company, bills)
+    except sap_service.SapUnavailable as exc:
+        raise PayoutInvalid([f'Could not check the TDS with SAP: {exc}']) from exc
+    chosen = known.get(code)
+    if chosen is None:
+        raise PayoutInvalid([f'{code} is not an active TDS code at 1, 2, 5 or 10% in SAP.'])
+    if taxed:
+        listed = ', '.join(f'{v["doc_num"]} (TDS {v["tds"]})' for v in taxed.values())
+        raise PayoutInvalid([f'TDS was already deducted in SAP on bill {listed}: it cannot be deducted again.'])
+    rate = Decimal(chosen['rate'])
+    return {
+        'tds_code': code,
+        'tds_label': f'{chosen["name"]}'[:150],
+        'tds_rate': rate,
+        'tds_account': chosen['account'],
+        'tds_amount': tds_amount(advance.amount, rate),
+    }
+
+
+def net_amount(advance, payout):
+    """What the methods pay: the request's amount less any TDS."""
+    return advance.amount - (payout.tds_amount if payout is not None else Decimal('0'))
+
+
 def save(advance, data, *, user):
     """Write the payout as sent. Lines are matched by `id` so their files stay.
 
@@ -103,6 +157,7 @@ def save(advance, data, *, user):
         })
     if problems:
         raise PayoutInvalid(problems)
+    tds = _clean_tds(advance, data.get('tds'))
 
     before = fingerprint(advance)
     payout, _ = Payout.objects.update_or_create(
@@ -113,6 +168,7 @@ def save(advance, data, *, user):
             'to_ifsc': _text(data.get('to_ifsc'), 11).upper(),
             'to_account_manual': bool(data.get('to_account_manual')),
             'updated_by': user,
+            **tds,
         })
 
     existing = {line.pk: line for line in payout.lines.all()}
@@ -144,7 +200,8 @@ def fingerprint(advance):
     if payout is None:
         return None
     return (
-        payout.beneficiary_name, payout.to_account_number, payout.to_ifsc,
+        payout.beneficiary_name, payout.to_account_number, payout.to_ifsc, payout.tds_code,
+        str(payout.tds_amount),
         tuple(sorted(
             (l.method, str(l.amount), l.from_account, l.cheque_number, l.cheque_bank,
              str(l.cheque_date or ''), str(l.cash_notes or ''))
@@ -240,8 +297,12 @@ def problems(advance):
             if notes != line.amount:
                 out.append(f'Method {n}: the cash notes add up to {notes}, not {line.amount}.')
     total = sum((l.amount for l in lines), Decimal('0'))
-    if lines and total != advance.amount:
-        out.append(f'The payment methods add up to {total}, but the request is for {advance.amount}.')
+    net = net_amount(advance, payout)
+    if lines and total != net:
+        out.append(f'The payment methods add up to {total}, but the request pays {net}'
+                   + (f' after TDS of {payout.tds_amount}.' if payout.tds_amount else '.'))
+    if payout.tds_amount and advance.request_type != RequestType.VENDOR:
+        out.append('TDS is deducted on vendor payments only.')
     banks = {l.from_account for l in lines if l.method != PayoutMethod.CASH and l.from_account}
     drawers = {l.from_account for l in lines if l.method == PayoutMethod.CASH and l.from_account}
     if len(banks) > 1:

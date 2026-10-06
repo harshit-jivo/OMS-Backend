@@ -4,10 +4,10 @@ THE ROUTE
 ---------
 The Workflow Engine chooses ONE workflow of module `ADVANCE_PAYMENT` for the
 request (the workflow's queries read `advance_payment_request`: company,
-department, sub-department). It may start with ANY number of approval
-stages, named freely (none, or Sub-HOD, HOD, Director, ...), and must end
-with three stages named exactly Payment Approval, Audit Approval, Final
-Approval (see `StageRole`):
+budget_code, the form's Department, and purpose_code). It may start with
+ANY number of approval stages, named freely (none, or Sub-HOD, HOD,
+Director, ...), and must end with three stages named exactly Payment
+Approval, Audit Approval, Final Approval (see `StageRole`):
 
     approval stages (0 or more) approve, reject, or RETURN to the creator
     Payment                     fills the payment details; approves only when
@@ -27,7 +27,12 @@ Rejection is terminal everywhere.
 
 WHO MAY ACT: the current stage's user TODAY, replacements applied
 (`get_stage_assignment`), checked on the server for every action. The
-client never says who is acting.
+client never says who is acting. A stage named "Department Head Approval"
+is the exception: it goes to the Department Head the requester picked on the
+request (replacements applied to them in the same way), and its configured
+user is only a placeholder. When the stage straight after it is the same
+person's (the Director picked as Department Head), they approve once and
+both stages are recorded.
 
 THE CREATOR may edit or cancel while no stage has approved since they last
 submitted, or while the request is RETURNED to them; after an edit of a
@@ -38,16 +43,18 @@ the log says what happened, the engine's configuration says what is ahead.
 """
 import logging
 
+from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 
 from workflow.exceptions import WorkflowError
-from workflow.services import selection
+from workflow.services import replacements, selection
 from workflow.services.assignments import get_stage_assignment
 
 from advance_payment.models import (
+    DEPARTMENT_HEAD_STAGE,
     FlowStatus,
     LogAction,
     FIXED_ROLES,
@@ -58,6 +65,7 @@ from advance_payment.models import (
     RequestLog,
     RequestStatus,
     StageRole,
+    is_department_head_stage,
 )
 from advance_payment.services import payout as payout_service
 from advance_payment.services import requests as request_service
@@ -114,6 +122,9 @@ def _select(advance):
     except WorkflowError as exc:
         raise FlowError(str(exc), status=409) from exc
     named = roles(chosen.stages)
+    if not advance.department_head_id and any(is_department_head_stage(s.name) for s, _r in named):
+        raise FlowError(f'This request is approved by its Department Head ({DEPARTMENT_HEAD_STAGE}): '
+                        f'choose the Department Head on the request.', status=409)
     return chosen, named
 
 
@@ -124,10 +135,31 @@ def effective_user_id(stage_id):
     return assignment.effective_user_id if assignment else None
 
 
+def _head_today(advance):
+    """The picked Department Head, or whoever stands in for them today."""
+    head = advance.department_head_id
+    if not head:
+        return None
+    return replacements.effective_user_ids([head], replacements.today()).get(head, head)
+
+
+def stage_user_id(advance, stage):
+    """Who acts on `stage` of this request today.
+
+    The stage's configured user, replacements applied; for the Department
+    Head stage, the Department Head picked on the request instead.
+    """
+    if stage is None:
+        return None
+    if is_department_head_stage(stage.name):
+        return _head_today(advance)
+    return effective_user_id(stage.id)
+
+
 def _point_at(flow, stage, role):
     flow.current_stage_id = stage.id if stage else None
     flow.current_role = role or ''
-    flow.current_user_id = effective_user_id(stage.id) if stage else None
+    flow.current_user_id = stage_user_id(flow.request, stage) if stage else None
 
 
 def _save(flow):
@@ -154,8 +186,11 @@ def log(advance, action, *, user=None, flow=None, remarks='', data=None,
     if stage is _CURRENT:
         stage = flow.current_stage if flow and flow.current_stage_id else None
     on_behalf_of = None
-    if stage is not None and user is not None and stage.user_id != user.pk:
-        on_behalf_of = stage.user_id
+    owner = None
+    if stage is not None:
+        owner = advance.department_head_id if is_department_head_stage(stage.name) else stage.user_id
+    if owner is not None and user is not None and owner != user.pk:
+        on_behalf_of = owner
     return RequestLog.objects.create(
         request=advance, action=action, cycle=flow.cycle if flow else 1,
         stage=stage, stage_name=stage.name if stage else '',
@@ -261,7 +296,7 @@ def edit(advance, cleaned, *, user, files=(), remove_file_ids=(), resubmit=False
         log(advance, LogAction.EDITED, user=user, flow=flow, stage=None, data=changes)
     if flow.status == FlowStatus.PENDING and changes:
         # Nothing is approved yet, so nothing is lost by routing again: a new
-        # department must reach its own approvers.
+        # Department (budget head) or purpose must reach its own approvers.
         _reroute(flow, advance)
         _save(flow)
     elif flow.status == FlowStatus.RETURNED and resubmit:
@@ -321,7 +356,7 @@ def cancel(advance, *, user, remarks='', version=None):
 
 def is_actor(flow, user):
     return (flow is not None and flow.status == FlowStatus.PENDING and flow.current_stage_id
-            and effective_user_id(flow.current_stage_id) == user.pk)
+            and stage_user_id(flow.request, flow.current_stage) == user.pk)
 
 
 def _acting(advance, user, version):
@@ -331,7 +366,7 @@ def _acting(advance, user, version):
     if flow.status != FlowStatus.PENDING or not flow.current_stage_id:
         raise FlowError(f'This request is {flow.request.get_status_display().lower()}; '
                         f'it is not waiting for a decision.', status=409)
-    if effective_user_id(flow.current_stage_id) != user.pk:
+    if stage_user_id(flow.request, flow.current_stage) != user.pk:
         raise FlowError(f'It is waiting at {flow.current_stage.name}, which is not yours.',
                         status=403)
     return flow
@@ -396,6 +431,24 @@ def _post_voucher(flow, user):
     return ''
 
 
+def _approve_once(flow, following, *, user):
+    """After the Department Head approves: the next stage, unless it is theirs too.
+
+    The Director picked as Department Head approves once: the approval stage
+    straight after (Director Approval) is the same person's, so it is recorded
+    as approved with them and the request moves past it. Returns the stage the
+    request goes to next, or None after the last.
+    """
+    stage, role = following
+    if role != StageRole.APPROVAL or stage_user_id(flow.request, stage) != user.pk:
+        return following
+    _point_at(flow, stage, role)
+    log(flow.request, LogAction.APPROVED, user=user, flow=flow,
+        remarks='Approved once: the same person approved as Department Head.',
+        data={'same_as_department_head': True})
+    return _next(flow)
+
+
 def approve(advance, *, user, remarks='', version=None):
     """Approve the current stage. Returns `(advance, error)`.
 
@@ -422,8 +475,11 @@ def approve(advance, *, user, remarks='', version=None):
                 _save(flow)
                 return advance, error
 
+        approved_as_head = is_department_head_stage(flow.current_stage.name)
         log(advance, LogAction.APPROVED, user=user, flow=flow, remarks=remarks)
         following = _next(flow)
+        if approved_as_head and following is not None:
+            following = _approve_once(flow, following, user=user)
         if role == StageRole.FINAL or following is None:
             flow.status = FlowStatus.COMPLETED
             _point_at(flow, None, '')
@@ -456,11 +512,15 @@ def reject(advance, *, user, remarks, version=None):
 
 @transaction.atomic
 def return_to_creator(advance, *, user, remarks, version=None):
-    """Sub-HOD, HOD or Director: back to the creator, to edit and resubmit."""
+    """An approval stage or Payment: back to the creator, to edit and resubmit.
+
+    Resubmitting routes it afresh from the first stage (a new round); the
+    payment details Payment had filled stay, to be checked again there.
+    """
     _remarks_required(remarks, 'returning it')
     flow = _acting(advance, user, version)
     if StageRole(flow.current_role) not in RETURN_TO_CREATOR_ROLES:
-        raise FlowError('Only the approval stages before Payment may return a request to its creator.',
+        raise FlowError('Only the approval stages and Payment may return a request to its creator.',
                         status=409)
     advance = flow.request
     log(advance, LogAction.RETURNED, user=user, flow=flow, remarks=remarks,
@@ -788,15 +848,28 @@ def readable_request_ids(user):
     return ids
 
 
+#: `name__iregex` for the Department Head stage, as `is_department_head_stage` reads it.
+_HEAD_STAGE_RE = r'^\s*' + r'\s+'.join(DEPARTMENT_HEAD_STAGE.split()) + r'\s*$'
+
+
 def awaiting_ids(user):
-    """Requests whose current stage is `user`'s today."""
+    """Requests whose current stage is `user`'s today.
+
+    A stage they are configured on, except the Department Head stage (its
+    configured user is a placeholder), and the Department Head stage of each
+    request whose picked head is them, or someone they stand in for today.
+    """
     from workflow.models import WorkflowStage
-    from workflow.services import replacements
 
     owners = replacements.configured_users_acting_for(user.pk, replacements.today())
-    stage_ids = WorkflowStage.objects.filter(user_id__in=owners, is_active=True).values_list('id', flat=True)
-    return set(RequestFlow.objects.filter(status=FlowStatus.PENDING, current_stage_id__in=list(stage_ids))
+    stage_ids = (WorkflowStage.objects.filter(user_id__in=owners, is_active=True)
+                 .exclude(name__iregex=_HEAD_STAGE_RE).values_list('id', flat=True))
+    pending = RequestFlow.objects.filter(status=FlowStatus.PENDING)
+    ids = set(pending.filter(current_stage_id__in=list(stage_ids)).values_list('request_id', flat=True))
+    ids |= set(pending.filter(current_stage__name__iregex=_HEAD_STAGE_RE,
+                              request__department_head_id__in=list(owners))
                .values_list('request_id', flat=True))
+    return ids
 
 
 def stage_plan(advance):
@@ -822,15 +895,23 @@ def stage_plan(advance):
             state = row.action
         else:
             state = 'UPCOMING'
-        assignment = get_stage_assignment(stage.id)
+        if is_department_head_stage(stage.name):
+            user_id = _head_today(advance)
+            head = advance.department_head if user_id == advance.department_head_id else (
+                get_user_model().objects.filter(pk=user_id).first() if user_id else None)
+            user_name = (head.name or head.username) if head else ''
+        else:
+            assignment = get_stage_assignment(stage.id)
+            user_id = assignment.effective_user_id if assignment else None
+            user_name = assignment.effective_username if assignment else ''
         out.append({
             'stage_id': stage.id,
             'name': stage.name,
             'role': role or '',
             'sequence': stage.sequence,
             'state': state,
-            'user_id': assignment.effective_user_id if assignment else None,
-            'user_name': assignment.effective_username if assignment else '',
+            'user_id': user_id,
+            'user_name': user_name,
             'acted_by_id': row.actor_id if row else None,
             'acted_on': row.created_on.isoformat() if row else None,
         })
