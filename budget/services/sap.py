@@ -283,6 +283,58 @@ def write_item(item, status, *, decided_by='oms', remarks=''):
     return item.sap_status_text
 
 
+# ---------------------------------------------------------------------------
+# The draft's attachments — evidence for the approver
+# ---------------------------------------------------------------------------
+#
+# Marketing and payment drafts carry SAP attachments (`AtcEntry` -> ATC1, one
+# row per file). A journal voucher has none of those: its file is one full path
+# in the user field `OBTF.U_ATTACH_LINK`, as JSAP's `DRAFT_APPROVAL_ATC1` reads
+# it. Every file lives in the company's attachments folder, so the attachment
+# file service (`advance_payment.services.attachment_files`) finds it by NAME.
+#
+# The name is always read from SAP by (draft, line), never taken from a caller.
+
+#: The draft header table each object type's AtcEntry is on.
+_ATTACHMENT_HEADERS = {**{t: 'ODRF' for t in MARKETING_TYPES}, 46: 'OPDF'}
+
+
+def _file_name(name, ext):
+    name, ext = str(name or '').strip(), str(ext or '').strip()
+    return f'{name}.{ext}' if ext else name
+
+
+def draft_attachments(company, obj_type, draft_entry):
+    """`[{line, file_name, date}]`: every file attached to the draft in SAP. Raises `SapUnavailable`."""
+    schema = schema_for(company)
+    try:
+        with HANAConnection() as conn:
+            if int(obj_type) == 28:
+                rows = conn.execute(
+                    f'SELECT TO_NVARCHAR("U_ATTACH_LINK") "link" FROM "{schema}"."OBTF" WHERE "BatchNum" = ?',
+                    [int(draft_entry)])
+                link = str((rows[0] if rows else {}).get('link') or '').strip()
+                name = link.replace('/', '\\').rsplit('\\', 1)[-1]
+                return [{'line': 0, 'file_name': name, 'date': None}] if name else []
+            header = _ATTACHMENT_HEADERS.get(int(obj_type))
+            if header is None:
+                return []
+            rows = conn.execute(
+                f'SELECT A."Line" "line", A."FileName" "name", A."FileExt" "ext", A."Date" "date" '
+                f'FROM "{schema}"."{header}" D JOIN "{schema}"."ATC1" A ON A."AbsEntry" = D."AtcEntry" '
+                f'WHERE D."DocEntry" = ? AND D."ObjType" = ? ORDER BY A."Line"',
+                [int(draft_entry), int(obj_type)])
+    except Exception as exc:  # noqa: BLE001
+        raise SapUnavailable(f'Could not read the draft\'s attachments from {company}: {exc}') from exc
+    return [{'line': int(r['line']), 'file_name': _file_name(r['name'], r['ext']), 'date': _date(r['date'])}
+            for r in rows if r.get('name')]
+
+
+def draft_attachment(company, obj_type, draft_entry, line):
+    """One of `draft_attachments`, by its line, or None."""
+    return next((a for a in draft_attachments(company, obj_type, draft_entry) if a['line'] == int(line)), None)
+
+
 def clear_draft(company, obj_type, draft_entry):
     """Remove a draft's rows from the gate: it changed in SAP, so its old decisions no longer apply."""
     schema = schema_for(company)

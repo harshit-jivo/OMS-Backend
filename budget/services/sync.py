@@ -19,12 +19,14 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
 from budget.models import (BudgetDraft, BudgetItem, BudgetLine, BudgetSettings, DraftStatus, ItemStatus,
                            LogAction)
 from budget.services import flow as flow_service
+from budget.services import notify as notify_service
 from budget.services import routing
 from budget.services import sap as sap_service
 
@@ -44,6 +46,8 @@ class SyncResult:
     unroutable: list = field(default_factory=list)
     routed: list = field(default_factory=list)
     errors: list = field(default_factory=list)
+    #: Items opened by this run (not in a dry run), to announce once per approver.
+    opened: list = field(default_factory=list, repr=False)
 
     @property
     def quiet(self):
@@ -105,6 +109,7 @@ def _raise_items(draft, rows, result):
             flow_service.open_item(item)
         except flow_service.BudgetFlowError as exc:
             raise flow_service.BudgetFlowError(f'{route}: {exc}') from exc
+        result.opened.append(item)
         result.routed.append({'draft': draft.draft_entry, 'obj_type': draft.obj_type, 'route': route,
                               'workflow': item.workflow.code if item.workflow else None,
                               'user': getattr(item.current_user, 'username', None)})
@@ -126,6 +131,7 @@ def _new(company, key, rows, approved, result, dry_run):
             return
     except flow_service.BudgetFlowError as exc:
         transaction.savepoint_rollback(sid)
+        result.opened = [i for i in result.opened if i.draft_id != draft.pk]
         result.unroutable.append({'draft': key[1], 'obj_type': key[0], 'reason': str(exc)})
         return
     if dry_run:
@@ -176,6 +182,17 @@ def _gone(company, seen, result, dry_run):
                 draft.save(update_fields=['status', 'updated_at'])
 
 
+def announce(items):
+    """One message per approver for the items a run put at their stage."""
+    by_user = defaultdict(list)
+    for item in items:
+        if item.status == ItemStatus.PENDING and item.current_user_id:
+            by_user[item.current_user_id].append(item)
+    users = {u.pk: u for u in get_user_model().objects.filter(pk__in=list(by_user))}
+    for user_id, mine in by_user.items():
+        notify_service.new_items(users.get(user_id), mine)
+
+
 def run(company, *, dry_run=False):
     """One sweep for one company. Raises `SapUnavailable` when SAP cannot be read."""
     result = SyncResult(company=company)
@@ -184,13 +201,16 @@ def run(company, *, dry_run=False):
     result.lines_seen, result.drafts_seen = len(lines), len(groups)
     known = {(d.obj_type, d.draft_entry): d for d in BudgetDraft.objects.filter(company=company)}
     for key, rows in groups.items():
+        opened = len(result.opened)
         try:
             _one(company, key, rows, known.get(key), approved, result, dry_run)
         except Exception as exc:  # noqa: BLE001 — one bad draft must not stop the run
+            del result.opened[opened:]  # rolled back: nothing of it to announce
             logger.exception('BUDGET: draft %s %s failed', company, key)
             result.errors.append({'draft': key[1], 'obj_type': key[0], 'error': f'{type(exc).__name__}: {exc}'})
     _gone(company, set(groups), result, dry_run)
     if not dry_run:
+        announce(result.opened)
         row = BudgetSettings.load()
         row.last_sync = {**(row.last_sync or {}), company: timezone.now().isoformat()}
         row.save(update_fields=['last_sync', 'updated_at'])

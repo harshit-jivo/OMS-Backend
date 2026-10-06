@@ -179,6 +179,9 @@ REGISTRY: dict[str, dict[str, str]] = {
         # the desk; deciding also needs being the item's current stage user.
         'Budget_Approval':           'Budget — approval desk',
         'Budget_Settings':           'Budget — auto-approval settings',
+        # Everyone's items, by month and approver, with Excel export. Reading
+        # only: deciding is still the stage user's alone.
+        'Budget_Reports':            'Budget — reports (all approvers, export)',
     },
 
     # --- Payments actions (legacy keys, verbatim from

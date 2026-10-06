@@ -2,6 +2,11 @@
 
     python manage.py seed_budget_workflows            # show the plan, write nothing
     python manage.py seed_budget_workflows --apply    # write it
+    python manage.py seed_budget_workflows --user "Gurpreet Vg=gurpreet" --user avtar=Avtarsingh
+
+`--user HIERARCHY_NAME=USERNAME` names who holds a hierarchy login on THIS
+server: the hierarchy is written with the test server's usernames, and the
+live server's differ for some people. Repeatable.
 
 The routes are `budget.hierarchy.routes()`. Idempotent: a workflow is found by
 its code and updated in place (stages by sequence), its query rewritten and
@@ -24,16 +29,28 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--apply', action='store_true', help='Write the workflows (default: show the plan).')
+        parser.add_argument('--user', action='append', default=[], metavar='NAME=USERNAME',
+                            help='Who a hierarchy username is on this server, e.g. --user avtar=Avtarsingh.')
 
     def handle(self, *args, **opts):
         routes = hierarchy.routes()
         names = sorted({u for r in routes for _s, u in r['stages']})
-        users = {u.username: u for u in get_user_model().objects.filter(username__in=names, is_active=True)}
-        missing = [n for n in names if n not in users]
+        renamed = {}
+        for pair in opts['user']:
+            name, _sep, username = pair.partition('=')
+            if name not in names or not username:
+                raise CommandError(f'--user {pair!r}: expected NAME=USERNAME with NAME one of {", ".join(names)}.')
+            renamed[name] = username
+        login = {n: renamed.get(n, n) for n in names}
+        found = {u.username: u for u in get_user_model().objects.filter(username__in=set(login.values()),
+                                                                        is_active=True)}
+        missing = [f'{n}' + (f' (as {login[n]})' if login[n] != n else '') for n in names if login[n] not in found]
         if missing:
-            raise CommandError(f'No active user for: {", ".join(missing)}.')
+            raise CommandError(f'No active user for: {", ".join(missing)}. '
+                               f'Create them, or name another with --user NAME=USERNAME.')
+        users = {n: found[login[n]] for n in names}
         for r in routes:
-            chain = ' -> '.join(u for _s, u in r['stages'])
+            chain = ' -> '.join(login[u] for _s, u in r['stages'])
             self.stdout.write(f'{r["code"]:<34} [{r["company"]:<9}] {chain}')
         if not opts['apply']:
             self.stdout.write(self.style.WARNING(f'\n{len(routes)} workflows. Dry run: nothing written.'))

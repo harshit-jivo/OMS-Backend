@@ -231,13 +231,13 @@ trail per item, SAP write state), settings.
 
 ---
 
-## 8b. Build status — backend, 2026-10-06
+## 8b. Build status — 2026-10-06
 
 App `budget` (Postgres schema `budget`), API `/api/budget/`:
 
 | piece | where |
 |---|---|
-| models + migration `0001_initial` (written, not applied) | `budget/models.py` |
+| models + migration `0001_initial` (applied on the test DB) | `budget/models.py` |
 | intake (port of `DRAFT_APPROVAL`), budget / spend, gate write with read-back | `budget/services/sap.py` |
 | route per line | `budget/services/routing.py` |
 | flow: open, approve, reject, retire | `budget/services/flow.py` |
@@ -257,6 +257,47 @@ To run it against the TEST companies:
 
 The intake has been run read-only against both TEST companies (Oil: 205 drafts /
 693 lines across all five document types; Beverages: 89 / 236).
+
+**Frontend** (`OMS-Frontend`):
+
+| page | file |
+|---|---|
+| `/Budget_Approval` — "Waiting on you" / "Decided by you", company filter, the draft (lines, each budget head's stages and trail), Approve / Reject (reason required) / Retry SAP | `src/pages/Budget_Approval.tsx` |
+| `/Budget_Settings` — SAP feed health (stale after 30 min), auto-approve switch and hours, exempt users | `src/pages/Budget_Settings.tsx` |
+| API client | `src/services/budgetService.ts` |
+
+Both pages are grantable per user (`adminPages.ts`) and in the sidebar's
+"Budget" section. A decision sends the item's `version`: a stale screen is
+refused. No budget figure is ever shown to an approver.
+
+**State on the test DB (2026-10-06):** module `BUDGET` registered, 58 workflows
+seeded, `sync_budget_drafts` run on both TEST companies — 261 drafts, 318 items
+(317 pending, 1 approved). Not yet scheduled (§4); auto-approval off.
+
+**Round trip, item 427** (Oil A/P invoice draft 51588, route TRANSPRT, 3 lines):
+approved in OMS → the 3 lines are `A` / `V` in
+`TEST_JIVO_OIL_HANADB.OMS_BUDGET_APPROVALS` and read `A` through
+`tbl_Draft_Approvals`, the view SAP's gate reads. Still to do: add that draft in
+TEST SAP (expect it to post), and try adding a pending one (e.g. 54447) and a
+rejected one (expect SAP's budget refusal).
+
+**Added after the JSAP source review (2026-10-06):**
+
+| piece | where |
+|---|---|
+| Draft attachments for approvers — ATC1 via `AtcEntry` (ODRF / OPDF), a journal voucher's `OBTF.U_ATTACH_LINK`; files served through the attachment file service on .118, never SAP's Service Layer | `sap.draft_attachments`, `drafts/<id>/attachments/[<line>/]` |
+| Notifications (web + OMS app, `notifications` framework): next stage's user on advance, one summary per approver per sync, earlier actors on the outcome, daily reminder | `services/notify.py`, `budget_pending_reminder` (daily) |
+| Bulk approve — each item decided on its own (version, SAP write) | `items/approve-bulk/` |
+| Reports — every item by document month / company / status / search, per-approver tally, Excel export (Approvers, Items, Lines); key `Budget_Reports` | `services/report.py`, `report/`, `report/export/`, `/Budget_Reports` |
+| Deep link: a notification opens its item (`?itemId=`), with Approve / Reject in the draft dialog | `items/<id>/`, `useDeepLinkedItem.ts` |
+
+Scheduled jobs are now three: `sync_budget_drafts` (5 min), `budget_auto_approve`
+(10 min), `budget_pending_reminder` (once a day).
+
+Fixed on the way: approving returned 500 — `select_for_update(of=('self',))`
+rendered `FOR UPDATE OF "budget"."budget_item"`, which Postgres refuses for a
+schema-qualified name. The lock now takes the item row alone, with no join
+(`flow._locked`).
 
 ---
 

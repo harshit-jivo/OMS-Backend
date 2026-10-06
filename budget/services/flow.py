@@ -12,6 +12,9 @@ what lets SAP post the draft.
   comes back as fresh items (`sync`), the way out JSAP never had.
 * One approve completes a stage; one reject ends the item.
 * `version` refuses a decision made on a stale screen.
+* Notifications (`services/notify.py`): the next stage's user when an item
+  moves on, earlier actors when it finishes. A sync's new items are announced
+  in one message per approver by `sync.run`, not here.
 """
 import logging
 
@@ -23,6 +26,7 @@ from workflow.services import selection
 from workflow.services.assignments import get_stage_assignment
 
 from budget.models import BudgetActionLog, BudgetItem, DraftStatus, ItemStatus, LogAction
+from budget.services import notify as notify_service
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +126,13 @@ def approve(item, *, user=None, remarks='', version=None, auto=False):
     if following:
         _point_at(item, following[0].id)
         item.save()
+        notify_service.stage_awaiting(item)
         return item, 'V'
     item.status = ItemStatus.APPROVED
     _point_at(item, None)
     item.save()
     refresh_draft_status(item.draft)
+    notify_service.decided(item, approved=True, actor=None if auto else user)
     return item, 'A'
 
 
@@ -142,6 +148,7 @@ def reject(item, *, user, remarks, version=None):
     _point_at(item, None)
     item.save()
     refresh_draft_status(item.draft)
+    notify_service.decided(item, approved=False, actor=user, remarks=remarks)
     return item
 
 

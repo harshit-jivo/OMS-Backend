@@ -143,7 +143,7 @@ def _flow(stages, locked):
             mock.patch.object(flow, 'log') as log, \
             mock.patch.object(flow, 'effective_user_id', return_value=21), \
             mock.patch.object(flow, 'refresh_draft_status') as refresh, \
-            mock.patch.object(flow.selection, 'stages_for', return_value=stages):
+            mock.patch.object(flow.selection, 'stages_for', return_value=stages),             mock.patch.object(flow, 'notify_service'):
         yield log, refresh
 
 
