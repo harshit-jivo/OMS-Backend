@@ -174,6 +174,12 @@ REGISTRY: dict[str, dict[str, str]] = {
         # Send SAP bills and POs to Advance Payment Users, who raise the
         # payment request from them (the "Send Bills & POs" page).
         'Advance_Payment_Dispatch':  'Advance Payment — send bills & POs to users',
+
+        # Credit Limit — replaces JSAP's credit-limit approval. Two keys, as
+        # in BackDate: `Credit_Limit_Approval` opens the desk, and acting also
+        # requires being the current stage's effective user.
+        'Credit_Limit':              'Credit Limit — raise requests',
+        'Credit_Limit_Approval':     'Credit Limit — approve/reject',
     },
 
     # --- Control Panel -----------------------------------------------------

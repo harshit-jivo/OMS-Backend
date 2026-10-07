@@ -259,7 +259,7 @@ class WorkflowSerializer(_CompanyMixin, serializers.ModelSerializer):
     class Meta:
         model = Workflow
         fields = ['id', 'module', 'module_code', 'code', 'name',
-                  'company', 'is_active',
+                  'company', 'priority', 'is_active',
                   'stages', 'queries', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
 

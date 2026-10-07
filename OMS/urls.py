@@ -85,6 +85,8 @@ api_urlpatterns = [
     path('backdate/', include('backdate.urls')),
     # PRDO — Production Order approval (own `production` schema).
     path('production/', include('production.urls')),
+    # Credit Limit (own `credit_limit` schema), replacing JSAP's credit flow.
+    path('credit-limit/', include('credit_limit.urls')),
     # Advance Payment — SAP lookups only for now (no models, no migration).
     path('advance-payments/', include('advance_payment.urls')),
     # Control Panel — sign-on to production C_Panel for its embedded pages.

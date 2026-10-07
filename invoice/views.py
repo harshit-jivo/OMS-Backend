@@ -12,8 +12,10 @@ logic genuinely needed `core.permissions`: it used to check `is_superuser`
 alone for "sees every branch", the exact bug class `core.permissions.is_admin`
 exists to close (an admin via role/`extra_roles`/`is_staff` wasn't recognised).
 """
+import datetime
 import json
 import logging
+from decimal import Decimal, InvalidOperation
 
 import pymssql
 import requests
@@ -585,143 +587,134 @@ class UpdateInvoiceLogView(generics.RetrieveUpdateAPIView):
         )
 
 
+#: How the invoice review screen names a company: JSAP's numeric branch code
+#: (`companyForBranch`), or the branch name an invoice log carries.
+_CL_COMPANY = {'1': 'OIL', '2': 'BEVERAGES', '3': 'MART', 'OIL': 'OIL',
+               'BEVERAGE': 'BEVERAGES', 'BEVERAGES': 'BEVERAGES',
+               'MART': 'MART'}
+
+
 class CreditLimitCardsView(APIView):
-    permission_classes = [AllowAny]
+    """One customer's live credit facts, read from SAP.
+
+    Was a proxy to JSAP's `GetCustomerCards`, which returned the company's
+    whole customer list for the page to search. The list shape is kept — zero
+    or one card — so the page's lookup is unchanged.
+    """
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company = request.query_params.get('company', '1')
-        url = f"{settings.DSR_API_BASE}/api/CreditLimit/GetCustomerCards"
+        from credit_limit.services import sap as cl_sap
+
+        company = _CL_COMPANY.get(
+            (request.query_params.get('company') or '').strip().upper())
+        card_code = (request.query_params.get('card_code') or '').strip()
+        if not company or not card_code:
+            return Response({'error': 'company and card_code are required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
-            dsr_response = requests.get(url, params={'company': company}, timeout=20, verify=_external_verify())
-            try:
-                body = dsr_response.json()
-            except ValueError:
-                body = {'error': dsr_response.text}
-            return Response(body, status=dsr_response.status_code)
-        except requests.RequestException as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            card = cl_sap.customer(company, card_code)
+        except cl_sap.SapUnavailable as exc:
+            return Response({'error': str(exc)},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        cards = [] if card is None else [{
+            'cardCode': card['card_code'],
+            'cardName': card['card_name'],
+            'cardType': card['main_group'] or card['card_type'],
+            'balance': str(card['balance']),
+            'creditLine': str(card['credit_limit']),
+        }]
+        return Response({'success': True, 'data': cards})
 
 
 class CreditLimitRequestView(APIView):
-    permission_classes = [AllowAny]
+    """Raise an OMS credit-limit request for an invoice SAP refused on credit.
+
+    The customer and company come from the INVOICE, not from the client: the
+    request is about this invoice's party, so the form cannot redirect it to
+    another one.
+    """
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        document_data = request.data.get('documentData')
+        from credit_limit.services import flow as cl_flow
+
         attachment = request.FILES.get('attachment')
-
         invoice_log_id = request.data.get('invoice_log_id')
-        if not document_data or not attachment:
-            return Response(
-                {'error': 'documentData and attachment are required'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not invoice_log_id:
-            return Response(
-                {'error': 'invoice_log_id is required'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         try:
-            invoice_log = InvoiceLog.objects.get(id=invoice_log_id)
-        except InvoiceLog.DoesNotExist:
+            document = json.loads(request.data.get('documentData') or '')
+        except (ValueError, TypeError):
+            document = None
+        if not isinstance(document, dict) or not invoice_log_id:
+            return Response(
+                {'error': 'documentData and invoice_log_id are required.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        invoice_log = InvoiceLog.objects.filter(id=invoice_log_id).first()
+        if invoice_log is None:
             return Response(
                 {'error': f'No invoice log found with id {invoice_log_id}.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Raising a credit-limit document in JSAP for an invoice that has been
-        # removed from the review screen would leave a real approval request
-        # pointing at nothing.
+                status=status.HTTP_404_NOT_FOUND)
+        # Raising a request for an invoice removed from the review screen
+        # would leave a real approval pointing at nothing.
         if invoice_log.is_deleted:
             return Response(
                 {'error': 'This invoice has been deleted. Restore it before raising a credit-limit request.'},
-                status=status.HTTP_409_CONFLICT,
-            )
+                status=status.HTTP_409_CONFLICT)
 
-        # credit_limit_logs is keyed by invoice_log_id (one request per invoice).
-        # Check BEFORE calling DSR — otherwise a duplicate attempt creates a second
-        # CL document in JSAP and only then fails on the insert.
-        existing = CreditLimitLogs.objects.filter(invoice_log_id=invoice_log.id).first()
-        if existing:
+        from credit_limit.models import CreditLimitRequest
+
+        if (CreditLimitRequest.objects.filter(invoice_log=invoice_log).exists()
+                or CreditLimitLogs.objects.filter(invoice_log_id=invoice_log.id).exists()):
             return Response(
-                {
-                    'error': 'A credit-limit request has already been raised for this invoice.',
-                    'detail': (
-                        f'Credit-limit document #{existing.jsap_doc_id} was raised for this '
-                        f'invoice on {existing.created_at:%d %b %Y %H:%M}. '
-                        'Track that request instead of raising a new one.'
-                    ),
-                    'jsap_doc_id': existing.jsap_doc_id,
-                    'created_at': existing.created_at,
-                    'invoice_log_id': invoice_log.id,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+                {'error': 'A credit-limit request has already been raised for this invoice.',
+                 'invoice_log_id': invoice_log.id},
+                status=status.HTTP_409_CONFLICT)
 
-        try:
-            parsed = json.loads(document_data)
-            parsed['createdBy'] = settings.OMS_JSAP_USER_ID
-            document_data = json.dumps(parsed)
-        except (ValueError, TypeError):
-            return Response(
-                {'error': 'documentData must be a valid JSON object'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        url = f"{settings.DSR_API_BASE}/api/CreditLimit/CreateCLDocumentV2"
-        try:
-            dsr_response = requests.post(
-                url,
-                data={'documentData': document_data},
-                files={'attachment': (attachment.name, attachment, attachment.content_type)},
-                timeout=30,
-                verify=_external_verify(),
-            )
+        payload = invoice_log.invoice_payload
+        if isinstance(payload, str):
             try:
-                body = dsr_response.json()
+                payload = json.loads(payload)
             except ValueError:
-                body = {'message': dsr_response.text}
+                payload = {}
+        card_code = str((payload or {}).get('CardCode') or '').strip()
+        company = _CL_COMPANY.get(str(invoice_log.branch or '').strip().upper())
+        try:
+            new_limit = Decimal(str(document.get('newCreditLimit')))
+            valid_till = datetime.date.fromisoformat(
+                str(document.get('validTill') or '')[:10])
+        except (InvalidOperation, ValueError):
+            new_limit, valid_till = None, None
+        if not card_code or not company:
+            return Response({'error': 'This invoice has no customer or company to raise a limit for.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if new_limit is None or new_limit <= 0 or valid_till is None:
+            return Response({'error': 'Enter a valid new credit limit and valid-till date.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-            credit_document_id = body.get("creditDocumentId") if isinstance(body, dict) else None
-            if credit_document_id is None:
-                logger.error("CL request for invoice %s returned no creditDocumentId: %s", invoice_log.id, body)
-                return Response(
-                    {
-                        'error': 'The credit-limit service did not return a document id.',
-                        'details': body,
-                    },
-                    status=status.HTTP_502_BAD_GATEWAY,
-                )
+        try:
+            cl_request = cl_flow.create(
+                user=request.user, company=company, card_code=card_code,
+                new_credit_limit=new_limit, valid_till=valid_till,
+                attachment=attachment, invoice_log=invoice_log,
+                remarks=f'Raised from invoice review (log #{invoice_log.id}).')
+        except cl_flow.CreditLimitError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        except IntegrityError:
+            # Lost a race with a concurrent request for the same invoice.
+            return Response(
+                {'error': 'A credit-limit request has already been raised for this invoice.',
+                 'invoice_log_id': invoice_log.id},
+                status=status.HTTP_409_CONFLICT)
 
-            try:
-                CreditLimitLogs.objects.create(
-                    invoice_log=invoice_log,
-                    jsap_doc_id=credit_document_id,
-                    party_name=invoice_log.party_name,
-                    created_by=request.user,
-                )
-            except IntegrityError:
-                # Lost a race with a concurrent request. The CL document exists in
-                # JSAP either way, so report it as the same conflict rather than a 500.
-                logger.warning("Duplicate credit-limit request for invoice %s", invoice_log.id)
-                return Response(
-                    {
-                        'error': 'A credit-limit request has already been raised for this invoice.',
-                        'jsap_doc_id': credit_document_id,
-                        'invoice_log_id': invoice_log.id,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            return Response(body, status=dsr_response.status_code)
-        except requests.RequestException as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-
+        return Response({'success': True, 'creditLimitRequestId': cl_request.pk,
+                         'message': 'Credit limit request submitted.'},
+                        status=status.HTTP_201_CREATED)
 
 
 class GetCreditLimitJSAPFlow(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         invoice_id = request.query_params.get('invoice_id')
@@ -733,6 +726,22 @@ class GetCreditLimitJSAPFlow(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        from credit_limit.models import CreditLimitRequest
+        from credit_limit.services import flow as cl_flow
+
+        cl_request = (CreditLimitRequest.objects.select_related('flow')
+                      .filter(invoice_log_id=invoice_id).first())
+        if cl_request is not None:
+            codes = {'APPROVED': 'A', 'REJECTED': 'R'}
+            return Response({'success': True, 'data': [
+                {'stageId': row['stage_id'], 'stageName': row['stage_name'],
+                 'priority': row['sequence'], 'assignedTo': row['reviewer'],
+                 'actionStatus': codes.get(row['status']),
+                 'actionDate': row['acted_at'], 'description': row['remarks']}
+                for row in cl_flow.progress(cl_request)]})
+
+        # LEGACY: requests raised in JSAP before this module existed. Remove
+        # this branch (and `services/jsap_db.py`) when JSAP is switched off.
         jsap_doc = CreditLimitLogs.objects.filter(invoice_log_id=invoice_id).first()
   
         if not jsap_doc:

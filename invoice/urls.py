@@ -14,7 +14,7 @@ urlpatterns = [
     path('log/<int:id>/' , UpdateInvoiceLogView.as_view()),
     path('credit-limit/cards/', CreditLimitCardsView.as_view(), name='credit-limit-cards'),
     path('credit-limit/request/', CreditLimitRequestView.as_view(), name='credit-limit-request'),
-    path('credit-limit/flow/' , GetCreditLimitJSAPFlow.as_view()),
+    path('credit-limit/flow/', GetCreditLimitJSAPFlow.as_view(), name='credit-limit-flow'),
     path('crystal/' , GetPrintReport.as_view()),
     path('logs/all/' , InvoiceLogListwoWhsView.as_view()),
     # SOs already carried by an in-flight invoice log, for the SO picker.
