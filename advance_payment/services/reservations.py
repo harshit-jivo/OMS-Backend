@@ -34,14 +34,37 @@ SAP's own open amount, less what OMS is holding:
 
 A document with nothing available is not offered again.
 
+WHERE OMS ALONE TRACKS (decided 2026-10-07)
+-------------------------------------------
+Every PO (whatever its date) and every bill CREATED in SAP on or after
+`ADVANCE_PAYMENT_TRACK_FROM` (2026-10-08) is tracked by OMS alone, and SAP's
+own figures are not used:
+
+    open       = the document's total  -  what OMS has PAID against it
+    available  = open                  -  what OMS requests HOLD (in approval)
+
+A PO's "already received" (GRPOs, goods in) is never deducted: an advance is
+measured against the PO amount. A new bill's paid-to-date in SAP is ignored:
+from the cut-off every payment against it goes through OMS. One guard stays: a
+bill's payment is applied to the bill in SAP, which refuses more than its own
+balance, so the live check before posting also holds a bill to SAP's balance.
+
+A bill created BEFORE the cut-off was paid in SAP before OMS existed, so its
+real balance is SAP's: SAP's open amount (total less paid in SAP) less what
+OMS requests hold. Payment history stays in OMS for all of them. The "already
+paid on account" ledger notice is shown beside POs created since the cut-off.
+Customer ledger items are unchanged (SAP's open less what OMS holds).
+
 The server re-checks this on every raise and edit, inside the transaction and
 under a per-document lock, so two requests raised at once cannot both take
 the last rupee.
 """
 import hashlib
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import connection
 
 from advance_payment.models import (
@@ -57,6 +80,66 @@ ZERO = Decimal('0')
 
 def _key(entry, line=0):
     return int(entry), int(line or 0)
+
+
+#: The kinds the cut-off applies to. Customer ledger items are always tracked.
+CUT_OFF_KINDS = (DocumentKind.PO, DocumentKind.BILL)
+
+
+def track_from():
+    """The first SAP creation date OMS tracks (`ADVANCE_PAYMENT_TRACK_FROM`)."""
+    value = getattr(settings, 'ADVANCE_PAYMENT_TRACK_FROM', '') or '2026-10-08'
+    return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
+
+def since_cut_off(created_on):
+    """Whether a document was created in SAP on or after the cut-off. Unknown: yes (the cautious side)."""
+    if not created_on:
+        return True
+    when = created_on if isinstance(created_on, date) else date.fromisoformat(str(created_on)[:10])
+    return when >= track_from()
+
+
+def tracked(kind, created_on):
+    """Whether OMS ALONE tracks this document: open = its total less what OMS paid.
+
+    Every PO (goods received never count against an advance), whatever its
+    date, and a bill created in SAP on or after the cut-off. An older bill (or
+    one whose creation date is unknown) and a customer ledger item start from
+    SAP's own open amount less what OMS holds (`available`).
+    """
+    if kind == DocumentKind.PO:
+        return True
+    if kind == DocumentKind.BILL:
+        # An older bill was paid in SAP before OMS: its real balance is SAP's.
+        # Unknown creation date: SAP's balance too (the side that cannot overpay).
+        return bool(created_on) and since_cut_off(created_on)
+    return False
+
+
+def sap_facts(company, kind, entries):
+    """`{doc_entry: {created_on, doc_total}}` for POs / bills, read from SAP. `{}` if SAP cannot be read."""
+    from advance_payment.services import sap as sap_service
+
+    if kind not in CUT_OFF_KINDS or not entries:
+        return {}
+    try:
+        live = sap_service.live_documents(company, kind, entries)
+    except sap_service.SapUnavailable:
+        return {}
+    return {e: {'created_on': v.get('created_on'), 'doc_total': v.get('doc_total')} for e, v in live.items()}
+
+
+def created_dates(company, kind, entries):
+    """`{doc_entry: created_on}` (see `sap_facts`)."""
+    return {e: f['created_on'] for e, f in sap_facts(company, kind, entries).items()}
+
+
+def oms_left(total, use):
+    """A tracked document: its total less what OMS has paid and what OMS requests hold."""
+    use = use or {}
+    left = Decimal(str(total or 0)) - use.get('paid', ZERO) - use.get('reserved', ZERO)
+    return max(left, ZERO)
 
 
 def subtracts_paid(kind):
@@ -165,8 +248,19 @@ def problems(company, documents, *, exclude_request=None):
         keys = [(d['sap_doc_entry'], d.get('sap_line', 0)) for d in docs]
         lock(company, kind, keys)
         used = usage(company, kind, keys, exclude_request=exclude_request)
+        facts = sap_facts(company, kind, [d['sap_doc_entry'] for d in docs])
         for d in docs:
             use = used.get(_key(d['sap_doc_entry'], d.get('sap_line', 0)))
+            fact = facts.get(int(d['sap_doc_entry'])) or {}
+            if tracked(kind, fact.get('created_on')) and fact.get('doc_total') is not None:
+                # From the cut-off OMS alone tracks it: total less paid and held.
+                left = oms_left(fact['doc_total'], use)
+                if d['amount'] > left:
+                    label = d.get('sap_doc_num') or d['sap_doc_entry']
+                    found.append(f'{DocumentKind(kind).label} {label}: only {left} is available — of its total '
+                                 f'{fact["doc_total"]}, OMS has paid {(use or {}).get("paid", ZERO)} and other '
+                                 f'requests hold {(use or {}).get("reserved", ZERO)}.')
+                continue
             if not use:
                 continue
             left = available(kind, d['open_amount'], use)
@@ -178,17 +272,32 @@ def problems(company, documents, *, exclude_request=None):
     return found
 
 
-def annotate(company, kind, rows, *, key, open_field, drop_exhausted=True):
-    """Add `oms: {reserved, paid, available, requests}` to SAP rows; drop the used-up ones.
+def annotate(company, kind, rows, *, key, open_field, total_field=None, paid_field=None, drop_exhausted=True):
+    """Add `oms: {tracked, reserved, paid, available, requests}` to SAP rows; drop the used-up ones.
 
     `key(row)` gives `(doc_entry, line)`; `open_field` names SAP's open amount.
+    A row OMS alone tracks (created since the cut-off, with `total_field`) is
+    REWRITTEN to OMS's figures: `open_field` = total less OMS paid, and
+    `paid_field` (SAP's received / paid-to-date) = what OMS has paid.
     """
     used = usage(company, kind, [key(r) for r in rows])
     out = []
     for r in rows:
         use = used.get(_key(*key(r)))
-        left = available(kind, r.get(open_field), use)
+        is_tracked = tracked(kind, r.get('created_on'))
+        if is_tracked and total_field and r.get(total_field) is not None:
+            paid = (use or {}).get('paid', ZERO)
+            r[open_field] = str(max(Decimal(str(r[total_field])) - paid, ZERO))
+            if paid_field:
+                r[paid_field] = str(paid)
+            left = oms_left(r[total_field], use)
+        else:
+            # Older (or nothing to work from): SAP's open less what OMS holds and paid.
+            left = available(kind, r.get(open_field), use)
         r['oms'] = {
+            # True: OMS alone tracks it (every PO; a bill created since the
+            # cut-off) — open = total less OMS paid. False: SAP's open less what OMS holds.
+            'tracked': is_tracked,
             'reserved': str(use['reserved']) if use else '0',
             'paid': str(use['paid']) if use else '0',
             # A PO's paid advances still on account in SAP (what it holds of `paid`).
@@ -278,7 +387,18 @@ def live_check(advance):
         now = live.get(key)
         status = now['status'] if now else 'GONE'
         open_now = Decimal(str(now['open'])) if now else ZERO
-        left = available(kind, open_now, used.get(key)) if status == 'OPEN' else ZERO
+        # From the cut-off: the total less what OMS paid and others hold — and a
+        # bill no more than SAP's own balance, which SAP itself would refuse to
+        # exceed. Before it: SAP's open amount less what OMS holds and paid.
+        created_on = (now or {}).get('created_on')
+        if status != 'OPEN':
+            left = ZERO
+        elif tracked(kind, created_on) and now.get('doc_total') is not None:
+            left = oms_left(now['doc_total'], used.get(key))
+            if kind == DocumentKind.BILL:
+                left = min(left, open_now)
+        else:
+            left = available(kind, open_now, used.get(key))
         label = f'{DocumentKind(kind).label} {d.sap_doc_num or d.sap_doc_entry}'
         if status == 'GONE':
             message = (f'{label} is no longer open on the customer’s account in SAP.' if kind == DocumentKind.LEDGER

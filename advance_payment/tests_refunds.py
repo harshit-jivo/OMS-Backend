@@ -3,6 +3,7 @@
 No database and no SAP: querysets and lookups are stood in for.
 """
 import contextlib
+from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
@@ -96,17 +97,21 @@ class ACustomerRefund(SimpleTestCase):
 
 
 @contextlib.contextmanager
-def _usage_rows(*rows, unadjusted=None):
+def _usage_rows(*rows, unadjusted=None, facts=None):
     """`RequestDocument.objects.filter(...).values_list(...)` answering these rows.
 
     `unadjusted(company, paid_lines)` stands in for SAP's on-account balances;
-    by default every paid advance is still wholly on account.
+    by default every paid advance is still wholly on account. `facts` stands in
+    for SAP's creation date and total (`{doc_entry: {created_on, doc_total}}`);
+    by default nothing is known, which falls back to SAP's open amount less
+    what OMS holds.
     """
     qs = mock.Mock()
     qs.values_list.return_value = list(rows)
     fake = unadjusted or (lambda company, lines: [amount for _key, _request, amount in lines])
     with mock.patch.object(reservations.RequestDocument.objects, 'filter', return_value=qs), \
-            mock.patch.object(reservations, 'unadjusted', side_effect=fake):
+            mock.patch.object(reservations, 'unadjusted', side_effect=fake), \
+            mock.patch.object(reservations, 'sap_facts', return_value=dict(facts or {})):
         yield
 
 
@@ -157,8 +162,82 @@ class WhatOmsHolds(SimpleTestCase):
             offered = reservations.annotate('OIL', DocumentKind.PO, rows, key=lambda r: (r['doc_entry'], 0),
                                             open_field='open_amount')
         self.assertEqual([r['doc_entry'] for r in offered], [14009])
-        self.assertEqual(offered[0]['oms'], {'reserved': '0', 'paid': '0', 'unadjusted': '0', 'available': '50',
-                                             'requests': 0})
+        self.assertEqual(offered[0]['oms'], {'tracked': True, 'reserved': '0', 'paid': '0', 'unadjusted': '0',
+                                             'available': '50', 'requests': 0})
+
+    def test_any_po_is_its_total_less_what_oms_paid_goods_received_ignored(self):
+        # Old or new: SAP's received (400, the GRPOs) is never deducted. Open =
+        # 500 total less 40 paid via OMS = 460; available = that less 25 held.
+        for created in ('2025-07-26', '2026-10-08'):
+            rows = [{'doc_entry': 14008, 'open_amount': '100', 'doc_total': '500', 'received_amount': '400',
+                     'created_on': created}]
+            with _usage_rows(*self.ROWS), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+                offered = reservations.annotate('OIL', DocumentKind.PO, rows, key=lambda r: (r['doc_entry'], 0),
+                                                open_field='open_amount', total_field='doc_total',
+                                                paid_field='received_amount')
+            self.assertEqual((offered[0]['oms']['tracked'], offered[0]['oms']['available']), (True, '435'))
+            self.assertEqual((offered[0]['open_amount'], offered[0]['received_amount']), ('460', '40'))
+
+    def test_a_new_bill_is_its_total_less_what_oms_paid(self):
+        # Created on/after the 8 Oct cut-off: SAP's paid-to-date (400) ignored.
+        # Open = 500 total less 40 paid via OMS = 460; available = less 25 held.
+        rows = [{'doc_entry': 14008, 'balance_due': '100', 'doc_total': '500', 'paid_to_date': '400',
+                 'created_on': '2026-10-09'}]
+        with _usage_rows(*self.ROWS), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            offered = reservations.annotate('OIL', DocumentKind.BILL, rows, key=lambda r: (r['doc_entry'], 0),
+                                            open_field='balance_due', total_field='doc_total',
+                                            paid_field='paid_to_date')
+        self.assertEqual((offered[0]['oms']['tracked'], offered[0]['oms']['available']), (True, '435'))
+        self.assertEqual((offered[0]['balance_due'], offered[0]['paid_to_date']), ('460', '40'))
+
+    def test_an_older_bill_keeps_sap_real_balance_less_what_oms_holds(self):
+        # Created before the cut-off: paid in SAP before OMS. SAP's balance (100)
+        # less 25 held = 75. Figures not rewritten.
+        rows = [{'doc_entry': 14008, 'balance_due': '100', 'doc_total': '500', 'paid_to_date': '400',
+                 'created_on': '2026-09-21'}]
+        with _usage_rows(*self.ROWS), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            offered = reservations.annotate('OIL', DocumentKind.BILL, rows, key=lambda r: (r['doc_entry'], 0),
+                                            open_field='balance_due', total_field='doc_total',
+                                            paid_field='paid_to_date')
+        self.assertEqual((offered[0]['oms']['tracked'], offered[0]['oms']['available']), (False, '75'))
+        self.assertEqual((offered[0]['balance_due'], offered[0]['paid_to_date']), ('100', '400'))
+
+    def test_a_save_against_an_older_bill_is_held_to_sap_balance(self):
+        line_ = {'kind': DocumentKind.BILL, 'sap_doc_entry': 14008, 'sap_line': 0, 'sap_doc_num': '126226600',
+                 'open_amount': Decimal('100'), 'amount': Decimal('76')}
+        facts = {14008: {'created_on': date(2025, 7, 26), 'doc_total': '500'}}
+        with _usage_rows(*self.ROWS, facts=facts), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            found = reservations.problems('OIL', [line_])
+        self.assertIn('only 75 is available', found[0])
+
+    def test_a_save_from_the_cut_off_is_held_to_total_less_paid_and_held(self):
+        line_ = {'kind': DocumentKind.BILL, 'sap_doc_entry': 14008, 'sap_line': 0, 'sap_doc_num': '126226600',
+                 'open_amount': Decimal('460'), 'amount': Decimal('436')}
+        facts = {14008: {'created_on': '2026-10-09', 'doc_total': '500'}}
+        with _usage_rows(*self.ROWS, facts=facts), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            found = reservations.problems('OIL', [line_])
+            self.assertEqual(reservations.problems('OIL', [{**line_, 'amount': Decimal('435')}]), [])
+        self.assertEqual(len(found), 1)
+        self.assertIn('only 435 is available — of its total 500, OMS has paid 40 and other requests hold 25',
+                      found[0])
+
+    def test_a_save_against_an_older_po_is_held_to_its_total(self):
+        line_ = {'kind': DocumentKind.PO, 'sap_doc_entry': 14008, 'sap_line': 0, 'sap_doc_num': '126226600',
+                 'open_amount': Decimal('460'), 'amount': Decimal('436')}
+        facts = {14008: {'created_on': date(2025, 7, 26), 'doc_total': '500'}}
+        with _usage_rows(*self.ROWS, facts=facts), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            found = reservations.problems('OIL', [line_])
+        self.assertIn('only 435 is available — of its total 500', found[0])
+
+    def test_what_oms_alone_tracks(self):
+        with self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            self.assertTrue(reservations.tracked(DocumentKind.PO, '2020-01-01'))    # every PO
+            self.assertTrue(reservations.tracked(DocumentKind.BILL, '2026-10-08'))   # a new bill
+            self.assertFalse(reservations.tracked(DocumentKind.BILL, '2026-10-07'))  # an older bill
+            self.assertFalse(reservations.tracked(DocumentKind.BILL, None))          # unknown: SAP's balance
+            self.assertFalse(reservations.tracked(DocumentKind.LEDGER, '2026-10-09'))
+            self.assertTrue(reservations.since_cut_off(None))                     # the notice: shown when unknown
+            self.assertFalse(reservations.since_cut_off('2026-10-05'))
 
     def test_a_save_is_refused_when_the_last_rupee_is_already_held(self):
         cleaned = request_service.CleanRequest(

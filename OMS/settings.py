@@ -364,6 +364,12 @@ BUDGET_SAP_SCHEMAS = _company_schemas(config('BUDGET_SAP_SCHEMAS', default=''))
 # release. Blank disables the cash-account endpoint (it reports that it is
 # not configured) rather than guessing.
 SAP_CASH_PARENT_ACCOUNT = config('SAP_CASH_PARENT_ACCOUNT', default='')
+# Payments: from this date every payment against a PO or bill goes through OMS.
+# Every PO, and every bill created in SAP on or after it: open = the document's
+# total less what OMS paid. An older bill: SAP's real balance less what OMS
+# holds. POs created on or after it also show the vendor's "already paid on
+# account" ledger notice (advance_payment.services.reservations).
+ADVANCE_PAYMENT_TRACK_FROM = config('ADVANCE_PAYMENT_TRACK_FROM', default='2026-10-08')
 # Profit center (OPRC.PrcCode) to stamp on Mart sales-order lines. Mart does not
 # use per-sub_group profit centers like Oil/Beverage, so this is a single code.
 # Blank (default) omits CostingCode entirely, letting SAP apply its own default

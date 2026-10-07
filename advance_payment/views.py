@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 from datetime import date
+from decimal import Decimal
 from urllib.parse import quote
 
 from django.core.cache import cache
@@ -45,7 +46,7 @@ from core.responses import created, fail, ok
 from advance_payment import permissions as ap_perms
 from advance_payment.models import (
     AdvanceRequest, Department, DocumentKind, Employee, EmployeeRole, FilePurpose, LogAction, PayoutLine,
-    RequestFile, SapVoucher, SubDepartment)
+    RequestFile, SapVoucher, SubDepartment, VoucherObject, VoucherStatus)
 from advance_payment.purposes import PURPOSE_GROUPS, purposes
 from advance_payment.serializers import EmployeeSerializer, assignment_data, request_data
 from advance_payment.services import (
@@ -210,7 +211,53 @@ class OpenPurchaseOrdersView(_Lookup):
         # offered, except on a paged list, where it stays (marked) so the pages
         # and the total stay true.
         return reservations.annotate(company, DocumentKind.PO, rows, key=lambda r: (r['doc_entry'], 0),
-                                     open_field='open_amount', drop_exhausted=not paged)
+                                     open_field='open_amount', total_field='doc_total',
+                                     paid_field='received_amount', drop_exhausted=not paged)
+
+
+class VendorOnAccountView(_Lookup):
+    """GET /api/advance-payments/vendor-on-account/?company=&card_code=
+
+    The vendor's ledger lines that still debit them, open — money paid but not
+    yet adjusted against a bill (payments on account, advance journals, down
+    payments), newest first, with their total. Each payment OMS itself posted
+    names its request (`oms_request`); any other was made outside OMS, which
+    OMS's PO amounts cannot see. Shown beside the vendor's POs; nothing is
+    deducted from them — SAP does not say which PO such a payment was for.
+    """
+
+    resource = 'vendor ledger'
+
+    def get(self, request, company=None):
+        company, error = self._company(request)
+        if error:
+            return error
+        card_code = (request.query_params.get('card_code') or '').strip()
+        if not card_code:
+            return fail('card_code is required.', status=http_status.HTTP_400_BAD_REQUEST)
+        try:
+            rows = sap_service.vendor_on_account(company, card_code)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        posted = {str(num): no for num, no in SapVoucher.objects.filter(
+            request__company=company, status=VoucherStatus.POSTED, sap_object=VoucherObject.OUTGOING_PAYMENT,
+            sap_doc_num__isnull=False).values_list('sap_doc_num', 'request__request_no')}
+        for r in rows:
+            r['oms_request'] = posted.get(r['doc_num']) if r['doc_type_code'] == 46 else None
+        total = sum((Decimal(r['open']) for r in rows), Decimal('0'))
+        outside = sum((Decimal(r['open']) for r in rows if not r['oms_request']), Decimal('0'))
+        # `po_entries=1,2`: the POs in question. The ledger is shown only beside
+        # POs OMS tracks (created since the cut-off); for older ones, `applies`
+        # is false and the page shows nothing (decided 2026-10-07).
+        raw = [e for e in (request.query_params.get('po_entries') or '').split(',') if e.strip()]
+        if not all(e.strip().isdigit() for e in raw):
+            return fail('po_entries must be DocEntries separated by commas.', status=http_status.HTTP_400_BAD_REQUEST)
+        entries = [int(e) for e in raw]
+        created = reservations.created_dates(company, DocumentKind.PO, entries) if entries else {}
+        applies = (not entries) or any(reservations.since_cut_off(created.get(e)) for e in entries)
+        return ok({'company': company, 'card_code': card_code, 'total_open': str(total),
+                   'outside_oms': str(outside), 'applies': applies,
+                   'track_from': reservations.track_from().isoformat(), 'results': rows})
 
 
 class OpenDocumentsView(_Lookup):
@@ -1034,7 +1081,8 @@ class OpenInvoicesView(_Lookup):
             return rows
         # What OMS already holds against each bill (see the PO view on paging).
         return reservations.annotate(company, DocumentKind.BILL, rows, key=lambda r: (r['doc_entry'], 0),
-                                     open_field='balance_due', drop_exhausted=not paged)
+                                     open_field='balance_due', total_field='doc_total',
+                                     paid_field='paid_to_date', drop_exhausted=not paged)
 
 
 # ---------------------------------------------------------------------------
