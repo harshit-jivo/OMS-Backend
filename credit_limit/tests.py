@@ -88,7 +88,7 @@ class _Base(TestCase):
                 (mock.patch.object(selection, 'evaluate'),
                  {'side_effect': lambda *a, **k: self.matched}),
                 (mock.patch('credit_limit.services.sap.customer'),
-                 {'return_value': dict(CARD)}),
+                 {'side_effect': lambda company, code: {**CARD, 'card_code': code}}),
                 (mock.patch('payments.sap_company.resolve_company_db'),
                  {'return_value': 'TEST_OIL'}),
                 (mock.patch('credit_limit.services.sap._commitment_limit'),
@@ -107,12 +107,16 @@ class _Base(TestCase):
         client.force_authenticate(user=user)
         return client
 
-    def raise_request(self, **overrides):
-        data = {'company': OIL, 'card_code': 'CUSTA000001',
-                'new_credit_limit': '25000',
+    def line(self, card_code='CUSTA000001', limit='25000'):
+        return {'card_code': card_code, 'new_credit_limit': limit,
                 'valid_till': (datetime.date.today()
-                               + datetime.timedelta(days=30)).isoformat(),
-                'attachment': upload(), **overrides}
+                               + datetime.timedelta(days=30)).isoformat()}
+
+    def raise_request(self, lines=None, attach=True):
+        data = {'company': OIL, 'remarks': 'Season stock',
+                'lines': json.dumps(lines or [self.line()])}
+        if attach:
+            data['attachment'] = upload()
         return self.client_for(self.requester).post(
             reverse('credit-limit-request-list'), data, format='multipart')
 
@@ -124,7 +128,8 @@ class _Base(TestCase):
 
 class SubmissionTests(_Base):
     def test_customer_facts_come_from_sap(self):
-        response = self.raise_request(card_name='Forged', current_balance='1')
+        line = {**self.line(), 'card_name': 'Forged', 'current_balance': '1'}
+        response = self.raise_request([line])
         self.assertEqual(response.status_code, 201, response.content)
         req = CreditLimitRequest.objects.get()
         self.assertEqual(req.card_name, 'Real Name From SAP')
@@ -134,10 +139,53 @@ class SubmissionTests(_Base):
         self.assertEqual(req.flow.current_user, self.approver1)
         self.assertTrue(req.attachment)
 
-    def test_attachment_is_optional(self):
-        response = self.raise_request(attachment='')
+    def test_a_single_party_needs_a_supporting_document(self):
+        response = self.raise_request(attach=False)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('attachment', response.json()['errors'])
+        self.assertFalse(CreditLimitRequest.objects.exists())
+
+    def test_several_parties_without_a_document_raise_one_request_each(self):
+        response = self.raise_request(
+            [self.line('CUSTA000001'), self.line('CUSTA000002', '9000')],
+            attach=False)
         self.assertEqual(response.status_code, 201, response.content)
-        self.assertFalse(CreditLimitRequest.objects.get().attachment)
+        rows = CreditLimitRequest.objects.order_by('pk')
+        self.assertEqual([r.card_code for r in rows],
+                         ['CUSTA000001', 'CUSTA000002'])
+        self.assertEqual([r.new_credit_limit for r in rows],
+                         [Decimal('25000'), Decimal('9000')])
+        self.assertTrue(all(r.remarks == 'Season stock' for r in rows))
+        self.assertTrue(all(not r.attachment for r in rows))
+        self.assertEqual(CreditLimitFlow.objects.count(), 2)
+
+    def test_a_shared_document_is_stored_once_for_every_request(self):
+        response = self.raise_request(
+            [self.line('CUSTA000001'), self.line('CUSTA000002')])
+        self.assertEqual(response.status_code, 201, response.content)
+        names = {r.attachment.name for r in CreditLimitRequest.objects.all()}
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names.pop())
+
+    def test_one_failing_party_saves_nothing_and_names_the_line(self):
+        def lookup(company, code):
+            return None if code == 'CUSTA000002' else {**CARD, 'card_code': code}
+
+        with mock.patch('credit_limit.services.sap.customer',
+                        side_effect=lookup):
+            response = self.raise_request(
+                [self.line('CUSTA000001'), self.line('CUSTA000002')],
+                attach=False)
+        self.assertEqual(response.status_code, 409)
+        failed = response.json()['errors']['lines']
+        self.assertEqual([(f['index'], f['card_code']) for f in failed],
+                         [(1, 'CUSTA000002')])
+        self.assertFalse(CreditLimitRequest.objects.exists())
+
+    def test_a_party_may_appear_once_per_submission(self):
+        response = self.raise_request([self.line(), self.line()], attach=False)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(CreditLimitRequest.objects.exists())
 
     def test_unroutable_request_is_not_stored(self):
         self.matched = []
@@ -161,7 +209,7 @@ class SubmissionTests(_Base):
 class DecisionTests(_Base):
     def setUp(self):
         super().setUp()
-        self.request_id = self.raise_request().json()['data']['id']
+        self.request_id = self.raise_request().json()['data'][0]['id']
 
     def flow(self):
         return CreditLimitFlow.objects.get(request_id=self.request_id)
