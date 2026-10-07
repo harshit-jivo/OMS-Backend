@@ -34,6 +34,7 @@ from workflow.services import selection
 
 from credit_limit.models import (
     CreditLimitActionLog,
+    CreditLimitAttachment,
     CreditLimitFlow,
     CreditLimitRequest,
     FlowStatus,
@@ -55,8 +56,8 @@ def make_user(username, *keys):
     return user
 
 
-def upload():
-    return SimpleUploadedFile('proof.pdf', b'%PDF-1.4', 'application/pdf')
+def upload(name='proof.pdf'):
+    return SimpleUploadedFile(name, b'%PDF-1.4', 'application/pdf')
 
 
 @override_settings(MEDIA_ROOT=MEDIA)
@@ -112,11 +113,11 @@ class _Base(TestCase):
                 'valid_till': (datetime.date.today()
                                + datetime.timedelta(days=30)).isoformat()}
 
-    def raise_request(self, lines=None, attach=True):
+    def raise_request(self, lines=None, attach=1):
         data = {'company': OIL, 'remarks': 'Season stock',
                 'lines': json.dumps(lines or [self.line()])}
         if attach:
-            data['attachment'] = upload()
+            data['attachments'] = [upload(f'proof{i}.pdf') for i in range(attach)]
         return self.client_for(self.requester).post(
             reverse('credit-limit-request-list'), data, format='multipart')
 
@@ -137,18 +138,18 @@ class SubmissionTests(_Base):
         self.assertEqual(req.current_credit_limit, Decimal('10000'))
         self.assertEqual(req.created_by, self.requester)
         self.assertEqual(req.flow.current_user, self.approver1)
-        self.assertTrue(req.attachment)
+        self.assertEqual([a.name for a in req.attachments.all()], ['proof0.pdf'])
 
     def test_a_single_party_needs_a_supporting_document(self):
-        response = self.raise_request(attach=False)
+        response = self.raise_request(attach=0)
         self.assertEqual(response.status_code, 400)
-        self.assertIn('attachment', response.json()['errors'])
+        self.assertIn('attachments', response.json()['errors'])
         self.assertFalse(CreditLimitRequest.objects.exists())
 
     def test_several_parties_without_a_document_raise_one_request_each(self):
         response = self.raise_request(
             [self.line('CUSTA000001'), self.line('CUSTA000002', '9000')],
-            attach=False)
+            attach=0)
         self.assertEqual(response.status_code, 201, response.content)
         rows = CreditLimitRequest.objects.order_by('pk')
         self.assertEqual([r.card_code for r in rows],
@@ -156,16 +157,36 @@ class SubmissionTests(_Base):
         self.assertEqual([r.new_credit_limit for r in rows],
                          [Decimal('25000'), Decimal('9000')])
         self.assertTrue(all(r.remarks == 'Season stock' for r in rows))
-        self.assertTrue(all(not r.attachment for r in rows))
+        self.assertFalse(CreditLimitAttachment.objects.exists())
         self.assertEqual(CreditLimitFlow.objects.count(), 2)
 
-    def test_a_shared_document_is_stored_once_for_every_request(self):
+    def test_several_documents_are_stored_once_and_listed_on_every_request(self):
         response = self.raise_request(
-            [self.line('CUSTA000001'), self.line('CUSTA000002')])
+            [self.line('CUSTA000001'), self.line('CUSTA000002')], attach=3)
         self.assertEqual(response.status_code, 201, response.content)
-        names = {r.attachment.name for r in CreditLimitRequest.objects.all()}
-        self.assertEqual(len(names), 1)
-        self.assertTrue(names.pop())
+        for row in response.json()['data']:
+            self.assertEqual([a['name'] for a in row['attachments']],
+                             ['proof0.pdf', 'proof1.pdf', 'proof2.pdf'])
+        rows = CreditLimitAttachment.objects.all()
+        self.assertEqual(rows.count(), 6)
+        # Six rows, three files on disk.
+        self.assertEqual(len({r.file.name for r in rows}), 3)
+
+    def test_a_single_party_may_carry_several_documents(self):
+        response = self.raise_request(attach=2)
+        self.assertEqual(response.status_code, 201, response.content)
+        req = CreditLimitRequest.objects.get()
+        self.assertEqual(req.attachments.count(), 2)
+        first = req.attachments.first()
+        download = self.client_for(self.requester).get(reverse(
+            'credit-limit-request-attachment', args=[req.pk, first.pk]))
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b''.join(download.streaming_content), b'%PDF-1.4')
+
+    def test_too_many_documents_are_refused(self):
+        response = self.raise_request(attach=11)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(CreditLimitRequest.objects.exists())
 
     def test_one_failing_party_saves_nothing_and_names_the_line(self):
         def lookup(company, code):
@@ -175,7 +196,7 @@ class SubmissionTests(_Base):
                         side_effect=lookup):
             response = self.raise_request(
                 [self.line('CUSTA000001'), self.line('CUSTA000002')],
-                attach=False)
+                attach=0)
         self.assertEqual(response.status_code, 409)
         failed = response.json()['errors']['lines']
         self.assertEqual([(f['index'], f['card_code']) for f in failed],
@@ -183,7 +204,7 @@ class SubmissionTests(_Base):
         self.assertFalse(CreditLimitRequest.objects.exists())
 
     def test_a_party_may_appear_once_per_submission(self):
-        response = self.raise_request([self.line(), self.line()], attach=False)
+        response = self.raise_request([self.line(), self.line()], attach=0)
         self.assertEqual(response.status_code, 400)
         self.assertFalse(CreditLimitRequest.objects.exists())
 
@@ -326,3 +347,55 @@ class InvoiceEntryPointTests(_Base):
         ).json()['data']
         self.assertEqual([s['stageName'] for s in stages],
                          ['Head', 'Director'])
+
+
+class NotificationTests(_Base):
+    """The REAL dispatcher, not a mock: a mocked `notify` is how passing the
+    company code string (which made every send raise) went unnoticed."""
+
+    def setUp(self):
+        super().setUp()
+        from notifications.services.dispatcher import notify as real_notify
+
+        patcher = mock.patch('credit_limit.services.notify.notify', real_notify)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def inbox(self, user):
+        from notifications.models import Notification
+
+        return list(Notification.objects.filter(user=user).order_by('id')
+                    .values_list('event_type', 'title', 'object_id'))
+
+    def test_the_approver_is_told_about_a_single_request(self):
+        request_id = self.raise_request().json()['data'][0]['id']
+        self.assertEqual(self.inbox(self.approver1), [(
+            'CREDIT_LIMIT_AWAITING_APPROVAL',
+            'Credit limit request awaiting your approval', request_id)])
+        self.assertEqual(self.inbox(self.approver2), [])
+
+    def test_a_batch_tells_each_approver_once(self):
+        self.raise_request([self.line('CUSTA000001'), self.line('CUSTA000002'),
+                            self.line('CUSTA000003')], attach=0)
+        (row,) = self.inbox(self.approver1)
+        self.assertEqual(row[0], 'CREDIT_LIMIT_AWAITING_APPROVAL')
+        self.assertEqual(row[1], '3 credit limit requests awaiting your approval')
+        self.assertIsNone(row[2])
+
+    def test_each_stage_and_the_outcome_are_announced(self):
+        request_id = self.raise_request().json()['data'][0]['id']
+        self.act(self.approver1, request_id, 'approve')
+        self.assertEqual([r[0] for r in self.inbox(self.approver2)],
+                         ['CREDIT_LIMIT_AWAITING_APPROVAL'])
+        self.act(self.approver2, request_id, 'approve')
+        self.assertEqual(self.inbox(self.requester), [(
+            'CREDIT_LIMIT_APPROVED', 'Credit limit approved', request_id)])
+
+    def test_the_requester_is_told_why_it_was_rejected(self):
+        request_id = self.raise_request().json()['data'][0]['id']
+        self.act(self.approver1, request_id, 'reject', 'Overdue balance')
+        from notifications.models import Notification
+
+        note = Notification.objects.get(user=self.requester)
+        self.assertEqual(note.event_type, 'CREDIT_LIMIT_REJECTED')
+        self.assertIn('Overdue balance', note.message)

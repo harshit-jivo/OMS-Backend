@@ -4,7 +4,7 @@ Requester (`Credit_Limit`):
   GET        customers/<card_code>/?company=   live OCRD credit facts
   GET POST   requests/                         ?company=&status=
 Either key (own requests, or any for an approver):
-  GET        requests/<pk>/   requests/<pk>/history/   requests/<pk>/attachment/
+  GET        requests/<pk>/   requests/<pk>/history/   requests/<pk>/attachments/<id>/
 Approver (`Credit_Limit_Approval` AND the current stage's effective user):
   GET        approvals/queue/   approvals/history/?status=
   POST       requests/<pk>/approve/   requests/<pk>/reject/
@@ -22,7 +22,8 @@ urlpatterns = [
          name='credit-limit-request-detail'),
     path('requests/<int:pk>/history/', views.RequestHistoryView.as_view(),
          name='credit-limit-request-history'),
-    path('requests/<int:pk>/attachment/', views.AttachmentView.as_view(),
+    path('requests/<int:pk>/attachments/<int:attachment_id>/',
+         views.AttachmentView.as_view(),
          name='credit-limit-request-attachment'),
     path('requests/<int:pk>/approve/', views.ApproveView.as_view(),
          name='credit-limit-request-approve'),

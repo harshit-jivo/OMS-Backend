@@ -59,7 +59,8 @@ class LogAction(models.TextChoices):
 
 
 def _attachment_path(instance, filename):
-    return f'credit_limit/{instance.company}/{instance.card_code}/{filename}'
+    req = instance.request
+    return f'credit_limit/{req.company}/{req.card_code}/{filename}'
 
 
 class CreditLimitRequest(models.Model):
@@ -84,9 +85,6 @@ class CreditLimitRequest(models.Model):
     #: this module. It says how long the requester expects to need the limit.
     valid_till = models.DateField()
     remarks = models.TextField(blank=True, default='')
-    #: Optional supporting document.
-    attachment = models.FileField(upload_to=_attachment_path, max_length=500,
-                                  blank=True, default='')
 
     #: Set when the request was raised from an invoice SAP refused on credit.
     #: One request per invoice.
@@ -191,3 +189,32 @@ class CreditLimitActionLog(models.Model):
 
     def __str__(self):
         return f'{self.action} CL#{self.request_id} #{self.pk}'
+
+
+class CreditLimitAttachment(models.Model):
+    """One supporting document on one request.
+
+    A submission's documents are shared by every request it raised: each file
+    is written to disk ONCE and every request gets its own row pointing at
+    that same stored path, so each request's file list stands on its own.
+    """
+
+    request = models.ForeignKey(
+        CreditLimitRequest, on_delete=models.CASCADE, related_name='attachments',
+    )
+    file = models.FileField(upload_to=_attachment_path, max_length=500)
+    #: The name the uploader gave it — the stored path may be suffixed by the
+    #: storage to avoid collisions.
+    name = models.CharField(max_length=255)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+',
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = _t('credit_limit_attachment')
+        ordering = ['request', 'id']
+        verbose_name = 'Credit Limit Attachment'
+
+    def __str__(self):
+        return f'{self.name} (CL#{self.request_id})'
