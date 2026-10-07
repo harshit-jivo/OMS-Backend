@@ -19,6 +19,7 @@ from workflow.services.assignments import get_stage_assignment
 
 from credit_limit.models import (
     CreditLimitActionLog,
+    CreditLimitAttachment,
     CreditLimitFlow,
     CreditLimitRequest,
     FlowStatus,
@@ -75,10 +76,14 @@ class BatchError(CreditLimitError):
         self.lines = lines
 
 
+#: Supporting documents per submission.
+MAX_ATTACHMENTS = 10
+
+
 def attachment_required(line_count):
-    """THE rule: a single-party request needs a supporting document; a
-    multi-party submission may go without. One definition, used by the API
-    serializer and the invoice-review entry point alike."""
+    """THE rule: a single-party request needs at least one supporting
+    document; a multi-party submission may go without. One definition, used by
+    the API serializer and the invoice-review entry point alike."""
     return line_count == 1
 
 
@@ -124,7 +129,7 @@ def _create_one(*, user, company, card_code, new_credit_limit, valid_till,
 
 
 @transaction.atomic
-def submit(*, user, company, lines, remarks='', attachment=None,
+def submit(*, user, company, lines, remarks='', attachments=(),
            invoice_log=None):
     """Raise one request per line — each party is approved on its own chain.
 
@@ -133,18 +138,22 @@ def submit(*, user, company, lines, remarks='', attachment=None,
     reported together, and any failure rolls the whole submission back. A
     request no workflow matches is never stored — JSAP kept 30 such rows.
 
-    The supporting document is shared by every request in the submission and
-    written once, only after every line has routed, so a refused submission
-    leaves nothing on disk.
+    The supporting documents are shared by every request in the submission:
+    each file is written once, only after every line has routed (so a refused
+    submission leaves nothing on disk), and linked from every request.
     """
     if not lines:
         raise CreditLimitError('Add at least one party.')
     if len(lines) > MAX_LINES:
         raise CreditLimitError(
             f'At most {MAX_LINES} parties can be raised in one submission.')
-    if attachment_required(len(lines)) and not attachment:
+    attachments = [f for f in attachments if f]
+    if attachment_required(len(lines)) and not attachments:
         raise CreditLimitError(
             'A supporting document is required for a single-party request.')
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise CreditLimitError(
+            f'At most {MAX_ATTACHMENTS} supporting documents per submission.')
     if invoice_log is not None and len(lines) != 1:
         raise CreditLimitError(
             "A request raised from an invoice covers that invoice's party only.")
@@ -172,18 +181,19 @@ def submit(*, user, company, lines, remarks='', attachment=None,
     if failures:
         raise BatchError(failures)
 
-    if attachment:
-        first = created[0][0]
-        first.attachment = attachment
-        first.save(update_fields=['attachment'])
-        CreditLimitRequest.objects.filter(
-            pk__in=[req.pk for req, _ in created[1:]],
-        ).update(attachment=first.attachment.name)
+    requests = [req for req, _ in created]
+    for upload in attachments:
+        stored = CreditLimitAttachment.objects.create(
+            request=requests[0], file=upload, name=upload.name[:255],
+            uploaded_by=user)
+        CreditLimitAttachment.objects.bulk_create(
+            CreditLimitAttachment(request=req, file=stored.file.name,
+                                  name=stored.name, uploaded_by=user)
+            for req in requests[1:])
 
     # Notifications are recorded in this transaction and pushed on commit,
     # so a rolled-back submission tells nobody anything.
-    for _req, flow in created:
-        notify.stage_awaiting(flow)
+    notify.submitted([flow for _req, flow in created])
     return [req for req, _ in created]
 
 

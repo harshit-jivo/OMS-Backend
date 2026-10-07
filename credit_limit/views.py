@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 def _queryset():
-    return CreditLimitRequest.objects.select_related(
-        'created_by', 'flow', 'flow__workflow', 'flow__current_stage',
-        'flow__current_user')
+    return (CreditLimitRequest.objects
+            .select_related('created_by', 'flow', 'flow__workflow',
+                            'flow__current_stage', 'flow__current_user')
+            .prefetch_related('attachments'))
 
 
 def _filtered(request, qs):
@@ -112,7 +113,9 @@ class RequestListCreateView(APIView):
             'company': request.data.get('company'),
             'lines': lines,
             'remarks': request.data.get('remarks', ''),
-            'attachment': request.data.get('attachment') or None,
+            # Several files under one key; `attachment` is the older name.
+            'attachments': (request.FILES.getlist('attachments')
+                            or request.FILES.getlist('attachment')),
         })
         if not serializer.is_valid():
             return fail('Please correct the highlighted fields.',
@@ -163,18 +166,20 @@ class RequestHistoryView(APIView):
 
 
 class AttachmentView(APIView):
+    """One of a request's supporting documents."""
+
     def get_permissions(self):
         return [IsAuthenticated(), perms.CanReadRequests()]
 
-    def get(self, request, pk):
+    def get(self, request, pk, attachment_id):
         obj, error = _readable(request, pk)
         if error:
             return error
-        if not obj.attachment:
-            return fail('This request has no attachment.',
+        row = obj.attachments.filter(pk=attachment_id).first()
+        if row is None:
+            return fail('Attachment not found.',
                         status=http_status.HTTP_404_NOT_FOUND)
-        name = obj.attachment.name.rsplit('/', 1)[-1]
-        return FileResponse(obj.attachment.open('rb'), filename=name)
+        return FileResponse(row.file.open('rb'), filename=row.name)
 
 
 class ApprovalQueueView(APIView):

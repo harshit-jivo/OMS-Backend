@@ -22,10 +22,15 @@ class CreditLimitFlowSerializer(serializers.Serializer):
     updated_at = serializers.DateTimeField()
 
 
+class CreditLimitAttachmentSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+
+
 class CreditLimitRequestSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(
         source='created_by.username', read_only=True, default='')
-    attachment_name = serializers.SerializerMethodField()
+    attachments = CreditLimitAttachmentSerializer(many=True, read_only=True)
     flow = CreditLimitFlowSerializer(read_only=True)
 
     class Meta:
@@ -33,12 +38,9 @@ class CreditLimitRequestSerializer(serializers.ModelSerializer):
         fields = ['id', 'company', 'card_code', 'card_name', 'main_group',
                   'current_balance', 'current_credit_limit',
                   'new_credit_limit', 'valid_till', 'remarks',
-                  'attachment_name', 'invoice_log', 'created_by',
+                  'attachments', 'invoice_log', 'created_by',
                   'created_by_username', 'created_at', 'flow']
         read_only_fields = fields
-
-    def get_attachment_name(self, obj):
-        return obj.attachment.name.rsplit('/', 1)[-1] if obj.attachment else ''
 
 
 class CreditLimitLineSerializer(serializers.Serializer):
@@ -59,7 +61,8 @@ class CreditLimitCreateSerializer(serializers.Serializer):
     """What the client may send: one company, one or more parties, and the
     remarks and supporting document they share.
 
-    The document is REQUIRED for a single party and optional for several —
+    At least one document is REQUIRED for a single party; for several they
+    are optional —
     `flow.attachment_required` is the rule; this only reports it per field.
     """
 
@@ -67,7 +70,8 @@ class CreditLimitCreateSerializer(serializers.Serializer):
     lines = CreditLimitLineSerializer(many=True, allow_empty=False)
     remarks = serializers.CharField(required=False, allow_blank=True,
                                     default='')
-    attachment = serializers.FileField(required=False, allow_null=True)
+    attachments = serializers.ListField(
+        child=serializers.FileField(), required=False, default=list)
 
     def validate_lines(self, value):
         from credit_limit.services.flow import MAX_LINES
@@ -82,11 +86,17 @@ class CreditLimitCreateSerializer(serializers.Serializer):
         return value
 
     def validate(self, attrs):
-        from credit_limit.services.flow import attachment_required
+        from credit_limit.services.flow import (
+            MAX_ATTACHMENTS, attachment_required,
+        )
 
-        if attachment_required(len(attrs['lines'])) and not attrs.get('attachment'):
-            raise serializers.ValidationError({'attachment': [
+        files = attrs.get('attachments') or []
+        if attachment_required(len(attrs['lines'])) and not files:
+            raise serializers.ValidationError({'attachments': [
                 'A supporting document is required for a single-party request.']})
+        if len(files) > MAX_ATTACHMENTS:
+            raise serializers.ValidationError({'attachments': [
+                f'At most {MAX_ATTACHMENTS} supporting documents per submission.']})
         return attrs
 
 
