@@ -229,9 +229,14 @@ def _mark_posted(log, actor, doc, *, reconciled):
 
 
 def _failed_status(log):
-    # An invoice whose credit-limit request is with JSAP keeps failing the same
+    # An invoice with a credit-limit request in flight keeps failing the same
     # check until it clears; dropping it to ERROR would hide "Show Flow".
-    return 'CL_RAISED' if CreditLimitLogs.objects.filter(invoice_log_id=log.pk).exists() else 'ERROR'
+    # OMS requests (`credit_limit`) and the legacy JSAP ones both count.
+    from credit_limit.models import CreditLimitRequest
+
+    raised = (CreditLimitRequest.objects.filter(invoice_log_id=log.pk).exists()
+              or CreditLimitLogs.objects.filter(invoice_log_id=log.pk).exists())
+    return 'CL_RAISED' if raised else 'ERROR'
 
 
 def _conflict(message, log):

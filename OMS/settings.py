@@ -169,6 +169,9 @@ INSTALLED_APPS = [
     # SAP is the point of origin: orders arrive via
     # `manage.py sync_production_orders`, never from a user.
     'production',
+    # Credit Limit — customer credit-limit approval, replacing JSAP's `cl`
+    # schema. Own `credit_limit` Postgres schema; drives the Workflow Engine.
+    'credit_limit',
     # Advance Payment. No models yet and therefore no migration: every
     # endpoint reads SAP live (open POs, open invoices, business partners,
     # employee advance accounts). It gains a model when it has an OMS fact of
