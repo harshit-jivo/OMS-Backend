@@ -310,6 +310,13 @@ SAP_ATTACHMENT_COMPANY_IDS = {
 }
 SAP_ATTACHMENT_TIMEOUT = config('SAP_ATTACHMENT_TIMEOUT', default=30, cast=int)
 
+# Payments: from this date every payment against a PO or bill goes through OMS.
+# Every PO, and every bill created in SAP on or after it: open = the document's
+# total less what OMS paid. An older bill: SAP's real balance less what OMS
+# holds. POs created on or after it also show the vendor's "already paid on
+# account" ledger notice (advance_payment.services.reservations).
+ADVANCE_PAYMENT_TRACK_FROM = config('ADVANCE_PAYMENT_TRACK_FROM', default='2026-10-08')
+
 # OCR service (ocr-service/ on the OMS server, 127.0.0.1:8014): reads photos
 # and scanned pages of payment proofs. Unset here = PDFs with text, Excel and
 # CSV still read; a photo or scan is refused with a clear message.

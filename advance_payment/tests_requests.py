@@ -153,10 +153,17 @@ class WhatTheServerAccepts(SimpleTestCase):
         self.assertEqual(cleaned.documents[0]['amount'], Decimal('87500.00'))
         self.assertEqual(cleaned.fields['amount'], Decimal('87500.00'))
 
-    def test_against_po_needs_the_expected_bill_date(self):
+    def test_against_po_the_expected_bill_date_is_optional(self):
         data = vendor_bill_request(payment_against='AGAINST_PO', documents=[
             {'kind': 'PO', 'sap_doc_entry': 14008, 'open_amount': '350000', 'amount': '1000'}])
-        with self.assertRaisesRegex(request_service.RequestInvalid, 'Expected Bill Date'):
+        self.assertIsNone(_clean(data).fields['expected_date'])
+        data['expected_date'] = '2026-11-01'
+        self.assertEqual(_clean(data).fields['expected_date'], datetime.date(2026, 11, 1))
+
+    def test_against_po_a_typed_expected_bill_date_must_be_a_date(self):
+        data = vendor_bill_request(payment_against='AGAINST_PO', expected_date='next week', documents=[
+            {'kind': 'PO', 'sap_doc_entry': 14008, 'open_amount': '350000', 'amount': '1000'}])
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Expected Bill Date is not a valid date'):
             _clean(data)
 
     def test_an_imprest_against_bills_asks_no_expected_bill_date(self):

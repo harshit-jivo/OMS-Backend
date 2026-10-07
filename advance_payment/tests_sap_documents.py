@@ -3,6 +3,7 @@
 No SAP: `sap._run` is stood in for, answering by the SQL it is given.
 """
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
 
@@ -164,3 +165,27 @@ class TheEndpoints(SimpleTestCase):
             response = self._get(views.PurchaseOrderView,
                                  '/api/advance-payments/purchase-order/?company=OIL&doc_entry=1')
         self.assertEqual(response.status_code, 404)
+
+
+class VendorOnAccount(SimpleTestCase):
+    """The vendor's ledger: money paid but not yet adjusted, for a person to judge against the POs."""
+
+    def test_reads_open_debits_not_credit_memos_newest_first(self):
+        rows = [{'trans_id': 238072, 'line_id': 1, 'trans_type': '46', 'base_ref': '1026466574',
+                 'posting_date': datetime(2026, 10, 6), 'debit': Decimal('802400'),
+                 'open': Decimal('802400'), 'memo': 'Outgoing Payments - VENDA001429', 'ref2': ''}]
+        with mock.patch.object(sap, '_run', return_value=rows) as run, \
+                mock.patch.object(sap, '_schema', return_value='S'):
+            got = sap.vendor_on_account('OIL', 'VENDA001429')
+        sql = run.call_args.args[1]
+        self.assertIn('"BalDueDeb" > 0', sql)
+        self.assertIn('"TransType" <> \'19\'', sql)
+        self.assertEqual(got, [{'trans_id': 238072, 'line_id': 1, 'doc_type': 'Outgoing Payment',
+                                'doc_type_code': 46, 'doc_num': '1026466574',
+                                'posting_date': '2026-10-06', 'paid': '802400', 'open': '802400',
+                                'memo': 'Outgoing Payments - VENDA001429', 'reference': ''}])
+
+    def test_no_vendor_no_query(self):
+        with mock.patch.object(sap, '_run') as run:
+            self.assertEqual(sap.vendor_on_account('OIL', ' '), [])
+        run.assert_not_called()

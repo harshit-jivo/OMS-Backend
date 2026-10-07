@@ -24,6 +24,7 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /department-heads/       (?search=: the employee master's HODs, each with their OMS login)
   GET /open-invoices/         ?company=&party_type=vendor|customer&offset=&from_date=
                               &card_code=&search=&limit=
+  GET /vendor-on-account/     ?company=&card_code=          (paid, not yet adjusted: from the ledger)
   GET /open-documents/        ?company=&card_code=&limit=
   GET /open-other-documents/  ?company=&card_code=&limit=   (vendor "All")
   GET /partner-bank-accounts/ ?company=&card_code=           (payee's banks)
@@ -95,6 +96,8 @@ urlpatterns = [
          name='advance-payment-department-heads'),
     path('open-invoices/', views.OpenInvoicesView.as_view(),
          name='advance-payment-open-invoices'),
+    path('vendor-on-account/', views.VendorOnAccountView.as_view(),
+         name='advance-payment-vendor-on-account'),
     path('open-documents/', views.OpenDocumentsView.as_view(),
          name='advance-payment-open-documents'),
     path('open-other-documents/', views.OtherDocumentsView.as_view(),

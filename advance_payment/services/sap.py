@@ -256,7 +256,8 @@ _OPEN_PO_SQL = '''
         IFNULL(T0."VatSum", 0)     AS "tax_amount",
         IFNULL(T0."PaidToDate", 0) AS "received_amount",
         T0."DocTotal" - IFNULL(T0."PaidToDate", 0) AS "open_amount",
-        T0."Comments"   AS "remarks"
+        T0."Comments"   AS "remarks",
+        T0."CreateDate" AS "created_on"
     FROM "{schema}"."OPOR" T0
     WHERE T0."DocStatus" = 'O'
       AND IFNULL(T0."CANCELED", 'N') = 'N'
@@ -330,6 +331,8 @@ def open_purchase_orders(company, card_code=None, search=None, limit=None, from_
         'received_amount': _money(r.get('received_amount')),
         'open_amount': _money(r.get('open_amount')),
         'remarks': _s(r.get('remarks')),
+        # When it was created in SAP: decides whether OMS tracks it (reservations.tracked).
+        'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, 'open purchase orders')]
     return _with_attachments(company, 'OPOR', rows)
 
@@ -354,7 +357,8 @@ _OPEN_INVOICE_SQL = '''
         "DocCur"     AS "currency",
         "DocTotal"   AS "doc_total",
         "PaidToDate" AS "paid_to_date",
-        "DocTotal" - IFNULL("PaidToDate", 0) AS "balance_due"
+        "DocTotal" - IFNULL("PaidToDate", 0) AS "balance_due",
+        "CreateDate" AS "created_on"
     FROM "{schema}"."{table}"
     WHERE "DocStatus" = 'O'
       AND IFNULL("CANCELED", 'N') = 'N'
@@ -420,6 +424,7 @@ def open_invoices(company, party_type='vendor', card_code=None, search=None,
         'doc_total': _money(r.get('doc_total')),
         'paid_to_date': _money(r.get('paid_to_date')),
         'balance_due': _money(r.get('balance_due')),
+        'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, f'open {party_type} invoices')]
     return _with_attachments(company, table, rows)
 
@@ -1660,7 +1665,8 @@ _LIVE_DOCUMENTS_SQL = '''
            "DocTotal" - IFNULL("PaidToDate", 0) AS "open_amount",
            "DocStatus" AS "doc_status", "CANCELED" AS "cancelled",
            "CardCode" AS "card_code", "CardName" AS "card_name", "NumAtCard" AS "vendor_ref",
-           "DocDate" AS "doc_date", "DocDueDate" AS "due_date", "DocTotal" AS "doc_total"
+           "DocDate" AS "doc_date", "DocDueDate" AS "due_date", "DocTotal" AS "doc_total",
+           "CreateDate" AS "created_on"
     FROM "{schema}"."{table}"
     WHERE "DocEntry" IN ({marks})
 '''
@@ -1687,6 +1693,7 @@ def live_documents(company, kind, doc_entries):
             'card_code': _s(r.get('card_code')), 'card_name': _s(r.get('card_name')),
             'vendor_ref': _s(r.get('vendor_ref')), 'doc_date': _date(r.get('doc_date')),
             'due_date': _date(r.get('due_date')), 'doc_total': _money(r.get('doc_total')),
+            'created_on': _date(r.get('created_on')),
         }
     return out
 
@@ -1712,6 +1719,49 @@ def payments_unadjusted(company, doc_entries):
     sql = _PAYMENTS_UNADJUSTED_SQL.format(schema=_schema(company), marks=', '.join('?' * len(entries)))
     return {int(r['doc_entry']): Decimal(str(r.get('unadjusted') or 0))
             for r in _run(company, sql, entries, 'payments on account')}
+
+
+#: A vendor's ledger lines that still DEBIT them, open: money we paid that is
+#: not yet set off against a bill — payments on account, advance journals, down
+#: payments. Credit memos (19) are excluded: they are not money paid.
+_VENDOR_ON_ACCOUNT_SQL = '''
+    SELECT J."TransId" AS "trans_id", J."Line_ID" AS "line_id", J."TransType" AS "trans_type",
+           J."BaseRef" AS "base_ref", J."RefDate" AS "posting_date", J."Debit" AS "debit",
+           J."BalDueDeb" AS "open", J."LineMemo" AS "memo", J."Ref2" AS "ref2"
+    FROM "{schema}"."JDT1" J
+    WHERE J."ShortName" = ? AND J."BalDueDeb" > 0 AND J."TransType" <> '19'
+    ORDER BY J."RefDate" DESC, J."TransId" DESC
+'''
+
+
+def vendor_on_account(company, card_code):
+    """What we have paid a vendor that their ledger still holds OPEN: not yet adjusted.
+
+    `[{trans_id, line_id, doc_type, doc_num, posting_date, paid, open, memo}]`,
+    newest first. SAP never ties an on-account payment to a PO, so OMS cannot
+    say which PO it was for; it shows these beside the vendor's POs for a
+    person to judge (a payment made straight in SAP is invisible otherwise).
+    """
+    code = _s(card_code)
+    if not code:
+        return []
+    rows = _run(company, _VENDOR_ON_ACCOUNT_SQL.format(schema=_schema(company)), [code], 'vendor ledger')
+    out = []
+    for r in rows:
+        kind = int(r['trans_type']) if str(r.get('trans_type') or '').lstrip('-').isdigit() else None
+        out.append({
+            'trans_id': int(r['trans_id']),
+            'line_id': int(r['line_id'] or 0),
+            'doc_type': DOC_TYPES.get(kind, f'Type {kind}'),
+            'doc_type_code': kind,
+            'doc_num': _s(r.get('base_ref')) or str(r['trans_id']),
+            'posting_date': _date(r.get('posting_date')),
+            'paid': _money(r.get('debit')),
+            'open': _money(r.get('open')),
+            'memo': _s(r.get('memo')),
+            'reference': _s(r.get('ref2')),
+        })
+    return out
 
 
 _LEDGER_BRANCH_SQL = '''

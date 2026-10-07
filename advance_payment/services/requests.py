@@ -66,6 +66,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 #: `documents`: the kind of SAP document it pays through, or None for a typed
 #: amount.
 CASES = {
+    # The Expected Bill Date is asked, but optional (since 2026-10-07).
     (RequestType.VENDOR, PaymentAgainst.AGAINST_PO): {'documents': DocumentKind.PO, 'expected_date': True},
     (RequestType.VENDOR, PaymentAgainst.AGAINST_BILL): {'documents': DocumentKind.BILL},
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.ADVANCE): {'documents': None, 'repayment': True},
@@ -183,9 +184,11 @@ def clean(data):
     if payment_date is None:
         problems.append('Enter the Payment Date.')
 
+    # Vendor -> Against PO's Expected Bill Date is optional: blank is fine, but
+    # something typed must be a date.
     expected_date = _date(data.get('expected_date')) if case.get('expected_date') else None
-    if case.get('expected_date') and expected_date is None:
-        problems.append('Enter the Expected Bill Date.')
+    if case.get('expected_date') and expected_date is None and _text(data.get('expected_date')):
+        problems.append('The Expected Bill Date is not a valid date.')
     expected_bill_date = _date(data.get('expected_bill_date')) if case.get('expected_bill_date') else None
     if case.get('expected_bill_date') and expected_bill_date is None:
         problems.append('Enter the Expected Bill Date.')
