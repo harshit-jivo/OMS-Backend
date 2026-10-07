@@ -1,6 +1,7 @@
 """Credit Limit API. Identity always comes from `request.user`; approval also
 requires being the current stage's effective user. Responses use the project's
 `{success, message, data}` envelope."""
+import json
 import logging
 
 from django.http import FileResponse
@@ -99,18 +100,38 @@ class RequestListCreateView(APIView):
         return ok(CreditLimitRequestSerializer(qs, many=True).data)
 
     def post(self, request):
-        serializer = CreditLimitCreateSerializer(data=request.data)
+        """Raise one request per party. Multipart carries `lines` as a JSON
+        string next to the file; a JSON body may send it as a list."""
+        lines = request.data.get('lines')
+        if isinstance(lines, str):
+            try:
+                lines = json.loads(lines)
+            except ValueError:
+                return fail('`lines` must be a JSON list of parties.')
+        serializer = CreditLimitCreateSerializer(data={
+            'company': request.data.get('company'),
+            'lines': lines,
+            'remarks': request.data.get('remarks', ''),
+            'attachment': request.data.get('attachment') or None,
+        })
         if not serializer.is_valid():
             return fail('Please correct the highlighted fields.',
                         errors=serializer.errors)
         try:
-            obj = flow_service.create(user=request.user,
-                                      **serializer.validated_data)
+            objs = flow_service.submit(user=request.user,
+                                       **serializer.validated_data)
+        except flow_service.BatchError as exc:
+            return fail(str(exc), errors={'lines': exc.lines},
+                        status=http_status.HTTP_409_CONFLICT)
         except flow_service.CreditLimitError as exc:
             return fail(str(exc), status=http_status.HTTP_409_CONFLICT)
-        return created(CreditLimitRequestSerializer(
-            _queryset().get(pk=obj.pk)).data,
-            message='Credit limit request submitted.')
+        count = len(objs)
+        return created(
+            CreditLimitRequestSerializer(
+                _queryset().filter(pk__in=[o.pk for o in objs])
+                .order_by('pk'), many=True).data,
+            message=(f'{count} credit limit requests submitted.' if count > 1
+                     else 'Credit limit request submitted.'))
 
 
 class RequestDetailView(APIView):

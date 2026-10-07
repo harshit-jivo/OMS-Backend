@@ -14,6 +14,16 @@ written or read for new requests.
 
 ## Behaviour
 
+- **One submission, many parties.** `POST requests/` takes a company, a
+  `lines` list (`card_code`, `new_credit_limit`, `valid_till` per party, up to
+  50), and shared `remarks` and `attachment`. Each line becomes its own
+  request on its own approval chain. All or nothing: if any line cannot be
+  raised, nothing is saved and the 409 lists the failing lines
+  (`errors.lines: [{index, card_code, message}]`).
+- **Supporting document:** required for a single party, optional for several
+  (`flow.attachment_required`). A shared document is stored once and linked
+  from every request in the submission. Invoice review always raises one
+  party, so it always requires one.
 - **Customer facts come from SAP.** At submission the server reads `CardName`,
   `U_Main_Group`, `Balance` and `CreditLine` from OCRD. The client sends only
   company, card code, new limit, valid-till, remarks and the attachment.

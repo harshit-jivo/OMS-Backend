@@ -41,22 +41,53 @@ class CreditLimitRequestSerializer(serializers.ModelSerializer):
         return obj.attachment.name.rsplit('/', 1)[-1] if obj.attachment else ''
 
 
-class CreditLimitCreateSerializer(serializers.Serializer):
-    """What the client may send. Everything about the customer comes from SAP."""
+class CreditLimitLineSerializer(serializers.Serializer):
+    """One party in a submission. Its customer facts come from SAP."""
 
-    company = serializers.ChoiceField(choices=COMPANY_CODES)
     card_code = serializers.CharField(max_length=50)
     new_credit_limit = serializers.DecimalField(
         max_digits=19, decimal_places=2, min_value=1)
     valid_till = serializers.DateField()
-    remarks = serializers.CharField(required=False, allow_blank=True,
-                                    default='')
-    attachment = serializers.FileField(required=False, allow_null=True)
 
     def validate_valid_till(self, value):
         if value < timezone.localdate():
             raise serializers.ValidationError('Valid till cannot be in the past.')
         return value
+
+
+class CreditLimitCreateSerializer(serializers.Serializer):
+    """What the client may send: one company, one or more parties, and the
+    remarks and supporting document they share.
+
+    The document is REQUIRED for a single party and optional for several —
+    `flow.attachment_required` is the rule; this only reports it per field.
+    """
+
+    company = serializers.ChoiceField(choices=COMPANY_CODES)
+    lines = CreditLimitLineSerializer(many=True, allow_empty=False)
+    remarks = serializers.CharField(required=False, allow_blank=True,
+                                    default='')
+    attachment = serializers.FileField(required=False, allow_null=True)
+
+    def validate_lines(self, value):
+        from credit_limit.services.flow import MAX_LINES
+
+        if len(value) > MAX_LINES:
+            raise serializers.ValidationError(
+                f'At most {MAX_LINES} parties per submission.')
+        codes = [line['card_code'].strip().upper() for line in value]
+        if len(codes) != len(set(codes)):
+            raise serializers.ValidationError(
+                'Each party can appear once per submission.')
+        return value
+
+    def validate(self, attrs):
+        from credit_limit.services.flow import attachment_required
+
+        if attachment_required(len(attrs['lines'])) and not attrs.get('attachment'):
+            raise serializers.ValidationError({'attachment': [
+                'A supporting document is required for a single-party request.']})
+        return attrs
 
 
 class CreditLimitActionLogSerializer(serializers.ModelSerializer):

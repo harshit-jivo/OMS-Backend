@@ -646,9 +646,9 @@ class CreditLimitRequestView(APIView):
             document = json.loads(request.data.get('documentData') or '')
         except (ValueError, TypeError):
             document = None
-        if not isinstance(document, dict) or not invoice_log_id:
+        if not isinstance(document, dict) or not attachment or not invoice_log_id:
             return Response(
-                {'error': 'documentData and invoice_log_id are required.'},
+                {'error': 'documentData, attachment and invoice_log_id are required.'},
                 status=status.HTTP_400_BAD_REQUEST)
 
         invoice_log = InvoiceLog.objects.filter(id=invoice_log_id).first()
@@ -694,11 +694,16 @@ class CreditLimitRequestView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            cl_request = cl_flow.create(
-                user=request.user, company=company, card_code=card_code,
-                new_credit_limit=new_limit, valid_till=valid_till,
+            (cl_request,) = cl_flow.submit(
+                user=request.user, company=company,
+                lines=[{'card_code': card_code, 'new_credit_limit': new_limit,
+                        'valid_till': valid_till}],
                 attachment=attachment, invoice_log=invoice_log,
                 remarks=f'Raised from invoice review (log #{invoice_log.id}).')
+        except cl_flow.BatchError as exc:
+            # One line, so its own reason is the useful message.
+            return Response({'error': exc.lines[0]['message']},
+                            status=status.HTTP_409_CONFLICT)
         except cl_flow.CreditLimitError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
         except IntegrityError:

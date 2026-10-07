@@ -54,14 +54,37 @@ def _point_at(flow, stage_id):
     flow.current_user_id = effective_user_id(stage_id)
 
 
-@transaction.atomic
-def create(*, user, company, card_code, new_credit_limit, valid_till,
-           attachment=None, remarks='', invoice_log=None):
-    """Read the customer from SAP, store the request, and route it.
+#: A batch is reviewed as one screen by its requester; beyond this it is a
+#: bulk import, which this endpoint is not.
+MAX_LINES = 50
 
-    One transaction: a request no workflow matches is not stored. JSAP kept
-    such rows with no flow at all — 30 of them.
+
+class BatchError(CreditLimitError):
+    """One or more lines of a submission failed; nothing was saved.
+
+    `lines` is `[{index, card_code, message}]`, so the form can mark each
+    failing row rather than showing the first error alone.
     """
+
+    def __init__(self, lines):
+        super().__init__(
+            'Nothing was submitted: '
+            + ('one party' if len(lines) == 1 else f'{len(lines)} parties')
+            + ' could not be raised. Fix or remove '
+            + ('it' if len(lines) == 1 else 'them') + ' and submit again.')
+        self.lines = lines
+
+
+def attachment_required(line_count):
+    """THE rule: a single-party request needs a supporting document; a
+    multi-party submission may go without. One definition, used by the API
+    serializer and the invoice-review entry point alike."""
+    return line_count == 1
+
+
+def _create_one(*, user, company, card_code, new_credit_limit, valid_till,
+                remarks, invoice_log):
+    """Read the customer from SAP, store one request and route it."""
     try:
         card = sap.customer(company, card_code)
     except sap.SapUnavailable as exc:
@@ -92,20 +115,76 @@ def create(*, user, company, card_code, new_credit_limit, valid_till,
     except WorkflowError as exc:
         raise CreditLimitError(str(exc)) from exc
 
-    # The file is written only once the request is known to be routable, so a
-    # rolled-back submission leaves nothing on disk.
-    if attachment:
-        request.attachment = attachment
-        request.save(update_fields=['attachment'])
-
     flow = CreditLimitFlow(request=request, workflow=chosen.workflow,
                            total_stage=len(chosen.stages))
     _point_at(flow, chosen.stages[0].id)
     flow.save()
-
     log(request, action=LogAction.CREATE, user=user, remarks=remarks)
-    notify.stage_awaiting(flow)
-    return request
+    return request, flow
+
+
+@transaction.atomic
+def submit(*, user, company, lines, remarks='', attachment=None,
+           invoice_log=None):
+    """Raise one request per line — each party is approved on its own chain.
+
+    `lines` is `[{card_code, new_credit_limit, valid_till}]`. ALL OR NOTHING:
+    every line is attempted (each in a savepoint) so all failures are
+    reported together, and any failure rolls the whole submission back. A
+    request no workflow matches is never stored — JSAP kept 30 such rows.
+
+    The supporting document is shared by every request in the submission and
+    written once, only after every line has routed, so a refused submission
+    leaves nothing on disk.
+    """
+    if not lines:
+        raise CreditLimitError('Add at least one party.')
+    if len(lines) > MAX_LINES:
+        raise CreditLimitError(
+            f'At most {MAX_LINES} parties can be raised in one submission.')
+    if attachment_required(len(lines)) and not attachment:
+        raise CreditLimitError(
+            'A supporting document is required for a single-party request.')
+    if invoice_log is not None and len(lines) != 1:
+        raise CreditLimitError(
+            "A request raised from an invoice covers that invoice's party only.")
+
+    codes = [str(line['card_code']).strip().upper() for line in lines]
+    duplicates = sorted({c for c in codes if codes.count(c) > 1})
+    if duplicates:
+        raise CreditLimitError(
+            'Each party can appear once per submission: '
+            + ', '.join(duplicates) + '.')
+
+    created, failures = [], []
+    for index, line in enumerate(lines):
+        try:
+            with transaction.atomic():
+                created.append(_create_one(
+                    user=user, company=company,
+                    card_code=line['card_code'],
+                    new_credit_limit=line['new_credit_limit'],
+                    valid_till=line['valid_till'],
+                    remarks=remarks, invoice_log=invoice_log))
+        except CreditLimitError as exc:
+            failures.append({'index': index, 'card_code': line['card_code'],
+                             'message': str(exc)})
+    if failures:
+        raise BatchError(failures)
+
+    if attachment:
+        first = created[0][0]
+        first.attachment = attachment
+        first.save(update_fields=['attachment'])
+        CreditLimitRequest.objects.filter(
+            pk__in=[req.pk for req, _ in created[1:]],
+        ).update(attachment=first.attachment.name)
+
+    # Notifications are recorded in this transaction and pushed on commit,
+    # so a rolled-back submission tells nobody anything.
+    for _req, flow in created:
+        notify.stage_awaiting(flow)
+    return [req for req, _ in created]
 
 
 def stages_for(flow):
