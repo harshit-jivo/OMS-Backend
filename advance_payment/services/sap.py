@@ -1651,6 +1651,25 @@ _JOURNAL_BY_MEMO_SQL = '''
 '''
 
 
+_JOURNAL_TOTAL_BY_MEMO_SQL = '''
+    SELECT H."TransId" AS "trans_id",
+           (SELECT SUM(L."Debit") FROM "{schema}"."JDT1" L WHERE L."TransId" = H."TransId") AS "debit"
+    FROM "{schema}"."OJDT" H
+    WHERE H."Memo" = ? AND H."TransType" = '30' AND H."StornoToTr" IS NULL
+      AND NOT EXISTS (SELECT 1 FROM "{schema}"."OJDT" R WHERE R."StornoToTr" = H."TransId")
+    ORDER BY H."TransId" DESC
+'''
+
+
+def journal_total_by_memo(company, memo):
+    """`{trans_id, debit}` (all its lines) of a live journal entry with that memo, or None."""
+    rows = _run(company, _JOURNAL_TOTAL_BY_MEMO_SQL.format(schema=_schema(company)), [memo],
+                'journal entry by memo')
+    if not rows:
+        return None
+    return {'trans_id': int(rows[0]['trans_id']), 'debit': Decimal(str(rows[0].get('debit') or 0))}
+
+
 def journal_by_memo(company, memo, card_code):
     """`{trans_id, debit}` of a live (not reversed) journal entry with that memo, or None."""
     rows = _run(company, _JOURNAL_BY_MEMO_SQL.format(schema=_schema(company)), [_s(card_code), memo],
@@ -1906,3 +1925,86 @@ def budgets(company):
         'name': _s(r.get('name')) or _s(r.get('code')),
     } for r in rows]
 
+
+
+# ---------------------------------------------------------------------------
+# Expense requests: the accounts, months and Variety an expense line carries
+# ---------------------------------------------------------------------------
+
+#: The expense G/L groups SAP's budget check covers (`SBO_SP_TRANSACTIONNOTIFICATION`,
+#: object 46): accounts under these parents, and 5100008.
+#: Indirect expenses: the groups SAP's budget check covers.
+EXPENSE_PARENTS = ('5610000', '5620000', '5630000', '5640000', '5650000',
+                   '5660000', '5670000', '5680000', '5690000')
+#: Direct expenses: SAP's DIRECT EXPENSE group, less the accounts SAP itself
+#: books to (cost of goods sold, price difference, variances) — never paid.
+DIRECT_EXPENSE_PARENTS = ('5100000',)
+_NOT_PAID_DIRECT = re.compile(
+    getattr(settings, 'ADVANCE_PAYMENT_DIRECT_EXPENSE_EXCLUDE', r'COST OF GOODS|VARIANCE|PRICE DIFFERENCE'), re.I)
+
+#: The Sub Budgets SAP allows under a budget head, where it restricts them
+#: (SBO_SP_TRANSACTIONNOTIFICATION, payments 46 AND journals 30 — both are
+#: posted for an Expense, so only what both allow; read 2026-10-07). A head
+#: not listed takes any Sub Budget.
+SUB_BUDGET_RULES = {
+    'OIL': {'BackOff': {'Accounts', 'Admin', 'HR_DEPT', 'IMPORT', 'IT', 'Legal'},
+            'Med MKT': {'DIGTAL M', 'POP', 'SOCIAL M', 'TV ADD'},
+            'Interest': {'BankChgs', 'CC Limit', 'Trm Loan'}},
+    'BEVERAGES': {'BackOff': {'Accounts', 'Admin', 'HR_DEPT', 'IMPORT', 'IT', 'Legal'},
+                  'Med MKT': {'DIGTAL M', 'POP', 'SOCIAL M', 'TV ADD'},
+                  'Interest': {'BankChgs', 'CC Limit', 'Trm Loan'}},
+    'MART': {'BackOff': {'Accounts', 'Admin', 'HR_DEPT', 'IT', 'Legal'},
+             'Med MKT': {'DIGTAL M', 'POP', 'SOCIAL M', 'TV ADD'},
+             'Interest': {'BankChgs', 'CC Limit', 'Trm Loan'}},
+    **(getattr(settings, 'ADVANCE_PAYMENT_SUB_BUDGET_RULES', None) or {}),
+}
+
+#: SAP's Effective Month dimension (ODIM 2 in all three companies): "10-2026".
+MONTH_DIMENSION = int(getattr(settings, 'ADVANCE_PAYMENT_MONTH_DIMENSION', 2))
+_MONTH_CODE = re.compile(r'^(0[1-9]|1[0-2])-\d{4}$')
+
+#: Dimension 1 ("Variety") on an expense line. Every expense payment in SAP
+#: carries one value per company (Oct 2026, last 180 days: Oil CANOLA on all
+#: 814 lines, Beverages WATER on all 82, Mart BST), so it is filled, not asked.
+EXPENSE_VARIETY = {'OIL': 'CANOLA', 'BEVERAGES': 'WATER', 'MART': 'BST',
+                   **(getattr(settings, 'ADVANCE_PAYMENT_EXPENSE_VARIETY', None) or {})}
+
+_EXPENSE_ACCOUNTS_SQL = '''
+    SELECT A."AcctCode" AS "code", A."AcctName" AS "name", A."FatherNum" AS "parent", P."AcctName" AS "group"
+    FROM "{schema}"."OACT" A
+    LEFT JOIN "{schema}"."OACT" P ON P."AcctCode" = A."FatherNum"
+    WHERE A."Postable" = 'Y' AND IFNULL(A."FrozenFor", 'N') = 'N'
+      AND A."FatherNum" IN ({parents})
+    ORDER BY A."AcctCode"
+'''
+
+
+def expense_accounts(company, kind=None):
+    """The postable expense G/L accounts an Expense line may pay to:
+    `[{code, name, group, kind}]`, `kind` DIRECT or INDIRECT; `kind=` keeps one."""
+    sql = _EXPENSE_ACCOUNTS_SQL.format(
+        schema=_schema(company),
+        parents=', '.join(f"'{p}'" for p in EXPENSE_PARENTS + DIRECT_EXPENSE_PARENTS))
+    out = []
+    for r in _run(company, sql, [], 'expense accounts'):
+        direct = _s(r.get('parent')) in DIRECT_EXPENSE_PARENTS
+        if direct and _NOT_PAID_DIRECT.search(_s(r.get('name'))):
+            continue
+        row = {'code': _s(r.get('code')), 'name': _s(r.get('name')), 'group': _s(r.get('group')),
+               'kind': 'DIRECT' if direct else 'INDIRECT'}
+        if kind is None or row['kind'] == kind:
+            out.append(row)
+    return out
+
+
+_MONTHS_SQL = '''
+    SELECT "PrcCode" AS "code" FROM "{schema}"."OPRC" WHERE "Active" = 'Y' AND "DimCode" = ?
+'''
+
+
+def expense_months(company):
+    """SAP's active Effective Month codes, newest first: `["10-2026", "09-2026", …]`."""
+    codes = [_s(r.get('code')) for r in _run(company, _MONTHS_SQL.format(schema=_schema(company)),
+                                             [MONTH_DIMENSION], 'effective months')]
+    months = [c for c in codes if _MONTH_CODE.match(c)]
+    return sorted(months, key=lambda c: (c[3:], c[:2]), reverse=True)

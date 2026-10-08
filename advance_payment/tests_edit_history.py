@@ -5,6 +5,7 @@ values are stored as the page reads them — department NAMES, the partner's
 code and name, documents by number — not ids nobody can read back.
 """
 from decimal import Decimal
+from unittest import mock
 
 from advance_payment.models import (
     Department, FlowStatus, LogAction, RequestDocument, RequestFlow, RequestLog, RequestStatus, SubDepartment,
@@ -24,6 +25,10 @@ def doc(entry, amount, num=None):
 class EditHistory(DeskFixture):
     def setUp(self):
         super().setUp()
+        # What is still open on each document is SAP's: not asked here.
+        reserve = mock.patch('advance_payment.services.reservations.problems', return_value=[])
+        reserve.start()
+        self.addCleanup(reserve.stop)
         self.advance = self.request(at=self.my_stage)
         for d in (doc(10256, '40000'), doc(10271, '20000')):
             RequestDocument.objects.create(request=self.advance, **d)

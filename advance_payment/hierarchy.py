@@ -17,6 +17,8 @@ This module is DATA: who approves is named by role (`PEOPLE` keys), and
 workflows. Change a person there (or on the Workflows page), not here; change
 the hierarchy here, and re-run the command.
 """
+import re
+
 from advance_payment.models import DEPARTMENT_HEAD_STAGE
 from advance_payment.purposes import HEAD_PURPOSES, HEAD_REQUEST_TYPES, PAYMENT_PURPOSES
 
@@ -35,6 +37,10 @@ PEOPLE = {
     'payment': 'taran',
     'audit': 'parmeet',
     'final': 'kamal1',
+    # Expense requests only: owners of budget heads not named above.
+    'backoffice': 'nirmal',          # Nirmal Didi Ji: BackOff
+    'transport': 'paramdeep',        # Paramdeep Singh: Transprt
+    'marketing': 'karanpreet',       # Karanpreet Singh: Med MKT
 }
 
 #: The Department Head stage's configured user: never asked to act (the
@@ -90,6 +96,77 @@ def _chain(first, director):
     return stages
 
 
+# ---------------------------------------------------------------------------
+# Expense requests: by budget head, the budget hierarchy's owners
+# ---------------------------------------------------------------------------
+#
+# An Expense request (paid straight to expense G/Ls) is routed by its budget
+# head's OWNER — the Budget hierarchy agreed 2026-10-05/06 (the same owners as
+# `budget/hierarchy.py`; copied here by role so Payments does not depend on
+# the Budget app) — then Payment -> Audit, where Audit's approval posts.
+#
+#   <head>               owner                (Director after, for NPD)
+#   <head>, electricity  owner, then Director (the requester ticks Electricity)
+#   R & D, OTE           Director alone
+#   Mart                 Prabhjot, whatever the head
+
+EXPENSE = "request_type = 'EXPENSE'"
+
+#: {company: {budget code as SAP has it: owner role, or None for "the Director alone"}}
+EXPENSE_OWNERS = {
+    'OIL': {
+        'BackOff': 'backoffice', 'Sales': 'sales_oil', 'Sales RE': 'sales_oil',
+        'Del Bkhp': 'bhupinder', 'Del Mayp': 'bhupinder', 'Factory': 'factory_oil', 'FACT_COM': 'factory_oil',
+        'Interest': 'avtar', 'Med MKT': 'marketing', 'R & D': None, 'OTE': None, 'Transprt': 'transport',
+        'NPD1': 'avtar', 'NPD2': 'avtar', 'NPD3': 'avtar',
+    },
+    'BEVERAGES': {
+        'BackOff': 'backoffice', 'Sales': 'sales_bev', 'Sales RE': 'sales_bev',
+        'Del Bkhp': 'bhupinder', 'Del Mayp': 'bhupinder', 'Factory': 'factory_bev', 'FACT_COM': 'factory_bev',
+        'Interest': 'avtar', 'Med MKT': 'marketing', 'OTE': None, 'Transprt': 'transport',
+        'NPD1': 'avtar', 'NPD2': 'avtar', 'NPD3': 'avtar',
+    },
+}
+
+#: Heads whose owner is always followed by the Director.
+EXPENSE_DIRECTOR_AFTER = frozenset({'NPD1', 'NPD2', 'NPD3'})
+
+_COMPANY_TAG = {'OIL': 'OIL', 'BEVERAGES': 'BEV'}
+
+
+def _head_key(budget_code):
+    """'Sales RE' -> 'SALES_RE', 'R & D' -> 'R_D': a budget code as a workflow code part."""
+    return re.sub(r'[^A-Z0-9]+', '_', budget_code.upper()).strip('_')
+
+
+def _expense_chain(owner, director):
+    stages = [(OWNER_STAGE, owner)] if owner else []
+    if director or not owner:
+        stages.append((DIRECTOR_STAGE, 'director'))
+    return stages
+
+
+def expense_routes():
+    """The Expense workflows: per company and budget head, plain and electricity; and Mart."""
+    out = [{'code': 'AP_EXP_MART', 'name': 'Expense · Mart', 'company': 'MART', 'expense': True,
+            'query': _where(EXPENSE, "company = 'MART'"), 'stages': [(OWNER_STAGE, 'mart')]}]
+    for company, heads in EXPENSE_OWNERS.items():
+        tag = _COMPANY_TAG[company]
+        for budget_code, owner in heads.items():
+            base = (EXPENSE, f"company = '{company}'", f"budget_code = '{budget_code}'")
+            director = budget_code in EXPENSE_DIRECTOR_AFTER
+            out += [
+                {'code': f'AP_EXP_{tag}_{_head_key(budget_code)}', 'name': f'Expense · {company.title()} · {budget_code}',
+                 'company': company, 'expense': True,
+                 'query': _where(*base, 'is_electricity = false'), 'stages': _expense_chain(owner, director)},
+                {'code': f'AP_EXP_{tag}_{_head_key(budget_code)}_ELEC',
+                 'name': f'Expense · {company.title()} · {budget_code} · electricity',
+                 'company': company, 'expense': True,
+                 'query': _where(*base, 'is_electricity = true'), 'stages': _expense_chain(owner, True)},
+            ]
+    return out
+
+
 def routes():
     """Every workflow of the hierarchy: `[{code, name, company, query, stages}]`.
 
@@ -100,7 +177,7 @@ def routes():
     labels = {code: label for code, label, _g in PAYMENT_PURPOSES}
     out = [
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
-         'query': _where("company = 'MART'"), 'stages': [(OWNER_STAGE, 'mart')]},
+         'query': _where("company = 'MART'", "request_type <> 'EXPENSE'"), 'stages': [(OWNER_STAGE, 'mart')]},
         {'code': 'AP_STAFF_ADVANCE', 'name': 'Payments · Staff Advance / Imprest', 'company': 'ALL',
          'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN')),
          'stages': _chain(HEAD, True)},
@@ -138,10 +215,15 @@ def routes():
                         'query': _where(*base), 'stages': _chain(HEAD, code in HEAD_THEN_DIRECTOR)})
         else:
             raise ValueError(f'Purpose {code} has no route in the hierarchy.')
-    return out
+    return out + expense_routes()
 
 
 def full_stages(route):
-    """All stages of a route, in order: `[(name, role)]`, the three fixed ones last."""
-    return [*route['stages'], ('Payment Approval', 'payment'), ('Audit Approval', 'audit'),
-            ('Final Approval', 'final')]
+    """All stages of a route, in order: `[(name, role)]`, the fixed ones last.
+
+    Payment -> Audit -> Final; an Expense route ends at Audit, whose approval posts.
+    """
+    tail = [('Payment Approval', 'payment'), ('Audit Approval', 'audit')]
+    if not route.get('expense'):
+        tail.append(('Final Approval', 'final'))
+    return [*route['stages'], *tail]
