@@ -4,7 +4,7 @@
 liquid stock: FG (packed oil / beverages) and RM (loose oil). On PM, CG and SC
 items -- packaging, consumables, gift articles -- it is SAP's default of 1 or an
 unrelated number, so qty x pack unit reported 25 empty tins as 25 litres.
-Mirrors the frontend's `src/lib/litres.ts`.
+Mirrors the frontend's `src/lib/itemUnits.ts`.
 """
 
 LITRE_ITEM_PREFIXES = ('FG', 'RM')
