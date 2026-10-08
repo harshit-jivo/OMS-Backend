@@ -1140,7 +1140,7 @@ class OpenInvoicesView(_Lookup):
 # `Advance_Payment_Approval`, and ACTING needs, on top, being the current
 # stage's user today (`flow.approve` and friends check it on the server).
 
-APPROVAL_KEY = 'Advance_Payment_Approval'
+APPROVAL_KEY = ap_perms.APPROVAL_KEY
 
 #: At most this many requests in one list; newest first.
 LIST_LIMIT = 300

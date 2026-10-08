@@ -499,7 +499,7 @@ class Queries():
                     T0."WhsName"
                 FROM "{s}"."OWHS" AS T0
                 WHERE T0."Locked" = 'N'
-                AND T0."WhsCode" IN ('DL-MP' , 'BH-FG')
+                AND T0."WhsCode" IN ('BH-FG')
                 """
         elif branch == 'MART':
             s = Queries.MART_SCHEMA

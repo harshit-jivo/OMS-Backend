@@ -334,7 +334,55 @@ def open_purchase_orders(company, card_code=None, search=None, limit=None, from_
         # When it was created in SAP: decides whether OMS tracks it (reservations.tracked).
         'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, 'open purchase orders')]
-    return _with_attachments(company, 'OPOR', rows)
+    return _with_bill_tds(company, _with_attachments(company, 'OPOR', rows))
+
+
+#: The TDS SAP withheld on each PO's bills. SAP never carries TDS on a PO
+#: itself (OPOR.WTSum is always 0); it is withheld on the A/P invoices raised
+#: from it — straight from the PO (PCH1.BaseType 22) or through its goods
+#: receipts (PCH1.BaseType 20 -> PDN1.BaseType 22). Cancelled bills do not count.
+_PO_BILL_TDS_SQL = '''
+    SELECT P."po" AS "po", SUM(IFNULL(B."WTSum", 0)) AS "tds", COUNT(*) AS "bills"
+    FROM (
+        SELECT DISTINCT L."DocEntry" AS "bill", L."BaseEntry" AS "po"
+        FROM "{schema}"."PCH1" L
+        WHERE L."BaseType" = 22 AND L."BaseEntry" IN ({marks})
+        UNION
+        SELECT DISTINCT L."DocEntry", GL."BaseEntry"
+        FROM "{schema}"."PCH1" L
+        JOIN "{schema}"."PDN1" GL ON GL."DocEntry" = L."BaseEntry"
+        WHERE L."BaseType" = 20 AND GL."BaseType" = 22 AND GL."BaseEntry" IN ({marks})
+    ) P
+    JOIN "{schema}"."OPCH" B ON B."DocEntry" = P."bill"
+    WHERE IFNULL(B."CANCELED", 'N') = 'N'
+    GROUP BY P."po"
+'''
+
+
+def _with_bill_tds(company, rows):
+    """Each PO row with `tds_on_bills` (what SAP withheld on its bills) and `billed` (how many).
+
+    Like the attachments, a lookup that fails leaves the list standing: the
+    rows say nothing about TDS rather than the picker refusing to open.
+    """
+    entries = [r['doc_entry'] for r in rows]
+    found = {}
+    if entries:
+        marks = ', '.join('?' * len(entries))
+        try:
+            found = {int(r['po']): r for r in _run(
+                company, _PO_BILL_TDS_SQL.format(schema=_schema(company), marks=marks),
+                entries + entries, 'TDS on PO bills')}
+        except SapUnavailable:
+            logger.warning('advance_payment: TDS on PO bills unreadable for %s', company)
+            for r in rows:
+                r['tds_on_bills'], r['billed'] = None, None
+            return rows
+    for r in rows:
+        hit = found.get(r['doc_entry'])
+        r['tds_on_bills'] = _money(hit['tds'] if hit else 0)
+        r['billed'] = int(hit['bills']) if hit else 0
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +406,7 @@ _OPEN_INVOICE_SQL = '''
         "DocTotal"   AS "doc_total",
         "PaidToDate" AS "paid_to_date",
         "DocTotal" - IFNULL("PaidToDate", 0) AS "balance_due",
+        IFNULL("WTSum", 0) AS "tds",
         "CreateDate" AS "created_on"
     FROM "{schema}"."{table}"
     WHERE "DocStatus" = 'O'
@@ -424,6 +473,8 @@ def open_invoices(company, party_type='vendor', card_code=None, search=None,
         'doc_total': _money(r.get('doc_total')),
         'paid_to_date': _money(r.get('paid_to_date')),
         'balance_due': _money(r.get('balance_due')),
+        # The TDS SAP withheld on it (`WTSum`); "0" when none was.
+        'tds': _money(r.get('tds')),
         'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, f'open {party_type} invoices')]
     return _with_attachments(company, table, rows)

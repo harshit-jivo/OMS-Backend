@@ -189,3 +189,33 @@ class VendorOnAccount(SimpleTestCase):
         with mock.patch.object(sap, '_run') as run:
             self.assertEqual(sap.vendor_on_account('OIL', ' '), [])
         run.assert_not_called()
+
+
+@mock.patch.object(sap, '_schema', return_value='JIVO_OIL_HANADB')
+class TdsInSap(SimpleTestCase):
+    """Whether SAP withheld TDS: on a bill itself, and on the bills raised from a PO."""
+
+    def test_a_bill_carries_the_tds_sap_withheld(self, _schema):
+        row = {'doc_entry': 7, 'doc_num': 624104114, 'doc_total': '100000', 'paid_to_date': '0',
+               'balance_due': '100000', 'tds': Decimal('37500')}
+        with mock.patch.object(sap, '_run', return_value=[row]), \
+                mock.patch.object(sap, '_with_attachments', side_effect=lambda _c, _t, rows: rows):
+            (bill,) = sap.open_invoices('OIL', 'vendor', card_code='V1')
+        self.assertEqual(bill['tds'], '37500')
+
+    def test_a_po_carries_the_tds_withheld_on_its_bills(self, _schema):
+        rows = [{'doc_entry': 1}, {'doc_entry': 2}]
+        found = [{'po': 1, 'tds': Decimal('12589'), 'bills': 2}]
+        with mock.patch.object(sap, '_run', return_value=found) as run:
+            sap._with_bill_tds('OIL', rows)
+        self.assertEqual((rows[0]['tds_on_bills'], rows[0]['billed']), ('12589', 2))
+        self.assertEqual((rows[1]['tds_on_bills'], rows[1]['billed']), ('0', 0))
+        # One query for the whole page, the entries bound once per branch.
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[2], [1, 2, 1, 2])
+
+    def test_an_unreadable_lookup_says_nothing_rather_than_none_deducted(self, _schema):
+        rows = [{'doc_entry': 1}]
+        with mock.patch.object(sap, '_run', side_effect=sap.SapUnavailable('down')):
+            sap._with_bill_tds('OIL', rows)
+        self.assertEqual((rows[0]['tds_on_bills'], rows[0]['billed']), (None, None))

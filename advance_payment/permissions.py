@@ -39,3 +39,7 @@ DISPATCH_KEY = 'Advance_Payment_Dispatch'
 class CanDispatch(HasKey):
     def __init__(self):
         super().__init__(DISPATCH_KEY)
+
+
+#: The approval desk. Acting also needs being the current stage's user.
+APPROVAL_KEY = 'Advance_Payment_Approval'
