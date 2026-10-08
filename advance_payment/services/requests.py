@@ -169,11 +169,12 @@ class CleanRequest:
     expense_lines: list = field(default_factory=list)
 
 
-def clean(data, *, desk=False):
+def clean(data, *, desk=False, user=None):
     """Validate the form's JSON. Returns `CleanRequest`; raises `RequestInvalid`.
 
     `desk`: the Payment desk's correction of an Expense, which may also set
-    its TDS (the requester's form never does).
+    its TDS (the requester's form never does). `user`: who is raising it — an
+    Expense with no vendor is paid to them.
     """
     problems = []
     data = data or {}
@@ -184,6 +185,10 @@ def clean(data, *, desk=False):
 
     request_type = _text(data.get('request_type')).upper()
     against = _text(data.get('payment_against')).upper()
+    if request_type == RequestType.EXPENSE:
+        # Not asked: direct or indirect follows from the lines' G/L accounts
+        # (`_clean_expense`). Indirect until a direct one is chosen.
+        against = PaymentAgainst.INDIRECT_EXPENSE
     case = CASES.get((request_type, against))
     if case is None:
         problems.append('That Type and Payment Against pair is not offered.')
@@ -195,6 +200,9 @@ def clean(data, *, desk=False):
         # The money goes to G/L accounts. Who is paid is named; a SAP vendor is
         # optional (Payment is then offered its bank accounts), and names them.
         partner_name = _clean_expense_vendor(company, partner_code, partner_name, problems)
+        if not partner_name and user is not None:
+            # Not asked: no vendor, so the person raising it is who is paid.
+            partner_name = (getattr(user, 'name', '') or user.get_username())[:200]
         if not partner_name:
             problems.append('Say who is being paid (Pay To).')
     elif not partner_code or not partner_name:
@@ -209,9 +217,10 @@ def clean(data, *, desk=False):
     if case.get('expense'):
         if data.get('documents'):
             problems.append('An Expense request pays its lines, not documents.')
-        expense = _clean_expense(company, data, problems, kind=case['expense'], desk=desk,
-                                 partner_code=partner_code)
+        expense = _clean_expense(company, data, problems, desk=desk, partner_code=partner_code)
         expense_lines = expense.pop('lines', [])
+        against = PaymentAgainst.DIRECT_EXPENSE if expense.pop('kind', '') == 'DIRECT' \
+            else PaymentAgainst.INDIRECT_EXPENSE
         amount = sum((ln['amount'] for ln in expense_lines), Decimal('0'))
     elif case['documents']:
         documents, amount = _clean_documents(data.get('documents'), case['documents'], problems)
@@ -223,6 +232,8 @@ def clean(data, *, desk=False):
             problems.append('Enter an amount above zero.')
 
     payment_date = _date(data.get('payment_date'))
+    if payment_date is None and case.get('expense') and not _text(data.get('payment_date')):
+        payment_date = timezone.localdate()  # not asked: the day it is raised
     if payment_date is None:
         problems.append('Enter the Payment Date.')
 
@@ -237,8 +248,8 @@ def clean(data, *, desk=False):
 
     repayment = _clean_repayment(data, problems) if case.get('repayment') else {}
 
-    if not _text(data.get('remarks')):
-        problems.append('Enter the Remarks.')
+    if not _text(data.get('remarks')) and not case.get('expense'):
+        problems.append('Enter the Remarks.')  # optional on an Expense
 
     routing = _clean_routing(company, data, problems, expense=bool(case.get('expense')))
     routing['department_head_employee'], routing['department_head'] = _clean_department_head(
@@ -257,8 +268,8 @@ def clean(data, *, desk=False):
         owner = Employee.objects.alive().filter(employee_code=owner_code.group(1).upper()).first()
         if owner is None:
             problems.append('That Ownership employee is not in the employee master.')
-    elif not owner_label:
-        problems.append('Choose the Ownership HOD or Sub-HOD.')
+    elif not owner_label and not case.get('expense'):
+        problems.append('Choose the Ownership HOD or Sub-HOD.')  # not asked on an Expense
 
     against_other = _text(data.get('payment_against_other'), 120) if against == PaymentAgainst.OTHER else ''
     if against == PaymentAgainst.OTHER and not against_other:
@@ -326,7 +337,7 @@ def form_of(advance):
         'budget_code': advance.budget_code, 'sub_budget_code': advance.sub_budget_code,
         'effect_month': advance.effect_month, 'is_electricity': advance.is_electricity,
         'expense_tds_code': advance.expense_tds_code,
-        'expense_lines': [{'taxable_amount': str(ln.taxable_amount), 'gst_code': ln.gst_code,
+        'expense_lines': [{'amount': str(ln.amount), 'gst_code': ln.gst_code,
                            'gl_account': ln.gl_account, 'effect_month': ln.effect_month,
                            'remarks': ln.remarks, 'tds_override': ln.tds_override}
                           for ln in advance.expense_lines.all()],
@@ -334,11 +345,13 @@ def form_of(advance):
 
 
 #: What the Payment desk may correct on an Expense request.
-EXPENSE_EDITABLE = ('payment_against', 'partner_code', 'partner_name', 'budget_code', 'sub_budget_code',
-                    'effect_month', 'is_electricity', 'expense_tds_code', 'expense_lines')
-#: ...and the request's fields that follow from them.
-_EXPENSE_FIELDS = ('payment_against', 'partner_code', 'partner_name', 'amount', 'budget_code', 'budget_name',
-                   'sub_budget_code', 'sub_budget_name', 'effect_month', 'is_electricity', 'expense_tds_code')
+#: Not the company, the budget head, who is paid (the vendor) or any amount:
+#: those are the requester's (return it to them to change one). The lines'
+#: amounts are checked unchanged by `flow.edit_expense`.
+EXPENSE_EDITABLE = ('sub_budget_code', 'effect_month', 'is_electricity', 'expense_tds_code', 'expense_lines')
+#: ...and the request's fields that follow from them (direct or indirect, by the G/Ls).
+_EXPENSE_FIELDS = ('payment_against', 'sub_budget_code', 'sub_budget_name', 'effect_month', 'is_electricity',
+                   'expense_tds_code')
 
 
 def edit_expense(advance, cleaned):
@@ -358,25 +371,28 @@ def edit_expense(advance, cleaned):
     return changes
 
 
-def _clean_expense(company, data, problems, *, kind, desk=False, partner_code=''):
+def _clean_expense(company, data, problems, *, desk=False, partner_code=''):
     """An Expense request's month, electricity flag, TDS and lines.
 
-    `{effect_month, is_electricity, tds_code, lines: [...]}`. Each line gives
-    its taxable amount and GST (`EXPENSE_GST`); its `amount` is the invoice
-    value they make. A line's G/L is optional (the Payment stage fills it in;
-    the remarks then say what it is for) but, when given, must be a postable
-    expense account of the request's kind — DIRECT or INDIRECT. The month is
-    the Payment desk's to set; a month given must be one of SAP's.
+    `{effect_month, is_electricity, tds_code, kind, lines: [...]}`. Each line
+    is an amount (the invoice value) to a G/L account; without one, the
+    remarks say what it is for and the Payment desk picks it. `kind` — DIRECT
+    or INDIRECT — follows from the G/L accounts; one request is one kind.
+    The month is the day it is raised (the Payment desk may change it).
 
-    `desk`: the Payment desk's TDS — the request's `expense_tds_code` and each
-    line's `tds_override` — checked against SAP's TDS codes and worked out on
-    each line's taxable amount. The requester's form never carries TDS.
+    `desk`: the Payment desk's own fields — each line's GST (the record of how
+    much of the amount is tax: the taxable amount is backed out of it) and the
+    TDS (the request's `expense_tds_code`, each line's `tds_override`) on the
+    taxable amount. The requester's form never carries them.
     """
     from advance_payment.services import payout as payout_service
     from advance_payment.services import sap as sap_service
 
-    out = {'is_electricity': bool(data.get('is_electricity')), 'lines': [], 'tds_code': ''}
+    out = {'is_electricity': bool(data.get('is_electricity')), 'lines': [], 'tds_code': '', 'kind': ''}
     month = _text(data.get('effect_month'), 20)
+    asked_month = bool(month)
+    if not month and not desk:
+        month = month_code(timezone.localdate())
     raw = data.get('expense_lines')
     if not isinstance(raw, list) or not raw:
         problems.append('Add at least one expense line.')
@@ -384,18 +400,17 @@ def _clean_expense(company, data, problems, *, kind, desk=False, partner_code=''
     if len(raw) > MAX_EXPENSE_LINES:
         problems.append(f'At most {MAX_EXPENSE_LINES} expense lines.')
         raw = raw[:MAX_EXPENSE_LINES]
-    noun = 'a direct' if kind == 'DIRECT' else 'an indirect'
     accounts, months, codes = {}, set(), {}
     if company in COMPANY_CODES:
         try:
-            accounts = {a['code']: a['name'] for a in sap_service.expense_accounts(company, kind)}
+            accounts = {a['code']: a for a in sap_service.expense_accounts(company)}
             months = set(sap_service.expense_months(company))
             if desk:
                 codes = {c['code']: c for c in sap_service.tds_codes(company, partner_code)}
         except sap_service.SapUnavailable:
             problems.append('Could not check the expense accounts with SAP. Try again shortly.')
             return {**out, 'effect_month': month}
-    if month and months and month not in months:
+    if asked_month and months and month not in months:
         problems.append(f'Month "{month}" is not one of SAP\'s Effective Months.')
 
     def tds_of(code, where):
@@ -409,30 +424,34 @@ def _clean_expense(company, data, problems, *, kind, desk=False, partner_code=''
     if request_tds and codes:
         tds_of(request_tds, 'TDS')
     out['tds_code'] = request_tds
+    kinds = {}
     for n, line in enumerate(raw, start=1):
         line = line if isinstance(line, dict) else {}
-        taxable = _money(line.get('taxable_amount'))
-        gst_code = _text(line.get('gst_code'), 20).upper()
+        amount = _money(line.get('amount'))
+        gst_code = _text(line.get('gst_code'), 20).upper() if desk else ''
         gl = _text(line.get('gl_account'), 20)
         line_month = _text(line.get('effect_month'), 20)
         remarks = _text(line.get('remarks'), 254)
-        if taxable is None or taxable <= 0:
-            problems.append(f'Line {n}: enter a taxable amount above zero.')
-            taxable = None
+        if amount is None or amount <= 0:
+            problems.append(f'Line {n}: enter an amount above zero.')
+            amount = None
         if gst_code not in EXPENSE_GST:
             problems.append(f'Line {n}: "{gst_code}" is not a GST choice.')
             gst_code = ''
         if gl and accounts and gl not in accounts:
-            problems.append(f'Line {n}: {gl} is not {noun} expense account in SAP.')
+            problems.append(f'Line {n}: {gl} is not an expense account in SAP.')
+        elif gl and gl in accounts:
+            kinds.setdefault(accounts[gl]['kind'], []).append(n)
         if not gl and not remarks:
             problems.append(f'Line {n}: choose the G/L account, or say in the remarks what it is for.')
         if line_month and months and line_month not in months:
             problems.append(f'Line {n}: month "{line_month}" is not one of SAP\'s Effective Months.')
-        taxable = taxable or Decimal('0')
-        gst = (taxable * EXPENSE_GST[gst_code][1] / 100).quantize(_PAISA, rounding=ROUND_HALF_UP)
-        cleaned = {'line_no': n, 'taxable_amount': taxable, 'gst_code': gst_code, 'gst_amount': gst,
-                   'amount': taxable + gst, 'gl_account': gl,
-                   'gl_name': accounts.get(gl, '') if gl else '',
+        amount = amount or Decimal('0')
+        rate = EXPENSE_GST[gst_code][1]
+        taxable = (amount * 100 / (100 + rate)).quantize(_PAISA, rounding=ROUND_HALF_UP)
+        cleaned = {'line_no': n, 'taxable_amount': taxable, 'gst_code': gst_code, 'gst_amount': amount - taxable,
+                   'amount': amount, 'gl_account': gl,
+                   'gl_name': accounts[gl]['name'] if gl in accounts else '',
                    # The request's month is every line's unless it names its own.
                    'effect_month': '' if line_month == month else line_month,
                    'remarks': remarks,
@@ -449,7 +468,17 @@ def _clean_expense(company, data, problems, *, kind, desk=False, partner_code=''
                                tds_account=chosen['account'],
                                tds_amount=payout_service.tds_amount(taxable, rate))
         out['lines'].append(cleaned)
+    if len(kinds) > 1:
+        problems.append(f'One request is either direct or indirect expenses: lines '
+                        f'{", ".join(map(str, kinds["DIRECT"]))} are direct, lines '
+                        f'{", ".join(map(str, kinds["INDIRECT"]))} indirect. Raise them separately.')
+    out['kind'] = 'DIRECT' if set(kinds) == {'DIRECT'} else 'INDIRECT'
     return {**out, 'effect_month': month}
+
+
+def month_code(day):
+    """SAP's Effective Month code for a date: 2026-10-08 -> "10-2026"."""
+    return f'{day.month:02d}-{day.year}'
 
 
 def _ledger_fields(doc, label, problems):
@@ -594,7 +623,7 @@ def _clean_routing(company, data, problems, *, expense=False):
         sub_budget = _text(data.get('sub_budget_code'), 20)
         allowed = sap_service.SUB_BUDGET_RULES.get(company, {}).get(budget)
         if not sub_budget:
-            problems.append('Choose the Sub Budget.')
+            pass  # the Payment desk's to set (`flow.expense_problems`)
         elif sub_budget not in subs:
             problems.append(f'Sub Budget "{sub_budget}" is not an active sub budget in {company}.')
         elif allowed is not None and sub_budget not in allowed:

@@ -525,7 +525,14 @@ STORAGES = {
     },
 }
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+# Where uploaded files live: Payments attachments, Credit Limit attachments,
+# Legal labels, SKU images. Set it in .env to a folder OUTSIDE the code (on
+# .118, a local disk that is backed up), so replacing the backend folder on a
+# deploy cannot take the uploads with it. The database stores paths relative
+# to this folder (`advance_payment/57/bill.pdf`), so moving the files here and
+# pointing MEDIA_ROOT at them needs no data change. Unset: `media/` beside the
+# code, as before.
+MEDIA_ROOT = config('MEDIA_ROOT', default='') or os.path.join(BASE_DIR, 'media')
 
 
 # REST Framework

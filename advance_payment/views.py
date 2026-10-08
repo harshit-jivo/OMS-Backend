@@ -1236,7 +1236,7 @@ class RequestListView(_RequestView):
         if not isinstance(data, dict):
             return fail('Send the request as JSON in `data`.')
         try:
-            cleaned = request_service.clean(data)
+            cleaned = request_service.clean(data, user=request.user)
             advance = flow_service.raise_request(
                 cleaned, user=request.user, files=request.FILES.getlist('files'))
         except request_service.RequestInvalid as exc:
@@ -1286,7 +1286,7 @@ class RequestEditView(_RequestView):
             remove = []
         resubmit = str(request.data.get('resubmit') or '').lower() in ('1', 'true', 'yes')
         try:
-            cleaned = request_service.clean(data)
+            cleaned = request_service.clean(data, user=advance.created_by)
             flow_service.edit(advance, cleaned, user=request.user,
                               files=request.FILES.getlist('files'), remove_file_ids=remove,
                               resubmit=resubmit, version=request.data.get('version'))

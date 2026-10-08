@@ -46,6 +46,7 @@ Same shape as PRDO and BackDate: the flow row says where the request waits,
 the log says what happened, the engine's configuration says what is ahead.
 """
 import logging
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core import signing
@@ -726,20 +727,35 @@ def expense_problems(advance):
     if not lines:
         return ['The request has no expense lines.']
     out = [f'Line {ln.line_no}: choose its expense G/L account.' for ln in lines if not ln.gl_account]
+    if not advance.sub_budget_code:
+        out.append('Choose the Sub Budget.')
     # The month is the Payment desk's to set: SAP needs one on every line.
     if any(not (ln.effect_month or advance.effect_month) for ln in lines):
         out.append('Choose the Month.')
     return out
 
 
+def _same_amounts(before, after):
+    """The Payment desk keeps the requester's lines and their amounts."""
+    def amounts(lines):
+        try:
+            return [Decimal(str((ln or {}).get('amount'))) for ln in lines]
+        except (ArithmeticError, TypeError, ValueError, AttributeError):
+            return None
+    if not isinstance(after, list) or amounts(after) != amounts(before):
+        raise FlowError('The Payment desk cannot change the lines or their amounts: return it to the '
+                        'requester to change them.', status=409)
+
+
 @transaction.atomic
 def edit_expense(advance, data, *, user, version=None):
     """Payment stage only: correct an Expense request.
 
-    The desk may change anything `requests.EXPENSE_EDITABLE` names — the
-    vendor / payee, budget head, sub budget, month, electricity and the lines
-    (G/L, amount, month, remarks). `data` holds only what changes; it is laid
-    over the request and the whole is checked as the requester's form is.
+    The desk may change what `requests.EXPENSE_EDITABLE` names — the sub
+    budget, month, electricity, TDS and each line's G/L, GST, month, TDS and
+    remarks — never the company, the budget head, who is paid or an amount.
+    `data` holds only what changes; it is laid over the request and the whole
+    is checked as the requester's form is.
     The route is not re-chosen: the request has passed its approvals.
 
     Logged as PAYMENT_EDITED with each change {old, new}: the history says it
@@ -753,6 +769,8 @@ def edit_expense(advance, data, *, user, version=None):
         raise FlowError('Only an Expense request is corrected here.', status=409)
     form = request_service.form_of(advance)
     data = data if isinstance(data, dict) else {}
+    if 'expense_lines' in data:
+        _same_amounts(form['expense_lines'], data['expense_lines'])
     form.update({k: data[k] for k in request_service.EXPENSE_EDITABLE if k in data})
     try:
         cleaned = request_service.clean(form, desk=True)
