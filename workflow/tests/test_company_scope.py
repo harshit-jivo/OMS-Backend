@@ -10,6 +10,8 @@ does prefer the specific one; that engine is deliberately untouched.
 these tests used to assert against are now unrepresentable rather than merely
 forbidden — which is why the constraint class below is much shorter.
 """
+from unittest import mock
+
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 
@@ -279,3 +281,60 @@ class QueryScopeNarrowingTests(TestCase):
                 query = make_query(wf, name=f'q-{company}', company=company,
                                    validate=False)
                 self.assertIsNone(query.scope_conflict())
+
+
+class PriorityTests(TestCase):
+    """`Workflow.priority` is the one explicit tiebreak: lowest wins, a tie
+    for lowest is still ambiguous.
+
+    `evaluate` is stubbed to report every workflow built here as matched, so
+    these hold the RANKING rule down on any database (query rows need
+    Postgres). Matching itself is covered above.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.module = make_module()
+        cls.user = make_user('priority-approver')
+
+    def setUp(self):
+        self.matched = []
+        patcher = mock.patch.object(selection, 'evaluate',
+                                    side_effect=lambda *a, **k: self.matched)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _workflow(self, code, priority, company=OIL):
+        wf = make_workflow(self.module, code=code, company=company)
+        wf.priority = priority
+        wf.save()
+        make_stage(wf, 1, self.user)
+        self.matched.append(mock.Mock(workflow_id=wf.pk, workflow=wf))
+        return wf
+
+    def _select(self):
+        return selection.select_workflow(self.module, 1, OIL)
+
+    def test_lowest_priority_wins(self):
+        a = self._workflow('WF_A', 10)
+        self._workflow('WF_B', 20, company=None)
+        self.assertEqual(self._select()[0].pk, a.pk)
+
+    def test_winner_does_not_depend_on_creation_order(self):
+        self._workflow('WF_A', 20)
+        b = self._workflow('WF_B', 10, company=None)
+        self.assertEqual(self._select()[0].pk, b.pk)
+
+    def test_default_priorities_tie_and_stay_ambiguous(self):
+        self._workflow('WF_A', Workflow.DEFAULT_PRIORITY)
+        self._workflow('WF_B', Workflow.DEFAULT_PRIORITY, company=None)
+        with self.assertRaises(AmbiguousWorkflowSelection):
+            self._select()
+
+    def test_a_tie_at_the_lowest_priority_is_ambiguous(self):
+        self._workflow('WF_A', 5)
+        self._workflow('WF_B', 5, company=None)
+        self._workflow('WF_C', 50)
+        with self.assertRaises(AmbiguousWorkflowSelection) as caught:
+            self._select()
+        self.assertNotIn('WF_C', caught.exception.message)

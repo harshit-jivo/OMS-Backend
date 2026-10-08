@@ -19,6 +19,10 @@ Approval, Audit Approval, Final Approval (see `StageRole`):
                                 to Payment, which rejects or corrects it, and
                                 it goes through Audit and Final again
 
+AN EXPENSE ROUTE HAS NO FINAL: it ends Payment -> Audit, and AUDIT's
+approval posts it (decided 2026-10-07). Generally: the last fixed stage of a
+route posts — Final where there is one, else Audit.
+
 SAP IS WRITTEN ONCE, AT THE END. Nothing is posted before Final approves,
 so a send-back, a correction or a rejection never has anything in SAP to
 cancel or re-post, and a completed request is never changed again.
@@ -64,6 +68,7 @@ from advance_payment.models import (
     RequestFlow,
     RequestLog,
     RequestStatus,
+    RequestType,
     StageRole,
     is_department_head_stage,
 )
@@ -94,21 +99,34 @@ class FlowError(Exception):
 # The route, read from the engine
 # ---------------------------------------------------------------------------
 
+#: The fixed tails a route may end with: the full one, or (an Expense route)
+#: Payment and Audit only, where Audit posts.
+FIXED_TAILS = (list(FIXED_ROLES), [StageRole.PAYMENT, StageRole.AUDIT])
+
+
 def roles(stages):
     """`[(stage, role)]` for a workflow's stages; FlowError if they break the rule.
 
     The rule: any number of approval stages, then exactly Payment Approval,
-    Audit Approval, Final Approval, once each, last and in that order.
+    Audit Approval, Final Approval, once each, last and in that order — or,
+    for an Expense route, Payment Approval and Audit Approval only.
     """
     named = [(stage, StageRole.of(stage.name)) for stage in stages]
     fixed = [role for _s, role in named if role != StageRole.APPROVAL]
-    tail = [role for _s, role in named[-len(FIXED_ROLES):]]
-    if fixed != list(FIXED_ROLES) or tail != list(FIXED_ROLES):
-        raise FlowError(
-            'The workflow must end with three stages named exactly Payment Approval, '
-            'Audit Approval and Final Approval, in that order. Any stages before them '
-            'are approvals and may be named freely.', status=409)
-    return named
+    for tail_roles in FIXED_TAILS:
+        tail = [role for _s, role in named[-len(tail_roles):]]
+        if fixed == tail_roles and tail == tail_roles:
+            return named
+    raise FlowError(
+        'The workflow must end with three stages named exactly Payment Approval, '
+        'Audit Approval and Final Approval, in that order (an Expense workflow: Payment '
+        'Approval and Audit Approval). Any stages before them are approvals and may be '
+        'named freely.', status=409)
+
+
+def posting_role(named):
+    """The stage whose approval posts to SAP: Final, or Audit on a route without Final."""
+    return StageRole.FINAL if any(r == StageRole.FINAL for _s, r in named) else StageRole.AUDIT
 
 
 def _stages(flow):
@@ -465,11 +483,12 @@ def approve(advance, *, user, remarks='', version=None):
         if role == StageRole.PAYMENT:
             if advance.partner_not_in_sap:
                 _link_partner(flow, user)
-            problems = payout_service.problems(advance)
+            problems = payout_service.problems(advance) + expense_problems(advance)
             if problems:
                 raise FlowError('The payment details are not ready: ' + ' '.join(problems),
                                 problems=problems)
-        if role == StageRole.FINAL:
+        posts = role == posting_role(_stages(flow))
+        if posts:
             error = _post_voucher(flow, user)
             if error:
                 _save(flow)
@@ -480,7 +499,7 @@ def approve(advance, *, user, remarks='', version=None):
         following = _next(flow)
         if approved_as_head and following is not None:
             following = _approve_once(flow, following, user=user)
-        if role == StageRole.FINAL or following is None:
+        if posts or following is None:
             flow.status = FlowStatus.COMPLETED
             _point_at(flow, None, '')
             _save(flow)
@@ -629,10 +648,11 @@ def _digits(value):
 def _from_sap(advance, account, ifsc):
     """Is (account, IFSC) one of the payee's own SAP accounts?
 
-    An Employee's payee is a G/L with no bank details: never. SAP out of
-    reach: treated as typed, so the password is asked rather than skipped.
+    An Employee's payee is a G/L with no bank details, and an Expense without
+    a vendor has no SAP partner at all: never. SAP out of reach: treated as
+    typed, so the password is asked rather than skipped.
     """
-    if advance.request_type == 'EMPLOYEE_ADVANCE':
+    if advance.request_type == 'EMPLOYEE_ADVANCE' or not advance.partner_code:
         return False
     try:
         rows, _default = sap_service.partner_bank_accounts(advance.company, advance.partner_code)
@@ -684,12 +704,65 @@ def save_payout(advance, data, *, user, version=None):
 
 
 def payment_users(flow):
-    """Today's users of the route's Payment and Final stages (UTRs, after completion)."""
+    """Today's users of the route's Payment stage and the stage that posted (UTRs, after completion)."""
+    named = _stages(flow)
+    posting = posting_role(named)
     ids = set()
-    for stage, role in _stages(flow):
-        if role in (StageRole.PAYMENT, StageRole.FINAL):
+    for stage, role in named:
+        if role in (StageRole.PAYMENT, posting):
             ids.add(effective_user_id(stage.id))
     return ids
+
+
+# ---------------------------------------------------------------------------
+# Expense lines: the G/L the Payment stage fills in
+# ---------------------------------------------------------------------------
+
+def expense_problems(advance):
+    """What stops the Payment stage approving an Expense request. `[]` for any other."""
+    if advance.request_type != RequestType.EXPENSE:
+        return []
+    lines = list(advance.expense_lines.all())
+    if not lines:
+        return ['The request has no expense lines.']
+    out = [f'Line {ln.line_no}: choose its expense G/L account.' for ln in lines if not ln.gl_account]
+    # The month is the Payment desk's to set: SAP needs one on every line.
+    if any(not (ln.effect_month or advance.effect_month) for ln in lines):
+        out.append('Choose the Month.')
+    return out
+
+
+@transaction.atomic
+def edit_expense(advance, data, *, user, version=None):
+    """Payment stage only: correct an Expense request.
+
+    The desk may change anything `requests.EXPENSE_EDITABLE` names — the
+    vendor / payee, budget head, sub budget, month, electricity and the lines
+    (G/L, amount, month, remarks). `data` holds only what changes; it is laid
+    over the request and the whole is checked as the requester's form is.
+    The route is not re-chosen: the request has passed its approvals.
+
+    Logged as PAYMENT_EDITED with each change {old, new}: the history says it
+    was edited at Payment, and by whom.
+    """
+    flow = _acting(advance, user, version)
+    if StageRole(flow.current_role) != StageRole.PAYMENT:
+        raise FlowError('An Expense request is corrected at the Payment stage.', status=409)
+    advance = flow.request
+    if advance.request_type != RequestType.EXPENSE:
+        raise FlowError('Only an Expense request is corrected here.', status=409)
+    form = request_service.form_of(advance)
+    data = data if isinstance(data, dict) else {}
+    form.update({k: data[k] for k in request_service.EXPENSE_EDITABLE if k in data})
+    try:
+        cleaned = request_service.clean(form, desk=True)
+    except request_service.RequestInvalid as exc:
+        raise FlowError(' '.join(exc.problems), problems=exc.problems) from exc
+    changes = request_service.edit_expense(advance, cleaned)
+    if changes:
+        log(advance, LogAction.PAYMENT_EDITED, user=user, flow=flow, data=changes)
+    _save(flow)
+    return advance
 
 
 @transaction.atomic

@@ -168,6 +168,10 @@ class RequestType(models.TextChoices):
     #: A REFUND: money a customer is owed back (they paid more than they were
     #: invoiced). Posted as an outgoing payment to the customer (rCustomer).
     CUSTOMER = 'CUSTOMER', 'Customer'
+    #: Paid straight to expense G/L accounts (no vendor, no bill): rent,
+    #: utilities, bank charges… Each line carries SAP's Month, Budget and Sub
+    #: Budget. Routed by the budget head's owner; Audit's approval posts it.
+    EXPENSE = 'EXPENSE', 'Expense'
 
 
 class PaymentAgainst(models.TextChoices):
@@ -183,6 +187,10 @@ class PaymentAgainst(models.TextChoices):
     ON_ACCOUNT = 'ON_ACCOUNT', 'On Account'
     #: A typed answer; the text is in `payment_against_other`.
     OTHER = 'OTHER', 'Other'
+    #: An Expense request: its lines (`ExpenseLine`) are what it pays. One
+    #: kind per request: direct (SAP's 5100000 group) or indirect (5610000-5690000).
+    DIRECT_EXPENSE = 'DIRECT_EXPENSE', 'Direct Expense'
+    INDIRECT_EXPENSE = 'INDIRECT_EXPENSE', 'Indirect Expense'
 
 
 class ReturnMethod(models.TextChoices):
@@ -335,6 +343,16 @@ class AdvanceRequest(models.Model):
     #: requests raised before then, empty since.
     sub_budget_code = models.CharField(max_length=20, blank=True, default='')
     sub_budget_name = models.CharField(max_length=100, blank=True, default='')
+    #: Expense only: SAP's Effective Month (dimension 2, e.g. "10-2026") for
+    #: every line that does not name its own. Set by the Payment desk.
+    effect_month = models.CharField(max_length=20, blank=True, default='')
+    #: Expense only: an electricity expense, approved by the head's owner AND
+    #: the Director (the budget hierarchy's electricity rule). Ticked by the
+    #: requester, because the G/L may not be known yet when the request is raised.
+    is_electricity = models.BooleanField(default=False)
+    #: Expense only: the TDS code the Payment desk deducts on every line that
+    #: does not name its own (`ExpenseLine.tds_override`); blank: none.
+    expense_tds_code = models.CharField(max_length=20, blank=True, default='')
     #: What the money is for: a code of `advance_payment.purposes`, with its
     #: label as it was when raised.
     purpose_code = models.CharField(max_length=30, blank=True, default='')
@@ -464,6 +482,66 @@ class RequestDocument(models.Model):
 
     def __str__(self):
         return f'{self.request_id}: {self.kind} {self.sap_doc_num}'
+
+
+class ExpenseLine(models.Model):
+    """One line of an Expense request: an invoice to an expense G/L account.
+
+    The requester gives the taxable amount and its GST (for the record: SAP
+    is not told the GST); `amount` is the invoice value, taxable + GST. The
+    Payment desk deducts TDS on the taxable amount: SAP is paid the invoice
+    value less TDS, and the TDS is booked by journal entry.
+
+    The G/L may be left blank by the requester (with remarks saying what it
+    is for); the Payment stage fills it in before it can approve. Month, if
+    blank, is the request's; Budget and Sub Budget are always the request's.
+    """
+
+    request = models.ForeignKey(AdvanceRequest, on_delete=models.CASCADE, related_name='expense_lines')
+    line_no = models.PositiveSmallIntegerField()
+    #: Before GST.
+    taxable_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+    #: `requests.EXPENSE_GST`: '' (no GST), CGST_SGST_5, CGST_SGST_18, IGST_5, IGST_18.
+    gst_code = models.CharField(max_length=20, blank=True, default='')
+    gst_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+    #: The invoice value: taxable + GST.
+    amount = models.DecimalField(max_digits=19, decimal_places=2)
+    #: An expense account in SAP (OACT), or blank until Payment chooses it.
+    gl_account = models.CharField(max_length=20, blank=True, default='')
+    gl_name = models.CharField(max_length=200, blank=True, default='')
+    #: SAP's Effective Month for this line, or blank for the request's.
+    effect_month = models.CharField(max_length=20, blank=True, default='')
+    remarks = models.CharField(max_length=254, blank=True, default='')
+    #: The Payment desk's TDS choice for this line: '' (the request's
+    #: `expense_tds_code`), 'NONE', or a TDS code of its own.
+    tds_override = models.CharField(max_length=20, blank=True, default='')
+    #: The TDS deducted, as resolved from the choice: on the taxable amount,
+    #: rounded to the rupee. Booked Dr this line's G/L, Cr `tds_account`.
+    tds_code = models.CharField(max_length=20, blank=True, default='')
+    tds_label = models.CharField(max_length=150, blank=True, default='')
+    tds_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    tds_account = models.CharField(max_length=20, blank=True, default='')
+    tds_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+
+    class Meta:
+        db_table = 'advance_payment_expense_line'
+        ordering = ['request', 'line_no']
+        constraints = [
+            models.UniqueConstraint(fields=['request', 'line_no'], name='ap_expense_line_once'),
+            models.CheckConstraint(condition=Q(amount__gt=0), name='ap_expense_line_amount_positive'),
+        ]
+
+    def __str__(self):
+        return f'{self.request_id}#{self.line_no} {self.gl_account or "?"} {self.amount}'
+
+    def month(self):
+        """This line's Effective Month: its own, else the request's."""
+        return self.effect_month or self.request.effect_month
+
+    @property
+    def net(self):
+        """What SAP's payment pays to this line's G/L: the invoice value less TDS."""
+        return self.amount - (self.tds_amount or 0)
 
 
 class FilePurpose(models.TextChoices):
@@ -705,6 +783,9 @@ class LogAction(models.TextChoices):
     REJECTED = 'REJECTED', 'Rejected'
     SENT_BACK = 'SENT_BACK', 'Sent back to Payment'
     PAYOUT_UPDATED = 'PAYOUT_UPDATED', 'Payment details updated'
+    #: The Payment desk corrected an Expense request (vendor, budget head, sub
+    #: budget, month, lines): `data` holds each change as {old, new}.
+    PAYMENT_EDITED = 'PAYMENT_EDITED', 'Edited at Payment'
     PARTNER_LINKED = 'PARTNER_LINKED', 'Linked to its SAP account'
     SAP_POSTED = 'SAP_POSTED', 'Voucher posted to SAP'
     SAP_POST_FAILED = 'SAP_POST_FAILED', 'Voucher failed to post'

@@ -1056,6 +1056,40 @@ class BudgetsView(_Lookup):
         return sap_service.budgets(company)
 
 
+class ExpenseAccountsView(_Lookup):
+    """GET /api/advance-payments/expense-accounts/?company=
+
+    The postable expense G/L accounts an Expense line may pay to — the groups
+    SAP's budget check covers (5610000-5690000) and 5100008. `[{code, name, group}]`.
+    """
+
+    resource = 'expense accounts'
+
+    def fetch(self, request, company):
+        return sap_service.expense_accounts(company)
+
+
+class ExpenseMonthsView(_Lookup):
+    """GET /api/advance-payments/expense-months/?company=
+
+    SAP's active Effective Month codes (dimension 2), newest first:
+    `["10-2026", …]`, and the Variety (dimension 1) every expense line of
+    this company carries.
+    """
+
+    resource = 'effective months'
+
+    def get(self, request, company=None):
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            months = sap_service.expense_months(company)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        return ok({'company': company, 'months': months, 'variety': sap_service.EXPENSE_VARIETY.get(company, '')})
+
+
 class OpenInvoicesView(_Lookup):
     """GET /api/advance-payments/open-invoices/
            ?company=&party_type=vendor|customer&card_code=&search=&limit=
@@ -1126,6 +1160,7 @@ def _requests():
                 Prefetch('files', queryset=RequestFile.objects.select_related('uploaded_by')),
                 Prefetch('payout__lines', queryset=PayoutLine.objects.select_related('utr_recorded_by')),
                 Prefetch('vouchers', queryset=SapVoucher.objects.select_related('posted_by', 'cancelled_by')),
+                'expense_lines',
             ))
 
 
@@ -1314,6 +1349,28 @@ class RequestPayoutView(_RequestView):
         except flow_service.FlowError as exc:
             return _flow_error(exc)
         return self._answer(request, advance, 'Payment details saved.')
+
+
+class RequestExpenseView(_RequestView):
+    """PUT /requests/<id>/expense/ {partner_code?, partner_name?, budget_code?,
+    sub_budget_code?, effect_month?, is_electricity?, expense_lines?, version}
+
+    The Payment desk corrects an Expense request; each change is logged as
+    "Edited at Payment", with who made it.
+    """
+
+    def put(self, request, pk):
+        advance = self._get(request, pk)
+        if not _is_desk(request.user):
+            return fail('You do not have the Payments Approval permission.',
+                        status=http_status.HTTP_403_FORBIDDEN)
+        data = dict(request.data)
+        version = data.pop('version', None)
+        try:
+            flow_service.edit_expense(advance, data, user=request.user, version=version)
+        except flow_service.FlowError as exc:
+            return _flow_error(exc)
+        return self._answer(request, advance, 'Expense request saved.')
 
 
 class RequestConfirmPasswordView(_RequestView):

@@ -1,6 +1,6 @@
 """Fail-loud workflow selection — plan §6.
 
-The whole algorithm, and every rule about what it must NOT do:
+The whole algorithm:
 
     Execute ALL configured queries for the module
                     |
@@ -8,20 +8,21 @@ The whole algorithm, and every rule about what it must NOT do:
                     |
          0 -> WorkflowNotConfigured
          1 -> select it
-        >1 -> AmbiguousWorkflowSelection  (caller rolls back)
+        >1 -> the one with the LOWEST `Workflow.priority`
+              (a tie for lowest -> AmbiguousWorkflowSelection; caller rolls back)
 
-There is no tiebreak of any kind. Ambiguity is never resolved by workflow id,
-creation order, query id, query order, database row order, a default
-workflow, stage `sequence`, or a hidden priority — those columns do not exist
-and no implicit ordering is consulted. More than one matching workflow is a
-configuration fault and is raised as one.
+`priority` is the ONLY tiebreak, and it is an explicit, visible column an
+administrator sets. Ambiguity is never resolved by workflow id, creation
+order, query id, query order, database row order, a default workflow or stage
+`sequence`. Every workflow starts at the same default priority, so two matches
+with nobody having ranked them are still a configuration fault, raised as one.
 
 Two implementation details that exist specifically to keep that promise:
 
 * **Every query is evaluated.** The loop does not stop at the first match.
-  Stopping early would make the outcome depend on iteration order, which is
-  exactly the implicit ordering this design forbids — and it would hide the
-  ambiguity rather than report it.
+  Stopping early would make the outcome depend on iteration order — JSAP's
+  credit-limit trigger did exactly that — and it would hide a tie that
+  priority does not settle.
 * **Re-invocation re-selects from scratch.** When a module resubmits an entry
   and calls the engine again, selection runs again in full against the CURRENT
   configuration. The previously used workflow gets no preference; if config
@@ -130,7 +131,7 @@ def candidate_queries(module, company=''):
         .filter(company_q(company, prefix='workflow__'))  # workflow level
         .select_related('workflow', 'workflow__module')
         # Stable listing for reproducible logs ONLY. Never a tiebreak: every
-        # candidate is evaluated and ambiguity is reported, not ordered away.
+        # candidate is evaluated, and `select_workflow` ranks by priority.
         .order_by('workflow_id', 'id')
     )
 
@@ -170,20 +171,25 @@ def select_workflow(module, document_key, company='', *, key_column=None):
             context={'module': module.code, 'document_key': document_key},
         )
 
-    if len(by_workflow) > 1:
-        names = sorted(q[0].workflow.code for q in by_workflow.values())
+    # Several matches: the lowest priority wins, and only if it is alone.
+    lowest = min(q[0].workflow.priority for q in by_workflow.values())
+    winners = [q for q in by_workflow.values()
+               if q[0].workflow.priority == lowest]
+
+    if len(winners) > 1:
+        names = sorted(q[0].workflow.code for q in winners)
         logger.warning(
             'workflow selection ambiguous for module=%s key=%s: %s',
             module.code, document_key, names,
         )
         raise AmbiguousWorkflowSelection(
-            f'More than one workflow matches this document '
-            f'({", ".join(names)}). Fix the workflow query configuration '
-            f'before submitting.',
+            f'More than one workflow matches this document at the same '
+            f'priority ({", ".join(names)}). Give one of them a lower '
+            f'priority, or fix the workflow queries, before submitting.',
             context={'module': module.code, 'workflows': names},
         )
 
-    (queries,) = by_workflow.values()
+    (queries,) = winners
     workflow = queries[0].workflow
 
     # A workflow with no stages can never progress; refusing here rather than
@@ -289,8 +295,9 @@ def select_for_module(*, module_code, document_id, company='',
     * `on_date`      resolve replacements as at this date; defaults to today
 
     Raises `WorkflowNotConfigured` (0 matches), `AmbiguousWorkflowSelection`
-    (>1), `InvalidWorkflowConfiguration` (no active stages) or
-    `ConditionExecutionError`. There is no tie-breaking of any kind.
+    (>1 at the lowest priority), `InvalidWorkflowConfiguration` (no active
+    stages) or `ConditionExecutionError`. `Workflow.priority` is the only
+    tiebreak.
     """
     code = (module_code or '').strip().upper()
     try:

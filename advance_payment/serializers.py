@@ -266,6 +266,23 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'created_on': _iso(advance.created_on),
         'updated_on': _iso(advance.updated_on),
         'documents': [document_data(d) for d in advance.documents.all()],
+        # Expense only: the lines it pays, each with its G/L (blank until
+        # Payment fills it) and month (blank: the request's `effect_month`).
+        'effect_month': advance.effect_month,
+        'is_electricity': advance.is_electricity,
+        # The Payment desk's TDS: the request's code (each line may name its
+        # own, or NONE); each line's amount is its invoice value, `net` what
+        # SAP's payment pays to its G/L.
+        'expense_tds_code': advance.expense_tds_code,
+        'expense_lines': [{
+            'id': ln.pk, 'line_no': ln.line_no, 'taxable_amount': str(ln.taxable_amount),
+            'gst_code': ln.gst_code, 'gst_amount': str(ln.gst_amount), 'amount': str(ln.amount),
+            'gl_account': ln.gl_account, 'gl_name': ln.gl_name, 'effect_month': ln.effect_month,
+            'month': ln.effect_month or advance.effect_month, 'remarks': ln.remarks,
+            'tds_override': ln.tds_override, 'tds_code': ln.tds_code, 'tds_label': ln.tds_label,
+            'tds_rate': str(ln.tds_rate) if ln.tds_rate is not None else None,
+            'tds_amount': str(ln.tds_amount), 'net': str(ln.net),
+        } for ln in advance.expense_lines.all()],
         'files': [file_data(f) for f in advance.files.all()
                   if see_account or f.purpose == 'SUPPORTING'],
         'payout': payout_data(payout) if see_account else None,

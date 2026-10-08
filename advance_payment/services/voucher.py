@@ -8,6 +8,9 @@ Modelled on Oil's own outgoing payments since April 2026 (OVPM, 3,372 live):
                                     (957 of 2,154 supplier payments)
     Vendor, Against PO / Imprest    DocType S, ON ACCOUNT: no PaymentInvoices
     Advance / Other                 (794 of them; there are no down payments)
+    Expense                         DocType A, one PaymentAccounts line per
+                                    expense line, with Variety / Month /
+                                    Budget / Sub Budget (dimensions 1-4)
     Employee advance                DocType A, the employee's 1113xxxx advance
                                     G/L in PaymentAccounts (77 of them)
 
@@ -42,6 +45,7 @@ returned, so a failure is recorded even though the approval does not advance.
 """
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 
 from django.db.models import Max
 from django.utils import timezone
@@ -56,6 +60,7 @@ from advance_payment.models import (
     VoucherObject,
     VoucherStatus,
 )
+from advance_payment.services import payout as payout_service
 from advance_payment.services import sap as sap_service
 
 logger = logging.getLogger(__name__)
@@ -135,7 +140,11 @@ def _remarks(advance):
     if getattr(advance, 'purpose_label', ''):
         parts.append(advance.purpose_label)
     payout = getattr(advance, '_payout_for_remarks', None)
-    if payout is not None and getattr(payout, 'tds_amount', 0):
+    if advance.request_type == RequestType.EXPENSE:
+        tds = sum((ln.tds_amount for ln in advance.expense_lines.all()), Decimal('0'))
+        if tds:
+            parts.append(f'TDS {tds}')
+    elif payout is not None and getattr(payout, 'tds_amount', 0):
         parts.append(f'TDS {payout.tds_code} {payout.tds_rate:g}% {payout.tds_amount}')
     if advance.remarks:
         parts.append(advance.remarks)
@@ -171,6 +180,35 @@ def build_tds_journal(advance, payout, *, posting_date, bpl_id, memo, control_ac
     }
 
 
+def build_expense_tds_journal(advance, *, posting_date, bpl_id, memo):
+    """An Expense's TDS journal: Dr each line's G/L (with its four dimensions,
+    as SAP's journal rules require on an expense account), Cr each TDS account.
+
+    The payment pays each line's invoice value LESS its TDS, so the G/L ends
+    with the invoice value in full and the TDS stands owed to the government.
+    """
+    from advance_payment.services.sap import EXPENSE_VARIETY
+
+    day = posting_date.isoformat()
+    branch = {'BPLID': int(bpl_id)} if bpl_id is not None else {}
+    variety = EXPENSE_VARIETY.get(advance.company) or None
+    taxed = [ln for ln in advance.expense_lines.all() if ln.tds_amount]
+    lines = [{'AccountCode': ln.gl_account, 'Debit': _money(ln.tds_amount), 'Credit': 0.0,
+              'LineMemo': f'TDS {ln.tds_code} {advance.request_no} line {ln.line_no}'[:50],
+              'CostingCode': variety, 'CostingCode2': ln.effect_month or advance.effect_month,
+              'CostingCode3': advance.budget_code, 'CostingCode4': advance.sub_budget_code, **branch}
+             for ln in taxed]
+    owed = {}
+    for ln in taxed:
+        owed.setdefault((ln.tds_account, ln.tds_code), Decimal('0'))
+        owed[(ln.tds_account, ln.tds_code)] += ln.tds_amount
+    lines += [{'AccountCode': account, 'Debit': 0.0, 'Credit': _money(amount),
+               'LineMemo': f'TDS {code} {advance.request_no}'[:50], **branch}
+              for (account, code), amount in owed.items()]
+    return {'ReferenceDate': day, 'DueDate': day, 'TaxDate': day, 'Memo': tds_memo(memo),
+            'Reference': advance.request_no, 'JournalEntryLines': lines}
+
+
 def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_trans_id=None):
     """The Service Layer `VendorPayments` body. Pure: no SAP, no database writes.
 
@@ -193,7 +231,27 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
     if bpl_id is not None:
         payload['BPLID'] = int(bpl_id)
 
-    if advance.request_type == RequestType.EMPLOYEE_ADVANCE:
+    if advance.request_type == RequestType.EXPENSE:
+        # Straight to the expense accounts, as SAP's own expense payments are
+        # (VPM4): one line per expense line, each with Variety (the company's),
+        # Month, Budget and Sub Budget — ProfitCenter..ProfitCenter4, SAP's
+        # dimensions 1-4. Each pays its invoice value less its TDS (the TDS
+        # journal books the rest). Posted by OMS directly (not from a draft):
+        # SAP's check 461001 must exempt OMS's payments (B1i, memo `OMS AP-`).
+        from advance_payment.services.sap import EXPENSE_VARIETY
+
+        variety = EXPENSE_VARIETY.get(advance.company) or None
+        payload['DocType'] = 'rAccount'
+        payload['PaymentAccounts'] = [{
+            'AccountCode': line.gl_account,
+            'SumPaid': _money(line.amount - (line.tds_amount or 0)),
+            'Decription': (line.remarks or advance.partner_name)[:50],
+            'ProfitCenter': variety,
+            'ProfitCenter2': line.effect_month or advance.effect_month,
+            'ProfitCenter3': advance.budget_code,
+            'ProfitCenter4': advance.sub_budget_code,
+        } for line in advance.expense_lines.all()]
+    elif advance.request_type == RequestType.EMPLOYEE_ADVANCE:
         payload['DocType'] = 'rAccount'
         payload['PaymentAccounts'] = [{
             'AccountCode': advance.partner_code,
@@ -256,21 +314,27 @@ def _tds_journal(advance, payout, *, posting_date, bpl_id, memo, company_db):
     """
     from payments import sap_client
 
+    expense = advance.request_type == RequestType.EXPENSE
+    tds = payout_service.tds_total(advance, payout)
     try:
-        found = sap_service.journal_by_memo(advance.company, tds_memo(memo), advance.partner_code)
-        control = '' if found else sap_service.vendor_control_account(advance.company, advance.partner_code)
+        found = _find_tds_journal(advance, memo)
+        control = '' if found or expense else sap_service.vendor_control_account(advance.company,
+                                                                                 advance.partner_code)
     except sap_service.SapUnavailable as exc:
         return None, f'Could not reach SAP to book the TDS: {exc}'
     if found:
-        if found['debit'] != payout.tds_amount:
+        if found['debit'] != tds:
             return None, (f'SAP already has TDS journal {found["trans_id"]} for this payment, booking '
-                          f'{found["debit"]} — not the {payout.tds_amount} now asked. Reverse it in SAP, '
+                          f'{found["debit"]} — not the {tds} now asked. Reverse it in SAP, '
                           f'then approve again.')
         return found['trans_id'], ''
-    if not control:
+    if expense:
+        body = build_expense_tds_journal(advance, posting_date=posting_date, bpl_id=bpl_id, memo=memo)
+    elif not control:
         return None, f'SAP has no control account for {advance.partner_code}: the TDS cannot be booked.'
-    body = build_tds_journal(advance, payout, posting_date=posting_date, bpl_id=bpl_id, memo=memo,
-                             control_account=control)
+    else:
+        body = build_tds_journal(advance, payout, posting_date=posting_date, bpl_id=bpl_id, memo=memo,
+                                 control_account=control)
     try:
         _, answer = sap_client.request('POST', '/JournalEntries', company_db=company_db, json_body=body)
     except sap_client.SapError as exc:
@@ -279,8 +343,16 @@ def _tds_journal(advance, payout, *, posting_date, bpl_id, memo, company_db):
                           f'again finds it by its memo and will not book it twice.')
         return None, f'SAP refused the TDS journal: {exc}'
     trans_id = answer.get('JdtNum') or answer.get('TransId')
-    logger.info('ADVANCE: %s booked TDS journal %s (%s)', advance.request_no, trans_id, payout.tds_amount)
+    logger.info('ADVANCE: %s booked TDS journal %s (%s)', advance.request_no, trans_id, tds)
     return int(trans_id), ''
+
+
+def _find_tds_journal(advance, memo):
+    """The TDS journal an earlier attempt booked: by memo, and what it debited
+    (an Expense's: all its lines; a vendor's: the vendor line)."""
+    if advance.request_type == RequestType.EXPENSE:
+        return sap_service.journal_total_by_memo(advance.company, tds_memo(memo))
+    return sap_service.journal_by_memo(advance.company, tds_memo(memo), advance.partner_code)
 
 
 def _cancel_tds_journal(trans_id, company_db):
@@ -363,7 +435,7 @@ def post(advance, *, user):
         if changed:
             return failed('SAP has changed since this request was raised: ' + ' '.join(changed)
                           + ' Send it back to Payment to correct it.')
-        if payout.tds_amount:
+        if payout_service.tds_total(advance, payout):
             tds_trans_id, problem = _tds_journal(advance, payout, posting_date=posting_date,
                                                  bpl_id=bpl_id, memo=memo, company_db=company_db)
             if problem:
@@ -382,9 +454,9 @@ def post(advance, *, user):
                 message += ' ' + _cancel_tds_journal(tds_trans_id, company_db)
             return failed(message, response=exc.payload)
 
-    if existing and payout.tds_amount:
+    if existing and payout_service.tds_total(advance, payout):
         try:
-            found = sap_service.journal_by_memo(advance.company, tds_memo(memo), advance.partner_code)
+            found = _find_tds_journal(advance, memo)
         except sap_service.SapUnavailable:
             found = None
         tds_trans_id = found['trans_id'] if found else None

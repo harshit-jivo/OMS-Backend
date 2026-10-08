@@ -31,6 +31,8 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /house-banks/           ?company=                     (our banks, all)
   GET /cash-accounts/         ?company=                     (our cash G/Ls)
   GET /budgets/               ?company=                     (the form's Department: budget heads)
+  GET /expense-accounts/      ?company=                     (Expense: the expense G/L accounts)
+  GET /expense-months/        ?company=                     (Expense: SAP's Effective Months, Variety)
 
 `/open-invoices/` lists unpaid invoices across a company, for picking one.
 `/open-documents/` is ONE partner's whole open ledger — invoices, credit
@@ -46,6 +48,7 @@ The requests and their approval (see `views.py`, `services/flow.py`):
   POST /requests/<id>/<action>/          approve | reject | return | send-back |
                                          cancel | resubmit     {remarks, version}
   PUT  /requests/<id>/payout/            the Payment stage's payment details
+  PUT  /requests/<id>/expense/           the Payment stage corrects an Expense request
   POST /requests/<id>/confirm-password/  before typing a payee account by hand
   POST /requests/<id>/payout-lines/<l>/utr/   after completion: the bank's UTR
   POST /requests/<id>/files/             a bank / payment proof
@@ -108,6 +111,10 @@ urlpatterns = [
          name='advance-payment-house-banks'),
     path('cash-accounts/', views.CashAccountsView.as_view(),
          name='advance-payment-cash-accounts'),
+    path('expense-accounts/', views.ExpenseAccountsView.as_view(),
+         name='advance-payment-expense-accounts'),
+    path('expense-months/', views.ExpenseMonthsView.as_view(),
+         name='advance-payment-expense-months'),
     path('budgets/', views.BudgetsView.as_view(),
          name='advance-payment-budgets'),
 
@@ -121,6 +128,8 @@ urlpatterns = [
          name='advance-payment-request-edit'),
     path('requests/<int:pk>/payout/', views.RequestPayoutView.as_view(),
          name='advance-payment-request-payout'),
+    path('requests/<int:pk>/expense/', views.RequestExpenseView.as_view(),
+         name='advance-payment-request-expense'),
     path('requests/<int:pk>/confirm-password/', views.RequestConfirmPasswordView.as_view(),
          name='advance-payment-request-confirm-password'),
     path('requests/<int:pk>/payout-lines/<int:line_id>/utr/', views.RequestUtrView.as_view(),

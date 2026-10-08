@@ -119,9 +119,23 @@ def _clean_tds(advance, raw):
     }
 
 
+def expense_tds(advance):
+    """An Expense's TDS: the sum of its lines' (0 for any other request)."""
+    if advance.request_type != RequestType.EXPENSE:
+        return Decimal('0')
+    return sum((ln.tds_amount for ln in advance.expense_lines.all()), Decimal('0'))
+
+
+def tds_total(advance, payout):
+    """The TDS this payment deducts: an Expense's lines', else the payout's."""
+    if advance.request_type == RequestType.EXPENSE:
+        return expense_tds(advance)
+    return payout.tds_amount if payout is not None else Decimal('0')
+
+
 def net_amount(advance, payout):
     """What the methods pay: the request's amount less any TDS."""
-    return advance.amount - (payout.tds_amount if payout is not None else Decimal('0'))
+    return advance.amount - tds_total(advance, payout)
 
 
 def save(advance, data, *, user):
@@ -299,8 +313,9 @@ def problems(advance):
     total = sum((l.amount for l in lines), Decimal('0'))
     net = net_amount(advance, payout)
     if lines and total != net:
+        tds = tds_total(advance, payout)
         out.append(f'The payment methods add up to {total}, but the request pays {net}'
-                   + (f' after TDS of {payout.tds_amount}.' if payout.tds_amount else '.'))
+                   + (f' after TDS of {tds}.' if tds else '.'))
     if payout.tds_amount and advance.request_type != RequestType.VENDOR:
         out.append('TDS is deducted on vendor payments only.')
     banks = {l.from_account for l in lines if l.method != PayoutMethod.CASH and l.from_account}

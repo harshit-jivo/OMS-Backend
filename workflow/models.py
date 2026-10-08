@@ -194,12 +194,18 @@ class Workflow(_Timestamped, _CompanyScoped):
     `OIL`, `BEVERAGES`, `MART`. Keeping it here means applicability is
     readable off one row without inspecting the workflow's queries.
 
-    No `priority` and no `is_active`, by decision. A workflow is reachable
-    only while it has candidate query rows, so retiring one means removing or
-    closing its `WorkflowQuery` rows — lifecycle lives on the selector, not on
-    a status column here (plan §4.2). In-flight flows hold an FK and keep
-    running regardless.
+    `priority` settles OVERLAP, explicitly and nothing else. When a document
+    matches several workflows, the one with the LOWEST priority wins; when
+    the lowest is shared, selection is still ambiguous and fails loud. Every
+    row starts at the same default, so until an administrator sets one, two
+    matches are exactly the configuration fault they always were. JSAP
+    resolved overlap by whichever template its cursor reached first — an
+    order nobody chose and nobody could see; this is the visible version.
     """
+
+    #: The default every row shares. Lower wins, so an administrator can rank
+    #: a workflow above OR below the rest without renumbering them.
+    DEFAULT_PRIORITY = 100
 
     module = models.ForeignKey(
         WorkflowModule,
@@ -208,10 +214,15 @@ class Workflow(_Timestamped, _CompanyScoped):
     )
     code = models.CharField(max_length=60)
     name = models.CharField(max_length=120)
+    priority = models.PositiveSmallIntegerField(
+        default=DEFAULT_PRIORITY,
+        help_text='When a document matches several workflows, the lowest '
+                  'priority wins. A tie is still an error.',
+    )
     #: Retire without deleting — see WorkflowModule.is_active for the full
     #: reasoning. Inactive rows are EXCLUDED outright; `is_active` is never
-    #: used to rank or prefer one row over another, so it cannot become the
-    #: implicit selection input that `priority` would have been.
+    #: used to rank or prefer one row over another — that is `priority`'s job,
+    #: and only `priority`'s.
     is_active = models.BooleanField(
         default=True,
         help_text='Inactive rows are hidden and take no part in selection. '

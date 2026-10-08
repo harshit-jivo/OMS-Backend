@@ -25,8 +25,11 @@ from advance_payment.services import heads
 from advance_payment.services import requests as request_service
 from advance_payment.tests_requests import _clean, vendor_bill_request
 
-ROUTES = hierarchy.routes()
-BY_CODE = {r['code']: r for r in ROUTES}
+ALL_ROUTES = hierarchy.routes()
+#: The payment routes (by purpose); Expense routes (by budget head) are pinned in `ExpenseRoutes`.
+ROUTES = [r for r in ALL_ROUTES if not r.get('expense')]
+EXPENSE_ROUTES = [r for r in ALL_ROUTES if r.get('expense')]
+BY_CODE = {r['code']: r for r in ALL_ROUTES}
 
 
 def _routes_for(purpose):
@@ -46,7 +49,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertTrue(all(len(c) <= 60 for c in codes))
 
     def test_mart_and_staff_advance_are_kept_out_of_the_purpose_routes(self):
-        self.assertEqual(BY_CODE['AP_MART']['query'], "SELECT id FROM advance_payment_request WHERE company = 'MART'")
+        self.assertEqual(BY_CODE['AP_MART']['query'],
+                         "SELECT id FROM advance_payment_request WHERE company = 'MART' AND request_type <> 'EXPENSE'")
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
@@ -246,3 +250,58 @@ class AnHodIsMatchedToTheirLogin(SimpleTestCase):
     def test_a_tie_is_no_match(self):
         twins = [user(1, 'amit.k', 'Amit Kumar'), user(2, 'amit.s', 'Amit Sharma')]
         self.assertIsNone(heads.match_user(hod('Amit'), twins))
+
+
+class ExpenseRoutes(SimpleTestCase):
+    """Expense requests: by budget head's owner (the Budget hierarchy), then Payment -> Audit."""
+
+    def test_one_plain_and_one_electricity_route_per_head_and_one_for_mart(self):
+        heads = sum(len(h) for h in hierarchy.EXPENSE_OWNERS.values())
+        self.assertEqual(len(EXPENSE_ROUTES), heads * 2 + 1)
+        codes = [r['code'] for r in ALL_ROUTES]
+        self.assertEqual(len(codes), len(set(codes)))
+        self.assertTrue(all(len(c) <= 60 for c in codes))
+
+    def test_every_expense_route_ends_payment_then_audit(self):
+        for route in EXPENSE_ROUTES:
+            with self.subTest(route['code']):
+                stages = hierarchy.full_stages(route)
+                self.assertEqual([r for _n, r in stages[-2:]], ['payment', 'audit'])
+                named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
+                                            enumerate(stages, start=1)])
+                self.assertEqual(flow_service.posting_role(named), StageRole.AUDIT)
+
+    def test_who_approves_an_expense(self):
+        self.assertEqual(BY_CODE['AP_EXP_OIL_FACTORY']['stages'], [(hierarchy.OWNER_STAGE, 'factory_oil')])
+        self.assertEqual(BY_CODE['AP_EXP_BEV_FACTORY']['stages'], [(hierarchy.OWNER_STAGE, 'factory_bev')])
+        # Electricity: the owner, then the Director.
+        self.assertEqual(BY_CODE['AP_EXP_OIL_FACTORY_ELEC']['stages'],
+                         [(hierarchy.OWNER_STAGE, 'factory_oil'), (hierarchy.DIRECTOR_STAGE, 'director')])
+        # NPD: the Director always follows. R & D / OTE: the Director alone.
+        self.assertEqual(BY_CODE['AP_EXP_OIL_NPD1']['stages'],
+                         [(hierarchy.OWNER_STAGE, 'avtar'), (hierarchy.DIRECTOR_STAGE, 'director')])
+        self.assertEqual(BY_CODE['AP_EXP_OIL_R_D']['stages'], [(hierarchy.DIRECTOR_STAGE, 'director')])
+        self.assertEqual(BY_CODE['AP_EXP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
+
+    def test_an_expense_matches_only_its_own_route(self):
+        q = BY_CODE['AP_EXP_OIL_SALES_RE']['query']
+        for part in ("request_type = 'EXPENSE'", "company = 'OIL'", "budget_code = 'Sales RE'",
+                     'is_electricity = false'):
+            self.assertIn(part, q)
+        self.assertIn('is_electricity = true', BY_CODE['AP_EXP_OIL_SALES_RE_ELEC']['query'])
+        # Payment routes need a purpose an Expense never has, and Mart's excludes it.
+        for route in ROUTES:
+            if route['code'] in ('AP_MART', 'AP_STAFF_ADVANCE'):
+                continue
+            self.assertIn('purpose_code = ', route['query'])
+
+    def test_a_payment_route_without_final_is_refused_but_payment_audit_is_an_expense_tail(self):
+        stage = lambda n, i: SimpleNamespace(name=n, sequence=i)  # noqa: E731
+        with self.assertRaises(flow_service.FlowError):
+            flow_service.roles([stage('Budget Owner Approval', 1), stage('Payment Approval', 2)])
+        named = flow_service.roles([stage('Budget Owner Approval', 1), stage('Payment Approval', 2),
+                                    stage('Audit Approval', 3)])
+        self.assertEqual(flow_service.posting_role(named), StageRole.AUDIT)
+        named = flow_service.roles([stage('Payment Approval', 1), stage('Audit Approval', 2),
+                                    stage('Final Approval', 3)])
+        self.assertEqual(flow_service.posting_role(named), StageRole.FINAL)
