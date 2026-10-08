@@ -23,6 +23,7 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from collections import defaultdict
 from sap_sync.models import Party as SapParty, PartyAddress as SapPartyAddress, Product as SapProduct
+from orders.services.litres import is_litre_item
 from users.models import User, State
 from ._shared import (
     APPROVER_ACTIVE_CODES,
@@ -150,7 +151,7 @@ def _build_state_item_sales(filtered_orders, state_map):
         variety = item['sub_group'] or 'Unknown'
         qty = to_float(item['qty'])
         boxes = to_float(item['boxes'])
-        ltrs = to_float(item['ltrs'])
+        ltrs = to_float(item['ltrs']) if is_litre_item(item_code) else 0
         product = product_meta.get((
             str(item_code or '').strip(),
             str(category or '').strip().upper(),
@@ -161,7 +162,7 @@ def _build_state_item_sales(filtered_orders, state_map):
             sal_pack_unit = to_float(product.get('sal_pack_unit'))
             if boxes <= 0 and qty > 0 and sal_factor > 0:
                 boxes = qty / sal_factor
-            if ltrs <= 0 and qty > 0 and sal_pack_unit > 0:
+            if ltrs <= 0 and qty > 0 and sal_pack_unit > 0 and is_litre_item(item_code):
                 ltrs = qty * sal_pack_unit
 
         key = (state, variety, item_code, item_name, category)

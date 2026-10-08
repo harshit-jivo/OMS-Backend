@@ -17,6 +17,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from orders.services import scheme_engine
+from orders.services.litres import is_litre_item
 from orders.models import OrderItem, OrderItemScheme
 from users.models import SchemeProduct
 
@@ -175,7 +176,8 @@ def _create_order_item(order, item, to_float, to_bool):
         qty=qty,
         pcs=to_float(item.get('pcs', 0)),
         boxes=to_float(item.get('boxes', 0)),
-        ltrs=to_float(item.get('ltrs', 0)),
+        # The client computes litres; a non-liquid line has none whatever it sent.
+        ltrs=to_float(item.get('ltrs', 0)) if is_litre_item(item.get('item_code')) else 0,
         price_list_basic=price_list_basic,
         basic_price=basic_price,
         total=total,
