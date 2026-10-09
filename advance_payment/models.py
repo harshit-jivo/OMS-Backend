@@ -596,6 +596,10 @@ class PayoutMethod(models.TextChoices):
     CASH = 'CASH', 'Cash'
 
 
+#: SAP's Payment Mode values (OVPM.U_Pymnt_Mode), which check 460007 requires on a bank payment.
+SAP_PAYMENT_MODES = ('NEFT', 'RTGS', 'FT')
+
+
 class Payout(models.Model):
     """How the request is paid: filled in at the Payment stage. One per request."""
 
@@ -614,6 +618,9 @@ class Payout(models.Model):
     tds_account = models.CharField(max_length=20, blank=True, default='')
     #: Rounded to the rupee. The methods pay the request's amount less this.
     tds_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+    #: SAP's Payment Mode (NEFT / RTGS / FT) the Payment desk chose; blank:
+    #: worked out from the methods (`voucher.payment_mode`).
+    sap_payment_mode = models.CharField(max_length=10, blank=True, default='')
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
     updated_on = models.DateTimeField(auto_now=True)

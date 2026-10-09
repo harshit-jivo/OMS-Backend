@@ -28,7 +28,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.utils import timezone
 
-from advance_payment.models import DocumentKind, Payout, PayoutLine, PayoutMethod, RequestType
+from advance_payment.models import SAP_PAYMENT_MODES, DocumentKind, Payout, PayoutLine, PayoutMethod, RequestType
 
 CENT = Decimal('0.01')
 
@@ -169,6 +169,10 @@ def save(advance, data, *, user):
             'cheque_date': (raw.get('cheque_date') or None) if method == PayoutMethod.CHEQUE else None,
             'cash_notes': _notes(raw.get('cash_notes')) if method == PayoutMethod.CASH else None,
         })
+    # SAP's Payment Mode: the desk's choice, or blank for "from the methods".
+    mode = _text(data.get('sap_payment_mode'), 10).upper()
+    if mode and mode not in SAP_PAYMENT_MODES:
+        problems.append(f'SAP Payment Mode must be one of {", ".join(SAP_PAYMENT_MODES)}, or Automatic.')
     if problems:
         raise PayoutInvalid(problems)
     tds = _clean_tds(advance, data.get('tds'))
@@ -181,6 +185,7 @@ def save(advance, data, *, user):
             'to_account_number': _text(data.get('to_account_number'), 40),
             'to_ifsc': _text(data.get('to_ifsc'), 11).upper(),
             'to_account_manual': bool(data.get('to_account_manual')),
+            'sap_payment_mode': mode,
             'updated_by': user,
             **tds,
         })
@@ -215,7 +220,7 @@ def fingerprint(advance):
         return None
     return (
         payout.beneficiary_name, payout.to_account_number, payout.to_ifsc, payout.tds_code,
-        str(payout.tds_amount),
+        str(payout.tds_amount), payout.sap_payment_mode,
         tuple(sorted(
             (l.method, str(l.amount), l.from_account, l.cheque_number, l.cheque_bank,
              str(l.cheque_date or ''), str(l.cash_notes or ''))
@@ -265,6 +270,7 @@ def snapshot(advance):
         'to_ifsc': payout.to_ifsc or None,
         'account_source': ('Typed by hand' if payout.to_account_manual else 'From SAP')
         if payout.to_account_number else None,
+        'sap_payment_mode': payout.sap_payment_mode or 'Automatic',
     }
     for index, line in enumerate(payout.lines.order_by('pk'), start=1):
         out[f'payment_method_{index}'] = _line_text(line)

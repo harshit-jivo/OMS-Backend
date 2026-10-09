@@ -359,6 +359,24 @@ class TheSapPayment(SimpleTestCase):
         self.assertEqual((body['TransferAccount'], body['TransferSum']), ('1104107', 10000.0))
         self.assertEqual(body['TransferReference'], 'CHQ 252525')
 
+    def test_a_bank_payment_says_its_payment_mode_as_sap_check_460007_requires(self):
+        mode = lambda *lines: self.build(advance_of(amount='240000'), payout(*lines)).get('U_Pymnt_Mode')  # noqa: E731
+        self.assertEqual(mode(line(1, 'NEFT', '240000')), 'NEFT')
+        self.assertEqual(mode(line(1, 'RTGS', '240000')), 'RTGS')
+        for method in ('IMPS', 'UPI'):
+            self.assertEqual(mode(line(1, method, '240000')), 'FT')
+        self.assertEqual(mode(line(1, 'CHEQUE', '240000', cheque_number='1')), 'FT')
+        # Split between methods: the one carrying the most money.
+        self.assertEqual(mode(line(1, 'NEFT', '40000'), line(2, 'RTGS', '200000')), 'RTGS')
+        # Cash alone has no bank account, so SAP asks no Payment Mode.
+        self.assertIsNone(mode(line(1, 'CASH', '9000', '1105001')))
+
+    def test_the_payment_desks_choice_of_payment_mode_wins(self):
+        body = self.build(advance_of(amount='240000'), payout(line(1, 'UPI', '240000'), sap_payment_mode='NEFT'))
+        self.assertEqual(body['U_Pymnt_Mode'], 'NEFT')
+        body = self.build(advance_of(amount='240000'), payout(line(1, 'UPI', '240000'), sap_payment_mode=''))
+        self.assertEqual(body['U_Pymnt_Mode'], 'FT')
+
 
 class PostingOnce(SimpleTestCase):
     def test_a_payment_already_in_sap_is_adopted_not_posted_again(self):

@@ -180,6 +180,25 @@ def build_tds_journal(advance, payout, *, posting_date, bpl_id, memo, control_ac
     }
 
 
+#: SAP's Payment Mode (OVPM.U_Pymnt_Mode) by payment method. SAP's check 460007
+#: refuses a payment from a bank account without one; its valid values are NEFT,
+#: RTGS and FT (Oil, Beverages; Mart takes text). Cash needs none.
+PAYMENT_MODE = {
+    PayoutMethod.NEFT: 'NEFT',
+    PayoutMethod.RTGS: 'RTGS',
+    PayoutMethod.IMPS: 'FT',
+    PayoutMethod.UPI: 'FT',
+    PayoutMethod.CHEQUE: 'FT',
+}
+
+
+def payment_mode(bank_lines):
+    """The Payment Mode of a payment's bank lines: SAP has one field, so the
+    method carrying the most money (the first such line on a tie)."""
+    biggest = max(bank_lines, key=lambda line: line.amount)
+    return PAYMENT_MODE.get(biggest.method, 'FT')
+
+
 def build_expense_tds_journal(advance, *, posting_date, bpl_id, memo):
     """An Expense's TDS journal: Dr each line's G/L (with its four dimensions,
     as SAP's journal rules require on an expense account), Cr each TDS account.
@@ -297,6 +316,8 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
         payload['TransferAccount'] = bank[0].from_account
         payload['TransferSum'] = _money(sum(l.amount for l in bank))
         payload['TransferDate'] = day
+        # The Payment desk's choice, else worked out from the methods.
+        payload['U_Pymnt_Mode'] = getattr(payout, 'sap_payment_mode', '') or payment_mode(bank)
         cheques = [l.cheque_number for l in bank if l.method == PayoutMethod.CHEQUE and l.cheque_number]
         if cheques:
             payload['TransferReference'] = ('CHQ ' + ', '.join(cheques))[:50]
