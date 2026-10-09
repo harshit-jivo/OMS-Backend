@@ -133,6 +133,8 @@ def payout_data(payout):
         'to_account_number': payout.to_account_number,
         'to_ifsc': payout.to_ifsc,
         'to_account_manual': payout.to_account_manual,
+        # SAP's Payment Mode the desk chose; '' = from the methods.
+        'sap_payment_mode': payout.sap_payment_mode,
         'tds': ({'code': payout.tds_code, 'label': payout.tds_label, 'rate': _amount(payout.tds_rate),
                  'account': payout.tds_account, 'amount': _amount(payout.tds_amount)}
                 if payout.tds_code else None),
