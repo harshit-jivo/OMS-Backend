@@ -219,3 +219,36 @@ class TdsInSap(SimpleTestCase):
         with mock.patch.object(sap, '_run', side_effect=sap.SapUnavailable('down')):
             sap._with_bill_tds('OIL', rows)
         self.assertEqual((rows[0]['tds_on_bills'], rows[0]['billed']), (None, None))
+
+
+@mock.patch.object(sap, '_schema', return_value='JIVO_OIL_HANADB')
+class OneBillsBreakdown(SimpleTestCase):
+    """Bill 624104114 as SAP booked it: rent, CGST + SGST at 9%, TDS 194I at 10%."""
+
+    HEADER = [{'doc_entry': 188, 'doc_num': 624104114, 'vendor_ref': '7/2024-25', 'doc_date': None,
+               'document_date': None, 'status': 'O', 'cancelled': 'N', 'card_code': 'VENDA000869',
+               'card_name': 'GEETA GUPTA', 'freight': Decimal('0'), 'discount': Decimal('0'),
+               'gst': Decimal('67500'), 'tds': Decimal('37500'), 'rounding': Decimal('0'),
+               'net': Decimal('405000'), 'paid': Decimal('305000'),
+               'payable_account': '2110004', 'payable_account_name': 'SUNDRY CREDITOR SERVICE'}]
+    LINES = [{'line': 0, 'item_code': None, 'description': None, 'quantity': Decimal('0'),
+              'taxable': Decimal('375000'), 'gst': Decimal('67500'), 'tax_code': 'CG+SG@18',
+              'account': '5660002', 'account_name': 'RENT'}]
+    GST = [{'code': 'CGST@9', 'rate': Decimal('9'), 'base': Decimal('375000'), 'amount': Decimal('33750'),
+            'account': '2131012', 'account_name': 'INPUT CGST @ 9 %'}]
+    TDS = [{'code': '94IB', 'name': '194I TDS ON RENT', 'rate': Decimal('10'), 'taxable': Decimal('375000'),
+            'amount': Decimal('37500'), 'account': '2133001', 'account_name': 'TDS ON RENT 194I'}]
+
+    def test_taxable_gst_tds_and_net_add_up(self, _schema):
+        with mock.patch.object(sap, '_run', side_effect=[self.HEADER, self.LINES, self.GST, self.TDS]):
+            bill = sap.bill_breakdown('OIL', 188)
+        h = bill['header']
+        self.assertEqual((h['taxable'], h['gst'], h['gross'], h['tds'], h['net'], h['balance']),
+                         ('375000', '67500', '442500', '37500', '405000', '100000'))
+        self.assertEqual((h['payable_account'], h['status']), ('2110004', 'Open'))
+        self.assertEqual((bill['lines'][0]['account'], bill['lines'][0]['account_name']), ('5660002', 'RENT'))
+        self.assertEqual(bill['tds'][0]['account'], '2133001')
+
+    def test_no_such_bill_is_none(self, _schema):
+        with mock.patch.object(sap, '_run', return_value=[]):
+            self.assertIsNone(sap.bill_breakdown('OIL', 1))

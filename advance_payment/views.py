@@ -868,6 +868,31 @@ class PurchaseOrderView(_Lookup):
         return ok({'company': company, **po})
 
 
+class BillBreakdownView(_Lookup):
+    """GET /api/advance-payments/bill-breakdown/?company=&doc_entry=
+
+    One A/P invoice as SAP booked it: taxable, GST, TDS and net, each line's
+    G/L account, the GST and TDS accounts (see `sap.bill_breakdown`). For the
+    desk, from the Payment stage on. 404 when SAP has no such bill.
+    """
+
+    resource = 'A/P invoice'
+
+    def get(self, request):
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            bill = sap_service.bill_breakdown(company, request.query_params.get('doc_entry'))
+        except ValueError as exc:
+            return fail(str(exc), status=http_status.HTTP_400_BAD_REQUEST)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        if bill is None:
+            return fail('SAP has no such A/P invoice.', status=http_status.HTTP_404_NOT_FOUND)
+        return ok({'company': company, **bill})
+
+
 class DocumentAttachmentView(_Lookup):
     """GET /api/advance-payments/document-attachment/?company=&kind=po|bill|grpo&doc_entry=[&line=]
 

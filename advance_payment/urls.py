@@ -10,6 +10,7 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /document-attachment/   ?company=&kind=po|bill|grpo&doc_entry=[&line=]  (one SAP attachment, the file)
   GET /document-attachments/  ?company=&kind=po|bill&doc_entry=  (every related SAP attachment, a list)
   GET /purchase-order/        ?company=&doc_entry=                (one PO in full: header, lines, follow-on)
+  GET /bill-breakdown/        ?company=&doc_entry=                (one A/P invoice: taxable, GST, TDS, net, G/L)
   GET /document-history/      ?company=&kind=po|bill|ledger&doc_entry=[&line=]  (OMS's payments against it)
   GET /tds-options/           ?company=&card_code=&bills=     (TDS the Payment desk may deduct)
   GET /assignment-recipients/                                  (who bills / POs may be sent to)
@@ -75,6 +76,8 @@ urlpatterns = [
          name='advance-payment-document-attachments'),
     path('purchase-order/', views.PurchaseOrderView.as_view(),
          name='advance-payment-purchase-order'),
+    path('bill-breakdown/', views.BillBreakdownView.as_view(),
+         name='advance-payment-bill-breakdown'),
     path('document-history/', views.DocumentHistoryView.as_view(),
          name='advance-payment-document-history'),
     path('tds-options/', views.TdsOptionsView.as_view(),

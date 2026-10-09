@@ -24,6 +24,7 @@ from advance_payment.models import StageRole
 from advance_payment.services import flow as flow_service
 from advance_payment.services import payout as payout_service
 from advance_payment.services import requests as request_service
+from advance_payment.services import sap_rules
 from advance_payment.services import voucher as voucher_service
 
 
@@ -333,13 +334,35 @@ class TheSapPayment(SimpleTestCase):
         self.assertEqual(body['U_Type_of_Advance'], 'One Time Settlement')
         self.assertEqual(body['U_URGENCY'], 'H')
 
+    def test_an_advance_on_account_says_when_it_settles(self):
+        # SAP's check 460009 (AP-2026-0021: a PO advance with no expected bill
+        # date): 30 days after posting, unless the request names its own date.
+        po = advance_of(documents=[doc(14205, '6761833', kind='PO')])
+        po.expected_date = None
+        body = self.build(po, payout(line(1, 'RTGS', '6761833')))
+        self.assertNotIn('PaymentInvoices', body)
+        self.assertEqual(body['U_Adv_Settl_Dt'], '2026-10-25')  # DAY + 30
+        po.expected_date = datetime.date(2026, 10, 15)
+        self.assertEqual(self.build(po, payout(line(1, 'RTGS', '6761833')))['U_Adv_Settl_Dt'], '2026-10-15')
+        # A date already past would block the vendor at once: the default instead.
+        po.expected_date = datetime.date(2026, 9, 1)
+        self.assertEqual(self.build(po, payout(line(1, 'RTGS', '6761833')))['U_Adv_Settl_Dt'], '2026-10-25')
+
+    def test_an_imprest_advance_settles_by_its_expected_bill_date(self):
+        imprest = advance_of('EMPLOYEE_IMPREST', partner='ORGV000389')
+        imprest.expected_bill_date = datetime.date(2026, 10, 10)
+        self.assertEqual(self.build(imprest, payout(line(1, 'NEFT', '240000')))['U_Adv_Settl_Dt'], '2026-10-10')
+
+    def test_a_bill_payment_has_no_settlement_date(self):
+        body = self.build(advance_of(documents=[doc(501, '240000')]), payout(line(1, 'NEFT', '240000')))
+        self.assertNotIn('U_Adv_Settl_Dt', body)
+
     def test_urgency_only_from_5_pm_india_time(self):
         at = lambda h, m: datetime.datetime(2026, 10, 9, h, m, tzinfo=datetime.timezone.utc)
-        self.assertNotIn('U_URGENCY', voucher_service.sap_flags(at(11, 29)))  # 16:59 IST
-        self.assertEqual(voucher_service.sap_flags(at(11, 30))['U_URGENCY'], 'H')  # 17:00 IST
-        # 17:00 UTC is 22:30 IST; 10:00 UTC is 15:30 IST — the server's own clock is UTC.
-        self.assertNotIn('U_URGENCY', voucher_service.sap_flags(at(10, 0)))
-        self.assertEqual(voucher_service.sap_flags(at(10, 0))['U_Type_of_Advance'], 'One Time Settlement')
+        self.assertFalse(sap_rules.is_urgent(at(11, 29)))  # 16:59 IST
+        self.assertTrue(sap_rules.is_urgent(at(11, 30)))  # 17:00 IST
+        # 10:00 UTC is 15:30 IST — the server's own clock is UTC.
+        self.assertFalse(sap_rules.is_urgent(at(10, 0)))
 
     def test_a_bill_payment_names_its_bills(self):
         body = self.build(advance_of(documents=[doc(501, '200000'), doc(502, '40000')]),
@@ -397,6 +420,12 @@ class TheSapPayment(SimpleTestCase):
 
 
 class PostingOnce(SimpleTestCase):
+    def setUp(self):
+        # Before 5 PM: the payloads here are stand-ins, compared as given.
+        urgent = mock.patch.object(sap_rules, 'is_urgent', return_value=False)
+        urgent.start()
+        self.addCleanup(urgent.stop)
+
     def test_a_payment_already_in_sap_is_adopted_not_posted_again(self):
         advance = mock.Mock(pk=7, request_no='AP-2026-0007', company='OIL')
         advance.vouchers.filter.return_value.count.return_value = 0
@@ -443,6 +472,22 @@ class PostingOnce(SimpleTestCase):
         self.assertIn('Balance due exceeded', outcome.message)
         self.assertEqual(create.call_args.kwargs['status'], 'FAILED')
         self.assertEqual(create.call_args.kwargs['payload'], {'x': 1})
+
+    def test_a_body_sap_would_refuse_is_not_sent(self):
+        # A bank payment with no Payment Mode: SAP's 460007, said by OMS instead.
+        advance = mock.Mock(pk=7, request_no='AP-2026-0007', company='OIL')
+        advance.vouchers.filter.return_value.count.return_value = 0
+        advance.vouchers.aggregate.return_value = {'n': None}
+        gap = {'DocDate': '2026-10-09', 'DocType': 'rSupplier', 'TransferSum': 10.0,
+               'PaymentInvoices': [{'DocEntry': 1}]}
+        with mock.patch.object(voucher_service.AdvanceRequest.objects, 'get', return_value=advance),                 mock.patch.object(voucher_service.Payout.objects, 'filter') as payouts,                 mock.patch.object(voucher_service, '_branch', return_value=(1, '')),                 mock.patch.object(voucher_service, 'build_payload', return_value=gap),                 mock.patch.object(voucher_service, '_company_db', return_value='TEST_OIL'),                 mock.patch.object(voucher_service.sap_service, 'outgoing_payment_series', return_value=2601),                 mock.patch.object(voucher_service.sap_service, 'outgoing_payment_by_memo', return_value=None),                 mock.patch('advance_payment.services.reservations.live_check', return_value=[]),                 mock.patch('payments.sap_client.request') as sap_post,                 mock.patch.object(voucher_service.SapVoucher.objects, 'create') as create:
+            payouts.return_value.first.return_value = SimpleNamespace(tds_amount=Decimal('0'))
+            outcome = voucher_service.post(advance, user=SimpleNamespace(pk=1))
+        self.assertFalse(outcome.ok)
+        self.assertIn('Not sent to SAP', outcome.message)
+        self.assertIn('460007', outcome.message)
+        sap_post.assert_not_called()
+        self.assertEqual(create.call_args.kwargs['status'], 'FAILED')
 
 
 class FinalPosts(SimpleTestCase):

@@ -45,11 +45,9 @@ returned, so a failure is recorded even though the approval does not advance.
 """
 import logging
 from dataclasses import dataclass
-from datetime import time
 from decimal import Decimal
 
 from django.db.models import Max
-from django.utils import timezone
 
 from advance_payment.models import (
     AdvanceRequest,
@@ -63,6 +61,8 @@ from advance_payment.models import (
 )
 from advance_payment.services import clock
 from advance_payment.services import payout as payout_service
+from advance_payment.services import sap_rules
+from advance_payment.services.sap_rules import PAYMENT_MODE, payment_mode  # noqa: F401 — re-exported
 from advance_payment.services import sap as sap_service
 
 logger = logging.getLogger(__name__)
@@ -180,45 +180,6 @@ def build_tds_journal(advance, payout, *, posting_date, bpl_id, memo, control_ac
              'Credit': _money(payout.tds_amount), 'LineMemo': text, **branch},
         ],
     }
-
-
-#: SAP's Payment Mode (OVPM.U_Pymnt_Mode) by payment method. SAP's check 460007
-#: refuses a payment from a bank account without one; its valid values are NEFT,
-#: RTGS and FT (Oil, Beverages; Mart takes text). Cash needs none.
-PAYMENT_MODE = {
-    PayoutMethod.NEFT: 'NEFT',
-    PayoutMethod.RTGS: 'RTGS',
-    PayoutMethod.IMPS: 'FT',
-    PayoutMethod.UPI: 'FT',
-    PayoutMethod.CHEQUE: 'FT',
-}
-
-
-#: SAP's own checks on every outgoing payment (its transaction notification),
-#: which a payment made in SAP's screens meets by hand:
-#:   4612   — "After 5:00 PM Urgency field is mandatory": U_URGENCY, whose only
-#:            value is 'H'. SAP's clock is India's, not this server's UTC.
-#:   460008 — "Pls Select the type of Advance Payment": U_Type_of_Advance.
-#:            OMS pays each request once; 'Adjustable in EMI' is a payroll
-#:            recovery OMS does not arrange (SAP's own payments use it ~1%).
-URGENT_FROM = time(17, 0)
-TYPE_OF_ADVANCE = 'One Time Settlement'
-
-
-def sap_flags(now=None):
-    """The fields SAP's checks demand of an outgoing payment made at `now`."""
-    at = (now or timezone.now()).astimezone(clock.INDIA)
-    flags = {'U_Type_of_Advance': TYPE_OF_ADVANCE}
-    if at.time() >= URGENT_FROM:
-        flags['U_URGENCY'] = 'H'
-    return flags
-
-
-def payment_mode(bank_lines):
-    """The Payment Mode of a payment's bank lines: SAP has one field, so the
-    method carrying the most money (the first such line on a tie)."""
-    biggest = max(bank_lines, key=lambda line: line.amount)
-    return PAYMENT_MODE.get(biggest.method, 'FT')
 
 
 def build_expense_tds_journal(advance, *, posting_date, bpl_id, memo):
@@ -346,8 +307,8 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
     if cash:
         payload['CashAccount'] = cash[0].from_account
         payload['CashSum'] = _money(sum(l.amount for l in cash))
-    payload.update(sap_flags(now))
-    return payload
+    # SAP's own checks (urgency, type of advance, settlement date): one place.
+    return sap_rules.apply(payload, advance, posting_date=posting_date, now=now)
 
 
 def _tds_journal(advance, payout, *, posting_date, bpl_id, memo, company_db):
@@ -486,6 +447,16 @@ def post(advance, *, user):
                 return failed(problem)
             payload = build_payload(advance, payout, posting_date=posting_date, series=series,
                                     bpl_id=bpl_id, memo=memo, tds_trans_id=tds_trans_id)
+        # Again at the last moment — a post that crossed 5 PM while its TDS
+        # journal was booked must still be marked urgent — then checked, so a
+        # gap is reported here in plain words rather than refused by SAP.
+        sap_rules.apply(payload, advance, posting_date=posting_date)
+        gaps = sap_rules.problems(payload)
+        if gaps:
+            message = 'Not sent to SAP: ' + ' '.join(gaps)
+            if tds_trans_id:
+                message += ' ' + _cancel_tds_journal(tds_trans_id, company_db)
+            return failed(message)
         try:
             _, body = sap_client.request('POST', '/VendorPayments', company_db=company_db,
                                          json_body=payload)
@@ -493,7 +464,7 @@ def post(advance, *, user):
             if exc.status_code is None:
                 return failed(f'SAP did not answer ({exc}). It may still have posted: approving '
                               f'again checks SAP first and will not post twice.')
-            message = f'SAP refused the payment: {exc}'
+            message = sap_rules.explain(exc)
             if tds_trans_id:
                 message += ' ' + _cancel_tds_journal(tds_trans_id, company_db)
             return failed(message, response=exc.payload)

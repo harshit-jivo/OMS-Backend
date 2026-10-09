@@ -911,6 +911,135 @@ def purchase_order(company, doc_entry):
 #: `TransType`, so a row only ever matches its own table. Payments carry
 #: `CounterRef` (cheque/UTR) instead of `NumAtCard`; a manual journal (type 30)
 #: has neither and correctly comes back blank.
+# ---------------------------------------------------------------------------
+# One bill's A/P breakdown
+# ---------------------------------------------------------------------------
+#: What an A/P invoice is made of, as SAP booked it: the taxable value of each
+#: line and the G/L account it went to (PCH1), the GST by component and its
+#: account (PCH4), the TDS withheld by section and its account (PCH5; the A/P
+#: account is OWHT.ApTdsAcc), and the vendor's payable account (CtlAccount).
+#: DocTotal is what is payable: taxable + freight + GST - TDS, rounded.
+_BILL_HEADER_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", "DocNum" AS "doc_num", "NumAtCard" AS "vendor_ref",
+           "DocDate" AS "doc_date", "TaxDate" AS "document_date", "DocStatus" AS "status",
+           "CANCELED" AS "cancelled", "CardCode" AS "card_code", "CardName" AS "card_name",
+           IFNULL("TotalExpns", 0) AS "freight", IFNULL("DiscSum", 0) AS "discount",
+           IFNULL("VatSum", 0) AS "gst", IFNULL("WTSum", 0) AS "tds", IFNULL("RoundDif", 0) AS "rounding",
+           "DocTotal" AS "net", IFNULL("PaidToDate", 0) AS "paid",
+           H."CtlAccount" AS "payable_account", A."AcctName" AS "payable_account_name"
+    FROM "{schema}"."OPCH" H
+    LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = H."CtlAccount"
+    WHERE H."DocEntry" = ?
+'''
+
+_BILL_LINES_SQL = '''
+    SELECT L."LineNum" AS "line", L."ItemCode" AS "item_code", L."Dscription" AS "description",
+           L."Quantity" AS "quantity", L."LineTotal" AS "taxable", IFNULL(L."VatSum", 0) AS "gst",
+           L."TaxCode" AS "tax_code", L."AcctCode" AS "account", A."AcctName" AS "account_name"
+    FROM "{schema}"."PCH1" L
+    LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = L."AcctCode"
+    WHERE L."DocEntry" = ?
+    ORDER BY L."LineNum"
+'''
+
+_BILL_GST_SQL = '''
+    SELECT T."StaCode" AS "code", T."TaxRate" AS "rate", SUM(T."BaseSum") AS "base",
+           SUM(T."TaxSum") AS "amount", T."TaxAcct" AS "account", A."AcctName" AS "account_name"
+    FROM "{schema}"."PCH4" T
+    LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = T."TaxAcct"
+    WHERE T."DocEntry" = ?
+    GROUP BY T."StaCode", T."TaxRate", T."TaxAcct", A."AcctName"
+    ORDER BY T."StaCode"
+'''
+
+_BILL_TDS_SQL = '''
+    SELECT W."WTCode" AS "code", O."WTName" AS "name", W."Rate" AS "rate",
+           W."TaxbleAmnt" AS "taxable", W."WTAmnt" AS "amount",
+           COALESCE(NULLIF(W."Account", ''), NULLIF(O."ApTdsAcc", ''), O."Account") AS "account",
+           A."AcctName" AS "account_name"
+    FROM "{schema}"."PCH5" W
+    LEFT JOIN "{schema}"."OWHT" O ON O."WTCode" = W."WTCode"
+    LEFT JOIN "{schema}"."OACT" A
+           ON A."AcctCode" = COALESCE(NULLIF(W."Account", ''), NULLIF(O."ApTdsAcc", ''), O."Account")
+    WHERE W."AbsEntry" = ?
+'''
+
+
+def bill_breakdown(company, doc_entry):
+    """One A/P invoice as SAP booked it, or None when there is no such bill.
+
+    `{header: {..., taxable, gross, net}, lines: [...], gst: [...], tds: [...]}`.
+    `taxable` is the lines' value before tax; `gross` is what the vendor's
+    invoice shows (taxable + freight + GST); `net` is SAP's DocTotal, payable
+    after TDS. Amounts are strings, as everywhere in this module.
+    """
+    entry = _doc_entry(doc_entry)
+    schema = _schema(company)
+    rows = _run(company, _BILL_HEADER_SQL.format(schema=schema), [entry], 'A/P invoice')
+    if not rows:
+        return None
+    h = rows[0]
+    lines = _run(company, _BILL_LINES_SQL.format(schema=schema), [entry], 'A/P invoice lines')
+    gst = _run(company, _BILL_GST_SQL.format(schema=schema), [entry], 'A/P invoice GST')
+    tds = _run(company, _BILL_TDS_SQL.format(schema=schema), [entry], 'A/P invoice TDS')
+    taxable = sum((Decimal(str(r['taxable'] or 0)) for r in lines), Decimal('0'))
+    freight, header_gst = Decimal(str(h['freight'] or 0)), Decimal(str(h['gst'] or 0))
+    net, paid = Decimal(str(h['net'] or 0)), Decimal(str(h['paid'] or 0))
+    return {
+        'header': {
+            'doc_entry': int(h['doc_entry']),
+            'doc_num': int(h['doc_num']) if h.get('doc_num') is not None else None,
+            'vendor_ref': _s(h.get('vendor_ref')),
+            'doc_date': _date(h.get('doc_date')),
+            'document_date': _date(h.get('document_date')),
+            'status': 'Cancelled' if _s(h.get('cancelled')) == 'Y' else (
+                'Open' if _s(h.get('status')) == 'O' else 'Closed'),
+            'card_code': _s(h.get('card_code')),
+            'card_name': _s(h.get('card_name')),
+            'payable_account': _s(h.get('payable_account')),
+            'payable_account_name': _s(h.get('payable_account_name')),
+            'taxable': _money(taxable),
+            'freight': _money(freight),
+            'discount': _money(h.get('discount')),
+            'gst': _money(header_gst),
+            'gross': _money(taxable + freight + header_gst),
+            'tds': _money(h.get('tds')),
+            'rounding': _money(h.get('rounding')),
+            'net': _money(net),
+            'paid': _money(paid),
+            'balance': _money(net - paid),
+        },
+        'lines': [{
+            'line': int(r['line']),
+            'item_code': _s(r.get('item_code')),
+            'description': _s(r.get('description')),
+            'quantity': _money(r.get('quantity')),
+            'taxable': _money(r.get('taxable')),
+            'gst': _money(r.get('gst')),
+            'tax_code': _s(r.get('tax_code')),
+            'account': _s(r.get('account')),
+            'account_name': _s(r.get('account_name')),
+        } for r in lines],
+        'gst': [{
+            'code': _s(r.get('code')),
+            'rate': _money(r.get('rate')),
+            'base': _money(r.get('base')),
+            'amount': _money(r.get('amount')),
+            'account': _s(r.get('account')),
+            'account_name': _s(r.get('account_name')),
+        } for r in gst],
+        'tds': [{
+            'code': _s(r.get('code')),
+            'name': _s(r.get('name')),
+            'rate': _money(r.get('rate')),
+            'taxable': _money(r.get('taxable')),
+            'amount': _money(r.get('amount')),
+            'account': _s(r.get('account')),
+            'account_name': _s(r.get('account_name')),
+        } for r in tds],
+    }
+
+
 _OPEN_DOC_SQL = '''
     SELECT
         T0."TransId"                     AS "trans_id",
