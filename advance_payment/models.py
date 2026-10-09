@@ -218,6 +218,11 @@ class RequestStatus(models.TextChoices):
     CANCELLED = 'CANCELLED', 'Cancelled'
 
 
+#: The Audit stage of an Expense route: its own name, so the Expense auditor
+#: (Bhavani) and the payments auditor (Parmeet) read apart everywhere.
+EXPENSE_AUDIT_STAGE = 'Expense Audit Approval'
+
+
 class StageRole(models.TextChoices):
     """What a stage DOES, told from its name in the Workflows page.
 
@@ -241,10 +246,13 @@ class StageRole(models.TextChoices):
     def of(cls, stage_name):
         """The role of an engine stage, by its name (case and spacing ignored).
 
-        Payment / Audit / Final by their exact names; every other name is a
-        general APPROVAL stage.
+        Payment / Audit / Final by their exact names — and "Expense Audit
+        Approval", the Expense routes' own auditor, is Audit; every other name
+        is a general APPROVAL stage.
         """
         key = ' '.join(str(stage_name or '').split()).lower()
+        if key == EXPENSE_AUDIT_STAGE.lower():
+            return cls.AUDIT
         for role in (cls.PAYMENT, cls.AUDIT, cls.FINAL):
             if role.label.lower() == key:
                 return role

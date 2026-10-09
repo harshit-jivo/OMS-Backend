@@ -28,7 +28,7 @@ OWNERS = {
         'NPD1': 'avtar', 'NPD2': 'avtar', 'NPD3': 'avtar',
     },
     'BEVERAGES': {
-        'BackOff': 'nirmal', 'Sales': 'karanpreet', 'Sales RE': 'karanpreet',
+        'BackOff': 'nirmal', 'Sales': 'Raju Vg', 'Sales RE': 'Raju Vg',  # Raju since 2026-10-09
         'Del Bkhp': 'bhupinder', 'Del Mayp': 'bhupinder', 'Factory': 'arvinder', 'FACT_COM': 'arvinder',
         'Interest': 'avtar', 'Med MKT': 'karanpreet', 'OTE': None, 'Transprt': 'paramdeep',
         'NPD1': 'avtar', 'NPD2': 'avtar', 'NPD3': 'avtar',

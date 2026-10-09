@@ -92,6 +92,13 @@ HEAD_REQUEST_TYPES = frozenset({'EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST'})
 #: Mart has one approver for everything: no Department Head is asked.
 NO_HEAD_COMPANIES = frozenset({'MART'})
 
+#: The plant's budget heads. A staff salary advance (Employee Advance) under
+#: one goes to the plant's fixed approver, not the Department Head — the
+#: approval matrix of 2026-10-09: up to `STAFF_ADVANCE_LIMIT`, Shunty (Oil) or
+#: Arvinder (Beverages); above it, Gurpreet Ji ("Sonu Veerji").
+FACTORY_BUDGETS = ('Factory', 'FACT_COM')
+STAFF_ADVANCE_LIMIT = 20000
+
 _LABELS = {code: label for code, label, _group in PAYMENT_PURPOSES}
 
 
@@ -105,10 +112,12 @@ def saved_label(code):
     return _LABELS.get(code) or RETIRED.get(code, '')
 
 
-def needs_department_head(company, request_type, purpose_code):
+def needs_department_head(company, request_type, purpose_code, budget_code=''):
     """Whether this request is approved by the Department Head picked on the form."""
     if company in NO_HEAD_COMPANIES:
         return False
+    if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
+        return False  # the plant's fixed approver, by amount
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES
 
 
