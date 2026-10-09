@@ -42,8 +42,8 @@ THE CREATOR may edit or cancel while no stage has approved since they last
 submitted, or while the request is RETURNED to them; after an edit of a
 returned request they resubmit, and the engine chooses the route afresh. A
 request Payment returned had passed every approval stage: resubmitted with
-the same amount, company, budget head, purpose and request type, it goes
-straight back to Payment and those approvals stand; a change to any of them
+the same amount, company, budget head, purpose, request type and Department
+Head, it goes straight back to Payment and those approvals stand; a change to any of them
 starts it from the first stage (`keeps_approvals`, decided 2026-10-09).
 
 Same shape as PRDO and BackDate: the flow row says where the request waits,
@@ -263,8 +263,9 @@ def _reroute(flow, advance, *, at_payment=False):
 # Returned after its approvals: resubmitted straight back to Payment
 # ---------------------------------------------------------------------------
 
-#: What the approval stages approved: the amount, and what chose their route
-#: (company, budget head, payment purpose, request type). Changing any of them
+#: What the approval stages approved: the amount, what chose their route
+#: (company, budget head, payment purpose, request type), and the Department
+#: Head the requester picked, who approved it. Changing any of them
 #: on a returned request sends it through the full flow again; any other
 #: correction goes straight back to Payment, the approvals standing (decided
 #: 2026-10-09). `{key in the RETURNED row's data: (its value now, the key an
@@ -275,6 +276,7 @@ APPROVED_TERMS = {
     'budget_code': (lambda a: a.budget_code or '', 'budget'),
     'purpose_code': (lambda a: a.purpose_code or '', 'purpose'),
     'request_type': (lambda a: a.request_type or '', 'request_type'),
+    'department_head': (lambda a: str(a.department_head_id or ''), 'department_head'),
 }
 
 

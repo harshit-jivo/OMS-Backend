@@ -299,7 +299,8 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
             'total_stages': flow.total_stages,
             'awaiting_me': bool(flow_service.is_actor(flow, user)),
             # Returned by Payment: resubmitting with the same amount, company,
-            # budget head, purpose and request type goes straight back to Payment.
+            # budget head, purpose, request type and Department Head goes
+            # straight back to Payment.
             'returned_after_approval': (flow.status == 'RETURNED'
                                         and flow_service.returned_after_approval(advance)),
         },
