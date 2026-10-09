@@ -51,6 +51,8 @@ class Command(BaseCommand):
 
         routes = hierarchy.routes()
         retire = [c.strip() for c in opts['retire'].split(',') if c.strip()]
+        # Workflows the hierarchy no longer has: deactivated with the rest.
+        retire += [c for c in hierarchy.retired_expense_routes() if c not in retire]
         self._plan(routes, people, retire)
         if not opts['apply']:
             self.stdout.write(self.style.WARNING('\nDry run: nothing written. Re-run with --apply.'))

@@ -18,7 +18,9 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from advance_payment import hierarchy
-from advance_payment.models import DEPARTMENT_HEAD_STAGE, StageRole, is_department_head_stage
+from advance_payment.models import (
+    DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE, StageRole, is_department_head_stage,
+)
 from advance_payment.purposes import HEAD_PURPOSES, PAYMENT_PURPOSES, needs_department_head
 from advance_payment.services import flow as flow_service
 from advance_payment.services import heads
@@ -41,7 +43,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         for code, _label, _group in PAYMENT_PURPOSES:
             with self.subTest(code):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 2 + 2 + 1)  # +Mart, Staff; Salary x3, Refund x2
+        # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -54,7 +57,7 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_STAFF_ADVANCE'):
+            if route['code'] == 'AP_MART' or route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
                 self.assertNotIn('MART', route['query'])
@@ -85,14 +88,18 @@ class WhoApproves(SimpleTestCase):
         self.assertEqual(BY_CODE['AP_STAFF_ADVANCE']['stages'],
                          [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.DIRECTOR_STAGE, 'director')])
 
-    def test_only_oil_and_import_expenses_go_to_himanshu(self):
+    def test_only_import_expenses_go_to_himanshu(self):
         himanshu = sorted(r['code'] for r in ROUTES if ('Budget Owner Approval', 'himanshu') in r['stages'])
-        self.assertEqual(himanshu, ['AP_FREIGHT_IMPORT', 'AP_OIL_PURCHASE'])
+        self.assertEqual(himanshu, ['AP_FREIGHT_IMPORT'])
+
+    def test_oil_purchase_goes_to_shunty_then_ziyaul(self):
+        self.assertEqual(BY_CODE['AP_OIL_PURCHASE']['stages'],
+                         [(hierarchy.OWNER_STAGE, 'shunty'), (hierarchy.SECOND_STAGE, 'ziyaul')])
 
     def test_the_director_follows_where_the_hierarchy_says(self):
         with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages'])
         self.assertEqual(with_director, sorted([
-            'AP_STAFF_ADVANCE', 'AP_OIL_PURCHASE', 'AP_FREIGHT_IMPORT', 'AP_FA_PM', 'AP_FA_CIVIL',
+            'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FREIGHT_IMPORT', 'AP_FA_PM', 'AP_FA_CIVIL',
             'AP_FA_OTHERS', 'AP_FA_CONSUMABLES', 'AP_CAPITAL', 'AP_UTILITIES',
             'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM']))
 
@@ -253,47 +260,60 @@ class AnHodIsMatchedToTheirLogin(SimpleTestCase):
 
 
 class ExpenseRoutes(SimpleTestCase):
-    """Expense requests: by budget head's owner (the Budget hierarchy), then Payment -> Audit."""
+    """Expense requests (2026-10-09): the budget head's owner, then the Director,
+    then Payment -> Expense Audit (Bhavani, not the payments auditor), which posts."""
 
-    def test_one_plain_and_one_electricity_route_per_head_and_one_for_mart(self):
+    def test_one_route_per_head_and_one_for_mart(self):
         heads = sum(len(h) for h in hierarchy.EXPENSE_OWNERS.values())
-        self.assertEqual(len(EXPENSE_ROUTES), heads * 2 + 1)
+        self.assertEqual(len(EXPENSE_ROUTES), heads + 1)
         codes = [r['code'] for r in ALL_ROUTES]
         self.assertEqual(len(codes), len(set(codes)))
         self.assertTrue(all(len(c) <= 60 for c in codes))
+        # The old per-electricity workflows are retired, none of them still a route.
+        retired = hierarchy.retired_expense_routes()
+        self.assertEqual(len(retired), heads)
+        self.assertFalse(set(retired) & set(codes))
+        self.assertIn('AP_EXP_OIL_FACTORY_ELEC', retired)
 
-    def test_every_expense_route_ends_payment_then_audit(self):
+    def test_every_expense_route_ends_payment_then_its_own_audit_which_posts(self):
         for route in EXPENSE_ROUTES:
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
-                self.assertEqual([r for _n, r in stages[-2:]], ['payment', 'audit'])
+                self.assertEqual(stages[-2:], [('Payment Approval', 'payment'),
+                                               (EXPENSE_AUDIT_STAGE, 'expense_audit')])
                 named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
                                             enumerate(stages, start=1)])
+                self.assertEqual(named[-1][1], StageRole.AUDIT)
                 self.assertEqual(flow_service.posting_role(named), StageRole.AUDIT)
+        self.assertEqual(hierarchy.PEOPLE['expense_audit'], 'bhavani')
+        self.assertNotEqual(hierarchy.PEOPLE['expense_audit'], hierarchy.PEOPLE['audit'])
 
     def test_who_approves_an_expense(self):
-        self.assertEqual(BY_CODE['AP_EXP_OIL_FACTORY']['stages'], [(hierarchy.OWNER_STAGE, 'factory_oil')])
-        self.assertEqual(BY_CODE['AP_EXP_BEV_FACTORY']['stages'], [(hierarchy.OWNER_STAGE, 'factory_bev')])
-        # Electricity: the owner, then the Director.
-        self.assertEqual(BY_CODE['AP_EXP_OIL_FACTORY_ELEC']['stages'],
-                         [(hierarchy.OWNER_STAGE, 'factory_oil'), (hierarchy.DIRECTOR_STAGE, 'director')])
-        # NPD: the Director always follows. R & D / OTE: the Director alone.
-        self.assertEqual(BY_CODE['AP_EXP_OIL_NPD1']['stages'],
-                         [(hierarchy.OWNER_STAGE, 'avtar'), (hierarchy.DIRECTOR_STAGE, 'director')])
-        self.assertEqual(BY_CODE['AP_EXP_OIL_R_D']['stages'], [(hierarchy.DIRECTOR_STAGE, 'director')])
+        director = (hierarchy.DIRECTOR_STAGE, 'director')
+        self.assertEqual(BY_CODE['AP_EXP_OIL_FACTORY']['stages'], [(hierarchy.OWNER_STAGE, 'factory_oil'), director])
+        self.assertEqual(BY_CODE['AP_EXP_BEV_FACTORY']['stages'], [(hierarchy.OWNER_STAGE, 'factory_bev'), director])
+        self.assertEqual(BY_CODE['AP_EXP_OIL_DEL_BKHP']['stages'], [(hierarchy.OWNER_STAGE, 'bhupinder'), director])
+        self.assertEqual(BY_CODE['AP_EXP_OIL_NPD1']['stages'], [(hierarchy.OWNER_STAGE, 'avtar'), director])
+        # R & D / OTE have no owner: the Director, once.
+        self.assertEqual(BY_CODE['AP_EXP_OIL_R_D']['stages'], [director])
+        # Mart: Prabhjot.
         self.assertEqual(BY_CODE['AP_EXP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
 
     def test_an_expense_matches_only_its_own_route(self):
         q = BY_CODE['AP_EXP_OIL_SALES_RE']['query']
-        for part in ("request_type = 'EXPENSE'", "company = 'OIL'", "budget_code = 'Sales RE'",
-                     'is_electricity = false'):
+        for part in ("request_type = 'EXPENSE'", "company = 'OIL'", "budget_code = 'Sales RE'"):
             self.assertIn(part, q)
-        self.assertIn('is_electricity = true', BY_CODE['AP_EXP_OIL_SALES_RE_ELEC']['query'])
+        self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_STAFF_ADVANCE'):
+            if route['code'] == 'AP_MART' or route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             self.assertIn('purpose_code = ', route['query'])
+
+    def test_the_expense_auditors_stage_is_an_audit_stage_by_its_own_name(self):
+        self.assertEqual(StageRole.of('Expense Audit Approval'), StageRole.AUDIT)
+        self.assertEqual(StageRole.of('expense  audit approval'), StageRole.AUDIT)
+        self.assertEqual(StageRole.of('Audit Approval'), StageRole.AUDIT)
 
     def test_a_payment_route_without_final_is_refused_but_payment_audit_is_an_expense_tail(self):
         stage = lambda n, i: SimpleNamespace(name=n, sequence=i)  # noqa: E731
@@ -305,3 +325,37 @@ class ExpenseRoutes(SimpleTestCase):
         named = flow_service.roles([stage('Payment Approval', 1), stage('Audit Approval', 2),
                                     stage('Final Approval', 3)])
         self.assertEqual(flow_service.posting_role(named), StageRole.FINAL)
+
+
+class StaffSalaryAdvance(SimpleTestCase):
+    """The approval matrix of 2026-10-09: a plant's staff salary advance goes to the
+    plant's approver up to 20,000, the Director above; elsewhere, and Imprest, as before."""
+
+    def test_the_plants_approver_up_to_the_limit_the_director_above(self):
+        self.assertEqual(BY_CODE['AP_STAFF_ADVANCE_FACTORY_OIL']['stages'], [(hierarchy.OWNER_STAGE, 'shunty')])
+        self.assertEqual(BY_CODE['AP_STAFF_ADVANCE_FACTORY_BEV']['stages'], [(hierarchy.OWNER_STAGE, 'factory_bev')])
+        self.assertEqual(hierarchy.PEOPLE['factory_bev'], 'arvinder')
+        self.assertEqual(BY_CODE['AP_STAFF_ADVANCE_FACTORY_HIGH']['stages'],
+                         [(hierarchy.DIRECTOR_STAGE, 'director')])
+        self.assertIn('amount <= 20000', BY_CODE['AP_STAFF_ADVANCE_FACTORY_OIL']['query'])
+        self.assertIn('amount > 20000', BY_CODE['AP_STAFF_ADVANCE_FACTORY_HIGH']['query'])
+        for code in ('AP_STAFF_ADVANCE_FACTORY_OIL', 'AP_STAFF_ADVANCE_FACTORY_BEV', 'AP_STAFF_ADVANCE_FACTORY_HIGH'):
+            self.assertIn("request_type = 'EMPLOYEE_ADVANCE'", BY_CODE[code]['query'])
+            self.assertIn("budget_code IN ('Factory', 'FACT_COM')", BY_CODE[code]['query'])
+
+    def test_imprest_and_advances_outside_the_plant_stay_with_the_department_head(self):
+        q = BY_CODE['AP_STAFF_ADVANCE']['query']
+        self.assertIn("(request_type = 'EMPLOYEE_IMPREST' OR budget_code NOT IN ('Factory', 'FACT_COM'))", q)
+        self.assertEqual(BY_CODE['AP_STAFF_ADVANCE']['stages'],
+                         [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.DIRECTOR_STAGE, 'director')])
+
+    def test_no_department_head_is_asked_for_a_plants_salary_advance(self):
+        self.assertFalse(needs_department_head('OIL', 'EMPLOYEE_ADVANCE', 'EMP_ADVANCE', 'Factory'))
+        self.assertFalse(needs_department_head('BEVERAGES', 'EMPLOYEE_ADVANCE', 'EMP_ADVANCE', 'FACT_COM'))
+        self.assertTrue(needs_department_head('OIL', 'EMPLOYEE_ADVANCE', 'EMP_ADVANCE', 'BackOff'))
+        self.assertTrue(needs_department_head('OIL', 'EMPLOYEE_IMPREST', 'EMP_IMPREST', 'Factory'))
+
+    def test_beverages_sales_is_rajus(self):
+        self.assertEqual(hierarchy.PEOPLE['sales_bev'], 'Raju Vg')
+        self.assertEqual(BY_CODE['AP_EXP_BEV_SALES']['stages'],
+                         [(hierarchy.OWNER_STAGE, 'sales_bev'), (hierarchy.DIRECTOR_STAGE, 'director')])

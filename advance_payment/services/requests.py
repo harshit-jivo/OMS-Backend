@@ -646,7 +646,7 @@ def _clean_department_head(company, request_type, purpose, data, problems):
     """
     from advance_payment.services import heads
 
-    if not needs_department_head(company, request_type, purpose):
+    if not needs_department_head(company, request_type, purpose, _text(data.get('budget_code'), 20)):
         return None, None
     code = _text(data.get('department_head_code'), 20)
     if not code:
