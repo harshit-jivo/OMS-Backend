@@ -45,6 +45,7 @@ returned, so a failure is recorded even though the approval does not advance.
 """
 import logging
 from dataclasses import dataclass
+from datetime import time
 from decimal import Decimal
 
 from django.db.models import Max
@@ -60,6 +61,7 @@ from advance_payment.models import (
     VoucherObject,
     VoucherStatus,
 )
+from advance_payment.services import clock
 from advance_payment.services import payout as payout_service
 from advance_payment.services import sap as sap_service
 
@@ -192,6 +194,26 @@ PAYMENT_MODE = {
 }
 
 
+#: SAP's own checks on every outgoing payment (its transaction notification),
+#: which a payment made in SAP's screens meets by hand:
+#:   4612   — "After 5:00 PM Urgency field is mandatory": U_URGENCY, whose only
+#:            value is 'H'. SAP's clock is India's, not this server's UTC.
+#:   460008 — "Pls Select the type of Advance Payment": U_Type_of_Advance.
+#:            OMS pays each request once; 'Adjustable in EMI' is a payroll
+#:            recovery OMS does not arrange (SAP's own payments use it ~1%).
+URGENT_FROM = time(17, 0)
+TYPE_OF_ADVANCE = 'One Time Settlement'
+
+
+def sap_flags(now=None):
+    """The fields SAP's checks demand of an outgoing payment made at `now`."""
+    at = (now or timezone.now()).astimezone(clock.INDIA)
+    flags = {'U_Type_of_Advance': TYPE_OF_ADVANCE}
+    if at.time() >= URGENT_FROM:
+        flags['U_URGENCY'] = 'H'
+    return flags
+
+
 def payment_mode(bank_lines):
     """The Payment Mode of a payment's bank lines: SAP has one field, so the
     method carrying the most money (the first such line on a tie)."""
@@ -228,7 +250,7 @@ def build_expense_tds_journal(advance, *, posting_date, bpl_id, memo):
             'Reference': advance.request_no, 'JournalEntryLines': lines}
 
 
-def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_trans_id=None):
+def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_trans_id=None, now=None):
     """The Service Layer `VendorPayments` body. Pure: no SAP, no database writes.
 
     With TDS: the methods pay the net, and against bills the TDS journal's
@@ -324,6 +346,7 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
     if cash:
         payload['CashAccount'] = cash[0].from_account
         payload['CashSum'] = _money(sum(l.amount for l in cash))
+    payload.update(sap_flags(now))
     return payload
 
 
@@ -421,7 +444,7 @@ def post(advance, *, user):
     if payout is None:
         return failed('There are no payment details to post.')
     try:
-        posting_date = timezone.localdate()
+        posting_date = clock.today()
         bpl_id, problem = _branch(advance)
         if problem:
             return failed(problem)

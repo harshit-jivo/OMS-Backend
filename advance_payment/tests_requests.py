@@ -323,6 +323,24 @@ class TheSapPayment(SimpleTestCase):
         return voucher_service.build_payload(advance, the_payout, posting_date=DAY, series=2601,
                                              bpl_id=1, memo='OMS AP-2026-0007/1')
 
+    def test_meets_sap_checks_4612_and_460008(self):
+        # 460008 wants the Type of Advance on every payment; 4612 wants
+        # Urgency from 5 PM — India's clock, which is 11:30 UTC.
+        evening = datetime.datetime(2026, 10, 9, 12, 23, tzinfo=datetime.timezone.utc)  # 17:53 IST
+        body = voucher_service.build_payload(
+            advance_of('EMPLOYEE_IMPREST', partner='ORGV000389'), payout(line(1, 'NEFT', '23359')),
+            posting_date=DAY, series=2602, bpl_id=1, memo='OMS AP-2026-0020/1', now=evening)
+        self.assertEqual(body['U_Type_of_Advance'], 'One Time Settlement')
+        self.assertEqual(body['U_URGENCY'], 'H')
+
+    def test_urgency_only_from_5_pm_india_time(self):
+        at = lambda h, m: datetime.datetime(2026, 10, 9, h, m, tzinfo=datetime.timezone.utc)
+        self.assertNotIn('U_URGENCY', voucher_service.sap_flags(at(11, 29)))  # 16:59 IST
+        self.assertEqual(voucher_service.sap_flags(at(11, 30))['U_URGENCY'], 'H')  # 17:00 IST
+        # 17:00 UTC is 22:30 IST; 10:00 UTC is 15:30 IST — the server's own clock is UTC.
+        self.assertNotIn('U_URGENCY', voucher_service.sap_flags(at(10, 0)))
+        self.assertEqual(voucher_service.sap_flags(at(10, 0))['U_Type_of_Advance'], 'One Time Settlement')
+
     def test_a_bill_payment_names_its_bills(self):
         body = self.build(advance_of(documents=[doc(501, '200000'), doc(502, '40000')]),
                           payout(line(1, 'NEFT', '240000')))
@@ -548,3 +566,13 @@ class TypingTheAccountByHand(SimpleTestCase):
             self.assertTrue(flow_service._from_sap(self.advance, '50100234567812', 'HDFC0001234'))
             self.assertFalse(flow_service._from_sap(self.advance, '50100234567812', 'SBIN0001234'))
             self.assertFalse(flow_service._from_sap(self.advance, '99999999999', 'HDFC0001234'))
+
+
+class IndiasClock(SimpleTestCase):
+    """'Today' is India's, not this UTC server's: 00:00-05:30 IST is still yesterday in UTC."""
+
+    def test_just_after_midnight_in_india_is_already_today(self):
+        from advance_payment.services import clock
+        just_after = datetime.datetime(2026, 10, 9, 19, 0, tzinfo=datetime.timezone.utc)  # 00:30 IST, 10 Oct
+        with mock.patch('django.utils.timezone.now', return_value=just_after):
+            self.assertEqual(clock.today(), datetime.date(2026, 10, 10))

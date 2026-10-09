@@ -37,7 +37,6 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.db import IntegrityError, transaction
-from django.utils import timezone
 
 from advance_payment.models import (
     AdvanceRequest,
@@ -54,6 +53,7 @@ from advance_payment.models import (
     ReturnMethod,
 )
 from advance_payment.purposes import needs_department_head, purpose_label
+from advance_payment.services import clock
 from core.companies import COMPANY_CODES
 
 #: The form's `NOT_IN_SAP_PREFIX`: an employee from the master with no SAP
@@ -233,7 +233,7 @@ def clean(data, *, desk=False, user=None):
 
     payment_date = _date(data.get('payment_date'))
     if payment_date is None and case.get('expense') and not _text(data.get('payment_date')):
-        payment_date = timezone.localdate()  # not asked: the day it is raised
+        payment_date = clock.today()  # not asked: the day it is raised
     if payment_date is None:
         problems.append('Enter the Payment Date.')
 
@@ -392,7 +392,7 @@ def _clean_expense(company, data, problems, *, desk=False, partner_code=''):
     month = _text(data.get('effect_month'), 20)
     asked_month = bool(month)
     if not month and not desk:
-        month = month_code(timezone.localdate())
+        month = month_code(clock.today())
     raw = data.get('expense_lines')
     if not isinstance(raw, list) or not raw:
         problems.append('Add at least one expense line.')
@@ -751,7 +751,7 @@ def create(cleaned, *, user, files=()):
     retried with the next number.
     """
     check_files(files)
-    year = timezone.localdate().year
+    year = clock.today().year
     for _attempt in range(5):
         try:
             with transaction.atomic():

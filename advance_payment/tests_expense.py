@@ -73,7 +73,7 @@ def sap_lookups(partner=VENDOR):
             mock.patch('advance_payment.services.sap.expense_months', return_value=MONTHS), \
             mock.patch('advance_payment.services.sap.tds_codes', return_value=TDS_CODES), \
             mock.patch('advance_payment.services.sap.partner', return_value=partner) as found, \
-            mock.patch('django.utils.timezone.localdate', return_value=date(2026, 10, 8)):
+            mock.patch('advance_payment.services.clock.today', return_value=date(2026, 10, 8)):
         yield found
 
 
