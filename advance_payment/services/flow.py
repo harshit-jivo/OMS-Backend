@@ -40,7 +40,11 @@ both stages are recorded.
 
 THE CREATOR may edit or cancel while no stage has approved since they last
 submitted, or while the request is RETURNED to them; after an edit of a
-returned request they resubmit, and the engine chooses the route afresh.
+returned request they resubmit, and the engine chooses the route afresh. A
+request Payment returned had passed every approval stage: resubmitted with
+the same amount, company, budget head, purpose and request type, it goes
+straight back to Payment and those approvals stand; a change to any of them
+starts it from the first stage (`keeps_approvals`, decided 2026-10-09).
 
 Same shape as PRDO and BackDate: the flow row says where the request waits,
 the log says what happened, the engine's configuration says what is ahead.
@@ -240,16 +244,83 @@ def raise_request(cleaned, *, user, files=()):
     return advance
 
 
-def _reroute(flow, advance):
-    """Choose the route afresh and start at its first stage."""
+def _reroute(flow, advance, *, at_payment=False):
+    """Choose the route afresh and start at its first stage — or, `at_payment`,
+    at its Payment stage, the approval stages before it already passed."""
     chosen, named = _select(advance)
     first, role = named[0]
+    if at_payment:
+        first, role = next(((s, r) for s, r in named if r == StageRole.PAYMENT), named[0])
     flow.workflow = chosen.workflow
     flow.matched_query = chosen.matched_query
     flow.total_stages = len(named)
     flow.status = FlowStatus.PENDING
     _point_at(flow, first, role)
     return first
+
+
+# ---------------------------------------------------------------------------
+# Returned after its approvals: resubmitted straight back to Payment
+# ---------------------------------------------------------------------------
+
+#: What the approval stages approved: the amount, and what chose their route
+#: (company, budget head, payment purpose, request type). Changing any of them
+#: on a returned request sends it through the full flow again; any other
+#: correction goes straight back to Payment, the approvals standing (decided
+#: 2026-10-09). `{key in the RETURNED row's data: (its value now, the key an
+#: EDITED row names it by)}`.
+APPROVED_TERMS = {
+    'amount': (lambda a: f'{Decimal(str(a.amount)):.2f}', 'amount'),
+    'company': (lambda a: a.company or '', 'company'),
+    'budget_code': (lambda a: a.budget_code or '', 'budget'),
+    'purpose_code': (lambda a: a.purpose_code or '', 'purpose'),
+    'request_type': (lambda a: a.request_type or '', 'request_type'),
+}
+
+
+def approved_terms(advance):
+    """The RETURNED row's data: the approved terms as they are now."""
+    return {key: read(advance) for key, (read, _edited) in APPROVED_TERMS.items()}
+
+
+def _last_return(advance):
+    return advance.logs.filter(action=LogAction.RETURNED).order_by('-id').first()
+
+
+def _after_approval(returned):
+    """Returned by Payment (or a later stage): every approval stage had approved it."""
+    return returned is not None and StageRole.of(returned.stage_name) != StageRole.APPROVAL
+
+
+def keeps_approvals(returned, advance, edits=()):
+    """Whether resubmitting `advance` skips its approval stages, straight to Payment.
+
+    Only when it was RETURNED after its approvals (`returned`, that log row)
+    and every APPROVED_TERMS is still what it was then: the row's data holds
+    them. A row from before this rule lacks them; then any edit of them since
+    (`edits`, the EDITED rows after it) counts as a change.
+    """
+    if not _after_approval(returned):
+        return False
+    data = returned.data or {}
+    if all(key in data for key in APPROVED_TERMS):
+        return approved_terms(advance) == {key: data[key] for key in APPROVED_TERMS}
+    edited = {name for _read, name in APPROVED_TERMS.values()}
+    return not any(set(row.data or {}) & edited for row in edits)
+
+
+def approvals_kept(advance):
+    """`keeps_approvals` for the request as it stands, read from its log."""
+    returned = _last_return(advance)
+    if not _after_approval(returned):
+        return False
+    edits = advance.logs.filter(action=LogAction.EDITED, id__gt=returned.id)
+    return keeps_approvals(returned, advance, edits)
+
+
+def returned_after_approval(advance):
+    """For the creator's screen: may a resubmit go straight back to Payment?"""
+    return _after_approval(_last_return(advance))
 
 
 def creator_may_change(advance, flow=None):
@@ -263,9 +334,12 @@ def creator_may_change(advance, flow=None):
         return False
     last_submit = (RequestLog.objects
                    .filter(request=advance, action__in=[LogAction.SUBMITTED, LogAction.RESUBMITTED])
-                   .order_by('-id').values_list('id', flat=True).first()) or 0
+                   .order_by('-id').first())
+    if last_submit is not None and (last_submit.data or {}).get('approvals_kept'):
+        return False  # resubmitted straight to Payment: its approvals stand
     return not RequestLog.objects.filter(
-        request=advance, action=LogAction.APPROVED, id__gt=last_submit).exists()
+        request=advance, action=LogAction.APPROVED,
+        id__gt=last_submit.id if last_submit else 0).exists()
 
 
 def _locked(advance):
@@ -326,14 +400,17 @@ def edit(advance, cleaned, *, user, files=(), remove_file_ids=(), resubmit=False
 
 
 def _resubmit(flow, advance, *, user, remarks=''):
+    kept = approvals_kept(advance)
     flow.cycle += 1
-    first = _reroute(flow, advance)
+    first = _reroute(flow, advance, at_payment=kept)
     _save(flow)
     advance.status = RequestStatus.IN_APPROVAL
     advance.save(update_fields=['status', 'updated_on'])
+    data = {'workflow': flow.workflow.code, 'waiting_at': first.name}
+    if kept:
+        data['approvals_kept'] = True
     log(advance, LogAction.RESUBMITTED, user=user, flow=flow, stage=None, remarks=remarks,
-        from_status=RequestStatus.RETURNED, to_status=RequestStatus.IN_APPROVAL,
-        data={'workflow': flow.workflow.code, 'waiting_at': first.name})
+        from_status=RequestStatus.RETURNED, to_status=RequestStatus.IN_APPROVAL, data=data)
 
 
 @transaction.atomic
@@ -534,7 +611,9 @@ def reject(advance, *, user, remarks, version=None):
 def return_to_creator(advance, *, user, remarks, version=None):
     """An approval stage or Payment: back to the creator, to edit and resubmit.
 
-    Resubmitting routes it afresh from the first stage (a new round); the
+    Resubmitting routes it afresh from the first stage (a new round) — or,
+    returned by Payment and its approved terms unchanged, straight back to
+    Payment (`keeps_approvals`: the row keeps them as they are now). The
     payment details Payment had filled stay, to be checked again there.
     """
     _remarks_required(remarks, 'returning it')
@@ -544,7 +623,8 @@ def return_to_creator(advance, *, user, remarks, version=None):
                         status=409)
     advance = flow.request
     log(advance, LogAction.RETURNED, user=user, flow=flow, remarks=remarks,
-        from_status=RequestStatus.IN_APPROVAL, to_status=RequestStatus.RETURNED)
+        from_status=RequestStatus.IN_APPROVAL, to_status=RequestStatus.RETURNED,
+        data=approved_terms(advance))
     flow.status = FlowStatus.RETURNED
     _point_at(flow, None, '')
     _save(flow)
@@ -977,9 +1057,19 @@ def stage_plan(advance):
                                    action__in=[LogAction.APPROVED, LogAction.REJECTED,
                                                LogAction.RETURNED, LogAction.SENT_BACK]):
         decided[row.stage_id] = row
+    # An approval stage approved in an earlier cycle of the same round still
+    # stands: after a send-back to Payment, or a resubmit straight to Payment.
+    # The round began at the last submit that went through the approvals.
+    submits = advance.logs.filter(action__in=[LogAction.SUBMITTED, LogAction.RESUBMITTED]).order_by('-id')
+    round_start = next((r.id for r in submits if not (r.data or {}).get('approvals_kept')), 0)
+    standing = {}
+    for row in advance.logs.filter(action=LogAction.APPROVED, stage__isnull=False, id__gt=round_start):
+        standing[row.stage_id] = row
     out = []
     for stage, role in named:
         row = decided.get(stage.id)
+        if row is None and role == StageRole.APPROVAL:
+            row = standing.get(stage.id)
         if flow.current_stage_id == stage.id and flow.status == FlowStatus.PENDING:
             state = 'CURRENT'
         elif row is not None:

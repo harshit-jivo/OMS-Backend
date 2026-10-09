@@ -265,6 +265,53 @@ class PaymentReturnsToTheCreator(SimpleTestCase):
         self.assertTrue(can['edit_payout'])
 
 
+class AResubmitAfterApproval(SimpleTestCase):
+    """Returned by Payment: the approved terms unchanged go straight back to Payment."""
+
+    def _advance(self, **changed):
+        return SimpleNamespace(**{'amount': Decimal('5000'), 'company': 'OIL', 'budget_code': 'DEL',
+                                  'purpose_code': 'FREIGHT_OUT', 'request_type': 'VENDOR', **changed})
+
+    def _returned(self, stage_name='Payment Approval', advance=None):
+        return SimpleNamespace(stage_name=stage_name,
+                               data=flow_service.approved_terms(advance or self._advance()))
+
+    def test_unchanged_terms_keep_the_approvals(self):
+        self.assertEqual(self._returned().data['amount'], '5000.00')
+        other_remarks = self._advance(amount=Decimal('5000.00'), remarks='new')
+        self.assertTrue(flow_service.keeps_approvals(self._returned(), other_remarks))
+
+    def test_a_change_to_any_term_goes_through_the_full_flow_again(self):
+        for changed in ({'amount': Decimal('5001')}, {'company': 'BEVERAGES'}, {'budget_code': 'MKT'},
+                        {'purpose_code': 'FA_CIVIL'}, {'request_type': 'EMPLOYEE_ADVANCE'}):
+            with self.subTest(changed):
+                self.assertFalse(flow_service.keeps_approvals(self._returned(), self._advance(**changed)))
+
+    def test_returned_by_an_approval_stage_starts_again(self):
+        self.assertFalse(flow_service.keeps_approvals(self._returned('HOD Approval'), self._advance()))
+        self.assertFalse(flow_service.keeps_approvals(None, self._advance()))
+
+    def test_a_return_from_before_the_rule_reads_the_edits(self):
+        returned = SimpleNamespace(stage_name='Payment Approval', data=None)
+        remarks = SimpleNamespace(data={'remarks': {'old': 'a', 'new': 'b'}})
+        self.assertTrue(flow_service.keeps_approvals(returned, self._advance(), [remarks]))
+        for key in ('amount', 'company', 'budget', 'purpose', 'request_type'):
+            with self.subTest(key):
+                edit = SimpleNamespace(data={key: {'old': 'a', 'new': 'b'}})
+                self.assertFalse(flow_service.keeps_approvals(returned, self._advance(), [remarks, edit]))
+
+    def test_the_reroute_starts_at_payment(self):
+        hod, payment = SimpleNamespace(name='HOD Approval'), SimpleNamespace(name='Payment Approval')
+        named = [(hod, StageRole.APPROVAL), (payment, StageRole.PAYMENT)]
+        chosen = SimpleNamespace(workflow=SimpleNamespace(code='AP_X'), matched_query=None)
+        flow = SimpleNamespace()
+        with mock.patch.object(flow_service, '_select', return_value=(chosen, named)), \
+                mock.patch.object(flow_service, '_point_at') as point:
+            self.assertIs(flow_service._reroute(flow, None, at_payment=True), payment)
+            point.assert_called_with(flow, payment, StageRole.PAYMENT)
+            self.assertIs(flow_service._reroute(flow, None), hod)
+
+
 class ARefundsBranch(SimpleTestCase):
     """Before posting: a refund's items must still be open, and on one branch."""
 
