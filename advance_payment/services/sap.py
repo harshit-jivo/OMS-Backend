@@ -623,9 +623,10 @@ def _doc_entry(doc_entry):
 
 #: The documents whose attachments can be listed and opened, by KIND. A GRPO
 #: is only ever reached as the base of a bill (see `related_attachments`).
-LINE_ATTACHMENT_TABLES = {'po': 'OPOR', 'bill': 'OPCH', 'grpo': 'OPDN'}
+LINE_ATTACHMENT_TABLES = {'po': 'OPOR', 'bill': 'OPCH', 'grpo': 'OPDN', 'payment': 'OVPM'}
 
-_KIND_LABEL = {'po': 'Purchase order', 'bill': 'A/P invoice', 'grpo': 'Goods receipt PO'}
+_KIND_LABEL = {'po': 'Purchase order', 'bill': 'A/P invoice', 'grpo': 'Goods receipt PO',
+               'payment': 'Outgoing payment'}
 
 #: The documents an A/P invoice was copied from. In these books a bill is
 #: always copied from GRPOs (PCH1.BaseType 20; never straight from a PO), and
@@ -684,10 +685,14 @@ def related_attachments(company, kind, doc_entry):
     taken from the caller.
     """
     kind = str(kind or '').strip().lower()
-    if kind not in ATTACHMENT_TABLES:
-        raise ValueError(f'kind must be one of: {", ".join(sorted(ATTACHMENT_TABLES))}.')
+    if kind not in LINE_ATTACHMENT_TABLES:
+        raise ValueError(f'kind must be one of: {", ".join(sorted(LINE_ATTACHMENT_TABLES))}.')
     entry = _doc_entry(doc_entry)
     found = _attachment_lines(company, kind, [entry])
+    if kind == 'grpo':
+        # A goods receipt: its own lines, then the POs it was received against.
+        pos = _run(company, _GRPO_BASE_POS_SQL.format(schema=_schema(company)), [entry], 'GRPO base POs')
+        found += _attachment_lines(company, 'po', [int(r['doc_entry']) for r in pos])
     if kind == 'bill':
         bases = _run(company, _BILL_BASES_SQL.format(schema=_schema(company)), [entry, entry],
                      'bill base documents')
@@ -927,7 +932,8 @@ def purchase_order(company, doc_entry):
 #: DocTotal is what is payable: taxable + freight + GST - TDS, rounded.
 _BILL_HEADER_SQL = '''
     SELECT "DocEntry" AS "doc_entry", "DocNum" AS "doc_num", "NumAtCard" AS "vendor_ref",
-           "DocDate" AS "doc_date", "TaxDate" AS "document_date", "DocStatus" AS "status",
+           "DocDate" AS "doc_date", "TaxDate" AS "document_date", "DocDueDate" AS "due_date",
+           "DocStatus" AS "status",
            "CANCELED" AS "cancelled", "CardCode" AS "card_code", "CardName" AS "card_name",
            IFNULL("TotalExpns", 0) AS "freight", IFNULL("DiscSum", 0) AS "discount",
            IFNULL("VatSum", 0) AS "gst", IFNULL("WTSum", 0) AS "tds", IFNULL("RoundDif", 0) AS "rounding",
@@ -971,6 +977,34 @@ _BILL_TDS_SQL = '''
 '''
 
 
+#: What a bill links to, as SAP's "Linked Documents" shows it: the goods
+#: receipts it was copied from, the POs behind them (or behind the bill
+#: itself), and the outgoing payments applied to it.
+_BILL_LINKS_SQL = '''
+    SELECT 'grpo' AS "kind", G."DocEntry" AS "doc_entry", G."DocNum" AS "doc_num",
+           G."DocDate" AS "doc_date", G."DocTotal" AS "amount"
+    FROM "{schema}"."OPDN" G
+    WHERE G."DocEntry" IN (SELECT "BaseEntry" FROM "{schema}"."PCH1"
+                           WHERE "DocEntry" = ? AND "BaseType" = 20)
+    UNION ALL
+    SELECT 'po', P."DocEntry", P."DocNum", P."DocDate", P."DocTotal"
+    FROM "{schema}"."OPOR" P
+    WHERE P."DocEntry" IN (SELECT "BaseEntry" FROM "{schema}"."PCH1"
+                           WHERE "DocEntry" = ? AND "BaseType" = 22)
+       OR P."DocEntry" IN (SELECT GL."BaseEntry" FROM "{schema}"."PCH1" L
+                           JOIN "{schema}"."PDN1" GL ON GL."DocEntry" = L."BaseEntry"
+                           WHERE L."DocEntry" = ? AND L."BaseType" = 20 AND GL."BaseType" = 22)
+    UNION ALL
+    SELECT 'payment', O."DocEntry", O."DocNum", O."DocDate", V."SumApplied"
+    FROM "{schema}"."VPM2" V
+    JOIN "{schema}"."OVPM" O ON O."DocEntry" = V."DocNum"
+    WHERE V."DocEntry" = ? AND V."InvType" = 18 AND O."Canceled" = 'N'
+    ORDER BY 1, 4
+'''
+
+_LINK_LABEL = {'grpo': 'Goods Receipt PO', 'po': 'Purchase Order', 'payment': 'Outgoing Payment'}
+
+
 def bill_breakdown(company, doc_entry):
     """One A/P invoice as SAP booked it, or None when there is no such bill.
 
@@ -988,6 +1022,7 @@ def bill_breakdown(company, doc_entry):
     lines = _run(company, _BILL_LINES_SQL.format(schema=schema), [entry], 'A/P invoice lines')
     gst = _run(company, _BILL_GST_SQL.format(schema=schema), [entry], 'A/P invoice GST')
     tds = _run(company, _BILL_TDS_SQL.format(schema=schema), [entry], 'A/P invoice TDS')
+    links = _run(company, _BILL_LINKS_SQL.format(schema=schema), [entry] * 4, 'A/P invoice links')
     taxable = sum((Decimal(str(r['taxable'] or 0)) for r in lines), Decimal('0'))
     freight, header_gst = Decimal(str(h['freight'] or 0)), Decimal(str(h['gst'] or 0))
     net, paid = Decimal(str(h['net'] or 0)), Decimal(str(h['paid'] or 0))
@@ -998,6 +1033,7 @@ def bill_breakdown(company, doc_entry):
             'vendor_ref': _s(h.get('vendor_ref')),
             'doc_date': _date(h.get('doc_date')),
             'document_date': _date(h.get('document_date')),
+            'due_date': _date(h.get('due_date')),
             'status': 'Cancelled' if _s(h.get('cancelled')) == 'Y' else (
                 'Open' if _s(h.get('status')) == 'O' else 'Closed'),
             'card_code': _s(h.get('card_code')),
@@ -1043,6 +1079,236 @@ def bill_breakdown(company, doc_entry):
             'account': _s(r.get('account')),
             'account_name': _s(r.get('account_name')),
         } for r in tds],
+        'links': [{
+            'kind': r['kind'],
+            'kind_label': _LINK_LABEL.get(r['kind'], r['kind']),
+            'doc_entry': int(r['doc_entry']),
+            'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+            'doc_date': _date(r.get('doc_date')),
+            'amount': _money(r.get('amount')),
+        } for r in links],
+    }
+
+
+# ---------------------------------------------------------------------------
+# A goods receipt PO, and an outgoing payment, as SAP holds them
+# ---------------------------------------------------------------------------
+_GRPO_BASE_POS_SQL = """
+    SELECT DISTINCT "BaseEntry" AS "doc_entry" FROM "{schema}"."PDN1"
+    WHERE "DocEntry" = ? AND "BaseType" = 22
+"""
+
+_GRPO_HEADER_SQL = """
+    SELECT H."DocEntry" AS "doc_entry", H."DocNum" AS "doc_num", H."NumAtCard" AS "vendor_ref",
+           H."DocDate" AS "doc_date", H."DocDueDate" AS "due_date", H."TaxDate" AS "document_date",
+           H."DocStatus" AS "status", H."CANCELED" AS "cancelled", H."CardCode" AS "card_code",
+           H."CardName" AS "card_name", H."BPLName" AS "branch", H."Comments" AS "remarks",
+           IFNULL(H."DiscSum", 0) AS "discount", IFNULL(H."TotalExpns", 0) AS "freight",
+           IFNULL(H."VatSum", 0) AS "tax", IFNULL(H."RoundDif", 0) AS "rounding", H."DocTotal" AS "total"
+    FROM "{schema}"."OPDN" H WHERE H."DocEntry" = ?
+"""
+
+_GRPO_LINES_SQL = """
+    SELECT L."LineNum" AS "line", L."ItemCode" AS "item_code", L."Dscription" AS "description",
+           L."Quantity" AS "quantity", L."Price" AS "price", L."LineTotal" AS "line_total",
+           L."TaxCode" AS "tax_code", IFNULL(L."VatSum", 0) AS "tax", L."WhsCode" AS "warehouse",
+           L."AcctCode" AS "account", A."AcctName" AS "account_name"
+    FROM "{schema}"."PDN1" L
+    LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = L."AcctCode"
+    WHERE L."DocEntry" = ? ORDER BY L."LineNum"
+"""
+
+#: What a goods receipt links to: the POs it received against, and the A/P
+#: invoices made from it.
+_GRPO_LINKS_SQL = """
+    SELECT 'po' AS "kind", P."DocEntry" AS "doc_entry", P."DocNum" AS "doc_num",
+           P."DocDate" AS "doc_date", P."DocTotal" AS "amount"
+    FROM "{schema}"."OPOR" P
+    WHERE P."DocEntry" IN (SELECT "BaseEntry" FROM "{schema}"."PDN1" WHERE "DocEntry" = ? AND "BaseType" = 22)
+    UNION ALL
+    SELECT 'bill', B."DocEntry", B."DocNum", B."DocDate", B."DocTotal"
+    FROM "{schema}"."OPCH" B
+    WHERE B."DocEntry" IN (SELECT "DocEntry" FROM "{schema}"."PCH1" WHERE "BaseType" = 20 AND "BaseEntry" = ?)
+      AND IFNULL(B."CANCELED", 'N') = 'N'
+    ORDER BY 1, 4
+"""
+
+_LINK_LABELS = {'po': 'Purchase Order', 'bill': 'A/P Invoice', 'grpo': 'Goods Receipt PO',
+                'payment': 'Outgoing Payment'}
+
+
+def _status(row):
+    return 'Cancelled' if _s(row.get('cancelled')) == 'Y' else (
+        'Open' if _s(row.get('status')) == 'O' else 'Closed')
+
+
+def _links(rows):
+    return [{
+        'kind': r['kind'],
+        'kind_label': _LINK_LABELS.get(r['kind'], r['kind']),
+        'doc_entry': int(r['doc_entry']),
+        'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+        'doc_date': _date(r.get('doc_date')),
+        'amount': _money(r.get('amount')),
+    } for r in rows]
+
+
+def goods_receipt(company, doc_entry):
+    """One goods receipt PO (OPDN) as SAP holds it, or None.
+
+    `{header, lines, links}`: its lines with their G/L, the POs it received
+    against and the A/P invoices made from it.
+    """
+    entry = _doc_entry(doc_entry)
+    schema = _schema(company)
+    rows = _run(company, _GRPO_HEADER_SQL.format(schema=schema), [entry], 'goods receipt')
+    if not rows:
+        return None
+    h = rows[0]
+    lines = _run(company, _GRPO_LINES_SQL.format(schema=schema), [entry], 'goods receipt lines')
+    links = _run(company, _GRPO_LINKS_SQL.format(schema=schema), [entry, entry], 'goods receipt links')
+    before = sum((Decimal(str(r['line_total'] or 0)) for r in lines), Decimal('0'))
+    return {
+        'header': {
+            'doc_entry': int(h['doc_entry']),
+            'doc_num': int(h['doc_num']) if h.get('doc_num') is not None else None,
+            'vendor_ref': _s(h.get('vendor_ref')),
+            'doc_date': _date(h.get('doc_date')),
+            'due_date': _date(h.get('due_date')),
+            'document_date': _date(h.get('document_date')),
+            'status': _status(h),
+            'card_code': _s(h.get('card_code')),
+            'card_name': _s(h.get('card_name')),
+            'branch': _s(h.get('branch')),
+            'remarks': _s(h.get('remarks')),
+            'before_discount': _money(before),
+            'discount': _money(h.get('discount')),
+            'freight': _money(h.get('freight')),
+            'tax': _money(h.get('tax')),
+            'rounding': _money(h.get('rounding')),
+            'total': _money(h.get('total')),
+        },
+        'lines': [{
+            'line': int(r['line']),
+            'item_code': _s(r.get('item_code')),
+            'description': _s(r.get('description')),
+            'quantity': _money(r.get('quantity')),
+            'price': _money(r.get('price')),
+            'line_total': _money(r.get('line_total')),
+            'tax_code': _s(r.get('tax_code')),
+            'tax': _money(r.get('tax')),
+            'warehouse': _s(r.get('warehouse')),
+            'account': _s(r.get('account')),
+            'account_name': _s(r.get('account_name')),
+        } for r in lines],
+        'links': _links(links),
+    }
+
+
+_PAYMENT_HEADER_SQL = """
+    SELECT H."DocEntry" AS "doc_entry", H."DocNum" AS "doc_num", H."DocType" AS "doc_type",
+           H."DocDate" AS "doc_date", H."DocDueDate" AS "due_date", H."TaxDate" AS "document_date",
+           H."Canceled" AS "cancelled", H."CardCode" AS "card_code", H."CardName" AS "card_name",
+           H."BPLName" AS "branch", H."Comments" AS "remarks", H."JrnlMemo" AS "journal_memo",
+           H."CounterRef" AS "reference", H."TransId" AS "trans_id",
+           H."TrsfrAcct" AS "transfer_account", TA."AcctName" AS "transfer_account_name",
+           IFNULL(H."TrsfrSum", 0) AS "transfer_sum", H."TrsfrDate" AS "transfer_date",
+           H."TrsfrRef" AS "transfer_ref",
+           H."CashAcct" AS "cash_account", CA."AcctName" AS "cash_account_name",
+           IFNULL(H."CashSum", 0) AS "cash_sum", IFNULL(H."CheckSum", 0) AS "check_sum",
+           IFNULL(H."NoDocSum", 0) AS "on_account", H."DocTotal" AS "total",
+           H."U_Pymnt_Mode" AS "payment_mode", H."U_URGENCY" AS "urgency",
+           H."U_Type_of_Advance" AS "type_of_advance", H."U_Adv_Settl_Dt" AS "settle_by"
+    FROM "{schema}"."OVPM" H
+    LEFT JOIN "{schema}"."OACT" TA ON TA."AcctCode" = H."TrsfrAcct"
+    LEFT JOIN "{schema}"."OACT" CA ON CA."AcctCode" = H."CashAcct"
+    WHERE H."DocEntry" = ?
+"""
+
+#: What a payment paid: the documents it was applied to (VPM2) — A/P invoices
+#: by their own number — and, paid to accounts, its G/L lines (VPM4).
+_PAYMENT_DOCS_SQL = """
+    SELECT V."InvType" AS "inv_type", V."DocEntry" AS "doc_entry", B."DocNum" AS "doc_num",
+           B."NumAtCard" AS "vendor_ref", V."SumApplied" AS "applied", IFNULL(V."WtAppld", 0) AS "tds"
+    FROM "{schema}"."VPM2" V
+    LEFT JOIN "{schema}"."OPCH" B ON V."InvType" = 18 AND B."DocEntry" = V."DocEntry"
+    WHERE V."DocNum" = ? ORDER BY V."InvoiceId"
+"""
+
+_PAYMENT_ACCOUNTS_SQL = """
+    SELECT A."AcctCode" AS "account", A."AcctName" AS "account_name", A."Descrip" AS "description",
+           A."SumApplied" AS "applied"
+    FROM "{schema}"."VPM4" A WHERE A."DocNum" = ? ORDER BY A."LineId"
+"""
+
+#: SAP's object type of a document a payment was applied to.
+_INV_TYPES = {18: 'A/P Invoice', 19: 'A/P Credit Memo', 30: 'Journal Entry', 204: 'A/P Down Payment',
+              13: 'A/R Invoice', 14: 'A/R Credit Memo', 24: 'Incoming Payment', 46: 'Outgoing Payment'}
+_PAID_TO = {'S': 'Vendor', 'C': 'Customer', 'A': 'Account'}
+
+
+def outgoing_payment(company, doc_entry):
+    """One outgoing payment (OVPM) as SAP holds it, or None.
+
+    `{header, documents, accounts}`: how it was paid (bank transfer, cash,
+    cheque), what it was applied to, and the fields SAP's checks demand.
+    """
+    entry = _doc_entry(doc_entry)
+    schema = _schema(company)
+    rows = _run(company, _PAYMENT_HEADER_SQL.format(schema=schema), [entry], 'outgoing payment')
+    if not rows:
+        return None
+    h = rows[0]
+    docs = _run(company, _PAYMENT_DOCS_SQL.format(schema=schema), [entry], 'outgoing payment documents')
+    accounts = _run(company, _PAYMENT_ACCOUNTS_SQL.format(schema=schema), [entry], 'outgoing payment accounts')
+    doc_type = _s(h.get('doc_type'))
+    return {
+        'header': {
+            'doc_entry': int(h['doc_entry']),
+            'doc_num': int(h['doc_num']) if h.get('doc_num') is not None else None,
+            'paid_to': _PAID_TO.get(doc_type, doc_type),
+            'doc_date': _date(h.get('doc_date')),
+            'due_date': _date(h.get('due_date')),
+            'document_date': _date(h.get('document_date')),
+            'status': 'Cancelled' if _s(h.get('cancelled')) == 'Y' else 'Posted',
+            'card_code': _s(h.get('card_code')),
+            'card_name': _s(h.get('card_name')),
+            'branch': _s(h.get('branch')),
+            'remarks': _s(h.get('remarks')),
+            'journal_memo': _s(h.get('journal_memo')),
+            'reference': _s(h.get('reference')),
+            'trans_id': int(h['trans_id']) if h.get('trans_id') is not None else None,
+            'transfer_account': _s(h.get('transfer_account')),
+            'transfer_account_name': _s(h.get('transfer_account_name')),
+            'transfer_sum': _money(h.get('transfer_sum')),
+            'transfer_date': _date(h.get('transfer_date')),
+            'transfer_ref': _s(h.get('transfer_ref')),
+            'cash_account': _s(h.get('cash_account')),
+            'cash_account_name': _s(h.get('cash_account_name')),
+            'cash_sum': _money(h.get('cash_sum')),
+            'check_sum': _money(h.get('check_sum')),
+            'on_account': _money(h.get('on_account')),
+            'total': _money(h.get('total')),
+            'payment_mode': _s(h.get('payment_mode')),
+            'urgency': _s(h.get('urgency')),
+            'type_of_advance': _s(h.get('type_of_advance')),
+            'settle_by': _date(h.get('settle_by')),
+        },
+        'documents': [{
+            'inv_type': int(r['inv_type']) if r.get('inv_type') is not None else None,
+            'kind_label': _INV_TYPES.get(int(r['inv_type'] or 0), f"Type {r['inv_type']}"),
+            'doc_entry': int(r['doc_entry']),
+            'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+            'vendor_ref': _s(r.get('vendor_ref')),
+            'applied': _money(r.get('applied')),
+            'tds': _money(r.get('tds')),
+        } for r in docs],
+        'accounts': [{
+            'account': _s(r.get('account')),
+            'account_name': _s(r.get('account_name')),
+            'description': _s(r.get('description')),
+            'applied': _money(r.get('applied')),
+        } for r in accounts],
     }
 
 

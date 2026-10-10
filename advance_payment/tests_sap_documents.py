@@ -58,7 +58,7 @@ class EveryAttachmentOfABill(SimpleTestCase):
 
     def test_refuses_a_kind_or_line_it_does_not_know(self, _run, _schema):
         with self.assertRaisesRegex(ValueError, 'kind must be one of'):
-            sap.related_attachments('OIL', 'grpo', 27276)
+            sap.related_attachments('OIL', 'order', 27276)  # a GRPO and a payment now list theirs
         with self.assertRaisesRegex(ValueError, 'kind must be one of'):
             sap.attachment_line('OIL', 'OPCH', 52169, 1)
         with self.assertRaisesRegex(ValueError, 'line must be a number'):
@@ -239,8 +239,10 @@ class OneBillsBreakdown(SimpleTestCase):
     TDS = [{'code': '94IB', 'name': '194I TDS ON RENT', 'rate': Decimal('10'), 'taxable': Decimal('375000'),
             'amount': Decimal('37500'), 'account': '2133001', 'account_name': 'TDS ON RENT 194I'}]
 
+    LINKS = [{'kind': 'grpo', 'doc_entry': 27357, 'doc_num': 2026096869, 'doc_date': None, 'amount': Decimal('885000')}]
+
     def test_taxable_gst_tds_and_net_add_up(self, _schema):
-        with mock.patch.object(sap, '_run', side_effect=[self.HEADER, self.LINES, self.GST, self.TDS]):
+        with mock.patch.object(sap, '_run', side_effect=[self.HEADER, self.LINES, self.GST, self.TDS, self.LINKS]):
             bill = sap.bill_breakdown('OIL', 188)
         h = bill['header']
         self.assertEqual((h['taxable'], h['gst'], h['gross'], h['tds'], h['net'], h['balance']),
@@ -248,7 +250,52 @@ class OneBillsBreakdown(SimpleTestCase):
         self.assertEqual((h['payable_account'], h['status']), ('2110004', 'Open'))
         self.assertEqual((bill['lines'][0]['account'], bill['lines'][0]['account_name']), ('5660002', 'RENT'))
         self.assertEqual(bill['tds'][0]['account'], '2133001')
+        self.assertEqual((bill['links'][0]['kind_label'], bill['links'][0]['doc_num']), ('Goods Receipt PO', 2026096869))
 
     def test_no_such_bill_is_none(self, _schema):
         with mock.patch.object(sap, '_run', return_value=[]):
             self.assertIsNone(sap.bill_breakdown('OIL', 1))
+
+
+
+@mock.patch.object(sap, '_schema', return_value='JIVO_OIL_HANADB')
+class GoodsReceiptAndPayment(SimpleTestCase):
+    """The two documents a bill links to that had no window: a GRPO, a payment."""
+
+    GRPO = [{'doc_entry': 27357, 'doc_num': 2026096869, 'vendor_ref': '', 'doc_date': None, 'due_date': None,
+             'document_date': None, 'status': 'C', 'cancelled': 'N', 'card_code': 'VENDA001', 'card_name': 'PIONEER',
+             'branch': 'FACTORY', 'remarks': '', 'discount': Decimal('0'), 'freight': Decimal('0'),
+             'tax': Decimal('135000'), 'rounding': Decimal('0'), 'total': Decimal('885000')}]
+    GRPO_LINES = [{'line': 0, 'item_code': 'PM01', 'description': 'PET', 'quantity': Decimal('10'),
+                   'price': Decimal('75000'), 'line_total': Decimal('750000'), 'tax_code': 'IGST@18',
+                   'tax': Decimal('135000'), 'warehouse': 'BH-FG', 'account': '5120001', 'account_name': 'PM'}]
+    GRPO_LINKS = [{'kind': 'bill', 'doc_entry': 52574, 'doc_num': 626094379, 'doc_date': None, 'amount': Decimal('884250')}]
+
+    def test_a_goods_receipt(self, _schema):
+        with mock.patch.object(sap, '_run', side_effect=[self.GRPO, self.GRPO_LINES, self.GRPO_LINKS]):
+            g = sap.goods_receipt('OIL', 27357)
+        self.assertEqual((g['header']['status'], g['header']['before_discount'], g['header']['total']),
+                         ('Closed', '750000', '885000'))
+        self.assertEqual(g['links'][0]['kind_label'], 'A/P Invoice')
+
+    def test_an_outgoing_payment(self, _schema):
+        header = [{'doc_entry': 29816, 'doc_num': 1026466646, 'doc_type': 'S', 'doc_date': None, 'due_date': None,
+                   'document_date': None, 'cancelled': 'N', 'card_code': 'VENDA001792', 'card_name': 'RAICON',
+                   'branch': 'FACTORY', 'remarks': '', 'journal_memo': '', 'reference': '', 'trans_id': 239003,
+                   'transfer_account': '1104107', 'transfer_account_name': 'ICICI', 'transfer_sum': Decimal('25000'),
+                   'transfer_date': None, 'transfer_ref': '', 'cash_account': '', 'cash_account_name': '',
+                   'cash_sum': Decimal('0'), 'check_sum': Decimal('0'), 'on_account': Decimal('0'),
+                   'total': Decimal('25000'), 'payment_mode': 'NEFT', 'urgency': 'H',
+                   'type_of_advance': 'One Time Settlement', 'settle_by': None}]
+        docs = [{'inv_type': 18, 'doc_entry': 52574, 'doc_num': 626094379, 'vendor_ref': 'INV-1',
+                 'applied': Decimal('25000'), 'tds': Decimal('0')}]
+        with mock.patch.object(sap, '_run', side_effect=[header, docs, []]):
+            p = sap.outgoing_payment('OIL', 29816)
+        self.assertEqual((p['header']['paid_to'], p['header']['status'], p['header']['payment_mode']),
+                         ('Vendor', 'Posted', 'NEFT'))
+        self.assertEqual((p['documents'][0]['kind_label'], p['documents'][0]['doc_num']), ('A/P Invoice', 626094379))
+
+    def test_neither_is_none(self, _schema):
+        with mock.patch.object(sap, '_run', return_value=[]):
+            self.assertIsNone(sap.goods_receipt('OIL', 1))
+            self.assertIsNone(sap.outgoing_payment('OIL', 1))

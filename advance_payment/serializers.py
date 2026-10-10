@@ -314,8 +314,18 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         },
         'can': can,
     }
-    live = [v for v in advance.vouchers.all() if v.status == 'POSTED' and v.replaced_by_id is None]
+    vouchers = list(advance.vouchers.all())
+    live = [v for v in vouchers if v.status == 'POSTED' and v.replaced_by_id is None]
     out['voucher'] = voucher_data(live[-1]) if live else None
+    # Refused by SAP and not posted since: shown on the desk until the posting
+    # stage clears the cause and posts again (approving again retries; the
+    # journal memo keeps a payment SAP already took from being paid twice).
+    last = max(vouchers, key=lambda v: v.version) if vouchers else None
+    out['sap_failure'] = ({
+        'error': last.error,
+        'at': _iso(last.posted_on),
+        'attempts': sum(1 for v in vouchers if v.status == 'FAILED'),
+    } if not live and last is not None and last.status == 'FAILED' else None)
     # The last word from an approver who returned, sent back or rejected it:
     # what the creator (or Payment) must act on.
     last = (advance.logs.filter(action__in=['RETURNED', 'SENT_BACK', 'REJECTED'])

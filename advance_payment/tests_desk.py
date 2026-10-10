@@ -209,3 +209,24 @@ class ViewAllReadsEveryRequest(WhoOpensARequest):
 
     def test_the_desk_key_alone_does_not_list_everything(self):
         self.assertEqual(self.all_requests(self.me).status_code, 403)
+
+
+class RefusedBySapShows(DeskFixture):
+    """A request SAP refused says so on the desk until it is posted."""
+
+    def post(self, advance, status, version, error=''):
+        from advance_payment.models import SapVoucher, VoucherObject
+        SapVoucher.objects.create(request=advance, version=version, sap_object=VoucherObject.OUTGOING_PAYMENT,
+                                  status=status, error=error, posted_by=self.me)
+
+    def test_the_last_refusal_and_how_many_until_posted(self):
+        from advance_payment.models import VoucherStatus
+        advance = self.request(at=self.my_stage)
+        self.post(advance, VoucherStatus.FAILED, 1, 'SAP refused the payment: (4612) urgency')
+        self.post(advance, VoucherStatus.FAILED, 2, "SAP refused the payment: 1320000257 - branch 'DELHI ISD'")
+        failure = self.desk()[advance.pk]['sap_failure']
+        self.assertEqual(failure['attempts'], 2)
+        self.assertIn('DELHI ISD', failure['error'])
+
+        self.post(advance, VoucherStatus.POSTED, 3)
+        self.assertIsNone(self.desk()[advance.pk]['sap_failure'])

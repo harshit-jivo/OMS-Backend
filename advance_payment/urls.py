@@ -11,6 +11,8 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /document-attachments/  ?company=&kind=po|bill&doc_entry=  (every related SAP attachment, a list)
   GET /purchase-order/        ?company=&doc_entry=                (one PO in full: header, lines, follow-on)
   GET /bill-breakdown/        ?company=&doc_entry=                (one A/P invoice: taxable, GST, TDS, net, G/L)
+  GET /goods-receipt/         ?company=&doc_entry=                (one GRPO: header, lines, links)
+  GET /outgoing-payment/      ?company=&doc_entry=                (one payment: how paid, what it paid)
   GET /document-history/      ?company=&kind=po|bill|ledger&doc_entry=[&line=]  (OMS's payments against it)
   GET /tds-options/           ?company=&card_code=&bills=     (TDS the Payment desk may deduct)
   GET /assignment-recipients/                                  (who bills / POs may be sent to)
@@ -79,6 +81,10 @@ urlpatterns = [
          name='advance-payment-purchase-order'),
     path('bill-breakdown/', views.BillBreakdownView.as_view(),
          name='advance-payment-bill-breakdown'),
+    path('goods-receipt/', views.GoodsReceiptView.as_view(),
+         name='advance-payment-goods-receipt'),
+    path('outgoing-payment/', views.OutgoingPaymentView.as_view(),
+         name='advance-payment-outgoing-payment'),
     path('document-history/', views.DocumentHistoryView.as_view(),
          name='advance-payment-document-history'),
     path('tds-options/', views.TdsOptionsView.as_view(),

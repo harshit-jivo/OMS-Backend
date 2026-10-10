@@ -893,6 +893,52 @@ class BillBreakdownView(_Lookup):
         return ok({'company': company, **bill})
 
 
+class _OneSapDocument(_Lookup):
+    """GET ?company=&doc_entry= — one SAP document in full, or 404."""
+
+    #: `sap_service` function reading it, and what it is called when absent.
+    reader = None
+    missing = 'SAP has no such document.'
+
+    def get(self, request):
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            found = getattr(sap_service, self.reader)(company, request.query_params.get('doc_entry'))
+        except ValueError as exc:
+            return fail(str(exc), status=http_status.HTTP_400_BAD_REQUEST)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        if found is None:
+            return fail(self.missing, status=http_status.HTTP_404_NOT_FOUND)
+        return ok({'company': company, **found})
+
+
+class GoodsReceiptView(_OneSapDocument):
+    """GET /api/advance-payments/goods-receipt/?company=&doc_entry=
+
+    One goods receipt PO as SAP holds it: `{header, lines, links}` (see
+    `sap.goods_receipt`). Opened from a bill's or a PO's linked documents.
+    """
+
+    resource = 'goods receipt'
+    reader = 'goods_receipt'
+    missing = 'SAP has no such goods receipt.'
+
+
+class OutgoingPaymentView(_OneSapDocument):
+    """GET /api/advance-payments/outgoing-payment/?company=&doc_entry=
+
+    One outgoing payment as SAP holds it: `{header, documents, accounts}` (see
+    `sap.outgoing_payment`). Opened from a bill's linked documents.
+    """
+
+    resource = 'outgoing payment'
+    reader = 'outgoing_payment'
+    missing = 'SAP has no such outgoing payment.'
+
+
 class DocumentAttachmentView(_Lookup):
     """GET /api/advance-payments/document-attachment/?company=&kind=po|bill|grpo&doc_entry=[&line=]
 
