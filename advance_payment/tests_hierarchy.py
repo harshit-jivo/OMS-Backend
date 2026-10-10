@@ -254,6 +254,11 @@ class AnHodIsMatchedToTheirLogin(SimpleTestCase):
         shunty = SimpleNamespace(employee_code='JWPL0035', employee_name='Shunty Veerji Accounts', email='')
         self.assertIsNone(self.match(shunty))                             # the word alone is not him
 
+    def test_gagan_vg_is_the_approver_login_not_gagan_adv(self):
+        gagan_vg = SimpleNamespace(employee_code='JWPL0018', employee_name='Gagan Vg', email='')
+        live = [user(45, 'gagan', 'Gagan'), user(132, 'gagan adv', 'Gagan')]  # a tie by name on live
+        self.assertEqual(heads.match_user(gagan_vg, live).username, 'gagan')
+
     def test_a_tie_is_no_match(self):
         twins = [user(1, 'amit.k', 'Amit Kumar'), user(2, 'amit.s', 'Amit Sharma')]
         self.assertIsNone(heads.match_user(hod('Amit'), twins))
