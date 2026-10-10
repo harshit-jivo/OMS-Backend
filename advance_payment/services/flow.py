@@ -728,6 +728,15 @@ def _digits(value):
     return ''.join(ch for ch in str(value or '') if ch.isdigit())
 
 
+def _account_key(value):
+    """An account number to compare: its letters and digits, spaces and dashes dropped.
+
+    Not digits alone: SAP may hold a bank's special account ("DIL957"), and
+    on digits a typed "957" would pass for it.
+    """
+    return ''.join(ch for ch in str(value or '').upper() if ch.isalnum())
+
+
 def _from_sap(advance, account, ifsc):
     """Is (account, IFSC) one of the payee's own SAP accounts?
 
@@ -742,7 +751,7 @@ def _from_sap(advance, account, ifsc):
     except (sap_service.SapUnavailable, sap_service.UnknownCompany):
         return False
     for row in rows:
-        if _digits(row.get('account_number')) == account:
+        if _account_key(row.get('account_number')) == account:
             sap_ifsc = (row.get('ifsc') or '').upper()
             return not sap_ifsc or sap_ifsc == ifsc
     return False
@@ -759,10 +768,10 @@ def save_payout(advance, data, *, user, version=None):
         raise FlowError('The payment details are filled in at the Payment stage.', status=409)
     advance = flow.request
     data = dict(data or {})
-    account = _digits(data.get('to_account_number'))
+    account = _account_key(data.get('to_account_number'))
     ifsc = str(data.get('to_ifsc') or '').strip().upper()
     stored = Payout.objects.filter(request=advance).first()
-    unchanged = (stored is not None and _digits(stored.to_account_number) == account
+    unchanged = (stored is not None and _account_key(stored.to_account_number) == account
                  and (stored.to_ifsc or '').upper() == ifsc)
     manual = bool(account) and not _from_sap(advance, account, ifsc)
     if manual and not unchanged and not _token_ok(data.get('manual_token'), advance, user):

@@ -346,7 +346,7 @@ def history(company, kind, doc_entry, line=0):
             'open_amount': str(d.open_amount),
             'original_amount': str(d.original_amount),
             'raised_on': advance.created_on.isoformat() if advance.created_on else None,
-            'raised_by': (user.get_full_name() or user.get_username()) if user else '',
+            'raised_by': ((getattr(user, 'name', '') or '').strip() or user.get_username()) if user else '',
             'sap_payment': voucher.sap_doc_num if voucher else None,
             # A PO advance: how much SAP still holds on account (not yet set off against a bill).
             'unadjusted': str(still[d.pk]) if d.pk in still else None,

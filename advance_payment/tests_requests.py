@@ -258,7 +258,8 @@ def line(pk, method, amount, account='1104107', **extra):
 
 def payout(*lines, **extra):
     values = dict(beneficiary_name='GODAMWALE TRADING', to_account_number='50200057911744',
-                  to_ifsc='HDFC0001452', tds_code='', tds_rate=None, tds_account='', tds_amount=Decimal('0'))
+                  to_ifsc='HDFC0001452', to_account_manual=False, tds_code='', tds_rate=None, tds_account='',
+                  tds_amount=Decimal('0'))
     values.update(extra)
     row = SimpleNamespace(**values)
     row.lines = mock.Mock()
@@ -621,3 +622,26 @@ class IndiasClock(SimpleTestCase):
         just_after = datetime.datetime(2026, 10, 9, 19, 0, tzinfo=datetime.timezone.utc)  # 00:30 IST, 10 Oct
         with mock.patch('django.utils.timezone.now', return_value=just_after):
             self.assertEqual(clock.today(), datetime.date(2026, 10, 10))
+
+
+class ASpecialSapAccount(SimpleTestCase):
+    """AP-2026-0054: SAP holds "DIL957" for DIL EXIM — a bank's special account."""
+
+    def test_from_sap_it_is_trusted(self):
+        sap = payout(line(1, 'RTGS', '240000'), to_account_number='DIL957', to_account_manual=False)
+        self.assertEqual(payout_problems('240000', sap), [])
+
+    def test_typed_by_hand_it_must_still_be_digits(self):
+        typed = payout(line(1, 'RTGS', '240000'), to_account_number='DIL957', to_account_manual=True)
+        self.assertIn('To Account Number must be 9 to 18 digits.', payout_problems('240000', typed))
+
+    def test_a_typed_number_does_not_pass_for_it_on_its_digits(self):
+        rows = ([{'account_number': 'DIL957', 'ifsc': 'HDFC0000378'}], 'DIL957')
+        advance = SimpleNamespace(request_type='VENDOR', partner_code='VENDA000279', company='OIL')
+        with mock.patch.object(flow_service.sap_service, 'partner_bank_accounts', return_value=rows):
+            self.assertTrue(flow_service._from_sap(advance, flow_service._account_key('DIL957'), 'HDFC0000378'))
+            self.assertFalse(flow_service._from_sap(advance, flow_service._account_key('957'), 'HDFC0000378'))
+            # Spaces and dashes in SAP's record are still the same account.
+            spaced = ([{'account_number': '0258 105-0033', 'ifsc': 'HDFC0000378'}], '')
+            with mock.patch.object(flow_service.sap_service, 'partner_bank_accounts', return_value=spaced):
+                self.assertTrue(flow_service._from_sap(advance, '02581050033', 'HDFC0000378'))

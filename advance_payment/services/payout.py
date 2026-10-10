@@ -44,6 +44,11 @@ NOTE_DENOMINATIONS = {10, 20, 50, 100, 200, 500}
 
 _IFSC = re.compile(r'^[A-Z]{4}0[A-Z0-9]{6}$')
 _ACCOUNT = re.compile(r'^\d{9,18}$')
+#: An account the payee's SAP master holds: trusted as Finance set it up, so
+#: any 3-34 letters and digits (NEFT/RTGS take alphanumeric accounts) — a
+#: bank's special or virtual account ("DIL957") included. Typed by hand, an
+#: account must still be 9-18 digits: that is where the typos are.
+_SAP_ACCOUNT = re.compile(r'^[A-Za-z0-9]{3,34}$')
 _UTR = re.compile(r'^[A-Z0-9]{8,30}$')
 
 
@@ -293,8 +298,11 @@ def problems(advance):
     if not payout.beneficiary_name.strip():
         out.append('Enter the Beneficiary Name.')
     if any(l.method != PayoutMethod.CASH for l in lines):
-        if not _ACCOUNT.match(payout.to_account_number or ''):
+        number = payout.to_account_number or ''
+        if payout.to_account_manual and not _ACCOUNT.match(number):
             out.append('To Account Number must be 9 to 18 digits.')
+        elif not payout.to_account_manual and not _SAP_ACCOUNT.match(number):
+            out.append("To Account Number must be the payee's SAP account: 3 to 34 letters and digits.")
         if not _IFSC.match((payout.to_ifsc or '').upper()):
             out.append('IFSC must look like HDFC0001234.')
     if not lines:
