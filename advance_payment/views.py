@@ -1148,7 +1148,8 @@ class OpenInvoicesView(_Lookup):
 # Payment requests
 # ---------------------------------------------------------------------------
 #
-#   GET  /requests/?scope=mine|desk          the requester's, or the desk's
+#   GET  /requests/?scope=mine|desk|all      the requester's, the desk's, or every one
+#                                            (`all`: Advance_Payment_View_All, read only)
 #   POST /requests/                          raise (multipart: data=JSON, files)
 #   GET  /requests/<id>/                     one, with its history and route
 #   POST /requests/<id>/edit/                the creator's edit (multipart, as create,
@@ -1212,8 +1213,11 @@ class _RequestView(APIView):
         return [IsAuthenticated()]
 
     def _may_read(self, user, advance):
-        """Your own; or, with the desk key, what is or was yours to act on. Admins: any."""
-        if advance.created_by_id == user.pk or is_admin(user):
+        """Your own; or, with the desk key, what is or was yours to act on.
+
+        Admins and holders of `Advance_Payment_View_All`: any — to read only.
+        """
+        if advance.created_by_id == user.pk or is_admin(user) or ap_perms.reads_all_requests(user):
             return True
         return (APPROVAL_KEY in effective_keys(user)
                 and advance.pk in flow_service.readable_request_ids(user))
@@ -1241,6 +1245,11 @@ class RequestListView(_RequestView):
             # Only what is theirs to act on; administrators see every request.
             if not is_admin(request.user):
                 qs = qs.filter(pk__in=flow_service.desk_request_ids(request.user))
+        elif scope == 'all':
+            # Every request, to follow it; read only.
+            if not (ap_perms.reads_all_requests(request.user) or is_admin(request.user)):
+                return fail('You do not have the Payments — view all requests permission.',
+                            status=http_status.HTTP_403_FORBIDDEN)
         else:
             if ap_perms.VIEW_KEY not in keys:
                 return fail('You do not have the Payments permission.',

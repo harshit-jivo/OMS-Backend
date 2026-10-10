@@ -43,3 +43,12 @@ class CanDispatch(HasKey):
 
 #: The approval desk. Acting also needs being the current stage's user.
 APPROVAL_KEY = 'Advance_Payment_Approval'
+
+#: Read every request, whoever raised it and wherever it waits — a supervisor
+#: of the desks. Confers no action: editing is the creator's, deciding the
+#: current stage user's, and `flow` enforces both.
+VIEW_ALL_KEY = 'Advance_Payment_View_All'
+
+
+def reads_all_requests(user):
+    return VIEW_ALL_KEY in effective_keys(user)

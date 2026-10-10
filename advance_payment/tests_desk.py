@@ -178,3 +178,26 @@ class WhoOpensARequest(DeskFixture):
         requester = make_user('ap-other-requester', extra_pages=['Advance_Payment'])
         self.assertEqual(self.detail(requester, advance).status_code, 404)
         self.assertEqual(self.detail(self.creator, advance).status_code, 200)
+
+
+class ViewAllReadsEveryRequest(WhoOpensARequest):
+    """`Advance_Payment_View_All`: a supervisor follows every request, read only."""
+
+    def all_requests(self, user):
+        request = APIRequestFactory().get('/advance-payments/requests/', {'scope': 'all'})
+        force_authenticate(request, user=user)
+        return views.RequestListView.as_view()(request)
+
+    def test_lists_and_opens_a_request_waiting_on_someone_else(self):
+        theirs = self.request(at=self.their_stage)
+        supervisor = make_user('ap-supervisor', extra_pages=[DESK_KEY, 'Advance_Payment_View_All'])
+        listed = self.all_requests(supervisor)
+        self.assertEqual(listed.status_code, 200, listed.data)
+        self.assertIn(theirs.pk, [row['id'] for row in listed.data['data']['results']])
+        opened = self.detail(supervisor, theirs)
+        self.assertEqual(opened.status_code, 200)
+        can = opened.data['data']['can']
+        self.assertFalse(any(can.get(k) for k in ('approve', 'reject', 'edit', 'cancel')), can)
+
+    def test_the_desk_key_alone_does_not_list_everything(self):
+        self.assertEqual(self.all_requests(self.me).status_code, 403)
