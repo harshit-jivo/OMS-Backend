@@ -108,7 +108,9 @@ def send(*, company, recipient_id, documents, note, user):
                 made.append(DocumentAssignment.objects.create(
                     company=company, kind=kind, sap_doc_entry=entry, sap_doc_num=str(facts['doc_num'] or entry),
                     card_code=facts['card_code'], card_name=facts['card_name'], vendor_ref=facts['vendor_ref'],
-                    doc_date=facts['doc_date'] or None, due_date=facts['due_date'] or None,
+                    # The date ON the document (SAP's Document Date), as the bill / PO lists show it.
+                    doc_date=facts.get('document_date') or facts['doc_date'] or None,
+                    due_date=facts['due_date'] or None,
                     doc_total=facts['doc_total'], open_amount=facts['open'],
                     note=str(note or '').strip()[:2000], assigned_to=recipient, assigned_by=user))
     except IntegrityError as exc:

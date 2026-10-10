@@ -250,6 +250,7 @@ _OPEN_PO_SQL = '''
         T0."CardName"   AS "card_name",
         T0."NumAtCard"  AS "vendor_ref",
         T0."DocDate"    AS "doc_date",
+        T0."TaxDate"    AS "document_date",
         T0."DocDueDate" AS "due_date",
         T0."DocCur"     AS "currency",
         T0."DocTotal"   AS "doc_total",
@@ -322,6 +323,8 @@ def open_purchase_orders(company, card_code=None, search=None, limit=None, from_
         'card_name': _s(r.get('card_name')),
         'vendor_ref': _s(r.get('vendor_ref')),
         'doc_date': _date(r.get('doc_date')),
+        # The date ON the document (SAP's Document Date), beside its posting date.
+        'document_date': _date(r.get('document_date')),
         'due_date': _date(r.get('due_date')),
         'currency': _s(r.get('currency')),
         # All three tax-inclusive, as SAP prints the order, so they add up:
@@ -401,6 +404,7 @@ _OPEN_INVOICE_SQL = '''
         "CardName"   AS "card_name",
         "NumAtCard"  AS "party_ref",
         "DocDate"    AS "doc_date",
+        "TaxDate"    AS "document_date",
         "DocDueDate" AS "due_date",
         "DocCur"     AS "currency",
         "DocTotal"   AS "doc_total",
@@ -468,6 +472,8 @@ def open_invoices(company, party_type='vendor', card_code=None, search=None,
         'card_name': _s(r.get('card_name')),
         'party_ref': _s(r.get('party_ref')),
         'doc_date': _date(r.get('doc_date')),
+        # The date ON the bill (SAP's Document Date: the vendor's invoice date).
+        'document_date': _date(r.get('document_date')),
         'due_date': _date(r.get('due_date')),
         'currency': _s(r.get('currency')),
         'doc_total': _money(r.get('doc_total')),
@@ -1864,8 +1870,8 @@ _LIVE_DOCUMENTS_SQL = '''
            "DocTotal" - IFNULL("PaidToDate", 0) AS "open_amount",
            "DocStatus" AS "doc_status", "CANCELED" AS "cancelled",
            "CardCode" AS "card_code", "CardName" AS "card_name", "NumAtCard" AS "vendor_ref",
-           "DocDate" AS "doc_date", "DocDueDate" AS "due_date", "DocTotal" AS "doc_total",
-           "CreateDate" AS "created_on"
+           "DocDate" AS "doc_date", "TaxDate" AS "document_date", "DocDueDate" AS "due_date",
+           "DocTotal" AS "doc_total", "CreateDate" AS "created_on"
     FROM "{schema}"."{table}"
     WHERE "DocEntry" IN ({marks})
 '''
@@ -1891,6 +1897,7 @@ def live_documents(company, kind, doc_entries):
             'doc_num': r.get('doc_num'), 'open': _money(r.get('open_amount')), 'status': status,
             'card_code': _s(r.get('card_code')), 'card_name': _s(r.get('card_name')),
             'vendor_ref': _s(r.get('vendor_ref')), 'doc_date': _date(r.get('doc_date')),
+            'document_date': _date(r.get('document_date')),
             'due_date': _date(r.get('due_date')), 'doc_total': _money(r.get('doc_total')),
             'created_on': _date(r.get('created_on')),
         }
