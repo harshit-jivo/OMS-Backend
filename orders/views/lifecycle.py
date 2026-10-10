@@ -69,11 +69,74 @@ from orders.services.order_status import (
     apply_order_status_transition,
 )
 from ._shared import (
+    BILLING_ACTIVE_CODES,
     MART_STATUS_PENDING_ID,
     _mart_approver_user,
     _mart_status,
 )
 BILLING_RESOLVED_CODES = ['BILLING_REJECTED', 'COMPLETED']
+
+#: Statuses after which an order is closed: editing would send an order that
+#: may already have a sales order in SAP back through the flow.
+CLOSED_STATUS_CODES = ('COMPLETED', 'SO_CANCELLED')
+
+
+def _edit_locked_error(order):
+    """Why `order` can no longer be edited, or None."""
+    code = (getattr(order.status, 'code', '') or '').upper()
+    if order.sap_created or code in CLOSED_STATUS_CODES:
+        status_name = order.status.name if order.status else 'closed'
+        return (f'Order {order.order_number} is {status_name} and its sales '
+                f'order has been created, so it can no longer be edited.')
+    return None
+
+
+_DISTRIBUTOR_SWITCH_ERROR = ('An edit cannot move an order into or out of the '
+                             'distributor (Mart) flow.')
+
+
+def _switches_distributor_flow(order, new_order_type):
+    """True when an edit would change which flow the order is in. The edit
+    path trusts `order_type` from the request, so without this a party order
+    could be re-labelled DISTRIBUTOR and leave the billing/auditor flow."""
+    return (order.order_type == 'DISTRIBUTOR') != (new_order_type == 'DISTRIBUTOR')
+
+
+def _enter_rate_approval(order, next_status):
+    """Prepare an order that is (re)entering Rate Approval, or refuse it.
+
+    Every assigned approver decides afresh — decisions from an earlier round
+    must not carry over an edited order. And someone must be assigned: with no
+    matching approver rule the order would sit in Rate Approval forever (eight
+    live orders did), so the submission is refused and rolled back instead.
+    Returns an error Response, or None to carry on.
+    """
+    if (getattr(next_status, 'code', '') or '').upper() != 'RATE_APPROVAL':
+        return None
+    OrderRateApproval.objects.filter(order=order).update(
+        status="PENDING", approved_at=None, remarks="")
+    if OrderRateApproval.objects.filter(order=order).exists():
+        return None
+    transaction.set_rollback(True)
+    return Response(
+        {'error': 'These rates need rate approval, but no rate approver is set '
+                  'up for these items. Ask an administrator to add a rate '
+                  'approver rule, or correct the rates.'},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _is_billing_review_edit(editor_role, previous_status):
+    """A billing user editing an order that is at the billing desk — the edit
+    is their review, so it goes straight on to the auditor. Any other edit by
+    a billing user (their own order after a rejection, or one still in rate
+    approval) is a resubmission and goes through the normal flow, rate check
+    included."""
+    return (
+        editor_role == "billing"
+        and previous_status is not None
+        and (previous_status.code or "").upper() in BILLING_ACTIVE_CODES
+    )
 
 # ---------------------------------------------------------------------------
 # Endpoint gates (Phase 3: registry keys, with a transitional role fallback).
@@ -348,6 +411,7 @@ class UpdateOrderView(APIView):
         return [IsAuthenticated(),
                 HasKeyOrRole('orders.sales.edit', *ORDER_CREATOR_ROLES, 'auditor')]
 
+    @transaction.atomic
     def put(self, request, order_id):
         def _to_float(value, default=0.0):
             try:
@@ -366,7 +430,12 @@ class UpdateOrderView(APIView):
                 return False
             return bool(value)
 
-        order = get_object_or_404(Order, id=order_id)
+        # Locked like a status transition: an edit replaces every item, and an
+        # approval or SAP push must not read the order halfway through that.
+        order = get_object_or_404(Order.objects.select_for_update(), id=order_id)
+        locked = _edit_locked_error(order)
+        if locked:
+            return Response({'error': locked}, status=status.HTTP_409_CONFLICT)
         previous_status = order.status
         order_flow_type = _get_order_flow_type_for_order(order)
 
@@ -376,6 +445,8 @@ class UpdateOrderView(APIView):
 
         data = serializer.validated_data
         order_type = _normalize_order_type(request.data.get('order_type', order.order_type))
+        if _switches_distributor_flow(order, order_type):
+            return Response({'error': _DISTRIBUTOR_SWITCH_ERROR}, status=status.HTTP_400_BAD_REQUEST)
         employee_id = str(data.get('employee_id') or order.employee_id or '').strip()
         items = data.pop('items', [])
         order_remarks = request.data.get('remarks', data.get('remarks', ''))
@@ -452,7 +523,7 @@ class UpdateOrderView(APIView):
             }, status=status.HTTP_200_OK)
 
         editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
-        is_billing_editor = editor_role == "billing"
+        is_billing_editor = _is_billing_review_edit(editor_role, previous_status)
         order_flow_type = _get_order_flow_type_for_order(order)
 
         if is_billing_editor:
@@ -467,6 +538,10 @@ class UpdateOrderView(APIView):
                 config=_get_party_flow_config(order.card_code, order_flow_type, _get_order_primary_category(items)),
                 requires_rate_approval=needs_approval,
             )
+        assign_rate_approvers(order)
+        refused = _enter_rate_approval(order, next_status)
+        if refused:
+            return refused
         if next_status:
             order.status = next_status
 
@@ -539,6 +614,7 @@ class CreateOrderView(APIView):
         return [IsAuthenticated(),
                 HasKeyOrRole('orders.sales.create', *ORDER_CREATOR_ROLES)]
 
+    @transaction.atomic
     def post(self, request):
         def _to_float(value, default=0.0):
             try:
@@ -568,13 +644,18 @@ class CreateOrderView(APIView):
         order_id = request.data.get('order_id')
         user = request.user if request.user.is_authenticated else None
         if order_id:
-            order = get_object_or_404(Order, id=int(order_id))
+            order = get_object_or_404(Order.objects.select_for_update(), id=int(order_id))
+            locked = _edit_locked_error(order)
+            if locked:
+                return Response({'error': locked}, status=status.HTTP_409_CONFLICT)
             previous_status = order.status
             serializer = CreateOrderSerializer(data=request.data)
             if not serializer.is_valid():
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             data = serializer.validated_data
             order_type = _normalize_order_type(request.data.get('order_type', order.order_type))
+            if _switches_distributor_flow(order, order_type):
+                return Response({'error': _DISTRIBUTOR_SWITCH_ERROR}, status=status.HTTP_400_BAD_REQUEST)
             employee_id = str(data.get('employee_id') or order.employee_id or '').strip()
             items = data.pop('items', [])
             order_remarks = request.data.get('remarks', data.get('remarks', ''))
@@ -651,7 +732,7 @@ class CreateOrderView(APIView):
                 }, status=status.HTTP_200_OK)
 
             editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
-            is_billing_editor = editor_role == "billing"
+            is_billing_editor = _is_billing_review_edit(editor_role, previous_status)
             order_flow_type = _get_order_flow_type_for_order(order)
 
             if is_billing_editor:
@@ -667,17 +748,9 @@ class CreateOrderView(APIView):
                     requires_rate_approval=needs_approval,
                 )
 
-            # If the edit sends the order back into Rate Approval, a fresh approval
-            # round begins (a new pending rate-approval log is created below), so any
-            # prior approver decisions must be cleared back to PENDING. Otherwise the
-            # edit bypasses rate approval and existing decisions are preserved by
-            # assign_rate_approvers().
-            if next_status and (next_status.name or "").strip().lower() == "rate approval":
-                OrderRateApproval.objects.filter(order=order).update(
-                    status="PENDING",
-                    approved_at=None,
-                    remarks="",
-                )
+            refused = _enter_rate_approval(order, next_status)
+            if refused:
+                return refused
             if next_status:
                 order.status = next_status
             order.save()
@@ -830,6 +903,9 @@ class CreateOrderView(APIView):
             config=party_flow_config,
             requires_rate_approval=needs_approval,
         )
+        refused = _enter_rate_approval(order, next_status)
+        if refused:
+            return refused
         if next_status:
             order.status = next_status
             order.save()
@@ -1014,16 +1090,27 @@ class CreateOrderView(APIView):
             description='No order with this id, or no order status with the '
                         'posted `status` id.',
         ),
+        409: OpenApiResponse(
+            response=ORDER_STATUS_UPDATE_OK,
+            description='Nothing changed: the order is not at a stage this '
+                        'user\'s desk acts on (rejected, completed, or already '
+                        'moved on to another desk), the posted status is not '
+                        'this stage\'s approve or a rejection, or completion '
+                        'was asked for before the SAP sales order exists. '
+                        '`status` is the order\'s unchanged status name.',
+        ),
     },
-    description='Advance or reject one order. The body is `{status: <status '
-                'id>, reason?: <text>}`.\n\n'
+    description='Approve or reject one order at its current desk. The body is '
+                '`{status: <status id>, reason?: <text>}`, where `status` is '
+                'the desk\'s approve status (Rate Approval: Approved; Billing: '
+                'Auditor Approval; Auditor: Completed) or a rejection status.\n\n'
                 'The response body is built by '
-                '`orders.services.order_status.apply_order_status_transition`, '
-                'not by this view, and that function has nine return points. '
-                'The posted `status` id is also NOT always the status the '
-                'order ends up in: the flow configuration can override it, and '
-                'the multi-approver branch rolls it back — so read the `status` '
-                'NAME in the response rather than assuming the one you sent.',
+                '`orders.services.order_status.apply_order_status_transition`. '
+                'The posted `status` id is NOT always the status the order ends '
+                'up in: billing and rate approval move to the next configured '
+                'stage, and the multi-approver branch waits — so read the '
+                '`status` NAME in the response rather than assuming the one you '
+                'sent.',
 )
 class UpdateOrderStatusView(APIView):
     """Advance (or reject) an order through its configured status flow.

@@ -1,43 +1,48 @@
-"""Advancing (or rejecting) an order — `UpdateOrderStatusView`'s branch logic.
+"""Advancing (or rejecting) an order — `UpdateOrderStatusView`'s logic.
 
-Lifted out of `orders/views/lifecycle.py` (plan item 3.2) as a pure,
-mechanical extraction: `apply_order_status_transition` below is the body of
-`UpdateOrderStatusView.post`, moved statement-for-statement. Nothing about
-the conditions, the branching order, the side effects or the response
-bodies has changed — including the parts that are still fragile. In
-particular, deliberately UNCHANGED here (real problems, but a separate piece
-of work from a mechanical move):
+One endpoint serves three desks: the rate approvers, billing and the auditor.
+Each desk acts on an order only while the order is at that desk's stage, and
+each desk's page sends one fixed status to mean "approve":
 
-* Most of these branches key off `OrderStatus.name` text (`"billing" in
-  prev_name`, `"auditor" in prev_name`, ...) rather than the immutable
-  `code` column, so renaming a status can silently reroute the order flow.
-  See `orders.services.order_flow` for the same caveat on the functions this
-  module calls into.
-* Several branches compare `status_obj.id` against hardcoded integers (`3`,
-  `6`, `APPROVER_REJECTED_ACTION_ID`) that no migration guarantees.
+    stage (status code)       desk               approve request   approve leads to
+    RATE_APPROVAL             assigned approvers APPROVED          next configured stage
+    BILLING / BILLING_PENDING billing            AUDITOR_APPROVAL  next configured stage
+    AUDITOR_APPROVAL          auditor            COMPLETED         Completed (SO must exist)
+
+Any desk may instead send a rejection status. Everything else is refused with
+409 and changes nothing: an order at any other status (Rejected, Billing
+Rejected, Completed, SO Cancelled, Draft, Mart's own statuses) is not waiting
+on any desk here; a request from a user who is not that stage's desk, or for
+a different stage's action, is a stale screen or a repeated click acting on an
+order that has already moved on. Before this table, the endpoint accepted any
+status from anyone and re-routed it by words in the status NAME ("billing" /
+"auditor"), so a second Accept from billing completed orders with no sales
+order, rate rejections were overridden, and Completed orders were rejected.
+
+A rejected order re-enters the flow only by being edited and resubmitted —
+see `orders.views.lifecycle`.
+
+Stages are matched on `OrderStatus.code`, which is immutable, never on `name`.
 
 `apply_order_status_transition` is only ever called from inside
 `UpdateOrderStatusView.post`, itself wrapped in `transaction.atomic()` with
 the order row already held by `select_for_update()` by the time this
 function runs — see that view's docstring for why both are required (the
 multi-approver race they close) and why `send_order_notifications`, called
-from several branches below, must stay deferred via `transaction.on_commit`
-rather than fire eagerly: it ends in outbound HTTP per recipient, and this
-function runs with a row lock held.
+below, must stay deferred via `transaction.on_commit` rather than fire
+eagerly: it ends in outbound HTTP per recipient, and this function runs with
+a row lock held.
 
 Unlike its sibling modules (`order_flow.py`, `rate_approval.py`), this one
 returns DRF `Response` objects directly instead of plain data the view would
-wrap. That is a deliberate one-off, not a new house style for this
-directory: the point of this extraction was zero behaviour change end to
-end, and re-shaping nine different response bodies into a response-agnostic
-result for the view to re-assemble would have been a rewrite wearing an
-extraction's clothes.
+wrap; the response bodies predate the extraction and clients read them.
 """
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework import status
 
+from core.permissions import has_role, is_admin
 from orders.models import OrdersLog, OrderStatus, log_order_action
 from orders.notifications import mark_order_notifications_read
 from orders.services.order_flow import (
@@ -48,16 +53,50 @@ from orders.services.order_flow import (
     _order_status_message,
 )
 from orders.services.rate_approval import (
-    APPROVER_REJECTED_ACTION_ID,
     _get_order_rate_approval,
     _has_pending_rate_approvals,
     _mark_rate_approval_decision,
 )
 # These two are reached from `orders.views`, not `orders.services`, exactly
-# as they were reached from inside this method before the move. Moving THEM
-# too is out of scope for a mechanical extraction of this one view.
+# as they were before the extraction.
 from orders.views._shared import _assigned_rate_approvers_for_order
 from orders.views.notifications import _display_user_name, send_order_notifications
+
+
+#: The status code each stage's desk sends to mean "approve". An order whose
+#: status is not a key here is not waiting on any desk.
+APPROVE_REQUEST_BY_STAGE = {
+    'RATE_APPROVAL': 'APPROVED',
+    'BILLING': 'AUDITOR_APPROVAL',
+    'BILLING_PENDING': 'AUDITOR_APPROVAL',
+    'AUDITOR_APPROVAL': 'COMPLETED',
+}
+
+#: Who may act at each stage (admins always may). Rate Approval is absent on
+#: purpose: its entitlement is per order — the assigned approvers — and is
+#: checked in `_apply_rate_decision`.
+DESK_ROLES_BY_STAGE = {
+    'BILLING': ('billing',),
+    'BILLING_PENDING': ('billing',),
+    'AUDITOR_APPROVAL': ('auditor',),
+}
+
+BILLING_STAGES = ('BILLING', 'BILLING_PENDING')
+
+
+def _code(status_obj):
+    return (getattr(status_obj, 'code', '') or '').strip().upper()
+
+
+def _conflict(order, message):
+    return Response(
+        {
+            "message": message,
+            "order_id": order.id,
+            "status": order.status.name if order.status else "",
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 def _pending_log_user_for_status(status_obj, actor_user=None):
@@ -89,390 +128,210 @@ def _close_or_create_status_log(order, action_status, user, remarks=''):
     )
 
 
-def apply_order_status_transition(order, status_id, reason, user):
-    """The body of `UpdateOrderStatusView.post`, moved verbatim.
+def _log_entered_stage(order, stage_status, user, remarks=''):
+    """Record the order entering `stage_status`: a pending row (no performer)
+    for a stage someone still has to act on, a performed row for Completed.
+    An existing pending row for the stage is reused, never duplicated."""
+    log_user = _pending_log_user_for_status(stage_status, user)
+    if log_user is None and OrdersLog.objects.filter(
+        order=order, action=stage_status, performed_by__isnull=True,
+    ).exists():
+        return
+    log_order_action(order=order, action_name=stage_status.name, user=log_user,
+                     remarks=remarks if log_user else "")
 
-    Called with `order` already locked (`select_for_update()`) inside the
-    view's `transaction.atomic()` block. `status_id`, `reason` and `user` are
-    exactly `serializer.validated_data["status"]`,
-    `serializer.validated_data.get("reason", "")` and `request.user if
-    request.user.is_authenticated else None` — computed in the view and
-    passed in rather than recomputed here, since none of the three has a
-    side effect and moving *where* they are read does not change *what* they
-    read.
+
+def _set_rejected(order, rejected_status, reason, user):
+    order.status = rejected_status
+    order.rejected_by = user
+    order.rejected_at = timezone.now()
+    # `rejection_reason` is the canonical column. `reject_reason` is written
+    # alongside it only until the duplicate is dropped — see the note on
+    # Order.reject_reason.
+    if reason:
+        order.rejection_reason = reason
+        order.reject_reason = reason
+    order.save()
+
+
+def apply_order_status_transition(order, status_id, reason, user):
+    """Apply one desk's approve or reject to `order` (already locked).
+
+    `status_id`, `reason` and `user` are `serializer.validated_data["status"]`,
+    `serializer.validated_data.get("reason", "")` and the authenticated user,
+    computed in the view.
     """
     previous_status = order.status
-    order_flow_type = _get_order_flow_type_for_order(order)
-
-
-    # ✅ Fetch status dynamically from table
     status_obj = get_object_or_404(OrderStatus, id=status_id)
+    is_reject = _is_rejection_status(status_obj)
+    stage = _code(previous_status)
+    stage_name = previous_status.name if previous_status else "no status"
 
-    prev_name = (previous_status.name or "").strip().lower() if previous_status else ""
-
-    if (
-        previous_status
-        and previous_status.id == status_obj.id
-        and _is_rejection_status(status_obj)
-    ):
+    if previous_status and previous_status.id == status_obj.id and is_reject:
         return Response({
             "message": "Order already rejected",
             "order_id": order.id,
             "status": status_obj.name
         })
 
-    # Guardrail: if client sends Auditor status again while already in Auditor stage,
-    # treat it as "Auditor approved -> move to Billing Approval".
-    if previous_status and previous_status.id == status_obj.id and prev_name == "auditor approval":
-        billing_status = (
-            OrderStatus.objects.filter(id=3).first()
-            or OrderStatus.objects.filter(name__iexact="Billing Approval").first()
-            or OrderStatus.objects.filter(name__iexact="Billing").first()
-            or OrderStatus.objects.filter(name__icontains="billing").order_by("id").first()
-        )
-        if billing_status:
-            status_obj = billing_status
-
-    if previous_status and not _is_rejection_status(status_obj) and prev_name != "rate approval":
-        if "billing" in prev_name or "auditor" in prev_name:
-            configured_next_status = _get_next_order_flow_status(order, previous_status, flow_type=order_flow_type)
-            if configured_next_status:
-                status_obj = configured_next_status
-
-    actor_role = (getattr(getattr(user, "role", None), "name", "") or "").strip().lower()
-
-    # ✅ Update order
-    order.status = status_obj
-
-    # `rejection_reason` is the canonical column. `reject_reason` is written
-    # alongside it only until the duplicate is dropped — see the note on
-    # Order.reject_reason. Both carry the same text, so nothing downstream can
-    # tell which one it read.
-    if reason:
-        order.rejection_reason = reason
-        order.reject_reason = reason
-
-    mark_order_notifications_read(order, user)
-
-
-    order.save()
-
-    new_name = (status_obj.name or "").strip().lower()
-    is_auditor_to_billing = (
-        prev_name == "auditor approval"
-        and (status_obj.id == 3 or "billing" in new_name)
-    )
-
-    # A billing user forwarding an order to the auditor must leave the auditor
-    # stage pending (performed_by=None). Match on the actor's role too, so this
-    # holds even when the previous status name doesn't literally contain
-    # "billing" (otherwise it falls through to the generic handler, which would
-    # stamp the billing user as the auditor-stage performer and make the
-    # Auditor Approval stage look approved).
-    is_billing_to_auditor = (
-        ("billing" in prev_name or actor_role == "billing")
-        and "auditor" in new_name
-    )
-
-    is_billing_completed = (
-        "billing" in prev_name
-        and (
-            getattr(status_obj, "code", "") == "COMPLETED"
-            or new_name == "completed"
-        )
-    )
-
-    is_auditor_completed = (
-        "auditor" in prev_name
-        and (
-            getattr(status_obj, "code", "") == "COMPLETED"
-            or new_name == "completed"
-        )
-    )
-
-    is_auditor_rejected = (
-        "auditor" in prev_name
-        and (
-            getattr(status_obj, "code", "") == "REJECTED"
-            or "reject" in new_name
-        )
-    )
-
-    is_rate_approved = (
-        prev_name == "rate approval"
-        and status_obj.id == 6
-    )
-
-    is_rate_rejected = (
-        prev_name == "rate approval"
-        and (
-            status_obj.id == APPROVER_REJECTED_ACTION_ID
-            or getattr(status_obj, "code", "") == "REJECTED"
-            or "reject" in new_name
-        )
-    )
-
-    if is_rate_approved or is_rate_rejected:
-        rate_approval = _get_order_rate_approval(order, user)
-        if not rate_approval:
-            order.status = previous_status
-            order.save(update_fields=["status"])
-            return Response(
-                {"message": "This order is not assigned to you for rate approval."},
-                status=status.HTTP_403_FORBIDDEN,
+    if stage not in APPROVE_REQUEST_BY_STAGE:
+        if _is_rejection_status(previous_status):
+            return _conflict(
+                order,
+                f"Order is {stage_name}. It can move on only after it is "
+                f"edited and resubmitted.",
             )
+        return _conflict(
+            order,
+            f"Order is {stage_name} and is not waiting on any approval.",
+        )
 
-        if rate_approval.status != "PENDING":
-            order.status = previous_status
-            order.save(update_fields=["status"])
-            return Response(
-                {
-                    "message": f"You have already {rate_approval.status.lower()} this order.",
-                    "order_id": order.id,
-                    "status": order.status.name if order.status else "",
-                    "approval_status": rate_approval.status,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    desk_roles = DESK_ROLES_BY_STAGE.get(stage)
+    if desk_roles and not (is_admin(user) or has_role(user, *desk_roles)):
+        return _conflict(
+            order,
+            f"Order is now at {stage_name}; only that desk can act on it. "
+            f"Refresh to see its current status.",
+        )
 
-        if is_rate_rejected:
-            _mark_rate_approval_decision(order, user, "REJECTED", reason)
-            _close_or_create_status_log(
-                order=order,
-                action_status=previous_status,
-                user=user,
-                remarks=reason or "Rejected by rate approver"
-            )
+    if not is_reject and _code(status_obj) != APPROVE_REQUEST_BY_STAGE[stage]:
+        return _conflict(
+            order,
+            f"Order is now at {stage_name}, so this action no longer applies. "
+            f"Refresh to see its current status.",
+        )
 
-            order.status = status_obj
-            order.rejected_by = user
-            order.rejected_at = timezone.now()
-            if reason:
-                order.rejection_reason = reason
-                order.reject_reason = reason
-            order.save()
+    order_flow_type = _get_order_flow_type_for_order(order)
 
-            log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
-            send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
+    if stage == 'RATE_APPROVAL':
+        return _apply_rate_decision(
+            order, previous_status, status_obj, is_reject, reason, user, order_flow_type)
 
-            return Response({
-                "message": "Order rejected successfully",
-                "order_id": order.id,
-                "status": status_obj.name,
-                "approval_status": "REJECTED",
-            })
-
-        _mark_rate_approval_decision(order, user, "APPROVED", reason)
+    if is_reject:
+        _close_or_create_status_log(order, previous_status, user, reason)
+        _set_rejected(order, status_obj, reason, user)
+        mark_order_notifications_read(order, user)
         log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
-
-        if _has_pending_rate_approvals(order):
-            order.status = previous_status
-            order.save(update_fields=["status"])
-            return Response({
-                "message": "Rate approved. Waiting for remaining approvers.",
-                "order_id": order.id,
-                "status": previous_status.name if previous_status else status_obj.name,
-                "approval_status": "APPROVED",
-                "pending_approvers": [
-                    _display_user_name(approver)
-                    for approver in _assigned_rate_approvers_for_order(order, status_filter="PENDING")
-                ],
-            })
-
-        _close_or_create_status_log(
-            order=order,
-            action_status=previous_status,
-            user=user,
-            remarks=reason or "Approved by all rate approvers"
-        )
-
-        next_flow_status = _get_next_order_flow_status(order, previous_status, 'Billing', flow_type=order_flow_type)
-        if next_flow_status:
-            order.status = next_flow_status
-            order.save()
-            log_order_action(
-                order=order,
-                action_name=next_flow_status.name,
-                user=_pending_log_user_for_status(next_flow_status, user),
-                remarks="",
-            )
-            send_order_notifications(order, next_flow_status.name, actor=user, previous_status=previous_status)
-
-        return Response({
-            "message": _order_status_message(next_flow_status, "approved") if next_flow_status else "Rate approved",
-            "order_id": order.id,
-            "status": next_flow_status.name if next_flow_status else status_obj.name,
-            "approval_status": "APPROVED",
-        })
-
-    if is_auditor_to_billing:
-
-        auditor_pending_log = (
-            OrdersLog.objects
-            .filter(order=order, action=previous_status, performed_by__isnull=True)
-            .order_by("-created_at")
-            .first()
-        )
-        if auditor_pending_log:
-            auditor_pending_log.performed_by = user
-            if reason:
-                auditor_pending_log.remarks = reason
-            auditor_pending_log.save(update_fields=["performed_by", "remarks"])
-
-        # Next stage entry: billing approval should be a new pending row.
-        billing_pending_log = (
-            OrdersLog.objects
-            .filter(order=order, action=status_obj, performed_by__isnull=True)
-            .order_by("-created_at")
-            .first()
-        )
-        if not billing_pending_log:
-            log_order_action(
-                order=order,
-                action_name=status_obj.name,
-                user=None,
-                remarks=""
-            )
-
         send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
-
-
-        return Response({
-            "message": _order_status_message(status_obj, "accepted"),
-            "order_id": order.id,
-            "status": status_obj.name
-        })
-
-    if is_billing_to_auditor:
-        _close_or_create_status_log(
-            order=order,
-            action_status=previous_status,
-            user=user,
-            remarks=reason or "Accepted by billing"
-        )
-
-        log_order_action(
-            order=order,
-            action_name=status_obj.name,
-            user=None,
-            remarks=""
-        )
-
-        send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
-
-
-        return Response({
-            "message": _order_status_message(status_obj, "accepted"),
-            "order_id": order.id,
-            "status": status_obj.name
-        })
-
-    if is_billing_completed:
-        _close_or_create_status_log(
-            order=order,
-            action_status=previous_status,
-            user=user,
-            remarks=reason or "Accepted by billing"
-        )
-
-        log_order_action(
-            order=order,
-            action_name=status_obj.name,
-            user=user,
-            remarks=reason
-        )
-
-        send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
-
-
-        return Response({
-            "message": _order_status_message(status_obj, "accepted"),
-            "order_id": order.id,
-            "status": status_obj.name
-        })
-
-    if is_auditor_rejected:
-        _close_or_create_status_log(
-            order=order,
-            action_status=previous_status,
-            user=user,
-            remarks=reason
-        )
-
-        log_order_action(
-            order=order,
-            action_name=status_obj.name,
-            user=user,
-            remarks=reason
-        )
-
-        send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
-
-
         return Response({
             "message": "Order rejected successfully",
             "order_id": order.id,
             "status": status_obj.name
         })
 
-    if is_auditor_completed:
-        auditor_completed_remarks = reason or "Sales quotation created by auditor"
-        auditor_pending_log = (
-            OrdersLog.objects
-            .filter(order=order, action=previous_status, performed_by__isnull=True)
-            .order_by("-created_at")
-            .first()
+    if stage in BILLING_STAGES:
+        # The fallback matters for Billing Pending, which is not a configured
+        # stage: without it the FOC ladder answers "Billing" — backwards.
+        next_status = (
+            _get_next_order_flow_status(
+                order, previous_status, 'Auditor Approval', flow_type=order_flow_type)
+            or status_obj
         )
-        if auditor_pending_log:
-            auditor_pending_log.performed_by = user
-            auditor_pending_log.remarks = auditor_completed_remarks
-            auditor_pending_log.save(update_fields=["performed_by", "remarks"])
-
-        log_order_action(
-            order=order,
-            action_name=status_obj.name,
-            user=user,
-            remarks=auditor_completed_remarks
-        )
-
-        send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
-
-
-        return Response({
-            "message": _order_status_message(status_obj, "accepted"),
-            "order_id": order.id,
-            "status": status_obj.name
-        })
-
-    # If a placeholder row exists for this status (created earlier with no performer),
-    # update it instead of inserting a duplicate row.
-
-    pending_log = (
-        OrdersLog.objects
-        .filter(order=order, action=status_obj, performed_by__isnull=True)
-        .order_by("-created_at")
-        .first()
-    )
-
-    if pending_log:
-        pending_log.performed_by = user
-        if reason:
-            pending_log.remarks = reason
-        pending_log.save(update_fields=["performed_by", "remarks"])
+        default_remarks = "Accepted by billing"
     else:
-        # ✅ LOG using status name from DB
-        log_order_action(
-            order=order,
-            action_name=status_obj.name,
-            user=user,
-            remarks=reason
+        next_status = status_obj
+        default_remarks = "Sales quotation created by auditor"
+
+    # The auditor's page creates the sales order in SAP and only then asks
+    # for Completed; an order reaching Completed any other way has no SO.
+    if _is_completed_status(next_status) and not order.sap_created:
+        return _conflict(
+            order,
+            "The sales order has not been created in SAP yet, so the order "
+            "cannot be completed.",
         )
 
-    send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
-
+    remarks = reason or default_remarks
+    _close_or_create_status_log(order, previous_status, user, remarks)
+    order.status = next_status
+    order.save()
+    mark_order_notifications_read(order, user)
+    _log_entered_stage(order, next_status, user, remarks)
+    send_order_notifications(order, next_status.name, actor=user, previous_status=previous_status)
 
     return Response({
-        "message": _order_status_message(status_obj),
+        "message": _order_status_message(next_status, "accepted"),
         "order_id": order.id,
-        "status": status_obj.name
+        "status": next_status.name
+    })
+
+
+def _apply_rate_decision(order, previous_status, status_obj, is_reject, reason, user, order_flow_type):
+    """One assigned approver's decision. Any rejection rejects the order; it
+    advances only once every assigned approver has approved."""
+    rate_approval = _get_order_rate_approval(order, user)
+    if not rate_approval:
+        return Response(
+            {"message": "This order is not assigned to you for rate approval."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if rate_approval.status != "PENDING":
+        return Response(
+            {
+                "message": f"You have already {rate_approval.status.lower()} this order.",
+                "order_id": order.id,
+                "status": order.status.name if order.status else "",
+                "approval_status": rate_approval.status,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    mark_order_notifications_read(order, user)
+
+    if is_reject:
+        _mark_rate_approval_decision(order, user, "REJECTED", reason)
+        _close_or_create_status_log(
+            order=order,
+            action_status=previous_status,
+            user=user,
+            remarks=reason or "Rejected by rate approver"
+        )
+        _set_rejected(order, status_obj, reason, user)
+        log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
+        send_order_notifications(order, status_obj.name, actor=user, previous_status=previous_status)
+
+        return Response({
+            "message": "Order rejected successfully",
+            "order_id": order.id,
+            "status": status_obj.name,
+            "approval_status": "REJECTED",
+        })
+
+    _mark_rate_approval_decision(order, user, "APPROVED", reason)
+    log_order_action(order=order, action_name=status_obj.name, user=user, remarks=reason)
+
+    if _has_pending_rate_approvals(order):
+        return Response({
+            "message": "Rate approved. Waiting for remaining approvers.",
+            "order_id": order.id,
+            "status": previous_status.name,
+            "approval_status": "APPROVED",
+            "pending_approvers": [
+                _display_user_name(approver)
+                for approver in _assigned_rate_approvers_for_order(order, status_filter="PENDING")
+            ],
+        })
+
+    _close_or_create_status_log(
+        order=order,
+        action_status=previous_status,
+        user=user,
+        remarks=reason or "Approved by all rate approvers"
+    )
+
+    next_flow_status = (
+        _get_next_order_flow_status(order, previous_status, 'Billing', flow_type=order_flow_type)
+        or status_obj
+    )
+    order.status = next_flow_status
+    order.save()
+    _log_entered_stage(order, next_flow_status, user, reason)
+    send_order_notifications(order, next_flow_status.name, actor=user, previous_status=previous_status)
+
+    return Response({
+        "message": _order_status_message(next_flow_status, "approved"),
+        "order_id": order.id,
+        "status": next_flow_status.name,
+        "approval_status": "APPROVED",
     })

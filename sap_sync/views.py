@@ -25,7 +25,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from core.permissions import HasKey
+from core.permissions import HasAnyRole, HasKey, IsAdminRole
+from django.db import transaction
 from django.db.models import Q
 from core.pagination import OptInPagination, ordering_from
 from .models import Product, Party, PartyAddress, SyncLog, SyncSchedule, Branch, SalesQuotationLog, active_product_q  , SalesOrderLog
@@ -658,41 +659,101 @@ class SyncBranchesView(APIView):
                 'message': str(e),
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+def _create_sap_document_once(order_id, create, allowed_stages):
+    """Book one SAP document for a party order — at most once.
+
+    Returns `(result, None)` on success or `(None, error_response)`.
+
+    The same claim-under-lock as the Mart flow
+    (`orders.services.mart_posting.approve_and_post_to_sap`): `sap_created` is
+    SET under the row lock before SAP is called, so a second request — a retry,
+    a repeated click, a second tab — sees the claim instead of posting again.
+    Without it ten live orders got two or three sales orders each. The claim is
+    released only when SAP definitely refused; when its outcome is unknown the
+    claim stays, because a retry could book a duplicate.
+
+    If the order already has a sales order on record, that document is
+    returned instead of a new one, so the auditor can finish an order whose
+    push succeeded but whose status update did not.
+    """
+    from orders.services.mart_posting import _sap_outcome_is_ambiguous
+
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            return None, Response({'success': False, 'message': 'Order not found'},
+                                  status=status.HTTP_404_NOT_FOUND)
+
+        stage = (getattr(order.status, 'code', '') or '').upper()
+        status_name = order.status.name if order.status else 'no status'
+        if stage not in allowed_stages:
+            return None, Response({
+                'success': False,
+                'message': f'Order {order.order_number} is {status_name}; a sales '
+                           f'order cannot be created for it at this stage.',
+            }, status=status.HTTP_409_CONFLICT)
+
+        if order.sap_created:
+            existing = (SalesOrderLog.objects
+                        .filter(order_id=str(order.id), status='SUCCESS')
+                        .order_by('-created_at').first())
+            if existing:
+                return {'DocEntry': existing.sap_doc_entry, 'DocNum': existing.sap_doc_num,
+                        'already_created': True}, None
+            return None, Response({
+                'success': False,
+                'message': f'Order {order.order_number} is already booked into SAP, or '
+                           f'a push is in flight. Check SAP before trying again.',
+            }, status=status.HTTP_409_CONFLICT)
+
+        order.sap_created = True
+        order.save(update_fields=['sap_created'])
+
+    try:
+        return create(order), None
+    except Exception as exc:
+        logger.exception('SAP document creation failed for order %s', order.order_number)
+        if _sap_outcome_is_ambiguous(exc):
+            message = (f'SAP did not respond for order {order.order_number}, so it is not '
+                       f'known whether the document was created. Do NOT retry — check '
+                       f'SAP first, or this books a second one.')
+        else:
+            Order.objects.filter(pk=order.pk).update(sap_created=False)
+            message = str(exc)
+        return None, Response({'success': False, 'message': message},
+                              status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class   ApproveOrderAPIView(APIView):
-    """Approve an order and push to SAP"""
-    
+    """Create a SAP sales QUOTATION for an order. No page calls this; it is an
+    administrator's repair tool, so it is gated to admins."""
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
     def post(self, request):
         order_id = request.data.get('order_id')
-        
+
         if not order_id:
             return Response({
                 'success': False,
                 'message': 'order_id is required'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            service = SyncService(triggered_by=request.user.username)
-            order = Order.objects.get(id=order_id)
-            result = service.create_sales_quotation(order)
-            logger.info("Order %s approval result: %s", order_id, result)
 
-            return Response({
-                'success': True,
-                'message': 'Order approved and pushed to SAP successfully',
-                'data': result,
-                'errors': None
-            })
-        except Order.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'Order not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': str(e),
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+        service = SyncService(triggered_by=request.user.username)
+        result, error = _create_sap_document_once(
+            order_id, service.create_sales_quotation, ('AUDITOR_APPROVAL', 'COMPLETED'))
+        if error:
+            return error
+        logger.info("Order %s approval result: %s", order_id, result)
+        return Response({
+            'success': True,
+            'message': 'Order approved and pushed to SAP successfully',
+            'data': result,
+            'errors': None
+        })
+
 class SyncStatusView(APIView):
     """Get sync status with counts"""
     
@@ -773,6 +834,11 @@ class SyncStatusView(APIView):
 
 
 class PushSalesOrderView(APIView):
+    """Create the SAP sales order for an order that should have one but does
+    not — the repair for an order completed without its SO. No page calls
+    this, so it is gated to administrators, and it never books a second SO."""
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
 
     def post(self, request):
         order_id = request.data.get("order_id")
@@ -783,32 +849,18 @@ class PushSalesOrderView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            order = Order.objects.get(id=order_id)
-
-            service = SyncService(triggered_by='manual')
-            sap_response = service.create_sales_order(order)
-            
-            return Response(
-                {
-                    "message": "Quotation created successfully",
-                    "sap_response": sap_response
-                },
-                status=status.HTTP_200_OK
-            )
-
-        except Order.DoesNotExist:
-            return Response(
-                {"error": "Order not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-
-            )
+        service = SyncService(triggered_by='manual')
+        sap_response, error = _create_sap_document_once(
+            order_id, service.create_sales_order, ('AUDITOR_APPROVAL', 'COMPLETED'))
+        if error:
+            return error
+        return Response(
+            {
+                "message": "Sales order created successfully",
+                "sap_response": sap_response
+            },
+            status=status.HTTP_200_OK
+        )
 
 # class TestSalesQuotation(APIView):
 #    
@@ -870,8 +922,17 @@ class GetPartyByCategoryView(APIView):
 
 
 class   ApproveSalesOrderAPIView(APIView):
-    """Approve an order and push to SAP"""
-    
+    """The auditor's approval: book the order's sales order in SAP. The
+    auditor page then moves the order to Completed, which
+    `orders.services.order_status` allows only once the SO exists.
+
+    Only while the order is at Auditor Approval, and at most once — see
+    `_create_sap_document_once`. Asked again for an order whose SO already
+    exists, it returns that SO, so the auditor can finish the order."""
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasAnyRole('auditor')]
+
     def post(self, request):
         order_id = request.data.get('order_id')
     
@@ -880,30 +941,16 @@ class   ApproveSalesOrderAPIView(APIView):
                 'success': False,
                 'message': 'order_id is required'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            service = SyncService(triggered_by=request.user.username)
-            order = Order.objects.get(id=order_id)
 
-            if str(order.status).strip() == 'Completed':
-                return Response({"error" : "Invoice Already posted"})
-
-            result = service.create_sales_order(order)
-            logger.info("Order %s approval result: %s", order_id, result)
-
-            return Response({
-                'success': True,
-                'message': 'Order approved and pushed to SAP successfully',
-                'data': result,
-                'errors': None
-            })
-        except Order.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'Order not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': str(e),
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        service = SyncService(triggered_by=request.user.username)
+        result, error = _create_sap_document_once(
+            order_id, service.create_sales_order, ('AUDITOR_APPROVAL',))
+        if error:
+            return error
+        logger.info("Order %s approval result: %s", order_id, result)
+        return Response({
+            'success': True,
+            'message': 'Order approved and pushed to SAP successfully',
+            'data': result,
+            'errors': None
+        })
