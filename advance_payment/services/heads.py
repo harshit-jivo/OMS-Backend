@@ -40,6 +40,7 @@ _USERNAME, _NAME, _PART = 3, 2, 1
 #: HODs whose login no name match could find: `{employee code: username}`.
 KNOWN_LOGINS = {
     'TEMP0002': 'Gurpreet Vg',   # Veerji is Gurpreet Ji (the Director)
+    'JWPL0018': 'gagan',         # Gagan Vg: the Approver login, not "gagan adv" (both named Gagan)
 }
 
 
