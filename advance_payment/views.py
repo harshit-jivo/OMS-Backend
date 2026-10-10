@@ -50,7 +50,7 @@ from advance_payment.models import (
 from advance_payment.purposes import PURPOSE_GROUPS, purposes
 from advance_payment.serializers import EmployeeSerializer, assignment_data, request_data
 from advance_payment.services import (
-    attachment_files, invoice_fields, payment_proof, proof_reader)
+    attachment_files, invoice_fields, payment_proof, proof_reader, sap_attachments)
 from advance_payment.services import flow as flow_service
 from advance_payment.services import requests as request_service
 from advance_payment.services import assignments as assignment_service
@@ -1450,6 +1450,24 @@ class RequestFilesView(_RequestView):
         return self._answer(request, advance, f'{row.name} added.')
 
 
+class RequestSapAttachView(_RequestView):
+    """POST /requests/<id>/sap-attachments/ — attach to the posted SAP payment
+    the request's files SAP does not have: all of them when posting could not
+    attach them, or those added since (payment proofs)."""
+
+    def post(self, request, pk):
+        advance = self._get(request, pk)
+        if not flow_service.abilities(advance, request.user).get('attach_to_sap'):
+            return fail('Files are attached by whoever records the payment, once it is posted.',
+                        status=http_status.HTTP_403_FORBIDDEN)
+        count, problem = sap_attachments.attach_after_posting(advance, user=request.user)
+        if problem and not count:
+            return fail(problem, status=http_status.HTTP_409_CONFLICT)
+        message = f'{count} file{"" if count == 1 else "s"} attached in SAP.' if count else \
+            'SAP already has every file.'
+        return self._answer(request, advance, f'{message} {problem}'.strip())
+
+
 class RequestFileView(_RequestView):
     def get(self, request, pk, file_id):
         advance = self._get(request, pk)
@@ -1472,6 +1490,7 @@ class RequestFileView(_RequestView):
             return fail('Only its uploader may remove it, while they still may add files.',
                         status=http_status.HTTP_403_FORBIDDEN)
         name = row.name
+        sap_attachments.unshare_after_commit([row.share_file_id])
         row.file.delete(save=False)
         row.delete()
         flow_service.log(advance, LogAction.FILE_REMOVED, user=request.user,

@@ -947,6 +947,8 @@ def abilities(advance, user):
         'send_back': actor and role in SEND_BACK_ROLES,
         'edit_payout': actor and role == StageRole.PAYMENT,
         'record_utr': bool(utr),
+        # The same people, after posting: attach files SAP does not have yet.
+        'attach_to_sap': bool(utr),
         'see_account': sees_account(advance, user),
     }
 

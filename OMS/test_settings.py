@@ -189,3 +189,8 @@ def _teach_sqlite_postgres_regex(sender, connection, **kwargs):
 
 
 SECURE_SSL_REDIRECT = False
+
+# Never upload a test's files to the real SAP attachment shares: the request
+# file service is off in tests (tests that need it set these themselves).
+FILE_UPLOAD_URL = ''
+FILE_UPLOAD_TOKEN = ''

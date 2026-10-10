@@ -711,11 +711,16 @@ def check_files(files):
 
 
 def add_files(advance, files, *, user, purpose=FilePurpose.SUPPORTING, payout_line=None):
+    from advance_payment.services import sap_attachments
+
     rows = []
     for upload in files:
         rows.append(RequestFile.objects.create(
             request=advance, payout_line=payout_line, purpose=purpose, file=upload,
             name=upload.name[:255], size=upload.size, uploaded_by=user))
+    if rows:
+        # Onto the company's SAP attachments share, once this save commits.
+        sap_attachments.share_after_commit(advance)
     return rows
 
 
@@ -864,12 +869,20 @@ def update(advance, cleaned, *, user, files=(), remove_file_ids=()):
     advance.save()
     _write_documents(advance, cleaned.documents)
     _write_expense_lines(advance, cleaned.expense_lines)
+    from advance_payment.services import sap_attachments
+
     removed = list(advance.files.filter(
         pk__in=list(remove_file_ids), purpose=FilePurpose.SUPPORTING).values_list('name', flat=True))
+    unshared = []
     for row in advance.files.filter(pk__in=list(remove_file_ids), purpose=FilePurpose.SUPPORTING):
+        unshared.append(row.share_file_id)
         row.file.delete(save=False)
         row.delete()
+    sap_attachments.unshare_after_commit(unshared)
     added = add_files(advance, files, user=user)
+    if before.get('company') != _snapshot(advance).get('company'):
+        # A new company: its files belong on that company's share.
+        sap_attachments.share_after_commit(advance)
     advance.refresh_from_db()  # the department / sub-department names, as saved
     after = _snapshot(advance)
     changes = {k: {'old': before[k], 'new': after[k]} for k in after if before[k] != after[k]}

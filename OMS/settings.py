@@ -311,6 +311,27 @@ SAP_ATTACHMENT_COMPANY_IDS = {
 }
 SAP_ATTACHMENT_TIMEOUT = config('SAP_ATTACHMENT_TIMEOUT', default=30, cast=int)
 
+# File UPLOAD service (FastAPI on .118:8013, docs/file-upload-utility.md): puts
+# a payment request's files on the company's SAP attachments share. Folder ids
+# are the service's own: 3 Oil, 4 Beverages, 5 Mart. Unset URL or token = off.
+FILE_UPLOAD_URL = config('FILE_UPLOAD_URL', default='').rstrip('/')
+FILE_UPLOAD_TOKEN = config('FILE_UPLOAD_TOKEN', default='')
+FILE_UPLOAD_TIMEOUT = config('FILE_UPLOAD_TIMEOUT', default=60, cast=int)
+FILE_UPLOAD_FOLDERS = {
+    'OIL': config('FILE_UPLOAD_FOLDER_OIL', default=3, cast=int),
+    'BEVERAGES': config('FILE_UPLOAD_FOLDER_BEVERAGES', default=4, cast=int),
+    'MART': config('FILE_UPLOAD_FOLDER_MART', default=5, cast=int),
+}
+# The same share folders as the Service Layer host (.222, Linux) mounts them:
+# where SAP reads a file from when it makes the attachment
+# (Attachments2 SourcePath).
+SAP_ATTACHMENT_SOURCE_PATHS = {
+    'OIL': config('SAP_ATTACHMENT_SOURCE_OIL', default='/mnt/Attachments_Oil/JIVO_OIL/Attachments'),
+    'BEVERAGES': config('SAP_ATTACHMENT_SOURCE_BEVERAGES',
+                        default='/mnt/Attachments_Bev/JIVO_BEVERAGES/Attachments'),
+    'MART': config('SAP_ATTACHMENT_SOURCE_MART', default='/mnt/Attachments_Mart/JIVO_MART/Attachments'),
+}
+
 # OCR service (ocr-service/ on the OMS server, 127.0.0.1:8014): reads photos
 # and scanned pages of payment proofs. Unset here = PDFs with text, Excel and
 # CSV still read; a photo or scan is refused with a clear message.
