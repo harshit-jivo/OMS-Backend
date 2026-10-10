@@ -53,6 +53,7 @@ The requests and their approval (see `views.py`, `services/flow.py`):
   POST /requests/<id>/confirm-password/  before typing a payee account by hand
   POST /requests/<id>/payout-lines/<l>/utr/   after completion: the bank's UTR
   POST /requests/<id>/files/             a bank / payment proof
+  POST /requests/<id>/sap-attachments/   attach its files to the posted SAP payment
   GET|DELETE /requests/<id>/files/<f>/
 """
 from django.urls import path
@@ -137,6 +138,8 @@ urlpatterns = [
          name='advance-payment-request-confirm-password'),
     path('requests/<int:pk>/payout-lines/<int:line_id>/utr/', views.RequestUtrView.as_view(),
          name='advance-payment-request-utr'),
+    path('requests/<int:pk>/sap-attachments/', views.RequestSapAttachView.as_view(),
+         name='advance-payment-request-sap-attachments'),
     path('requests/<int:pk>/files/', views.RequestFilesView.as_view(),
          name='advance-payment-request-files'),
     path('requests/<int:pk>/files/<int:file_id>/', views.RequestFileView.as_view(),

@@ -122,6 +122,11 @@ def file_data(row):
         'payout_line_id': row.payout_line_id,
         'uploaded_by': _user(row.uploaded_by),
         'uploaded_on': _iso(row.uploaded_on),
+        # Where the file stands on its way to SAP: on the company's share,
+        # and attached to the outgoing payment.
+        'on_sap_share': bool(row.share_file_id),
+        'share_error': row.share_error,
+        'in_sap': bool(row.sap_attachment_entry),
     }
 
 
@@ -170,6 +175,9 @@ def voucher_data(voucher):
         'posted_on': _iso(voucher.posted_on),
         'cancelled_by': _user(voucher.cancelled_by),
         'cancelled_on': _iso(voucher.cancelled_on),
+        # The request's files on the payment in SAP, or why they are not.
+        'attachment_entry': voucher.attachment_entry,
+        'attachment_error': voucher.attachment_error,
     }
 
 

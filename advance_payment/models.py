@@ -579,6 +579,18 @@ class RequestFile(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
     uploaded_on = models.DateTimeField(default=timezone.now)
 
+    # ── On the SAP attachments share (`services.sap_attachments`) ─────────
+    #: The file service's id for its copy on the request company's share,
+    #: its name there (the service rewrites names), and that folder's id.
+    #: Null / blank until it is there; `share_error` says why not.
+    share_file_id = models.IntegerField(null=True, blank=True)
+    share_name = models.CharField(max_length=255, blank=True, default='')
+    share_folder = models.IntegerField(null=True, blank=True)
+    share_error = models.CharField(max_length=300, blank=True, default='')
+    #: The SAP attachment (Attachments2 AbsoluteEntry) it is a line of, once
+    #: it is attached to the request's outgoing payment.
+    sap_attachment_entry = models.IntegerField(null=True, blank=True)
+
     class Meta:
         db_table = 'advance_payment_request_file'
         ordering = ['request', 'uploaded_on']
@@ -769,6 +781,11 @@ class SapVoucher(models.Model):
     #: payable), if any. Left in SAP only when the payment itself posted, or
     #: may have; cancelled when SAP refused the payment.
     tds_trans_id = models.IntegerField(null=True, blank=True)
+    #: The request's files as a SAP attachment on this payment (Attachments2
+    #: AbsoluteEntry), or why they are not: the payment posts without them
+    #: rather than wait, and they can be attached afterwards.
+    attachment_entry = models.IntegerField(null=True, blank=True)
+    attachment_error = models.CharField(max_length=500, blank=True, default='')
     replaced_by = models.OneToOneField(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='replaces')
 
@@ -809,6 +826,8 @@ class LogAction(models.TextChoices):
     UTR_RECORDED = 'UTR_RECORDED', 'UTR recorded'
     FILE_ADDED = 'FILE_ADDED', 'File added'
     FILE_REMOVED = 'FILE_REMOVED', 'File removed'
+    #: The request's files attached to its SAP outgoing payment after it posted.
+    SAP_ATTACHED = 'SAP_ATTACHED', 'Files attached in SAP'
     COMPLETED = 'COMPLETED', 'Completed'
 
 

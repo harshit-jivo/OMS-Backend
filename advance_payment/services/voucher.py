@@ -379,6 +379,17 @@ def _company_db(advance):
     return sap_company.resolve_company_db(advance.company)
 
 
+def _attachment(advance, company_db):
+    """`(AttachmentEntry or None, problem)` for the payment; never raises."""
+    from advance_payment.services import sap_attachments
+
+    try:
+        return sap_attachments.for_payment(advance, company_db)
+    except Exception as exc:  # noqa: BLE001 — a file must never stop the payment
+        logger.exception('ADVANCE: attaching the files of %s failed', advance.request_no)
+        return None, f'Files not attached: {exc}'
+
+
 def _next_version(advance):
     return (advance.vouchers.aggregate(n=Max('version'))['n'] or 0) + 1
 
@@ -394,6 +405,8 @@ def post(advance, *, user):
     payload = None
 
     tds_trans_id = None
+    # Found again, an earlier attempt's payment keeps whatever it was posted with.
+    attachment_entry, attachment_error = None, ''
 
     def failed(message, response=None):
         voucher = SapVoucher.objects.create(
@@ -457,6 +470,11 @@ def post(advance, *, user):
             if tds_trans_id:
                 message += ' ' + _cancel_tds_journal(tds_trans_id, company_db)
             return failed(message)
+        # The request's files as the payment's SAP attachment. A failure does
+        # not hold the money up: it posts without them, and says why.
+        attachment_entry, attachment_error = _attachment(advance, company_db)
+        if attachment_entry:
+            payload['AttachmentEntry'] = attachment_entry
         try:
             _, body = sap_client.request('POST', '/VendorPayments', company_db=company_db,
                                          json_body=payload)
@@ -479,7 +497,8 @@ def post(advance, *, user):
         request=advance, version=version, sap_object=VoucherObject.OUTGOING_PAYMENT,
         status=VoucherStatus.POSTED, sap_doc_entry=body.get('DocEntry'),
         sap_doc_num=body.get('DocNum'), payload=payload, response=body, posted_by=user,
-        tds_trans_id=tds_trans_id)
+        tds_trans_id=tds_trans_id, attachment_entry=attachment_entry,
+        attachment_error=attachment_error[:500])
     logger.info('ADVANCE: %s posted outgoing payment %s (DocEntry %s)',
                 advance.request_no, voucher.sap_doc_num, voucher.sap_doc_entry)
     return Outcome(True, voucher)
