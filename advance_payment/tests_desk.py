@@ -146,3 +146,66 @@ class MyDecision(DeskFixture):
         with self.assertNumQueries(1):
             decisions = flow_service.my_decisions(self.me)
         self.assertEqual(len(decisions), 5)
+
+
+
+class WhoOpensARequest(DeskFixture):
+    """A request opens for its requester, and for a desk user it is or was at.
+
+    The desk user sees what waits at their stage and what they decided on —
+    never someone else's request, whatever page keys they hold.
+    """
+
+    def detail(self, user, advance):
+        request = APIRequestFactory().get(f'/advance-payments/requests/{advance.pk}/')
+        force_authenticate(request, user=user)
+        return views.RequestDetailView.as_view()(request, pk=advance.pk)
+
+    def test_opens_what_waits_at_my_stage_and_what_i_decided(self):
+        waiting = self.request(at=self.my_stage)
+        decided = self.request(at=self.their_stage)
+        self.decide(decided, LogAction.APPROVED, by=self.me)
+        for advance in (waiting, decided):
+            with self.subTest(request=advance.request_no):
+                self.assertEqual(self.detail(self.me, advance).status_code, 200)
+
+    def test_does_not_open_what_waits_at_someone_elses_stage(self):
+        theirs = self.request(at=self.their_stage)
+        self.assertEqual(self.detail(self.me, theirs).status_code, 404)
+
+    def test_a_requester_opens_only_what_they_raised(self):
+        advance = self.request(at=self.their_stage)
+        requester = make_user('ap-other-requester', extra_pages=['Advance_Payment'])
+        self.assertEqual(self.detail(requester, advance).status_code, 404)
+        self.assertEqual(self.detail(self.creator, advance).status_code, 200)
+
+
+class ViewAllReadsEveryRequest(WhoOpensARequest):
+    """`Advance_Payment_View_All`: a supervisor follows every request, read only."""
+
+    def all_requests(self, user):
+        request = APIRequestFactory().get('/advance-payments/requests/', {'scope': 'all'})
+        force_authenticate(request, user=user)
+        return views.RequestListView.as_view()(request)
+
+    def test_lists_and_opens_a_request_waiting_on_someone_else(self):
+        theirs = self.request(at=self.their_stage)
+        supervisor = make_user('ap-supervisor', extra_pages=[DESK_KEY, 'Advance_Payment_View_All'])
+        listed = self.all_requests(supervisor)
+        self.assertEqual(listed.status_code, 200, listed.data)
+        self.assertIn(theirs.pk, [row['id'] for row in listed.data['data']['results']])
+        opened = self.detail(supervisor, theirs)
+        self.assertEqual(opened.status_code, 200)
+        can = opened.data['data']['can']
+        self.assertFalse(any(can.get(k) for k in ('approve', 'reject', 'edit', 'cancel')), can)
+
+    def test_lists_who_decided_on_each_request_and_its_last_activity(self):
+        theirs = self.request(at=self.their_stage)
+        self.decide(theirs, LogAction.APPROVED, by=self.me)
+        supervisor = make_user('ap-supervisor-2', extra_pages=['Advance_Payment_View_All'])
+        row = next(r for r in self.all_requests(supervisor).data['data']['results'] if r['id'] == theirs.pk)
+        self.assertEqual([p['username'] for p in row['approvers']], [self.me.username])
+        self.assertEqual(row['last_activity']['action'], LogAction.APPROVED)
+
+    def test_the_desk_key_alone_does_not_list_everything(self):
+        self.assertEqual(self.all_requests(self.me).status_code, 403)
