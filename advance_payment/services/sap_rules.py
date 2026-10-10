@@ -140,26 +140,52 @@ KNOWN = {
     '460009': 'SAP needs the date the advance will be settled by its bill.',
 }
 
-_CODE = re.compile(r'\(\s*-?(\d{3,7})\s*\)')
+#: Refusals that are SAP's own setup, not the payment: fixed in SAP by its
+#: administrator, never by approving again. Keyed by SAP's message number.
+SETUP = {
+    # "You are not assigned to selected branch 'DELHI ISD'": the Service Layer
+    # user OMS posts as must be assigned to the branch of the documents paid.
+    '1320000257': ('The SAP user OMS posts as ({user}) is not assigned to this branch in SAP. '
+                   'Ask the SAP administrator to assign it: Administration → Setup → General → '
+                   'Users → {user} → Branches. Then approve again.'),
+}
+
+#: A transaction-notification rule: "(4612) After 5:00 PM ...".
+_RULE = re.compile(r'\(\s*-?(\d{3,7})\s*\)')
+#: SAP's own message number: "1320000257 - You are not assigned ...".
+_MESSAGE_NO = re.compile(r'^\s*-?(\d{5,})\s*-')
+#: The Service Layer's wrapper around every business refusal: says nothing.
+_GENERIC = {'5002', '1', '10'}
 
 
 def code_of(error):
-    """SAP's check number in a refusal, as a string; '' when it has none."""
+    """SAP's own number for a refusal, as a string; '' when it has none.
+
+    The Service Layer wraps every refusal in code -5002, so the number that
+    says WHICH refusal is in the message: a rule's "(4612)", or SAP's message
+    number before " - ". The wrapper code counts only when it is not generic.
+    """
+    text = str(error)
+    for pattern in (_RULE, _MESSAGE_NO):
+        found = pattern.search(text)
+        if found:
+            return found.group(1)
     raw = str(getattr(error, 'sap_code', '') or '').lstrip('-')
-    if raw.isdigit():
-        return raw
-    found = _CODE.search(str(error))
-    return found.group(1) if found else ''
+    return raw if raw.isdigit() and raw not in _GENERIC else ''
 
 
 def explain(error):
     """A refusal as the desk should read it: SAP's words, then what to do."""
+    from django.conf import settings
+
     code = code_of(error)
-    if code in KNOWN:
-        advice = (f'{KNOWN[code]} OMS fills this in itself, so SAP\'s rule has changed: '
+    if code in SETUP:
+        advice = SETUP[code].format(user=getattr(settings, 'HANA_USERNAME', '') or 'B1i')
+    elif code in KNOWN:
+        advice = (f"{KNOWN[code]} OMS fills this in itself, so SAP's rule has changed: "
                   f'send this message to IT.')
     elif code:
-        advice = (f'Check {code} is a rule in SAP that OMS does not know yet: '
+        advice = (f'SAP refusal {code} is not one OMS knows yet: '
                   f'send this message to IT to add it.')
     else:
         advice = ''

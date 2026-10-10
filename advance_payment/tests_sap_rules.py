@@ -77,7 +77,24 @@ class RefusalsExplained(SimpleTestCase):
 
     def test_an_unknown_check_is_named_for_it(self):
         message = sap_rules.explain(Exception('(470001) Something new'))
-        self.assertIn('Check 470001 is a rule in SAP that OMS does not know yet', message)
+        self.assertIn('SAP refusal 470001 is not one OMS knows yet', message)
+
+    def test_the_service_layer_wrapper_code_is_not_the_refusal(self):
+        # SAP wraps every refusal in -5002; the rule is in the message.
+        error = Exception('(4612) After 5:00 PM Urgency field is mandatory for Outgoing Payment.')
+        error.sap_code = '-5002'
+        self.assertEqual(sap_rules.code_of(error), '4612')
+        self.assertIn('urgent after 5 PM', sap_rules.explain(error))
+
+    def test_a_branch_the_posting_user_lacks_is_sap_setup(self):
+        # AP-2026-0025: B1i is not assigned to Mart's DELHI ISD branch.
+        error = Exception("1320000257 - You are not assigned to selected branch 'DELHI ISD'")
+        error.sap_code = '-5002'
+        self.assertEqual(sap_rules.code_of(error), '1320000257')
+        message = sap_rules.explain(error)
+        self.assertIn('is not assigned to this branch in SAP', message)
+        self.assertIn('Users →', message)
+        self.assertNotIn('5002', message.split(' — ')[1])
 
     def test_the_code_comes_from_sap_when_it_says_it(self):
         error = Exception('Validation failed')
