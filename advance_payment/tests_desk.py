@@ -199,5 +199,13 @@ class ViewAllReadsEveryRequest(WhoOpensARequest):
         can = opened.data['data']['can']
         self.assertFalse(any(can.get(k) for k in ('approve', 'reject', 'edit', 'cancel')), can)
 
+    def test_lists_who_decided_on_each_request_and_its_last_activity(self):
+        theirs = self.request(at=self.their_stage)
+        self.decide(theirs, LogAction.APPROVED, by=self.me)
+        supervisor = make_user('ap-supervisor-2', extra_pages=['Advance_Payment_View_All'])
+        row = next(r for r in self.all_requests(supervisor).data['data']['results'] if r['id'] == theirs.pk)
+        self.assertEqual([p['username'] for p in row['approvers']], [self.me.username])
+        self.assertEqual(row['last_activity']['action'], LogAction.APPROVED)
+
     def test_the_desk_key_alone_does_not_list_everything(self):
         self.assertEqual(self.all_requests(self.me).status_code, 403)

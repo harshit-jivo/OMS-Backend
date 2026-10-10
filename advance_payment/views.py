@@ -1260,6 +1260,14 @@ class RequestListView(_RequestView):
         decisions = flow_service.my_decisions(request.user) if scope == 'desk' else {}
         rows = [request_data(r, user=request.user, my_decision=decisions.get(r.pk))
                 for r in qs.order_by('-created_on')[:LIST_LIMIT]]
+        if scope == 'all':
+            # The register filters by who decided on it and shows how long it
+            # has sat: one log query for the page.
+            people = flow_service.route_people([row['id'] for row in rows])
+            for row in rows:
+                found = people.get(row['id'], {})
+                row['approvers'] = found.get('approvers', [])
+                row['last_activity'] = found.get('last_activity')
         return ok({'count': len(rows), 'results': rows})
 
     def post(self, request):

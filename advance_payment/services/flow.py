@@ -979,6 +979,34 @@ def my_decisions(user, request_ids=None):
     return latest
 
 
+def route_people(request_ids):
+    """For the all-requests register: `{request_id: {'approvers': [...], 'last_activity': {...}}}`.
+
+    `approvers`: everyone who approved, rejected, returned or sent back the
+    request, in the order they first did, as `{username, name}` — what the
+    register filters "by approver" on, beside whom it waits on now.
+    `last_activity`: the latest log row, any action — how long it has sat.
+    One query for the whole page.
+    """
+    out = {}
+    rows = (RequestLog.objects.filter(request_id__in=list(request_ids))
+            .select_related('actor').order_by('request_id', 'created_on', 'id'))
+    for row in rows:
+        people = out.setdefault(row.request_id, {'approvers': [], 'last_activity': None})
+        actor = row.actor
+        if row.action in DECISION_ACTIONS and actor is not None and actor.username not in {
+                p['username'] for p in people['approvers']}:
+            people['approvers'].append({'username': actor.username, 'name': getattr(actor, 'name', '') or ''})
+        people['last_activity'] = {
+            'action': row.action,
+            'label': row.get_action_display(),
+            'by': (getattr(actor, 'name', '') or actor.username) if actor else '',
+            'stage': row.stage_name,
+            'on': row.created_on.isoformat(),
+        }
+    return out
+
+
 def desk_request_ids(user):
     """What the approval desk LISTS for `user`: their queue and their own decisions.
 
