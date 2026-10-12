@@ -937,7 +937,7 @@ _BILL_HEADER_SQL = '''
            "CANCELED" AS "cancelled", "CardCode" AS "card_code", "CardName" AS "card_name",
            IFNULL("TotalExpns", 0) AS "freight", IFNULL("DiscSum", 0) AS "discount",
            IFNULL("VatSum", 0) AS "gst", IFNULL("WTSum", 0) AS "tds", IFNULL("RoundDif", 0) AS "rounding",
-           "DocTotal" AS "net", IFNULL("PaidToDate", 0) AS "paid",
+           "DocTotal" AS "net", IFNULL("PaidToDate", 0) AS "paid", H."TransId" AS "trans_id",
            H."CtlAccount" AS "payable_account", A."AcctName" AS "payable_account_name"
     FROM "{schema}"."OPCH" H
     LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = H."CtlAccount"
@@ -1038,6 +1038,7 @@ def bill_breakdown(company, doc_entry):
                 'Open' if _s(h.get('status')) == 'O' else 'Closed'),
             'card_code': _s(h.get('card_code')),
             'card_name': _s(h.get('card_name')),
+            'trans_id': int(h['trans_id']) if h.get('trans_id') is not None else None,
             'payable_account': _s(h.get('payable_account')),
             'payable_account_name': _s(h.get('payable_account_name')),
             'taxable': _money(taxable),
@@ -1104,7 +1105,8 @@ _GRPO_HEADER_SQL = """
            H."DocStatus" AS "status", H."CANCELED" AS "cancelled", H."CardCode" AS "card_code",
            H."CardName" AS "card_name", H."BPLName" AS "branch", H."Comments" AS "remarks",
            IFNULL(H."DiscSum", 0) AS "discount", IFNULL(H."TotalExpns", 0) AS "freight",
-           IFNULL(H."VatSum", 0) AS "tax", IFNULL(H."RoundDif", 0) AS "rounding", H."DocTotal" AS "total"
+           IFNULL(H."VatSum", 0) AS "tax", IFNULL(H."RoundDif", 0) AS "rounding", H."DocTotal" AS "total",
+           H."TransId" AS "trans_id"
     FROM "{schema}"."OPDN" H WHERE H."DocEntry" = ?
 """
 
@@ -1181,6 +1183,7 @@ def goods_receipt(company, doc_entry):
             'card_name': _s(h.get('card_name')),
             'branch': _s(h.get('branch')),
             'remarks': _s(h.get('remarks')),
+            'trans_id': int(h['trans_id']) if h.get('trans_id') is not None else None,
             'before_discount': _money(before),
             'discount': _money(h.get('discount')),
             'freight': _money(h.get('freight')),

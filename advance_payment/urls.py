@@ -13,6 +13,9 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /bill-breakdown/        ?company=&doc_entry=                (one A/P invoice: taxable, GST, TDS, net, G/L)
   GET /goods-receipt/         ?company=&doc_entry=                (one GRPO: header, lines, links)
   GET /outgoing-payment/      ?company=&doc_entry=                (one payment: how paid, what it paid)
+  GET /relationship-map/      ?company=&kind=po|grpo|bill&doc_entry=  (PO -> GRPO -> bill -> payment, returns, debit notes)
+  GET /journal-entry/         ?company=&trans_id=                 (a posted document's G/L lines)
+  GET /partner-balances/      ?company=&card_code=                (balance in Oil / Beverages, same code + same PAN)
   GET /document-history/      ?company=&kind=po|bill|ledger&doc_entry=[&line=]  (OMS's payments against it)
   GET /tds-options/           ?company=&card_code=&bills=     (TDS the Payment desk may deduct)
   GET /assignment-recipients/                                  (who bills / POs may be sent to)
@@ -85,6 +88,12 @@ urlpatterns = [
          name='advance-payment-goods-receipt'),
     path('outgoing-payment/', views.OutgoingPaymentView.as_view(),
          name='advance-payment-outgoing-payment'),
+    path('relationship-map/', views.RelationshipMapView.as_view(),
+         name='advance-payment-relationship-map'),
+    path('journal-entry/', views.JournalEntryView.as_view(),
+         name='advance-payment-journal-entry'),
+    path('partner-balances/', views.PartnerBalancesView.as_view(),
+         name='advance-payment-partner-balances'),
     path('document-history/', views.DocumentHistoryView.as_view(),
          name='advance-payment-document-history'),
     path('tds-options/', views.TdsOptionsView.as_view(),

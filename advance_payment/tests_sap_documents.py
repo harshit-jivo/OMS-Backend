@@ -12,6 +12,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from advance_payment import views
 from advance_payment.services import sap
+from advance_payment.services import sap_relations
 
 
 def _line(entry, num, line, name, ext='pdf'):
@@ -299,3 +300,52 @@ class GoodsReceiptAndPayment(SimpleTestCase):
         with mock.patch.object(sap, '_run', return_value=[]):
             self.assertIsNone(sap.goods_receipt('OIL', 1))
             self.assertIsNone(sap.outgoing_payment('OIL', 1))
+
+
+
+class RelationsInSap(SimpleTestCase):
+    """Relationship map, journal entry, and one partner's balance across companies."""
+
+    def test_a_same_code_that_is_another_business_is_not_shown(self):
+        # VENDA001056: S.N. INDUSTRIES in Beverages, RAUNAK NURSERY in Oil.
+        partners = {('BEVERAGES', 'VENDA001056'): {'code': 'VENDA001056', 'name': 'S.N. INDUSTRIES', 'type': 'S',
+                                                   'balance': Decimal('-1703088')},
+                    ('OIL', 'VENDA001056'): {'code': 'VENDA001056', 'name': 'RAUNAK NURSERY', 'type': 'S',
+                                             'balance': Decimal('0')}}
+        pans = {('BEVERAGES', 'VENDA001056'): 'AANPG8531F', ('OIL', 'VENDA001056'): ''}
+        with mock.patch.object(sap_relations, '_partner', side_effect=lambda c, code: partners.get((c, code))), \
+                mock.patch.object(sap_relations, '_pan', side_effect=lambda c, code: pans.get((c, code), '')):
+            rows = sap_relations.partner_balances('BEVERAGES', 'VENDA001056')
+        self.assertEqual([r['company'] for r in rows], ['BEVERAGES'])
+
+    def test_the_same_code_and_pan_shows_both_companies(self):
+        partner = {'code': 'VENDA000279', 'name': 'DIL EXIM', 'type': 'S', 'balance': Decimal('25699905')}
+        with mock.patch.object(sap_relations, '_partner', return_value=partner), \
+                mock.patch.object(sap_relations, '_pan', return_value='AAHCD7279A'):
+            rows = sap_relations.partner_balances('OIL', 'VENDA000279')
+        self.assertEqual([(r['company'], r['matched_by']) for r in rows], [('OIL', 'self'), ('BEVERAGES', 'PAN')])
+
+    def test_a_different_pan_on_the_same_code_is_not_shown(self):
+        partner = {'code': 'V1', 'name': 'ACME', 'type': 'S', 'balance': Decimal('5')}
+        with mock.patch.object(sap_relations, '_partner', return_value=partner), \
+                mock.patch.object(sap_relations, '_pan', side_effect=lambda c, code: 'AAAAA1111A' if c == 'OIL' else 'BBBBB2222B'):
+            rows = sap_relations.partner_balances('OIL', 'V1')
+        self.assertEqual([r['company'] for r in rows], ['OIL'])
+
+    def test_a_journal_entry_balances(self):
+        header = [{'trans_id': 234693, 'number': 926302189, 'posting_date': None, 'document_date': None,
+                   'memo': 'A/P Invoices - VENDA000942', 'trans_type': '18', 'base_ref': '626094172',
+                   'ref1': '', 'ref2': ''}]
+        lines = [{'line': 0, 'account': '2110005', 'account_name': 'SUNDRY CREDITOR', 'short_name': 'VENDA000942',
+                  'partner_name': 'X', 'debit': Decimal('0'), 'credit': Decimal('1080253'), 'memo': ''},
+                 {'line': 1, 'account': '2140001', 'account_name': 'GRNI', 'short_name': '2140001',
+                  'partner_name': None, 'debit': Decimal('1080253'), 'credit': Decimal('0'), 'memo': ''}]
+        with mock.patch.object(sap_relations, '_schema', return_value='S'), \
+                mock.patch.object(sap_relations, '_run', side_effect=[header, lines]):
+            je = sap_relations.journal_entry('OIL', 234693)
+        self.assertEqual((je['header']['debit'], je['header']['credit']), ('1080253', '1080253'))
+        self.assertEqual((je['lines'][0]['partner'], je['lines'][1]['partner']), ('VENDA000942', ''))
+
+    def test_a_map_is_asked_of_a_po_grpo_or_bill_only(self):
+        with self.assertRaisesRegex(ValueError, 'kind must be one of'):
+            sap_relations.relationship_map('OIL', 'payment', 1)

@@ -939,6 +939,75 @@ class OutgoingPaymentView(_OneSapDocument):
     missing = 'SAP has no such outgoing payment.'
 
 
+class _SapRead(_Lookup):
+    """GET ?company=… — one read from `sap_relations`, enveloped; 404 when SAP has nothing."""
+
+    missing = 'SAP has nothing for that.'
+
+    def read(self, request, company):  # pragma: no cover - each subclass says
+        raise NotImplementedError
+
+    def get(self, request):
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            found = self.read(request, company)
+        except ValueError as exc:
+            return fail(str(exc), status=http_status.HTTP_400_BAD_REQUEST)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        if found is None:
+            return fail(self.missing, status=http_status.HTTP_404_NOT_FOUND)
+        return ok({'company': company, **found} if isinstance(found, dict) else {'company': company,
+                                                                                  'results': found})
+
+
+class RelationshipMapView(_SapRead):
+    """GET /api/advance-payments/relationship-map/?company=&kind=po|grpo|bill&doc_entry=
+
+    SAP's relationship map around a document (see `sap_relations.relationship_map`).
+    """
+
+    resource = 'relationship map'
+
+    def read(self, request, company):
+        from advance_payment.services import sap_relations
+        return sap_relations.relationship_map(
+            company, request.query_params.get('kind'), request.query_params.get('doc_entry'))
+
+
+class JournalEntryView(_SapRead):
+    """GET /api/advance-payments/journal-entry/?company=&trans_id=
+
+    A posted document's G/L lines (see `sap_relations.journal_entry`).
+    """
+
+    resource = 'journal entry'
+    missing = 'SAP has no such journal entry.'
+
+    def read(self, request, company):
+        from advance_payment.services import sap_relations
+        return sap_relations.journal_entry(company, request.query_params.get('trans_id'))
+
+
+class PartnerBalancesView(_SapRead):
+    """GET /api/advance-payments/partner-balances/?company=&card_code=
+
+    The partner's balance in its company, and in Oil and Beverages where the
+    same code is the same business (see `sap_relations.partner_balances`).
+    """
+
+    resource = 'partner balances'
+
+    def read(self, request, company):
+        from advance_payment.services import sap_relations
+        code = (request.query_params.get('card_code') or '').strip()
+        if not code:
+            raise ValueError('card_code is required.')
+        return sap_relations.partner_balances(company, code)
+
+
 class DocumentAttachmentView(_Lookup):
     """GET /api/advance-payments/document-attachment/?company=&kind=po|bill|grpo&doc_entry=[&line=]
 
