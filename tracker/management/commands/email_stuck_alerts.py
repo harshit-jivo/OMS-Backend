@@ -5,7 +5,7 @@ that stage's `threshold_days`, the users mapped to that stage are emailed a
 digest listing the invoice number and vendor (party) name.
 
 Rules:
-  * Pre-audit FULL holds are skipped — a full hold parks the invoice on
+  * FULL holds are skipped (any desk that holds) — a full hold parks the invoice on
     purpose, so it should not raise a "stuck" email.
   * Invoices a desk user has MUTED (tracker.models.AlertMute) are skipped, with
     the reason they gave. The mute is tied to the stage visit, so it lapses on
@@ -28,7 +28,6 @@ from django.utils import timezone
 from tracker import services
 from tracker.models import AlertNotification, StuckAlert
 
-PRE_AUDIT = 'pre_audit'
 
 
 class Command(BaseCommand):
@@ -58,7 +57,8 @@ class Command(BaseCommand):
         # Resolved in one query for the whole sweep rather than per invoice.
         muted = services.alert_mute_map([inv.id for inv, _s, _d in stuck])
         for inv, stage, days in stuck:
-            if stage.code == PRE_AUDIT and services.is_full_hold(inv):
+            # A full hold parks an invoice on purpose, at any desk that holds.
+            if services.is_full_hold(inv):
                 skipped_hold += 1
                 continue
             if inv.id in muted:
@@ -90,7 +90,7 @@ class Command(BaseCommand):
         if not due:
             self.stdout.write(self.style.SUCCESS(
                 f"No stuck invoices due for notification "
-                f"(skipped {skipped_hold} pre-audit full-hold, "
+                f"(skipped {skipped_hold} full-hold, "
                 f"{skipped_muted} muted)."))
             return
 
@@ -143,7 +143,7 @@ class Command(BaseCommand):
                 last_notified_at=now)
 
         msg = (f"Stuck-alert email: {sent} sent, {len(due)} due visit(s), "
-               f"{skipped_hold} pre-audit full-hold skipped, "
+               f"{skipped_hold} full-hold skipped, "
                f"{skipped_muted} muted skipped.")
         if no_recipient_stages:
             msg += (f" No stage users mapped for: "

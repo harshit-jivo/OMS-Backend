@@ -1523,3 +1523,45 @@ class NextStageTests(TrackerFlowTestCase):
     def test_it_tracks_the_invoice_as_it_moves(self):
         invoice = self.move_to(self.make_invoice(number='NX-6'), 'pre_audit')
         self.assertEqual(next_stage(invoice).code, 'data_entry')
+
+
+class BiltyGrpoHoldTests(TrackerFlowTestCase):
+    """Bilty / GRPO holds as Pre-Audit does (migration 0025): OK, HOLD, RETURN."""
+
+    # Only Transport invoices pass through Bilty / GRPO (services.stage_route).
+    def at_bilty(self):
+        invoice = self.move_to(self.make_invoice(category=self.transport), 'bilty_grpo')
+        self.assertEqual(invoice.current_stage.code, 'bilty_grpo')
+        return invoice
+
+    def test_a_full_hold_keeps_it_at_bilty(self):
+        invoice = self.at_bilty()
+        held = apply_action(invoice=invoice, user=self.clerk, stage_status='HOLD', remarks='bilty awaited')
+        self.assertEqual(held.current_stage.code, 'bilty_grpo')
+        from tracker import services
+        self.assertTrue(services.is_full_hold(held))
+
+    def test_a_partial_hold_advances_with_the_amount_withheld(self):
+        invoice = self.at_bilty()
+        moved = apply_action(invoice=invoice, user=self.clerk, stage_status='HOLD', hold_type='PARTIAL',
+                             amount='100.00', remarks='short GRPO')
+        self.assertEqual(moved.current_stage.code, 'pre_audit')
+        self.assertEqual(moved.hold_amount, Decimal('100.00'))
+
+    def test_ok_advances_and_return_sends_back(self):
+        moved = apply_action(invoice=self.at_bilty(), user=self.clerk, stage_status='OK')
+        self.assertEqual(moved.current_stage.code, 'pre_audit')
+        back = apply_action(invoice=self.at_bilty_again(), user=self.clerk, stage_status='RETURN',
+                            remarks='wrong GRPO')
+        self.assertEqual(back.current_stage.code, 'entry')
+
+    def at_bilty_again(self):
+        invoice = self.move_to(self.make_invoice(category=self.transport, number='INV-2'), 'bilty_grpo')
+        return invoice
+
+    def test_it_now_asks_for_a_status_and_debit_is_not_one(self):
+        invoice = self.at_bilty()
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk, stage_status='', remarks='x')
+        with self.assertRaises(ValidationError):
+            apply_action(invoice=invoice, user=self.clerk, stage_status='DEBIT', amount='10', remarks='x')

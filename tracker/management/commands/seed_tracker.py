@@ -22,8 +22,9 @@ STAGES = [
     dict(code='entry',        name='Head Office In',     order=1,
          status_choices=[],                                   requires_status=False,
          can_return=False, is_terminal=False, threshold_days=2),
+    # Holds as Pre-Audit does (full / partial); see migration 0025.
     dict(code='bilty_grpo',   name='Bilty / GRPO',       order=2,
-         status_choices=[],                                   requires_status=False,
+         status_choices=['OK', 'HOLD', 'RETURN'],             requires_status=True,
          can_return=True,  is_terminal=False, threshold_days=3),
     dict(code='pre_audit',    name='Pre-Audit',          order=3,
          status_choices=['OK', 'HOLD', 'DEBIT', 'RETURN'],    requires_status=True,
