@@ -115,6 +115,9 @@ def send(*, company, recipient_id, documents, note, user):
                     note=str(note or '').strip()[:2000], assigned_to=recipient, assigned_by=user))
     except IntegrityError as exc:
         raise AssignmentInvalid(['One of these is already waiting, open, with that user.'], status=409) from exc
+    from advance_payment.services import notify
+
+    notify.assigned(made, actor=user)
     return made
 
 

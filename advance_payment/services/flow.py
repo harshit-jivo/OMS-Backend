@@ -77,6 +77,7 @@ from advance_payment.models import (
     StageRole,
     is_department_head_stage,
 )
+from advance_payment.services import notify
 from advance_payment.services import payout as payout_service
 from advance_payment.services import requests as request_service
 from advance_payment.services import sap as sap_service
@@ -241,6 +242,7 @@ def raise_request(cleaned, *, user, files=()):
         data={'workflow': chosen.workflow.code, 'files': [f.name for f in advance.files.all()]})
     log(advance, LogAction.SUBMITTED, user=user, flow=flow, stage=None,
         data={'waiting_at': first.name})
+    notify.awaiting(flow, actor=user)
     return advance
 
 
@@ -392,8 +394,11 @@ def edit(advance, cleaned, *, user, files=(), remove_file_ids=(), resubmit=False
     if flow.status == FlowStatus.PENDING and changes:
         # Nothing is approved yet, so nothing is lost by routing again: a new
         # Department (budget head) or purpose must reach its own approvers.
+        waiting_with = flow.current_user_id
         _reroute(flow, advance)
         _save(flow)
+        if flow.current_user_id != waiting_with:
+            notify.awaiting(flow, actor=user)
     elif flow.status == FlowStatus.RETURNED and resubmit:
         _resubmit(flow, advance, user=user)
     else:
@@ -413,6 +418,7 @@ def _resubmit(flow, advance, *, user, remarks=''):
         data['approvals_kept'] = True
     log(advance, LogAction.RESUBMITTED, user=user, flow=flow, stage=None, remarks=remarks,
         from_status=RequestStatus.RETURNED, to_status=RequestStatus.IN_APPROVAL, data=data)
+    notify.awaiting(flow, actor=user, note='Resubmitted')
 
 
 @transaction.atomic
@@ -587,9 +593,11 @@ def approve(advance, *, user, remarks='', version=None):
             advance.save(update_fields=['status', 'updated_on'])
             log(advance, LogAction.COMPLETED, user=user, flow=flow, stage=None,
                 from_status=RequestStatus.IN_APPROVAL, to_status=RequestStatus.COMPLETED)
+            notify.completed(advance, actor=user, posted=posts)
         else:
             _point_at(flow, *following)
             _save(flow)
+            notify.awaiting(flow, actor=user)
         return advance, ''
 
 
@@ -606,6 +614,7 @@ def reject(advance, *, user, remarks, version=None):
     _save(flow)
     advance.status = RequestStatus.REJECTED
     advance.save(update_fields=['status', 'updated_on'])
+    notify.rejected(advance, actor=user, remarks=remarks)
     return advance
 
 
@@ -632,6 +641,7 @@ def return_to_creator(advance, *, user, remarks, version=None):
     _save(flow)
     advance.status = RequestStatus.RETURNED
     advance.save(update_fields=['status', 'updated_on'])
+    notify.returned(advance, actor=user, remarks=remarks)
     return advance
 
 
@@ -660,9 +670,11 @@ def send_back(advance, *, user, remarks, version=None):
     advance = flow.request
     log(advance, LogAction.SENT_BACK, user=user, flow=flow, remarks=remarks,
         data={'to': payment[0].name})
+    sent_from = flow.current_stage.name
     flow.cycle += 1
     _point_at(flow, *payment)
     _save(flow)
+    notify.awaiting(flow, actor=user, note=f'Sent back by {sent_from}: {remarks}')
     return advance
 
 

@@ -6,7 +6,7 @@ from unittest import mock
 from django.test import SimpleTestCase, override_settings
 
 from advance_payment.models import VoucherStatus
-from advance_payment.services import sap_attachments
+from advance_payment.services import sap_attachment_rows, sap_attachments
 from advance_payment.services import voucher as voucher_service
 from payments import sap_client
 
@@ -155,3 +155,129 @@ class AfterPosting(SimpleTestCase):
             count, problem = sap_attachments.attach_after_posting(self.advance, user=None)
         self.assertEqual(count, 0)
         self.assertIn('not posted', problem)
+
+
+FOLDER_DOWN = sap_client.SapError('400', status_code=400, sap_code='-5002', payload={'error': {
+    'code': '-5002', 'message': "Source file does not exist  , '/mnt/Attachments_Oil/JIVO_OIL/Attachments/a.pdf'"}})
+
+
+@override_settings(**FILE_SERVICE, SAP_ATTACHMENT_HANA_FALLBACK=True)
+class WhenTheServiceLayerCannotSeeTheShare(SimpleTestCase):
+    advance = SimpleNamespace(company='OIL', request_no='AP-2026-0062')
+
+    def test_the_attachment_is_written_straight_into_sap(self):
+        files = [row(1, share_file_id=1211, share_name='Fwd_ FACTORY PAYMENT 07.10.2026.pdf', share_folder=3,
+                     size=219429)]
+        with mock.patch.object(sap_attachments, '_ready', return_value=(files, [])), \
+                mock.patch.object(sap_client, 'request', side_effect=FOLDER_DOWN), \
+                mock.patch.object(sap_attachment_rows, 'create', return_value=182600) as written, \
+                mock.patch.object(sap_attachments.RequestFile.objects, 'filter') as marked:
+            self.assertEqual(sap_attachments.for_payment(self.advance, 'JIVO_OIL_HANADB'), (182600, ''))
+        written.assert_called_once_with('JIVO_OIL_HANADB', [('Fwd_ FACTORY PAYMENT 07.10.2026.pdf', 219429)])
+        marked.return_value.update.assert_called_once_with(sap_attachment_entry=182600)
+
+    def test_any_other_refusal_is_reported_not_worked_around(self):
+        refused = sap_client.SapError('400', status_code=400, sap_code='-1116', payload={'error': {
+            'code': '-1116', 'message': 'File name too long'}})
+        files = [row(1, share_file_id=1, share_name='a.pdf', share_folder=3)]
+        with mock.patch.object(sap_attachments, '_ready', return_value=(files, [])), \
+                mock.patch.object(sap_client, 'request', side_effect=refused), \
+                mock.patch.object(sap_attachment_rows, 'create') as written:
+            entry, problem = sap_attachments.for_payment(self.advance, 'JIVO_OIL_HANADB')
+        written.assert_not_called()
+        self.assertEqual(entry, None)
+        self.assertIn('File name too long', problem)
+
+    @override_settings(SAP_ATTACHMENT_HANA_FALLBACK=False)
+    def test_switched_off_it_only_reports(self):
+        files = [row(1, share_file_id=1, share_name='a.pdf', share_folder=3)]
+        with mock.patch.object(sap_attachments, '_ready', return_value=(files, [])), \
+                mock.patch.object(sap_client, 'request', side_effect=FOLDER_DOWN), \
+                mock.patch.object(sap_attachment_rows, 'create') as written:
+            entry, problem = sap_attachments.for_payment(self.advance, 'JIVO_OIL_HANADB')
+        written.assert_not_called()
+        self.assertIn('Source file does not exist', problem)
+
+    def test_after_posting_the_payment_is_linked_even_when_sap_refuses_the_patch(self):
+        # A PATCH of a posted payment after 5 PM is refused by SAP's urgency rule.
+        v = SimpleNamespace(status=VoucherStatus.POSTED, sap_doc_entry=29858, attachment_entry=None,
+                            attachment_error='', saved=[])
+        v.save = lambda update_fields: v.saved.append(tuple(update_fields))
+        urgency = sap_client.SapError('400', status_code=400, sap_code='-1116', payload={'error': {
+            'code': '-1116', 'message': '(4612) After 5:00 PM Urgency field is mandatory for Outgoing Payment.'}})
+        files = [row(1, share_file_id=1211, share_name='a.pdf', share_folder=3, size=2048)]
+        with mock.patch.object(voucher_service, 'live', return_value=v), \
+                mock.patch.object(voucher_service, '_company_db', return_value='JIVO_OIL_HANADB'), \
+                mock.patch.object(sap_attachments, '_ready', return_value=(files, [])), \
+                mock.patch.object(sap_attachments.RequestFile.objects, 'filter'), \
+                mock.patch('advance_payment.services.flow.log'), \
+                mock.patch.object(sap_client, 'request', side_effect=[FOLDER_DOWN, urgency]), \
+                mock.patch.object(sap_attachment_rows, 'create', return_value=182600), \
+                mock.patch.object(sap_attachment_rows, 'link_payment') as linked:
+            self.assertEqual(sap_attachments.attach_after_posting(self.advance, user=None), (1, ''))
+        linked.assert_called_once_with('JIVO_OIL_HANADB', 29858, 182600)
+        self.assertEqual((v.attachment_entry, v.attachment_error), (182600, ''))
+
+    def test_files_added_later_become_lines_of_the_payments_attachment(self):
+        v = SimpleNamespace(status=VoucherStatus.POSTED, sap_doc_entry=29858, attachment_entry=182600,
+                            attachment_error='', saved=[])
+        v.save = lambda update_fields: v.saved.append(tuple(update_fields))
+        files = [row(2, share_file_id=1300, share_name='UTR.png', share_folder=3, size=900)]
+        with mock.patch.object(voucher_service, 'live', return_value=v), \
+                mock.patch.object(voucher_service, '_company_db', return_value='JIVO_OIL_HANADB'), \
+                mock.patch.object(sap_attachments, '_ready', return_value=(files, [])), \
+                mock.patch.object(sap_attachments.RequestFile.objects, 'filter'), \
+                mock.patch('advance_payment.services.flow.log'), \
+                mock.patch.object(sap_client, 'request', side_effect=FOLDER_DOWN), \
+                mock.patch.object(sap_attachment_rows, 'add') as added:
+            self.assertEqual(sap_attachments.attach_after_posting(self.advance, user=None), (1, ''))
+        added.assert_called_once_with('JIVO_OIL_HANADB', 182600, [('UTR.png', 900)])
+
+
+class FakeCursor:
+    """HANA, as the writer sees it: answers SELECTs from `answers`, records the rest."""
+
+    def __init__(self, answers, rowcount=1):
+        self.answers, self.done, self.rowcount, self._last = answers, [], rowcount, None
+
+    def execute(self, sql, params):
+        self.done.append((' '.join(sql.split()), params))
+        self._last = next((v for k, v in self.answers.items() if k in sql), None)
+
+    def fetchone(self):
+        return None if self._last is None else (self._last,)
+
+
+@override_settings(HANA_OIL_COMPANY_DB='JIVO_OIL_HANADB', HANA_USERNAME='B1i')
+class TheRowsWritten(SimpleTestCase):
+    def write(self, answers, fn, *args, rowcount=1):
+        cursor = FakeCursor(answers, rowcount)
+        connection = mock.Mock(cursor=mock.Mock(return_value=cursor))
+        hana = mock.Mock(connection=connection)
+        with mock.patch('hana.services.connection.HANAConnection', return_value=hana), \
+                mock.patch.object(sap_attachment_rows.clock, 'today', return_value='2026-10-12'):
+            result = fn(*args)
+        return result, cursor.done, connection
+
+    def test_as_sap_writes_a_file_already_in_its_attachments_folder(self):
+        answers = {'OATC_S': 182600, 'AttachPath': '\\\\10.10.101.52\\Attachments_Oil\\JIVO_OIL\\Attachments\\',
+                   'OUSR': 2, 'TABLE_COLUMNS': 1}
+        entry, done, connection = self.write(
+            answers, sap_attachment_rows.create, 'JIVO_OIL_HANADB', [('Fwd_ FACTORY PAYMENT 07.10.2026.pdf', 219429)])
+        self.assertEqual(entry, 182600)
+        self.assertIn(('INSERT INTO "JIVO_OIL_HANADB"."OATC" ("AbsEntry") VALUES (?)', [182600]), done)
+        sql, values = done[-1]
+        self.assertTrue(sql.startswith('INSERT INTO "JIVO_OIL_HANADB"."ATC1"'))
+        folder = '\\\\10.10.101.52\\Attachments_Oil\\JIVO_OIL\\Attachments'
+        self.assertEqual(values, [182600, 1, folder, folder, 'Fwd_ FACTORY PAYMENT 07.10.2026', 'pdf', '2026-10-12', 2,
+                                  'Y', 'N', 'Y', 'N', 'N', 'N', 215, 'N', 'N', 215, 'OK'])
+        connection.setautocommit.assert_called_once_with(False)
+        connection.commit.assert_called_once()
+
+    def test_never_writes_a_schema_oms_does_not_own(self):
+        with self.assertRaises(sap_attachment_rows.RowsError):
+            sap_attachment_rows.create('SBOCOMMON', [('a.pdf', 1)])
+
+    def test_a_payment_that_has_an_attachment_keeps_it(self):
+        with self.assertRaises(sap_attachment_rows.RowsError):
+            self.write({}, sap_attachment_rows.link_payment, 'JIVO_OIL_HANADB', 29858, 182600, rowcount=0)

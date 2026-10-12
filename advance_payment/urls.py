@@ -16,6 +16,8 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /relationship-map/      ?company=&kind=po|grpo|bill&doc_entry=  (PO -> GRPO -> bill -> payment, returns, debit notes)
   GET /journal-entry/         ?company=&trans_id=                 (a posted document's G/L lines)
   GET /partner-balances/      ?company=&card_code=                (balance in Oil / Beverages, same code + same PAN)
+  GET /full-ledger/           ?company=&card_code=&date_from=&date_to=  (every ledger line, running balance)
+  GET /bill-ledger/           ?company=&doc_entry=                (one bill: what settled it, what is left)
   GET /document-history/      ?company=&kind=po|bill|ledger&doc_entry=[&line=]  (OMS's payments against it)
   GET /tds-options/           ?company=&card_code=&bills=     (TDS the Payment desk may deduct)
   GET /assignment-recipients/                                  (who bills / POs may be sent to)
@@ -94,6 +96,10 @@ urlpatterns = [
          name='advance-payment-journal-entry'),
     path('partner-balances/', views.PartnerBalancesView.as_view(),
          name='advance-payment-partner-balances'),
+    path('full-ledger/', views.FullLedgerView.as_view(),
+         name='advance-payment-full-ledger'),
+    path('bill-ledger/', views.BillLedgerView.as_view(),
+         name='advance-payment-bill-ledger'),
     path('document-history/', views.DocumentHistoryView.as_view(),
          name='advance-payment-document-history'),
     path('tds-options/', views.TdsOptionsView.as_view(),

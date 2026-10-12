@@ -338,6 +338,10 @@ SAP_ATTACHMENT_SOURCE_PATHS = {
                         default='/mnt/Attachments_Bev/JIVO_BEVERAGES/Attachments'),
     'MART': config('SAP_ATTACHMENT_SOURCE_MART', default='/mnt/Attachments_Mart/JIVO_MART/Attachments'),
 }
+# When the Service Layer refuses an attachment because it cannot see that
+# share (its mount on .222 down), write SAP's attachment rows (OATC/ATC1)
+# straight into HANA, as factory_app does for GRPOs. Decided 2026-10-12.
+SAP_ATTACHMENT_HANA_FALLBACK = config('SAP_ATTACHMENT_HANA_FALLBACK', default=True, cast=bool)
 
 # OCR service (ocr-service/ on the OMS server, 127.0.0.1:8014): reads photos
 # and scanned pages of payment proofs. Unset here = PDFs with text, Excel and

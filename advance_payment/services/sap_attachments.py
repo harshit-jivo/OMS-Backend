@@ -24,6 +24,12 @@ for the payments it posts, in two steps:
    voucher and `attach_after_posting` attaches them later (also how files
    added after posting, such as payment proofs, reach SAP).
 
+   When the Service Layer refuses because it cannot see the share (its mount
+   on .222 dropped: -5002 "Source file does not exist" / "Attachments folder
+   ... changed or removed"), the attachment is written straight into SAP's
+   tables instead, as SAP's own client would write it for a file already in
+   the attachments folder (`sap_attachment_rows`, `SAP_ATTACHMENT_HANA_FALLBACK`).
+
 The Service Layer cannot delete an attachment row (error 220), so a row is
 made once per set of files and reused: a retried post whose files are already
 in an attachment reuses that attachment rather than leave another orphan.
@@ -35,6 +41,7 @@ from django.conf import settings
 from django.db import transaction
 
 from advance_payment.models import FilePurpose, LogAction, RequestFile, VoucherStatus
+from advance_payment.services import sap_attachment_rows
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +206,30 @@ def _line(row, source):
     return {'SourcePath': source, 'FileName': stem, 'FileExtension': ext, 'Override': 'tYES'}
 
 
+#: What the Service Layer says when it cannot see the attachments share.
+FOLDER_REFUSALS = ('source file does not exist', 'attachments folder', 'linux mount point')
+
+
+def _folder_refused(exc):
+    """The Service Layer refused only because its mount of the share is down."""
+    text = f'{_sap_problem(exc)}'.lower()
+    return str(getattr(exc, 'sap_code', '')) in ('-5002', '-43') and any(t in text for t in FOLDER_REFUSALS)
+
+
+def _files(rows):
+    return [(r.share_name, getattr(r, 'size', None)) for r in rows]
+
+
 def _sap_problem(exc):
     payload = getattr(exc, 'payload', None) or {}
     message = ((payload.get('error') or {}).get('message') if isinstance(payload, dict) else '') or str(exc)
+    if isinstance(message, dict):
+        message = message.get('value', '')
+    if str(getattr(exc, 'sap_code', '')) == '-5002':
+        # The file is on the share (the file service put it there); the SAP
+        # server cannot see it through its mount of the share.
+        message += (' (the file is on the share, but the SAP server .222 cannot see the share through its'
+                    ' mount: have the mount fixed on .222, then press Attach to SAP)')
     return f'SAP did not take the attachment: {message}'.strip()
 
 
@@ -216,7 +244,12 @@ def _new_attachment(rows, company, company_db):
         _, body = sap_client.request('POST', '/Attachments2', company_db=company_db,
                                      json_body={'Attachments2_Lines': [_line(r, source) for r in rows]})
     except sap_client.SapError as exc:
-        return None, _sap_problem(exc)
+        if not (_folder_refused(exc) and sap_attachment_rows.enabled()):
+            return None, _sap_problem(exc)
+        try:
+            body = {'AbsoluteEntry': sap_attachment_rows.create(company_db, _files(rows))}
+        except sap_attachment_rows.RowsError as rows_exc:
+            return None, f'{_sap_problem(exc)}; written directly neither: {rows_exc}'
     entry = body.get('AbsoluteEntry') if isinstance(body, dict) else None
     if not entry:
         return None, 'SAP made the attachment but did not say its number.'
@@ -278,8 +311,13 @@ def attach_after_posting(advance, *, user):
     source = _source_path(advance.company)
     try:
         if voucher.attachment_entry:
-            sap_client.request('PATCH', f'/Attachments2({voucher.attachment_entry})', company_db=company_db,
-                               json_body={'Attachments2_Lines': [_line(r, source) for r in todo]})
+            try:
+                sap_client.request('PATCH', f'/Attachments2({voucher.attachment_entry})', company_db=company_db,
+                                   json_body={'Attachments2_Lines': [_line(r, source) for r in todo]})
+            except sap_client.SapError as exc:
+                if not (_folder_refused(exc) and sap_attachment_rows.enabled()):
+                    raise
+                sap_attachment_rows.add(company_db, voucher.attachment_entry, _files(todo))
             RequestFile.objects.filter(pk__in=[r.pk for r in todo]).update(
                 sap_attachment_entry=voucher.attachment_entry)
         else:
@@ -288,9 +326,23 @@ def attach_after_posting(advance, *, user):
                 voucher.attachment_error = problem[:500]
                 voucher.save(update_fields=['attachment_error'])
                 return 0, problem
-            sap_client.request('PATCH', f'/VendorPayments({int(voucher.sap_doc_entry)})', company_db=company_db,
-                               json_body={'AttachmentEntry': entry})
+            try:
+                sap_client.request('PATCH', f'/VendorPayments({int(voucher.sap_doc_entry)})',
+                                   company_db=company_db, json_body={'AttachmentEntry': entry})
+            except sap_client.SapError as exc:
+                # Any refusal, not only the share's: a PATCH of a posted payment
+                # runs SAP's posting rules again (after 5 PM: "(4612) Urgency
+                # field is mandatory"), which an attachment is not subject to.
+                # Only the attachment number is set, and only where there is none.
+                if exc.status_code is None or not sap_attachment_rows.enabled():
+                    raise
+                sap_attachment_rows.link_payment(company_db, int(voucher.sap_doc_entry), entry)
             voucher.attachment_entry = entry
+    except sap_attachment_rows.RowsError as exc:
+        problem = f'SAP did not take the attachment: {exc}'
+        voucher.attachment_error = problem[:500]
+        voucher.save(update_fields=['attachment_error'])
+        return 0, problem
     except sap_client.SapError as exc:
         problem = _sap_problem(exc)
         voucher.attachment_error = problem[:500]

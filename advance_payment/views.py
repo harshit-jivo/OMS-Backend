@@ -1008,6 +1008,50 @@ class PartnerBalancesView(_SapRead):
         return sap_relations.partner_balances(company, code)
 
 
+class FullLedgerView(_SapRead):
+    """GET /api/advance-payments/full-ledger/?company=&card_code=&date_from=&date_to=
+
+    Every journal line on the partner's account with a running balance (see
+    `sap_relations.full_ledger`). Dates are optional, YYYY-MM-DD.
+    """
+
+    resource = 'ledger'
+
+    def read(self, request, company):
+        from advance_payment.services import sap_relations
+        return sap_relations.full_ledger(
+            company, request.query_params.get('card_code'),
+            _iso_date(request.query_params.get('date_from')), _iso_date(request.query_params.get('date_to')))
+
+
+class BillLedgerView(_SapRead):
+    """GET /api/advance-payments/bill-ledger/?company=&doc_entry=
+
+    One A/P invoice's own ledger: the bill and what settled it (see
+    `sap_relations.bill_ledger`).
+    """
+
+    resource = 'bill ledger'
+    missing = 'SAP has no such A/P invoice.'
+
+    def read(self, request, company):
+        from advance_payment.services import sap_relations
+        return sap_relations.bill_ledger(company, request.query_params.get('doc_entry'))
+
+
+def _iso_date(value):
+    """A YYYY-MM-DD query value as a date, None when blank; a bad one is a 400."""
+    import datetime
+
+    value = (value or '').strip()
+    if not value:
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f'{value!r} is not a date (YYYY-MM-DD).') from None
+
+
 class DocumentAttachmentView(_Lookup):
     """GET /api/advance-payments/document-attachment/?company=&kind=po|bill|grpo&doc_entry=[&line=]
 

@@ -306,6 +306,13 @@ class GoodsReceiptAndPayment(SimpleTestCase):
 class RelationsInSap(SimpleTestCase):
     """Relationship map, journal entry, and one partner's balance across companies."""
 
+    def setUp(self):
+        # The same-code tests: no partner under another code.
+        for name, value in (('_gstins', []), ('_accounts', []), ('_found_by', [])):
+            patcher = mock.patch.object(sap_relations, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_a_same_code_that_is_another_business_is_not_shown(self):
         # VENDA001056: S.N. INDUSTRIES in Beverages, RAUNAK NURSERY in Oil.
         partners = {('BEVERAGES', 'VENDA001056'): {'code': 'VENDA001056', 'name': 'S.N. INDUSTRIES', 'type': 'S',
@@ -332,6 +339,17 @@ class RelationsInSap(SimpleTestCase):
             rows = sap_relations.partner_balances('OIL', 'V1')
         self.assertEqual([r['company'] for r in rows], ['OIL'])
 
+    def test_the_same_business_under_another_code_is_shown_with_its_code(self):
+        own = {'code': 'VENDA001056', 'name': 'S.N. INDUSTRIES', 'type': 'S', 'balance': Decimal('-1703088')}
+        theirs = {'code': 'VENDA001044', 'name': 'S.N. INDUSTRIES', 'type': 'S', 'balance': Decimal('0')}
+        partners = {('BEVERAGES', 'VENDA001056'): own}
+        with mock.patch.object(sap_relations, '_partner', side_effect=lambda c, code: partners.get((c, code))), \
+                mock.patch.object(sap_relations, '_pan', return_value='AANPG8531F'), \
+                mock.patch.object(sap_relations, '_found_by', return_value=[(theirs, 'GSTIN'), (theirs, 'name')]):
+            rows = sap_relations.partner_balances('BEVERAGES', 'VENDA001056')
+        self.assertEqual([(r['company'], r['card_code'], r['matched_by']) for r in rows],
+                         [('BEVERAGES', 'VENDA001056', 'self'), ('OIL', 'VENDA001044', 'GSTIN')])
+
     def test_a_journal_entry_balances(self):
         header = [{'trans_id': 234693, 'number': 926302189, 'posting_date': None, 'document_date': None,
                    'memo': 'A/P Invoices - VENDA000942', 'trans_type': '18', 'base_ref': '626094172',
@@ -349,3 +367,70 @@ class RelationsInSap(SimpleTestCase):
     def test_a_map_is_asked_of_a_po_grpo_or_bill_only(self):
         with self.assertRaisesRegex(ValueError, 'kind must be one of'):
             sap_relations.relationship_map('OIL', 'payment', 1)
+
+
+
+class Ledgers(SimpleTestCase):
+    """The partner's whole ledger, and one bill's."""
+
+    def test_the_full_ledger_runs_from_the_opening_balance(self):
+        opening = [{'b': Decimal('-1899095')}]
+        lines = [{'trans_id': 1, 'line_id': 0, 'trans_type': '30', 'doc_entry': 1, 'doc_num': '826880024',
+                  'ref1': '', 'ref2': '', 'posting_date': None, 'due_date': None, 'debit': Decimal('1724277'),
+                  'credit': Decimal('0'), 'memo': ''},
+                 {'trans_id': 2, 'line_id': 0, 'trans_type': '18', 'doc_entry': 9, 'doc_num': '626089124',
+                  'ref1': '', 'ref2': '', 'posting_date': None, 'due_date': None, 'debit': Decimal('0'),
+                  'credit': Decimal('21616'), 'memo': ''}]
+        with mock.patch.object(sap_relations, '_schema', return_value='S'), \
+                mock.patch.object(sap_relations, '_run', side_effect=[opening, lines]):
+            led = sap_relations.full_ledger('BEVERAGES', 'VENDA000948', datetime(2026, 8, 1).date())
+        self.assertEqual([r['balance'] for r in led['rows']], ['-174818', '-196434'])
+        self.assertEqual((led['opening'], led['closing'], led['rows'][1]['doc_type']),
+                         ('-1899095', '-196434', 'A/P Invoice'))
+
+    def test_a_bill_is_settled_by_its_own_reconciled_amount(self):
+        # Bill 624104114: Rs 4,05,000, of which a payment on account cleared Rs 3,05,000.
+        bill = [{'e': 188, 'num': 624104114, 'date': None, 'due': None, 'ref': '7/2024-25',
+                 'total': Decimal('405000'), 'paid': Decimal('305000'), 'card': 'VENDA000869', 'trans_id': 50}]
+        recons = [{'recon': 7, 'recon_date': None, 'amount': Decimal('305000'), 'side': 'C'}]
+        other = [{'recon': 7, 'trans_type': '46', 'doc_entry': 197, 'doc_num': '1024466623',
+                  'posting_date': None, 'trans_id': 60}]
+        with mock.patch.object(sap_relations, '_schema', return_value='S'), \
+                mock.patch.object(sap_relations, '_run', side_effect=[bill, recons, other]):
+            led = sap_relations.bill_ledger('OIL', 188)
+        self.assertEqual((led['open'], led['sap_open']), ('100000', '100000'))
+        self.assertEqual((led['rows'][1]['doc_type'], led['rows'][1]['doc_num']), ('Outgoing Payment', '1024466623'))
+
+
+class FindingTheSameBusiness(SimpleTestCase):
+    """`_found_by`: another code in the other company, by GSTIN, PAN, bank account or name."""
+
+    def run_found(self, answers, pans=None, **kwargs):
+        sqls = []
+
+        def run(company, sql, params, what):
+            sqls.append(what)
+            return answers.get(what, [])
+
+        with mock.patch.object(sap_relations, '_schema', return_value='S'), \
+                mock.patch.object(sap_relations, '_run', side_effect=run), \
+                mock.patch.object(sap_relations, '_pan', side_effect=lambda c, code: (pans or {}).get(code, '')):
+            found = sap_relations._found_by('OIL', 'S', **kwargs)
+        return [(r['code'], how) for r, how in found], sqls
+
+    def test_looks_by_each_identifier_it_has(self):
+        row = {'code': 'VENDA000956', 'name': 'ARNAV TRANSPORT SERVICE', 'type': 'S', 'balance': Decimal('-111404.82')}
+        found, sqls = self.run_found({'partner by bank account': [row], 'partner by name': [row]},
+                                     gstins=[], pan='', name='Arnav Transport Service.', accounts=['50200088470979'])
+        self.assertEqual(found, [('VENDA000956', 'bank account'), ('VENDA000956', 'name')])
+        self.assertEqual(sqls, ['partner by bank account', 'partner by name'])
+
+    def test_a_same_name_with_another_pan_is_another_business(self):
+        row = {'code': 'V9', 'name': 'SHARMA TRADERS', 'type': 'S', 'balance': Decimal('1')}
+        found, _sqls = self.run_found({'partner by name': [row]}, pans={'V9': 'BBBBB2222B'},
+                                      gstins=[], pan='AAAAA1111A', name='Sharma Traders', accounts=[])
+        self.assertEqual(found, [])
+
+    def test_a_name_is_compared_on_letters_and_digits(self):
+        self.assertEqual(sap_relations._name_key('M/s. A.B. Traders (P) Ltd'), 'MSABTRADERSPLTD')
+
