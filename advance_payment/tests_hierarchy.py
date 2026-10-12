@@ -364,3 +364,28 @@ class StaffSalaryAdvance(SimpleTestCase):
         self.assertEqual(hierarchy.PEOPLE['sales_bev'], 'Raju Vg')
         self.assertEqual(BY_CODE['AP_EXP_BEV_SALES']['stages'],
                          [(hierarchy.OWNER_STAGE, 'sales_bev'), (hierarchy.DIRECTOR_STAGE, 'director')])
+
+
+class HeadsTwoLoginsShare(SimpleTestCase):
+    """Where two logins share an HOD's name, the matcher will not guess; the code is pinned."""
+
+    def login(self, pk, username, name):
+        return SimpleNamespace(pk=pk, username=username, name=name, email=f'{pk}@x.in')
+
+    def test_each_pinned_hod_goes_to_its_own_login_not_the_namesake(self):
+        users = [
+            self.login(138, 'Shunty Vg', 'Shunty Veerji'), self.login(144, 'Shunty Ary', 'Shunty Ary'),
+            self.login(123, 'bhupinder', 'Bhupinder Singh'), self.login(143, 'bhupinder payment', 'Bhupinder Singh'),
+            self.login(104, 'prabhjot', 'Prabhjot Singh'), self.login(43, 'raunak', 'Prabhjot singh raunak'),
+        ]
+        for code, name, pk in (('JWPL0035', 'Shunty Veerji Accounts', 138),
+                               ('JWPL1556', 'Bhupinder Singh', 123),
+                               ('JWPL2217', 'Prabhu', 104)):
+            employee = SimpleNamespace(employee_code=code, employee_name=name, email=None)
+            with self.subTest(code=code):
+                self.assertEqual(heads.match_user(employee, users).pk, pk)
+
+    def test_unpinned_namesakes_are_still_no_match(self):
+        users = [self.login(1, 'asha a', 'Asha Rani'), self.login(2, 'asha b', 'Asha Devi')]
+        employee = SimpleNamespace(employee_code='JWPL9999', employee_name='Asha', email=None)
+        self.assertIsNone(heads.match_user(employee, users))

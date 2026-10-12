@@ -41,6 +41,9 @@ _USERNAME, _NAME, _PART = 3, 2, 1
 KNOWN_LOGINS = {
     'TEMP0002': 'Gurpreet Vg',   # Veerji is Gurpreet Ji (the Director)
     'JWPL0018': 'gagan',         # Gagan Vg: the Approver login, not "gagan adv" (both named Gagan)
+    'JWPL0035': 'Shunty Vg',     # Shunty Veerji Accounts: "Shunty Veerji", not "Shunty Ary" (both Shunty)
+    'JWPL1556': 'bhupinder',     # Bhupinder Singh: the approver login, not "bhupinder payment" (Mart's desk)
+    'JWPL2217': 'prabhjot',      # Prabhu: Prabhjot Singh, not "raunak" ("Prabhjot singh raunak")
 }
 
 
