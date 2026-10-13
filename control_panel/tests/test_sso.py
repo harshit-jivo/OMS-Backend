@@ -198,3 +198,15 @@ class AccessImportTests(SimpleTestCase):
         self.assertTrue(mapped <= set(perms.ALL_CP_KEYS), mapped - set(perms.ALL_CP_KEYS))
         # Every report is reachable from some C_Panel group.
         self.assertEqual({k for k in mapped if '.report.' in k}, set(perms.REPORT_KEY.values()))
+
+
+class PageLevelMigrationTests(SimpleTestCase):
+    def test_conversion_keeps_page_and_report_keys(self):
+        import importlib
+        m = importlib.import_module('control_panel.migrations.0003_page_level_permissions')
+        self.assertEqual(
+            m._convert(['Reports', 'control_panel.oils_sale', 'control_panel.report.claims',
+                        'control_panel.sales.targets', 'control_panel.segment.premium_only',
+                        'control_panel.inventory.values', 'control_panel.report.claims']),
+            ['Reports', 'control_panel.oils_sale', 'control_panel.report.claims',
+             'control_panel.sales', 'control_panel.inventory'])
