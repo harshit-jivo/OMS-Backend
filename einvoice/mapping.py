@@ -204,6 +204,11 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None,
     else:
         intra = (not is_export) and str(seller_state) == str(pos_code)
 
+    # RoundingDiffAmount is in local currency (INR) even on a foreign-currency
+    # document, which is what the IRN's ValDtls are expressed in.
+    round_off = (_r2(sap_invoice.get("RoundingDiffAmount"))
+                 if sap_invoice.get("Rounding") == "tYES" else 0.0)
+
     item_list = []
     ass_total = cgst_total = sgst_total = igst_total = tot_inv = 0.0
     for i, ln in enumerate(lines, start=1):
@@ -323,9 +328,13 @@ def build_irn(sap_invoice: dict, hsn_map: dict | None = None,
             "CgstVal": _r2(cgst_total),
             "SgstVal": _r2(sgst_total),
             "IgstVal": _r2(igst_total),
-            "TotInvVal": _r2(tot_inv),
+            "TotInvVal": _r2(tot_inv + round_off),
         },
     }
+    # SAP's document rounding (the Sales Invoice page's "Round off"), so the
+    # IRN total matches the SAP invoice total.
+    if round_off:
+        irn["ValDtls"]["RndOffAmt"] = round_off
 
     # Ship-to only when it is a genuinely different party (a same-GSTIN ship-to is
     # rejected as NIC 2323 — see the 17.06.2026 advisory).
