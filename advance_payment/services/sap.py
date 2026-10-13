@@ -1428,6 +1428,43 @@ def partner(company, card_code):
     }
 
 
+#: A partner's credit period: its payment terms (OCTG). Credit days are the
+#: terms' extra months and days; "NET-30" is 30 days. GroupNum -1 is SAP's
+#: own default, "ADVANCE/CASH/0 DAYS", which most vendors carry only because
+#: nobody set terms for them — so it is reported as not set, never as a credit
+#: period anyone agreed.
+_CREDIT_TERMS_SQL = '''
+    SELECT C."CardCode" AS "card_code", T."GroupNum" AS "group_num", T."PymntGroup" AS "terms",
+           IFNULL(T."ExtraMonth", 0) AS "extra_months", IFNULL(T."ExtraDays", 0) AS "extra_days"
+    FROM "{schema}"."OCRD" C
+    LEFT JOIN "{schema}"."OCTG" T ON T."GroupNum" = C."GroupNum"
+    WHERE C."CardCode" IN ({marks})
+'''
+
+SAP_DEFAULT_TERMS = -1
+
+
+def credit_terms(company, card_codes):
+    """`{card_code: {terms, days, set}}` for the partners SAP has; one query.
+
+    `set` is False on SAP's default terms (GroupNum -1): no credit period was
+    ever chosen for that partner.
+    """
+    codes = sorted({_s(c) for c in card_codes if _s(c)})
+    if not codes:
+        return {}
+    sql = _CREDIT_TERMS_SQL.format(schema=_schema(company), marks=', '.join('?' * len(codes)))
+    out = {}
+    for r in _run(company, sql, codes, 'credit terms'):
+        group = r.get('group_num')
+        out[_s(r.get('card_code'))] = {
+            'terms': _s(r.get('terms')),
+            'days': int(r.get('extra_months') or 0) * 30 + int(r.get('extra_days') or 0),
+            'set': group is not None and int(group) != SAP_DEFAULT_TERMS,
+        }
+    return out
+
+
 def open_documents(company, card_code, limit=None, bills_only=False,
                    exclude_bills=False):
     """Every open document against one partner, oldest due first.

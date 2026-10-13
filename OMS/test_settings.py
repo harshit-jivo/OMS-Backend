@@ -179,3 +179,7 @@ SECURE_SSL_REDIRECT = False
 # file service is off in tests (tests that need it set these themselves).
 FILE_UPLOAD_URL = ''
 FILE_UPLOAD_TOKEN = ''
+
+# Nor read SAP for the payee's credit terms on every listed request (the tests
+# of that lookup switch it back on themselves).
+ADVANCE_PAYMENT_CREDIT_TERMS = False

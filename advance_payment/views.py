@@ -32,6 +32,7 @@ from datetime import date
 from decimal import Decimal
 from urllib.parse import quote
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse
@@ -1389,7 +1390,40 @@ class _RequestView(APIView):
 
     def _answer(self, request, advance, message='', status=http_status.HTTP_200_OK):
         fresh = _requests().get(pk=advance.pk)
-        return ok(request_data(fresh, user=request.user, detail=True), message, status=status)
+        (data,) = _with_credit_terms([request_data(fresh, user=request.user, detail=True)])
+        return ok(data, message, status=status)
+
+
+#: Paid to a SAP business partner, whose payment terms are its credit period.
+_TERMS_TYPES = ('VENDOR', 'EXPENSE')
+
+
+def _with_credit_terms(rows):
+    """Each row gains `credit_terms`: its payee's SAP payment terms, or None.
+
+    One SAP query per company for the whole list. A partner not in SAP, an
+    employee, or SAP being unreachable leaves it None: a list never fails over
+    a detail. Off when `ADVANCE_PAYMENT_CREDIT_TERMS` is False (the test settings).
+    """
+    if not getattr(settings, 'ADVANCE_PAYMENT_CREDIT_TERMS', True):
+        for row in rows:
+            row['credit_terms'] = None
+        return rows
+    wanted = {}
+    for row in rows:
+        code = row.get('partner_code') or ''
+        if row.get('request_type') in _TERMS_TYPES and code and not row.get('partner_not_in_sap') \
+                and not code.startswith(request_service.NOT_IN_SAP_PREFIX):
+            wanted.setdefault(row.get('company'), set()).add(code)
+    found = {}
+    for company, codes in wanted.items():
+        try:
+            found[company] = sap_service.credit_terms(company, codes)
+        except sap_service.SapUnavailable:
+            found[company] = {}
+    for row in rows:
+        row['credit_terms'] = found.get(row.get('company'), {}).get(row.get('partner_code') or '')
+    return rows
 
 
 class RequestListView(_RequestView):
@@ -1417,8 +1451,8 @@ class RequestListView(_RequestView):
         # The desk labels each row with the viewer's own decision; one query for
         # the page. The requester's list has no use for it, so it skips the work.
         decisions = flow_service.my_decisions(request.user) if scope == 'desk' else {}
-        rows = [request_data(r, user=request.user, my_decision=decisions.get(r.pk))
-                for r in qs.order_by('-created_on')[:LIST_LIMIT]]
+        rows = _with_credit_terms([request_data(r, user=request.user, my_decision=decisions.get(r.pk))
+                                   for r in qs.order_by('-created_on')[:LIST_LIMIT]])
         if scope == 'all':
             # The register filters by who decided on it and shows how long it
             # has sat: one log query for the page.
@@ -1453,7 +1487,8 @@ class RequestListView(_RequestView):
 
 class RequestDetailView(_RequestView):
     def get(self, request, pk):
-        return ok(request_data(self._get(request, pk), user=request.user, detail=True))
+        (data,) = _with_credit_terms([request_data(self._get(request, pk), user=request.user, detail=True)])
+        return ok(data)
 
 
 class RequestSapCheckView(_RequestView):
