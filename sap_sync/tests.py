@@ -127,9 +127,9 @@ class SyncServiceMapOrderToSapTests(TestCase):
             payload["DocumentLines"],
             [
                 {"ItemCode": "FG-MAIN", "Quantity": 10.0, "UnitPrice": 100.0, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
-                {"ItemCode": "FG-SCHEME-A", "Quantity": 2.0, "UnitPrice": 0.0, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
-                {"ItemCode": "FG-SCHEME-B1", "Quantity": 4.0, "UnitPrice": 0.0, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
-                {"ItemCode": "FG-SCHEME-B2", "Quantity": 4.0, "UnitPrice": 0.0, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
+                {"ItemCode": "FG-SCHEME-A", "Quantity": 2.0, "UnitPrice": 0.1, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
+                {"ItemCode": "FG-SCHEME-B1", "Quantity": 4.0, "UnitPrice": 0.1, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
+                {"ItemCode": "FG-SCHEME-B2", "Quantity": 4.0, "UnitPrice": 0.1, "U_SchemeAgst": "", "WarehouseCode": "GP-FG"},
             ],
         )
 
@@ -298,7 +298,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 950.0)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG-SCHEME")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 12.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     @skip(
         "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
@@ -350,7 +350,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 950.0)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG-SCHEME")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 12.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     @skip(
         "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
@@ -403,10 +403,10 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][0]["Quantity"], 20.0)
         self.assertEqual(payload["DocumentLines"][1]["ItemCode"], "FG0000005")
         self.assertEqual(payload["DocumentLines"][1]["Quantity"], 20.0)
-        self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 0.1)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG-COMBO-ITEM")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 20.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     @skip(
         "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
@@ -459,7 +459,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 450.0)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG0000005")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 20.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     @skip(
         "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
@@ -515,7 +515,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 450.0)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG0000005")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 5.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     @skip(
         "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
@@ -611,7 +611,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 450.0)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG0000005")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 5.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     @skip(
         "PUNJAB_COMBO_MOVED — asserts Punjab/combo scheme expansion inside map_order_to_sap. That responsibility is no longer there: `is_punjab_party` / `should_mirror_punjab_combo_scheme_qty` live in orders/services/scheme_rules.py and have NO reference in production code at all. (Until the Phase 3 refactor there was exactly one: an unused import in orders/views.py, removed when that module's dead imports were pruned — so the count went from one-that-did-nothing to zero, which is a clearer statement of the same fact.) map_order_to_sap now ships the scheme entries persisted on the order instead. Needs a domain decision, see the class docstring."
@@ -670,7 +670,7 @@ class SyncServiceMapOrderToSapTests(TestCase):
         self.assertEqual(payload["DocumentLines"][1]["UnitPrice"], 1228.45)
         self.assertEqual(payload["DocumentLines"][2]["ItemCode"], "FG0000005")
         self.assertEqual(payload["DocumentLines"][2]["Quantity"], 5.0)
-        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.0)
+        self.assertEqual(payload["DocumentLines"][2]["UnitPrice"], 0.1)
 
     def _preform_order(self):
         item = SimpleNamespace(

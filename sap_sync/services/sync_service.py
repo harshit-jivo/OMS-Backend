@@ -290,6 +290,10 @@ def _get_sap_line_quantity(item):
 # every realistic quantity.
 FOC_TOKEN_UNIT_PRICE = 0.001
 
+# A scheme giveaway ships free, but goes to SAP at this token rate rather than
+# 0 — the business's choice for scheme lines (2026-10-13).
+SCHEME_TOKEN_UNIT_PRICE = 0.1
+
 
 # Sub-groups that have no profit centre of their own in OPRC dimension 1 (the
 # column SAP labels "Variety"), mapped to the profit-centre NAME the business
@@ -1321,12 +1325,12 @@ class SyncService:
                 for scheme_item_code in scheme_item_codes:
                     # A scheme whose giveaway IS the ordered item ("buy 3 boxes, get
                     # 2 pcs of the same free") is legitimate and must still be sent —
-                    # as its own zero-price line, so the paid line keeps its price.
+                    # as its own token-price line, so the paid line keeps its price.
                     # Skipping it here silently dropped the customer's free stock.
                     line = {
                         "ItemCode": scheme_item_code,
                         "Quantity": scheme_qty,
-                        "UnitPrice": 0.0,
+                        "UnitPrice": SCHEME_TOKEN_UNIT_PRICE,
                         "U_SchemeAgst": sub_group,
                     }
                     if line_costing_code:
