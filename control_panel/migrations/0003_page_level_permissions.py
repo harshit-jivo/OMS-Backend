@@ -11,6 +11,7 @@ from django.db import migrations
 PAGE_OF = {'oils_sale': 'control_panel.oils_sale', 'sales': 'control_panel.sales',
            'inventory': 'control_panel.inventory', 'finance': 'control_panel.finance'}
 NEW_KEYS = set(PAGE_OF.values())
+REPORT_PREFIX = 'control_panel.report.'
 
 
 def _convert(keys):
@@ -19,7 +20,9 @@ def _convert(keys):
     for key in keys:
         key = str(key)
         parts = key.split('.')
-        if parts[0] != 'control_panel' or key in NEW_KEYS:
+        # Report keys (`control_panel.report.<name>`) are one key per report page,
+        # not a sub-tab of a page: they stay as they are.
+        if parts[0] != 'control_panel' or key in NEW_KEYS or key.startswith(REPORT_PREFIX):
             if key not in out:
                 out.append(key)
             continue
