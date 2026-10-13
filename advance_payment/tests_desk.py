@@ -230,3 +230,75 @@ class RefusedBySapShows(DeskFixture):
 
         self.post(advance, VoucherStatus.POSTED, 3)
         self.assertIsNone(self.desk()[advance.pk]['sap_failure'])
+
+
+class ChangeDecision(DeskFixture):
+    """An approver takes back an approval while the very next stage has not decided."""
+
+    def setUp(self):
+        super().setUp()
+        self.auditor = make_user('ap-auditor', extra_pages=[DESK_KEY])
+        self.final = make_user('ap-final', extra_pages=[DESK_KEY])
+        self.route = make_workflow(self.workflow.module, code='AP_ROUTE')
+        self.hod = make_stage(self.route, 1, self.me, name='HOD Approval')
+        self.payment = make_stage(self.route, 2, self.other, name='Payment Approval')
+        self.audit = make_stage(self.route, 3, self.auditor, name='Audit Approval')
+        make_stage(self.route, 4, self.final, name='Final Approval')
+
+    def waiting_at(self, stage, *, approved_at, by, cycle=1):
+        advance = self.request(at=stage)
+        RequestFlow.objects.filter(request=advance).update(workflow=self.route, total_stages=4, cycle=cycle)
+        RequestLog.objects.create(request=advance, action=LogAction.APPROVED, actor=by, cycle=1,
+                                  stage=approved_at, stage_name=approved_at.name)
+        return advance
+
+    def act(self, advance, user, action='change-decision'):
+        request = APIRequestFactory().post(f'/advance-payments/requests/{advance.pk}/{action}/',
+                                           {'remarks': 'Wrong amount'}, format='json')
+        force_authenticate(request, user=user)
+        return views.RequestActionView.as_view()(request, pk=advance.pk, action=action)
+
+    def can(self, advance, user):
+        advance = AdvanceRequest.objects.select_related('flow').get(pk=advance.pk)
+        return flow_service.abilities(advance, user)['change_decision']
+
+    def test_while_it_waits_at_the_next_stage_the_approval_comes_back(self):
+        advance = self.waiting_at(self.payment, approved_at=self.hod, by=self.me)
+        self.assertTrue(self.can(advance, self.me))
+        response = self.act(advance, self.me)
+        self.assertEqual(response.status_code, 200, response.data)
+        flow = RequestFlow.objects.get(request=advance)
+        self.assertEqual((flow.current_stage_id, flow.current_user_id), (self.hod.pk, self.me.pk))
+        last = RequestLog.objects.filter(request=advance).order_by('-id').first()
+        self.assertEqual((last.action, last.stage_id, last.remarks), (LogAction.RECALLED, self.hod.pk, 'Wrong amount'))
+        self.assertEqual(last.data, {'was_waiting_at': 'Payment Approval'})
+        # Back with them: they decide again, and cannot take it back twice.
+        self.assertTrue(response.data['data']['can']['approve'])
+        self.assertFalse(self.can(advance, self.me))
+
+    def test_not_once_it_is_two_stages_on(self):
+        advance = self.waiting_at(self.audit, approved_at=self.hod, by=self.me)
+        self.assertFalse(self.can(advance, self.me))
+        self.assertEqual(self.act(advance, self.me).status_code, 409)
+        self.assertEqual(RequestFlow.objects.get(request=advance).current_stage_id, self.audit.pk)
+
+    def test_not_once_the_next_stage_has_decided(self):
+        advance = self.waiting_at(self.audit, approved_at=self.hod, by=self.me)
+        RequestLog.objects.create(request=advance, action=LogAction.APPROVED, actor=self.other, cycle=1,
+                                  stage=self.payment, stage_name=self.payment.name)
+        self.assertFalse(self.can(advance, self.me))
+        # ...but the Payment approver, whose approval it now waits right after, may.
+        self.assertTrue(self.can(advance, self.other))
+
+    def test_only_the_approver_and_only_this_round(self):
+        advance = self.waiting_at(self.payment, approved_at=self.hod, by=self.me)
+        self.assertFalse(self.can(advance, self.auditor))
+        # Not theirs to act on, nor decided by them: it does not even open for them.
+        self.assertEqual(self.act(advance, self.auditor).status_code, 404)
+        older = self.waiting_at(self.payment, approved_at=self.hod, by=self.me, cycle=2)
+        self.assertFalse(self.can(older, self.me))
+
+    def test_not_after_it_is_completed(self):
+        advance = self.waiting_at(self.payment, approved_at=self.hod, by=self.me)
+        RequestFlow.objects.filter(request=advance).update(status=FlowStatus.COMPLETED)
+        self.assertFalse(self.can(advance, self.me))

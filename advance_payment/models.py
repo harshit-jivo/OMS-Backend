@@ -828,6 +828,9 @@ class LogAction(models.TextChoices):
     FILE_REMOVED = 'FILE_REMOVED', 'File removed'
     #: The request's files attached to its SAP outgoing payment after it posted.
     SAP_ATTACHED = 'SAP_ATTACHED', 'Files attached in SAP'
+    #: An approver took their approval back while the request still waited at
+    #: the very next stage: it waits at theirs again (`flow.recall`).
+    RECALLED = 'RECALLED', 'Decision taken back'
     COMPLETED = 'COMPLETED', 'Completed'
 
 

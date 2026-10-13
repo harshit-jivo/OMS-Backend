@@ -1314,7 +1314,7 @@ class OpenInvoicesView(_Lookup):
 #   POST /requests/<id>/edit/                the creator's edit (multipart, as create,
 #                                            plus remove_file_ids, resubmit, version)
 #   POST /requests/<id>/<action>/            cancel | resubmit | approve | reject |
-#                                            return | send-back   {remarks, version}
+#                                            return | send-back | change-decision   {remarks, version}
 #   PUT  /requests/<id>/payout/              the Payment stage's details
 #   POST /requests/<id>/payout-lines/<l>/utr/   {utr, proof}
 #   POST /requests/<id>/files/               multipart: file, purpose, payout_line_id
@@ -1505,6 +1505,7 @@ _ACTIONS = {
     'reject': (flow_service.reject, True, 'Rejected.'),
     'return': (flow_service.return_to_creator, True, 'Returned to its creator.'),
     'send-back': (flow_service.send_back, True, 'Sent back to Payment.'),
+    'change-decision': (flow_service.recall, True, 'Your approval is taken back: it waits for you again.'),
 }
 
 

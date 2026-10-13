@@ -645,6 +645,60 @@ def return_to_creator(advance, *, user, remarks, version=None):
     return advance
 
 
+# ---------------------------------------------------------------------------
+# Changing a decision: taking an approval back
+# ---------------------------------------------------------------------------
+#
+# An approver may take back their approval while the request waits at the
+# VERY NEXT stage, before that stage has decided anything: it then waits at
+# their stage again, and they approve, reject or return it afresh. Once it has
+# moved on further (next-to-next stage), or the next stage has decided, or it
+# is completed, rejected or returned, the decision stands (decided 2026-10-13).
+
+#: The log rows that move a request between stages; the latest says who moved it last.
+_MOVES = (LogAction.APPROVED, LogAction.REJECTED, LogAction.RETURNED, LogAction.SENT_BACK,
+          LogAction.SUBMITTED, LogAction.RESUBMITTED, LogAction.RECALLED)
+
+
+def recallable(advance, user, flow=None):
+    """The approval `user` may take back now (its log row), or None."""
+    flow = flow if flow is not None else getattr(advance, 'flow', None)
+    if flow is None or flow.status != FlowStatus.PENDING or not flow.current_stage_id:
+        return None
+    last = (RequestLog.objects.filter(request=advance, action__in=_MOVES)
+            .order_by('-id').first())
+    if (last is None or last.action != LogAction.APPROVED or last.actor_id != user.pk
+            or last.cycle != flow.cycle or not last.stage_id):
+        return None
+    try:
+        ids = [stage.id for stage, _role in _stages(flow)]
+    except FlowError:
+        return None
+    if last.stage_id not in ids or flow.current_stage_id not in ids:
+        return None
+    # The very next stage only: not the one after it.
+    return last if ids.index(flow.current_stage_id) == ids.index(last.stage_id) + 1 else None
+
+
+@transaction.atomic
+def recall(advance, *, user, remarks='', version=None):
+    """Take back your approval: the request waits at your stage again."""
+    flow = _locked(advance)
+    _check_version(flow, version)
+    last = recallable(flow.request, user, flow)
+    if last is None:
+        raise FlowError('You can change your decision only while the request waits at the stage '
+                        'right after yours, before that stage decides.', status=409)
+    advance = flow.request
+    moved_to = flow.current_stage.name
+    stage = last.stage
+    log(advance, LogAction.RECALLED, user=user, flow=flow, stage=stage, remarks=remarks,
+        data={'was_waiting_at': moved_to})
+    _point_at(flow, stage, StageRole.of(stage.name))
+    _save(flow)
+    return advance
+
+
 #: Stages that may hand a request back to Payment for correction. Audit is
 #: here as well as Final because Audit is the first desk that reads the
 #: payment details against the evidence: making it approve something it can
@@ -967,6 +1021,10 @@ def abilities(advance, user):
         'return_to_creator': actor and role in RETURN_TO_CREATOR_ROLES,
         'send_back': actor and role in SEND_BACK_ROLES,
         'edit_payout': actor and role == StageRole.PAYMENT,
+        # Take back an approval while the very next stage has not decided.
+        # (Not while it waits on you: then you simply decide.)
+        'change_decision': bool(not actor and flow is not None and flow.status == FlowStatus.PENDING
+                                and recallable(advance, user, flow)),
         'record_utr': bool(utr),
         # The same people, after posting: attach files SAP does not have yet.
         'attach_to_sap': bool(utr),
