@@ -179,6 +179,10 @@ REGISTRY: dict[str, dict[str, str]] = {
         # being the current stage's user. The desk key alone shows only the
         # holder's own stage and decisions.
         'Advance_Payment_View_All':  'Advance Payment — view all requests (read only)',
+        # The Payments & Expenses board: SAP's actual expense postings (C_Panel's
+        # REPORT _MONTHLY_EXPENSES) and OMS's payment and expense requests.
+        # Read only. (The key keeps its first name, so existing grants hold.)
+        'Expense_Dashboard':         'Payments & Expenses — dashboard (read only)',
 
         # Credit Limit — replaces JSAP's credit-limit approval. Two keys, as
         # in BackDate: `Credit_Limit_Approval` opens the desk, and acting also

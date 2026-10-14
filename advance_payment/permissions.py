@@ -41,6 +41,15 @@ class CanDispatch(HasKey):
         super().__init__(DISPATCH_KEY)
 
 
+#: The Payments & Expenses board: SAP's actual expenses and OMS's payment requests.
+EXPENSE_DASHBOARD_KEY = 'Expense_Dashboard'
+
+
+class CanViewExpenseDashboard(HasKey):
+    def __init__(self):
+        super().__init__(EXPENSE_DASHBOARD_KEY)
+
+
 #: The approval desk. Acting also needs being the current stage's user.
 APPROVAL_KEY = 'Advance_Payment_Approval'
 

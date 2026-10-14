@@ -206,12 +206,17 @@ def get_expenses_by_category(month, year):
 
 
 def get_expense_rows(from_date, to_date):
-    schema = _schema()
     try:
-        raw = run_call(f'CALL "{schema}"."REPORT _MONTHLY_EXPENSES"(?, ?)', [from_date, to_date])
+        return fetch_expense_rows(from_date, to_date)
     except Exception as e:
         print(f'get_expense_rows error: {e}')
         return []
+
+
+def fetch_expense_rows(from_date, to_date):
+    """`get_expense_rows`, but a SAP failure RAISES instead of reading as no expenses."""
+    schema = _schema()
+    raw = run_call(f'CALL "{schema}"."REPORT _MONTHLY_EXPENSES"(?, ?)', [from_date, to_date])
 
     rows = []
     for r in raw:

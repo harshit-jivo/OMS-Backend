@@ -1426,6 +1426,54 @@ def _with_credit_terms(rows):
     return rows
 
 
+class ExpenseDashboardView(APIView):
+    """GET /api/advance-payments/expense-dashboard/?from=&to=&branch=&kind=&salary=
+
+    SAP's actual expenses for the period (and the one before it, and the last
+    twelve months), with OMS's expense requests beside them. Read only.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanViewExpenseDashboard()]
+
+    def get(self, request):
+        from advance_payment.services import expense_dashboard
+
+        params = request.query_params
+        try:
+            data = expense_dashboard.build(
+                params.get('from') or '', params.get('to') or '',
+                branch=params.get('branch') or '', kind=params.get('kind') or 'all',
+                include_salary=str(params.get('salary') or '').lower() in ('1', 'true', 'yes'))
+        except expense_dashboard.DashboardInvalid as exc:
+            return fail(str(exc))
+        except expense_dashboard.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        return ok(data)
+
+
+class OmsDashboardView(APIView):
+    """GET /api/advance-payments/oms-dashboard/?from=&to=&company=
+
+    The OMS side of the Payments & Expenses board: payment requests raised and
+    paid in the period, and what is pending now. Read only, OMS's own tables.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanViewExpenseDashboard()]
+
+    def get(self, request):
+        from advance_payment.services import expense_dashboard, oms_dashboard
+
+        params = request.query_params
+        try:
+            data = oms_dashboard.build(params.get('from') or '', params.get('to') or '',
+                                       company=params.get('company') or '')
+        except expense_dashboard.DashboardInvalid as exc:
+            return fail(str(exc))
+        return ok(data)
+
+
 class RequestListView(_RequestView):
     def get(self, request):
         scope = (request.query_params.get('scope') or 'mine').lower()
