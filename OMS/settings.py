@@ -527,6 +527,9 @@ LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
 
+# HANA compares BKDT expiry against its local CURRENT_TIMESTAMP.
+HANA_TIME_ZONE = config('HANA_TIME_ZONE', default='Asia/Kolkata')
+
 USE_I18N = True
 
 USE_TZ = True

@@ -797,7 +797,7 @@ class HanaTests(_Base):
 
     def test_the_payload_matches_the_procedure_signature(self):
         """`OPEN_BKDT` takes 11 IN parameters, in this order."""
-        from backdate.services.hana import build_payload
+        from backdate.services.hana import build_payload, sap_timestamp
 
         req = make_request(self.requester)
         params = build_payload(req)
@@ -808,7 +808,7 @@ class HanaTests(_Base):
         self.assertEqual(params[2], 13)                       # TRANSTYPE int
         self.assertEqual(params[3], req.from_date)            # FROMDATE date
         self.assertEqual(params[4], req.to_date)              # TODATE date
-        self.assertEqual(params[5], req.time_limit)           # TIMELIMIT
+        self.assertEqual(params[5], sap_timestamp(req.time_limit))  # TIMELIMIT
         self.assertEqual(params[6], 'NO')                     # RIGHTS
         self.assertIsNone(params[9])                          # DELETEDBY
         self.assertIsNone(params[10])                         # DELETEDON
@@ -850,15 +850,15 @@ class HanaIdentityTests(_Base):
         self.assertNotEqual(params[7], self.requester.username)
 
     def test_createdon_is_the_request_time_not_the_approval_time(self):
-        from backdate.services.hana import build_payload
+        from backdate.services.hana import build_payload, sap_timestamp
 
         req = self._approve_to_final()
         req.refresh_from_db()
         params = build_payload(req)
 
-        self.assertEqual(params[8], req.created_at)
+        self.assertEqual(params[8], sap_timestamp(req.created_at))
         decision = req.action_logs.filter(action=LogAction.APPROVE).last()
-        self.assertGreater(decision.acted_at, params[8])
+        self.assertGreater(decision.acted_at, req.created_at)
 
     def test_the_approver_is_still_recorded_where_it_belongs(self):
         """Dropping the approver from SAP must not lose them from OMS."""
@@ -1222,7 +1222,7 @@ class SapPayloadTests(_Base):
         self.assertEqual(params['RIGHTS'], 'NO')
         self.assertEqual(params['CREATEDBY'], str(self.requester.pk))
         self.assertEqual(params['CREATEDON'],
-                         flow.backdate.created_at.isoformat())
+                         hana.sap_timestamp(flow.backdate.created_at).isoformat())
         self.assertIsNotNone(params['TIMELIMIT'])
         self.assertIsNone(params['DELETEDBY'])
         self.assertIsNone(params['DELETEDON'])

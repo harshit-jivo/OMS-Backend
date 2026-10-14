@@ -50,7 +50,9 @@ WHAT WAS WRONG IN JSAP AND IS FIXED HERE
 """
 import json
 import logging
+from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.utils import timezone
 
 from hana.services.connection import HANAConnection, HanaSchemaError, Queries
@@ -84,6 +86,17 @@ class HanaWriteError(Exception):
         super().__init__(message)
         self.payload = payload
         self.status_text = status_text
+
+
+def sap_timestamp(value):
+    """Convert an OMS instant to the local clock used by HANA TIMESTAMP.
+
+    BKDT is compared with CURRENT_TIMESTAMP. Convert the instant to the SAP
+    timezone before removing tzinfo, so the driver cannot discard a UTC offset.
+    """
+    if timezone.is_naive(value):
+        raise HanaWriteError('SAP timestamps must include a timezone.')
+    return value.astimezone(ZoneInfo(settings.HANA_TIME_ZONE)).replace(tzinfo=None)
 
 
 def _rights_for(action):  # noqa: ARG001 — see the docstring
@@ -168,10 +181,10 @@ def build_payload(backdate, company=None):
         object_type,                         # 3  TRANSTYPE INTEGER
         backdate.from_date,                  # 4  FROMDATE  DATE
         backdate.to_date,                    # 5  TODATE    DATE
-        backdate.time_limit,                 # 6  TIMELIMIT TIMESTAMP
+        sap_timestamp(backdate.time_limit),  # 6  TIMELIMIT TIMESTAMP
         _rights_for(backdate.action),        # 7  RIGHTS    NVARCHAR(10)
         str(backdate.created_by_id)[:20],    # 8  CREATEDBY NVARCHAR(20)
-        backdate.created_at,                 # 9  CREATEDON TIMESTAMP
+        sap_timestamp(backdate.created_at),  # 9  CREATEDON TIMESTAMP
         None,                                # 10 DELETEDBY NVARCHAR(10)
         None,                                # 11 DELETEDON TIMESTAMP
     ]
@@ -261,7 +274,7 @@ def apply_grant(flow):
             'response': (f'OPEN_BKDT accepted: {backdate.sap_username}, '
                          f'{backdate.document_type_name}, '
                          f'{backdate.from_date} to {backdate.to_date}, '
-                         f'expires {backdate.time_limit.isoformat()}.'),
+                         f'expires {params[5].isoformat()} ({settings.HANA_TIME_ZONE}).'),
         })
 
     status_text = json.dumps({'results': results}, indent=2, sort_keys=False)

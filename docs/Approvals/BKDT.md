@@ -850,6 +850,44 @@ approving. **[JSAP]** The approver is not lost: they are in
 `RIGHTS` is always `'NO'`, which is what JSAP always sent. **[JSAP]** Whether SAP
 expects something else for UPDATE is **[UNKNOWN]** — do not invent a value.
 
+### 11.2.1 Timestamp timezone boundary (October 14, 2026 audit)
+
+`time_limit` in OMS is a timezone-aware instant, stored in UTC. `OPEN_BKDT`
+parameter 6 and `BKDT.timeLimit` are HANA `TIMESTAMP` values without a timezone.
+SAP checks them against its local `CURRENT_TIMESTAMP`. The configured HANA
+clock was verified as UTC+05:30 using `CURRENT_TIMESTAMP` and
+`CURRENT_UTCTIMESTAMP` in the same read-only query.
+
+A selected expiry of October 14 at 16:30 IST is `2026-10-14T11:00:00Z` in OMS.
+Passing that aware UTC datetime directly through hdbcli was reproduced with a
+read-only `SELECT CAST(? AS TIMESTAMP) FROM DUMMY`: HANA received **11:00**.
+Converting to `Asia/Kolkata` before stripping tzinfo makes HANA receive
+**16:30**. `sap_timestamp` now performs that conversion for TIMELIMIT and
+CREATEDON. The audit payload records the values actually bound to the procedure.
+The procedure itself was inspected live: it inserts `:timeLimit` unchanged.
+
+Web create and edit serialize their local date/time input with `toISOString()`;
+the mobile app already does this. The API rejects timezone-less expiry strings
+rather than assuming UTC. Date-only posting windows remain unchanged, and expiry
+validation uses the SAP calendar day so a local time shortly after midnight
+is not mistaken for the preceding day in UTC. Seconds and microseconds are
+preserved by the backend conversion.
+
+Set `HANA_TIME_ZONE=Asia/Kolkata` on the backend (also its default), deploy the
+backend and restart its workers, and deploy the updated web frontend together.
+Older web clients sending a bare timestamp will receive a validation error and
+must refresh. No database migration or SAP procedure alteration is required.
+Existing SAP grants are not automatically rewritten or recreated.
+
+Historical evidence: the deleted row supplied for USER09 / creator 121 carried
+`timeLimit=2026-10-14 11:00:00`. It was absent in the live HANA lookup, and no
+matching request was found in the connected OMS database (whose latest request
+was October 7). SQL Server `backdate.userDocument` contained a newer related
+request, id 1184, USER09, documentType 18, July 1 posting window, expiry
+`2026-10-14 16:30:59`, creator 133, created October 14 at 16:11:40.747.
+That different creator/time means it cannot prove the deleted row's exact origin.
+The timezone bug itself was reproduced directly with the live driver.
+
 ### 11.3 Why `time_limit` is mandatory
 
 SAP's posting validator `SBO_SP_TRANSACTIONNOTIFICATION` contains **14** BKDT

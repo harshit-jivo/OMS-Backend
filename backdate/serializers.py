@@ -5,7 +5,11 @@ approver's name, are read from the engine at render time rather than stored on
 BKDT rows — so a renamed stage or a reassigned user reads correctly everywhere
 without this module updating anything.
 """
+from zoneinfo import ZoneInfo
+
+from django.conf import settings
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
 from core.companies import COMPANY_CODES
@@ -160,6 +164,21 @@ class BackDateSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ZonedExpiryField(serializers.DateTimeField):
+    """A client must identify the instant, rather than send a bare wall clock."""
+
+    def to_internal_value(self, data):
+        try:
+            parsed = parse_datetime(data) if isinstance(data, str) else data
+        except (TypeError, ValueError):
+            parsed = None
+        if (parsed is not None and hasattr(parsed, 'utcoffset')
+                and timezone.is_naive(parsed)):
+            raise serializers.ValidationError(
+                'Include a timezone in the expiry (Z or an offset such as +05:30).')
+        return super().to_internal_value(data)
+
+
 class _BackDateWriteSerializer(serializers.ModelSerializer):
     """Validation shared by create and edit.
 
@@ -173,6 +192,7 @@ class _BackDateWriteSerializer(serializers.ModelSerializer):
     #: either. Declared loosely on purpose: the model column is one string, but
     #: a form naturally sends the ticked boxes as a list.
     company = serializers.JSONField()
+    time_limit = ZonedExpiryField()
 
     #: WRITE-ONLY, and not a model field: there is no remarks column. What the
     #: user types here becomes the `remarks` of the action-log row this
@@ -314,7 +334,9 @@ class _BackDateWriteSerializer(serializers.ModelSerializer):
 
         # JSAP enforced this in SQL only. It matters: a time limit before the
         # window starts grants rights that have already lapsed.
-        if time_limit and from_date and time_limit.date() < from_date:
+        expiry_date = (timezone.localtime(time_limit, ZoneInfo(settings.HANA_TIME_ZONE)).date()
+                       if time_limit else None)
+        if expiry_date and from_date and expiry_date < from_date:
             raise serializers.ValidationError(
                 {'time_limit': 'The expiry cannot be before the window starts.'})
 
