@@ -1,27 +1,39 @@
-"""The Budget board: this month's spending by main budget head, against August's.
+"""The Budget board: this month's spending against August's — by budget head, and by kind of cost.
 
-THE HEADS are the eight the business reads its spending by (user, 2026-10-14):
-Sales, Salary, Freight, Interest & Finance (the user's "accounts or finance"), Factory, Electricity, Back Office
-and Rent. SAP's budget dimension does not have all of them — Electricity, Rent
-and Freight are accounts booked under many budget heads — so each posting is
-put under ONE head, by the first rule that fits (`head_of`):
+TWO CUTS OF THE SAME POSTINGS (user, 2026-10-14):
 
-  Salary        a salary posting (SAP's own salary test), or budget Sal CF
-  Electricity   an electricity or generator account
-  Rent          a rent account
-  Freight       a freight / cartage / transport account, or budget Transprt,
-                Del Bkhp, Del Mayp (delivery)
-  Finance       budget Interest, or an interest, bank-charges or penalty account
-  Sales         budget Sales, Sales RE, ECOM, Med MKT, OTE
-  Factory       budget Factory, FACT_COM, NPD1, NPD2, SUPPLY-C
-  Back Office   budget BackOff, HR/ADMIN, SERVICES
-  Other         anything else (August: only SAP's ₹62 of rounding)
+THE HEADS (`heads`, the board's rows) are by SAP's budget dimension — whose
+budget a posting was booked to, salaries, rent and power included — so they
+add up to the whole (`department_of`):
 
-So the heads add up to the whole, and nothing is counted twice.
+  Sales               Sales, Sales RE, ECOM, Med MKT, OTE
+  Factory             Factory (but its CIVIL), FACT_COM
+  Back Office         BackOff, HR/ADMIN, SERVICES, Sal CF
+  Freight (delivery)  Del Bkhp, Del Mayp, Transprt, SUPPLY-C (Mart's supply chain)
+  Bank Interest       Interest
+  Other               anything else (August: SAP's ₹62 of rounding)
 
-THE YARDSTICK is August 2026 (`BASELINE`): each head's spending this month is
-shown against its August total, and the heads are ranked — given room on the
-board — by what they spent in August.
+THE COSTS (`costs`, the side's pie) cut across those budgets by what the money
+was for — each posting under the first rule that fits (`cost_of`), and only
+these five shown:
+
+  Salary              a salary posting (SAP's own salary test), or budget Sal CF
+  Electricity         an electricity or generator account
+  Rent                a rent account
+  Freight             a freight / cartage / transport account, or budget
+                      Transprt, Del Bkhp, Del Mayp
+  Interest & Finance  budget Interest, or an interest, bank-charges or penalty account
+
+MART COUNTS ONLY THROUGH ITS SALARY AND FREIGHT (user, 2026-10-14) — its
+salaries under Sales, its freight under Freight (delivery) — and every
+other Mart posting — its sales promotion, supply chain, office costs, rent,
+interest — is left off the board altogether, heads, costs and total alike
+(`counted`). Oil and Beverages count in full — but for new-product development
+(NPD1, NPD2) and factory civil works (Factory › CIVIL), which the board leaves
+out too (user, 2026-10-14; `LEFT_OUT`).
+
+THE YARDSTICK is August 2026 (`BASELINE`): every figure this month is shown
+against August's.
 
 THE DATA is SAP's expense report, `REPORT _MONTHLY_EXPENSES` (Control Panel's
 source): the Oil company's, which carries its Oil and Beverages branches, and
@@ -37,24 +49,29 @@ from django.utils import timezone
 
 from advance_payment.services.expense_dashboard import DashboardInvalid, SapUnavailable
 
-#: The month every head is measured against (user, 2026-10-14).
+#: The month every figure is measured against (user, 2026-10-14).
 BASELINE = '2026-08'
 CURRENT_CACHE_SECONDS = 600
 CLOSED_CACHE_SECONDS = 6 * 3600
 
 COMPANIES = (('OIL', 'Oil'), ('BEVERAGES', 'Beverages'), ('MART', 'Mart'))
 
-#: `(key, name)`, in the order ties are broken.
-HEADS = (
-    ('SALES', 'Sales'),
+#: The board's rows: `(key, name, SAP budget heads)` — every budget in one, so they add up.
+DEPARTMENTS = (
+    ('SALES', 'Sales', {'SALES', 'SALES RE', 'ECOM', 'MED MKT', 'OTE'}),
+    ('FACTORY', 'Factory', {'FACTORY', 'FACT_COM'}),
+    ('BACKOFFICE', 'Back Office', {'BACKOFF', 'HR/ADMIN', 'SERVICES', 'SAL CF'}),
+    ('DELIVERY', 'Freight (delivery)', {'DEL BKHP', 'DEL MAYP', 'TRANSPRT', 'SUPPLY-C'}),
+    ('INTEREST', 'Bank Interest', {'INTEREST'}),
+)
+
+#: The kinds of cost the side's pie shows, `(key, name)`, in its order.
+COSTS = (
     ('SALARY', 'Salary'),
     ('FREIGHT', 'Freight'),
-    ('FINANCE', 'Interest & Finance'),  # interest is most of it (Aug: ₹39.8 L of ₹41.6 L)
-    ('FACTORY', 'Factory'),
-    ('ELECTRICITY', 'Electricity'),
-    ('BACKOFFICE', 'Back Office'),
+    ('FINANCE', 'Interest & Finance'),
     ('RENT', 'Rent'),
-    ('OTHER', 'Other'),
+    ('ELECTRICITY', 'Electricity'),
 )
 
 #: Who owns a head, by company: Sales has one owner per company (user, 2026-10-14).
@@ -64,38 +81,65 @@ OWNERS = {
               {'company': 'BEVERAGES', 'label': 'Beverages', 'name': 'Shunty'}],
 }
 
-SALES_BUDGETS = {'SALES', 'SALES RE', 'ECOM', 'MED MKT', 'OTE'}
-FACTORY_BUDGETS = {'FACTORY', 'FACT_COM', 'NPD1', 'NPD2', 'SUPPLY-C'}
-BACKOFFICE_BUDGETS = {'BACKOFF', 'HR/ADMIN', 'SERVICES'}
+#: The only Mart postings the board counts: its salaries and its freight (user, 2026-10-14).
+MART_KEEPS = {'SALARY', 'FREIGHT'}
+
+#: Budgets the board leaves out, in every company: new-product development —
+#: NPD1 (its Legal sub budget included) and NPD2 — and, as `(budget, sub
+#: budget)`, factory civil works (user, 2026-10-14).
+LEFT_OUT_BUDGETS = {'NPD1', 'NPD2'}
+LEFT_OUT_SUB_BUDGETS = {('FACTORY', 'CIVIL')}
+
 FREIGHT_BUDGETS = {'TRANSPRT', 'DEL BKHP', 'DEL MAYP'}
 
-#: How much of each level of a head's breakdown is carried, largest first.
+#: How much of each level of a breakdown is carried, largest first.
 TOP_BUDGETS = 15
 TOP_ACCOUNTS = 12
 TOP_POSTINGS = 8
 
 
-def head_of(row):
-    """The one main head a posting belongs to (the rules in the module's docstring)."""
-    account = str(row.get('account_name') or row.get('ledger') or '').upper()
-    budget = str(row.get('budget') or '').strip().upper()
-    if row.get('is_salary') or budget == 'SAL CF':
-        return 'SALARY'
-    if 'ELECTRIC' in account or 'GENERATOR' in account:
-        return 'ELECTRICITY'
-    if 'RENT' in account and 'PARENT' not in account:
-        return 'RENT'
-    if any(word in account for word in ('FREIGHT', 'CARTAGE', 'TRANSPORT')) or budget in FREIGHT_BUDGETS:
-        return 'FREIGHT'
-    if budget == 'INTEREST' or any(word in account for word in ('INTEREST', 'BANK CHARGES', 'PENALTY')):
-        return 'FINANCE'
-    if budget in SALES_BUDGETS:
+def _budget(row):
+    return str(row.get('budget') or '').strip().upper()
+
+
+def department_of(row):
+    """The row a posting is counted in: by its SAP budget head; 'OTHER' for none of them.
+
+    Mart's salaries count under Sales — its card, Prabhjot's — whatever budget
+    they were booked to (most to HR/ADMIN; user, 2026-10-14).
+    """
+    if row.get('company') == 'MART' and cost_of(row) == 'SALARY':
         return 'SALES'
-    if budget in FACTORY_BUDGETS:
-        return 'FACTORY'
-    if budget in BACKOFFICE_BUDGETS:
-        return 'BACKOFFICE'
-    return 'OTHER'
+    budget = _budget(row)
+    return next((key for key, _name, budgets in DEPARTMENTS if budget in budgets), 'OTHER')
+
+
+def cost_of(row):
+    """The kind of cost a posting is (the rules in the module's docstring), or None for none of the five."""
+    account = str(row.get('account_name') or row.get('ledger') or '').upper()
+    budget = _budget(row)
+    if row.get('is_salary') or budget == 'SAL CF':
+        cost = 'SALARY'
+    elif 'ELECTRIC' in account or 'GENERATOR' in account:
+        cost = 'ELECTRICITY'
+    elif 'RENT' in account and 'PARENT' not in account:
+        cost = 'RENT'
+    elif any(word in account for word in ('FREIGHT', 'CARTAGE', 'TRANSPORT')) or budget in FREIGHT_BUDGETS:
+        cost = 'FREIGHT'
+    elif budget == 'INTEREST' or any(word in account for word in ('INTEREST', 'BANK CHARGES', 'PENALTY')):
+        cost = 'FINANCE'
+    else:
+        return None
+    return cost
+
+
+def counted(row):
+    """Whether the board counts a posting at all: Oil's and Beverages' but for what is
+    left out, and of Mart's only its salary and freight."""
+    budget = _budget(row)
+    if budget in LEFT_OUT_BUDGETS or (budget, str(row.get('sub_budget') or '').strip().upper()) in LEFT_OUT_SUB_BUDGETS:
+        return False
+    return row.get('company') != 'MART' or cost_of(row) in MART_KEEPS
 
 
 def _month(value, field):
@@ -193,10 +237,13 @@ def _head(key, name, base_rows, cur_rows):
     cur_total = sum(_amount(r) for r in cur_rows)
     by_company = []
     for code, label in COMPANIES:
-        b = sum(_amount(r) for r in base_rows if r['company'] == code)
-        c = sum(_amount(r) for r in cur_rows if r['company'] == code)
+        b_rows = [r for r in base_rows if r['company'] == code]
+        c_rows = [r for r in cur_rows if r['company'] == code]
+        b, c = sum(_amount(r) for r in b_rows), sum(_amount(r) for r in c_rows)
         if b or c:
-            by_company.append({'company': code, 'label': label, 'base': _money(b), 'current': _money(c)})
+            # Each company's own breakdown: a company's card opens onto its data alone.
+            by_company.append({'company': code, 'label': label, 'base': _money(b), 'current': _money(c),
+                               'entries': len(c_rows), 'tree': _tree(b_rows, c_rows)})
     return {
         'key': key,
         'name': name,
@@ -210,8 +257,15 @@ def _head(key, name, base_rows, cur_rows):
     }
 
 
+def _split(rows, key):
+    by = defaultdict(list)
+    for r in rows:
+        by[key(r)].append(r)
+    return by
+
+
 def build(month='', baseline='', *, today=None):
-    """The board: every main head's spending in `month` (default: this month, to today) against `baseline`'s."""
+    """The board: `month`'s spending (default: this month, to today) against `baseline`'s — by head and by cost."""
     today = today or timezone.localdate()
     cur_start = _month(month, 'Month') if month else today.replace(day=1)
     base_start = _month(baseline or BASELINE, 'Baseline')
@@ -223,19 +277,17 @@ def build(month='', baseline='', *, today=None):
     cur_days = cur_month_end.day
     elapsed = (cur_end - cur_start).days + 1
 
-    base_rows = _rows(base_start, base_end, closed=base_end < today)
-    cur_rows = _rows(cur_start, cur_end, closed=cur_end == cur_month_end and cur_end < today)
-    base_by, cur_by = defaultdict(list), defaultdict(list)
-    for r in base_rows:
-        base_by[head_of(r)].append(r)
-    for r in cur_rows:
-        cur_by[head_of(r)].append(r)
+    base_rows = [r for r in _rows(base_start, base_end, closed=base_end < today) if counted(r)]
+    cur_rows = [r for r in _rows(cur_start, cur_end, closed=cur_end == cur_month_end and cur_end < today)
+                if counted(r)]
 
-    order = {key: i for i, (key, _n) in enumerate(HEADS)}
-    heads = [_head(key, name, base_by[key], cur_by[key]) for key, name in HEADS]
-    # Room on the board by what each spent in the yardstick month; Other always last.
-    heads.sort(key=lambda h: (h['key'] == 'OTHER', -h['base'], order[h['key']]))
+    base_by, cur_by = _split(base_rows, department_of), _split(cur_rows, department_of)
+    heads = [_head(key, name, base_by[key], cur_by[key])
+             for key, name in [(k, n) for k, n, _b in DEPARTMENTS] + [('OTHER', 'Other')]]
+    base_cost, cur_cost = _split(base_rows, cost_of), _split(cur_rows, cost_of)
+    costs = [_head(key, name, base_cost[key], cur_cost[key]) for key, name in COSTS]
 
+    # Every posting is in exactly one head, so the heads are the whole.
     base_total = sum(h['base'] for h in heads)
     cur_total = sum(h['current'] for h in heads)
     return {
@@ -246,4 +298,5 @@ def build(month='', baseline='', *, today=None):
                      'from': base_start.isoformat(), 'to': base_end.isoformat()},
         'total': {'base': _money(base_total), 'current': _money(cur_total), 'ratio': _ratio(cur_total, base_total)},
         'heads': heads,
+        'costs': costs,
     }
