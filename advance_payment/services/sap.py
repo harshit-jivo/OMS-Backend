@@ -1220,8 +1220,8 @@ _PAYMENT_HEADER_SQL = """
            H."CashAcct" AS "cash_account", CA."AcctName" AS "cash_account_name",
            IFNULL(H."CashSum", 0) AS "cash_sum", IFNULL(H."CheckSum", 0) AS "check_sum",
            IFNULL(H."NoDocSum", 0) AS "on_account", H."DocTotal" AS "total",
-           H."U_Pymnt_Mode" AS "payment_mode", H."U_URGENCY" AS "urgency",
-           H."U_Type_of_Advance" AS "type_of_advance", H."U_Adv_Settl_Dt" AS "settle_by"
+           H."{mode}" AS "payment_mode", H."{urgency}" AS "urgency",
+           H."{advance_type}" AS "type_of_advance", H."{settle}" AS "settle_by"
     FROM "{schema}"."OVPM" H
     LEFT JOIN "{schema}"."OACT" TA ON TA."AcctCode" = H."TrsfrAcct"
     LEFT JOIN "{schema}"."OACT" CA ON CA."AcctCode" = H."CashAcct"
@@ -1258,7 +1258,13 @@ def outgoing_payment(company, doc_entry):
     """
     entry = _doc_entry(doc_entry)
     schema = _schema(company)
-    rows = _run(company, _PAYMENT_HEADER_SQL.format(schema=schema), [entry], 'outgoing payment')
+    from advance_payment.services.sap_rules import field  # noqa: PLC0415
+
+    # Each company spells its user fields its own way (Mart: U_Adv_settl_Dt).
+    names = {key: field(schema, name) for key, name in (
+        ('mode', 'U_Pymnt_Mode'), ('urgency', 'U_URGENCY'), ('advance_type', 'U_Type_of_Advance'),
+        ('settle', 'U_Adv_Settl_Dt'))}
+    rows = _run(company, _PAYMENT_HEADER_SQL.format(schema=schema, **names), [entry], 'outgoing payment')
     if not rows:
         return None
     h = rows[0]

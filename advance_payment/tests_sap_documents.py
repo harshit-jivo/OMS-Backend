@@ -2,7 +2,7 @@
 
 No SAP: `sap._run` is stood in for, answering by the SQL it is given.
 """
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
@@ -290,7 +290,8 @@ class GoodsReceiptAndPayment(SimpleTestCase):
                    'type_of_advance': 'One Time Settlement', 'settle_by': None}]
         docs = [{'inv_type': 18, 'doc_entry': 52574, 'doc_num': 626094379, 'vendor_ref': 'INV-1',
                  'applied': Decimal('25000'), 'tds': Decimal('0')}]
-        with mock.patch.object(sap, '_run', side_effect=[header, docs, []]):
+        with mock.patch.object(sap, '_run', side_effect=[header, docs, []]), \
+                mock.patch('advance_payment.services.sap_rules.field', side_effect=lambda db, name: name):
             p = sap.outgoing_payment('OIL', 29816)
         self.assertEqual((p['header']['paid_to'], p['header']['status'], p['header']['payment_mode']),
                          ('Vendor', 'Posted', 'NEFT'))
@@ -308,7 +309,7 @@ class RelationsInSap(SimpleTestCase):
 
     def setUp(self):
         # The same-code tests: no partner under another code.
-        for name, value in (('_gstins', []), ('_accounts', []), ('_found_by', [])):
+        for name, value in (('_gstins', []), ('_accounts', []), ('_found_by', []), ('standing', {'since': None, 'days': None})):
             patcher = mock.patch.object(sap_relations, name, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -433,4 +434,26 @@ class FindingTheSameBusiness(SimpleTestCase):
 
     def test_a_name_is_compared_on_letters_and_digits(self):
         self.assertEqual(sap_relations._name_key('M/s. A.B. Traders (P) Ltd'), 'MSABTRADERSPLTD')
+
+
+class HowLongItHasStood(SimpleTestCase):
+    """`standing`: the days since the balance crossed onto its current side."""
+
+    def stood(self, days):
+        rows = [{'day': date(2026, m, d), 'net': Decimal(net)} for (m, d), net in days]
+        with mock.patch.object(sap_relations, '_schema', return_value='S'), \
+                mock.patch.object(sap_relations, '_run', return_value=rows):
+            return sap_relations.standing('OIL', 'V1', today=date(2026, 10, 14))
+
+    def test_counts_from_the_day_it_crossed_onto_its_side(self):
+        # Dr 500 on 1 Aug, cleared and gone Cr on 24 Aug, more Cr since: Cr since 24 Aug.
+        self.assertEqual(self.stood([((8, 1), '500'), ((8, 24), '-700'), ((9, 5), '-100')]),
+                         {'since': '2026-08-24', 'days': 51})
+
+    def test_a_balance_back_to_nil_starts_afresh(self):
+        self.assertEqual(self.stood([((6, 1), '-100'), ((7, 1), '100'), ((10, 1), '-50')]),
+                         {'since': '2026-10-01', 'days': 13})
+
+    def test_nothing_outstanding_has_no_days(self):
+        self.assertEqual(self.stood([((6, 1), '-100'), ((7, 1), '100.004')]), {'since': None, 'days': None})
 

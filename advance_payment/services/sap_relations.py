@@ -379,11 +379,54 @@ def _same_partner(company, card_code, pan, name):
     return (row, 'name') if same_name else (None, '')
 
 
+_DAILY_SQL = '''
+    SELECT "RefDate" AS "day", SUM("Debit" - "Credit") AS "net"
+    FROM "{schema}"."JDT1" WHERE "ShortName" = ?
+    GROUP BY "RefDate" ORDER BY "RefDate"
+'''
+
+
+def standing(company, card_code, today=None):
+    """How long the partner's balance has been on its current side. `{since, days}`.
+
+    Read from its ledger (JDT1), day by day: `since` is the posting date on
+    which the running balance last crossed onto the side it is on now (Cr:
+    payable to them, Dr: owed by them), and `days` is from then to today.
+    Both None when nothing is outstanding. Paise left over by rounding count
+    as nothing.
+    """
+    from advance_payment.services import clock  # noqa: PLC0415
+
+    running, since = Decimal('0'), None
+    for r in _run(company, _DAILY_SQL.format(schema=_schema(company)), [card_code], 'partner standing'):
+        before = running.quantize(Decimal('0.01'))
+        running += Decimal(str(r['net'] or 0))
+        after = running.quantize(Decimal('0.01'))
+        if after == 0:
+            since = None
+        elif before == 0 or (before > 0) != (after > 0):
+            since = r['day']
+    if since is None:
+        return {'since': None, 'days': None}
+    day = since.date() if hasattr(since, 'date') else since
+    return {'since': day.isoformat(), 'days': ((today or clock.today()) - day).days}
+
+
+def _with_standing(row):
+    """A balance row with `since` / `days`; without them (None) if the ledger cannot be read."""
+    try:
+        row.update(standing(row['company'], row['card_code']))
+    except Exception:  # noqa: BLE001 — the balance still shows without its days
+        row.update({'since': None, 'days': None})
+    return row
+
+
 def partner_balances(company, card_code):
     """The partner's SAP balance in its own company, and in Oil and Beverages
     wherever the same business is there, under any code (see the module notes).
 
-    `[{company, card_code, card_name, balance, matched_by}]`, its own company
+    `[{company, card_code, card_name, balance, matched_by, since, days}]` (`since`
+    / `days`: how long it has been on its side, `standing`), its own company
     first; `matched_by` is 'self', 'PAN' or 'name' (the same code), or 'GSTIN',
     'PAN', 'bank account' or 'name' (another code: `card_code` says which). A company where
     the business is not found is left out; one that cannot be read is
@@ -395,8 +438,8 @@ def partner_balances(company, card_code):
     pan = _pan(company, card_code)
     gstins = _gstins(company, card_code)
     accounts = _accounts(company, card_code)
-    out = [{'company': company, 'card_code': _s(own['code']), 'card_name': _s(own['name']),
-            'balance': _money(own.get('balance')), 'matched_by': 'self'}]
+    out = [_with_standing({'company': company, 'card_code': _s(own['code']), 'card_name': _s(own['name']),
+                           'balance': _money(own.get('balance')), 'matched_by': 'self'})]
     for other in BALANCE_COMPANIES:
         if other == company:
             continue
@@ -414,8 +457,8 @@ def partner_balances(company, card_code):
             if code in seen or len(seen) >= MATCH_LIMIT:
                 continue
             seen.add(code)
-            out.append({'company': other, 'card_code': code, 'card_name': _s(row['name']),
-                        'balance': _money(row.get('balance')), 'matched_by': how})
+            out.append(_with_standing({'company': other, 'card_code': code, 'card_name': _s(row['name']),
+                                       'balance': _money(row.get('balance')), 'matched_by': how}))
     return out
 
 

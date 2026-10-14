@@ -487,7 +487,7 @@ def post(advance, *, user):
             payload['AttachmentEntry'] = attachment_entry
         try:
             _, body = sap_client.request('POST', '/VendorPayments', company_db=company_db,
-                                         json_body=payload)
+                                         json_body=sap_rules.spelled_for(payload, company_db))
         except sap_client.SapError as exc:
             if exc.status_code is None:
                 return failed(f'SAP did not answer ({exc}). It may still have posted: approving '

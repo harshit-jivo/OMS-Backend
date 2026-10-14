@@ -104,3 +104,31 @@ class RefusalsExplained(SimpleTestCase):
     def test_no_code_no_advice(self):
         self.assertEqual(sap_rules.explain(Exception('Balance due exceeded')),
                          'SAP refused the payment: Balance due exceeded')
+
+
+class EachCompanysSpelling(SimpleTestCase):
+    """Mart spells the settlement date U_Adv_settl_Dt; the Service Layer matches names exactly."""
+
+    def setUp(self):
+        sap_rules._SPELLINGS.clear()
+        self.addCleanup(sap_rules._SPELLINGS.clear)
+
+    def spelled(self, columns, payload):
+        rows = [{'c': c} for c in columns]
+        with mock.patch('advance_payment.services.sap._run', return_value=rows) as run:
+            out = sap_rules.spelled_for(payload, 'JIVO_MART_HANADB')
+            sap_rules.spelled_for(payload, 'JIVO_MART_HANADB')
+        self.assertEqual(run.call_count, 1)  # read once per company
+        return out
+
+    def test_a_field_goes_as_the_company_spells_it(self):
+        out = self.spelled(['U_Adv_settl_Dt', 'U_Pymnt_Mode'],
+                           {'DocDate': '2026-10-14', 'U_Adv_Settl_Dt': '2026-11-13', 'U_Pymnt_Mode': 'RTGS'})
+        self.assertEqual(out, {'DocDate': '2026-10-14', 'U_Adv_settl_Dt': '2026-11-13', 'U_Pymnt_Mode': 'RTGS'})
+
+    def test_sap_unreadable_sends_them_as_they_are(self):
+        from advance_payment.services import sap
+
+        with mock.patch.object(sap, '_run', side_effect=sap.SapUnavailable('down')):
+            self.assertEqual(sap_rules.spelled_for({'U_Adv_Settl_Dt': 'x'}, 'JIVO_MART_HANADB'),
+                             {'U_Adv_Settl_Dt': 'x'})

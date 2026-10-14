@@ -130,6 +130,50 @@ def problems(payload, *, now=None):
     return out
 
 
+# ── Each company's own spelling of the fields ────────────────────────────────
+#
+# The user fields are made per company, by hand, and not always spelled alike:
+# Mart's settlement date is U_Adv_settl_Dt where Oil and Beverages have
+# U_Adv_Settl_Dt. The Service Layer matches names exactly, so the Oil spelling
+# sent to Mart is refused: "Property 'U_Adv_Settl_Dt' of 'Payment' is invalid"
+# (AP-2026-0106, 2026-10-14). OMS keeps one spelling (Oil's) and renames each
+# field to the company's own as it is sent or read.
+
+#: company DB -> {UPPER-CASE NAME: the company's spelling}, of OVPM's user fields.
+_SPELLINGS = {}
+
+
+def field_names(company_db):
+    """The company's own spelling of each OVPM user field, by its upper-case name.
+
+    Read once per company and kept for the life of the process (a field is
+    added in the SAP client, not at runtime; a restart picks up a new one).
+    Empty when SAP cannot be read: the fields then go as OMS spells them.
+    """
+    if company_db not in _SPELLINGS:
+        from advance_payment.services import sap  # noqa: PLC0415 — sap imports this module's rules
+
+        try:
+            rows = sap._run(company_db, 'SELECT COLUMN_NAME AS "c" FROM SYS.TABLE_COLUMNS WHERE SCHEMA_NAME = ? '
+                                        'AND TABLE_NAME = \'OVPM\' AND COLUMN_NAME LIKE \'U\\_%\' ESCAPE \'\\\'',
+                            [company_db], 'payment fields')
+        except sap.SapUnavailable:
+            return {}
+        _SPELLINGS[company_db] = {r['c'].upper(): r['c'] for r in rows}
+    return _SPELLINGS[company_db]
+
+
+def field(company_db, name):
+    """`name` as `company_db` spells it."""
+    return field_names(company_db).get(name.upper(), name)
+
+
+def spelled_for(payload, company_db):
+    """`payload` with each user field renamed to the company's spelling. A new dict."""
+    names = field_names(company_db)
+    return {(names.get(k.upper(), k) if k.startswith('U_') else k): v for k, v in payload.items()}
+
+
 # ── Refusals ─────────────────────────────────────────────────────────────────
 
 #: What each known check means to the person who pressed Approve.
