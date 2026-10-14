@@ -213,9 +213,14 @@ def get_expense_rows(from_date, to_date):
         return []
 
 
-def fetch_expense_rows(from_date, to_date):
-    """`get_expense_rows`, but a SAP failure RAISES instead of reading as no expenses."""
-    schema = _schema()
+def fetch_expense_rows(from_date, to_date, schema=None):
+    """`get_expense_rows`, but a SAP failure RAISES instead of reading as no expenses.
+
+    `schema`: the company whose report to read — the Oil company's by default,
+    which carries its Oil and Beverages branches; Jivo Mart has its own
+    procedure of the same name (`companies.MART`), whose rows say MART.
+    """
+    schema = schema or _schema()
     raw = run_call(f'CALL "{schema}"."REPORT _MONTHLY_EXPENSES"(?, ?)', [from_date, to_date])
 
     rows = []

@@ -163,6 +163,8 @@ urlpatterns = [
          name='advance-payment-expense-dashboard'),
     path('oms-dashboard/', views.OmsDashboardView.as_view(),
          name='advance-payment-oms-dashboard'),
+    path('budget-board/', views.BudgetBoardView.as_view(),
+         name='advance-payment-budget-board'),
     path('requests/<int:pk>/sap-attachments/', views.RequestSapAttachView.as_view(),
          name='advance-payment-request-sap-attachments'),
     path('requests/<int:pk>/files/', views.RequestFilesView.as_view(),

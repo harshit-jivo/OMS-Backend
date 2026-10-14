@@ -1497,6 +1497,30 @@ class ExpenseDashboardView(APIView):
         return ok(data)
 
 
+class BudgetBoardView(APIView):
+    """GET /api/advance-payments/budget-board/?month=YYYY-MM&baseline=YYYY-MM
+
+    The Payments & Expenses board's budget heads: each main head's SAP spending
+    this month (or `month`) against August's (or `baseline`'s), with what it is
+    made of. Oil, Beverages and Mart. Read only.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanViewExpenseDashboard()]
+
+    def get(self, request):
+        from advance_payment.services import budget_board, expense_dashboard
+
+        try:
+            data = budget_board.build(request.query_params.get('month') or '',
+                                      request.query_params.get('baseline') or '')
+        except expense_dashboard.DashboardInvalid as exc:
+            return fail(str(exc))
+        except expense_dashboard.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        return ok(data)
+
+
 class OmsDashboardView(APIView):
     """GET /api/advance-payments/oms-dashboard/?from=&to=&company=
 
