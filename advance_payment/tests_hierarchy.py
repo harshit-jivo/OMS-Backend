@@ -43,8 +43,9 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         for code, _label, _group in PAYMENT_PURPOSES:
             with self.subTest(code):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
-        # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1)
+        # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
+        # Imprest against Journal Entry
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -57,11 +58,19 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] == 'AP_MART' or route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL') or route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
                 self.assertNotIn('MART', route['query'])
                 self.assertIn("request_type NOT IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')", route['query'])
+
+    def test_an_imprest_against_a_journal_entry_goes_to_the_head_then_navdeep_not_the_director(self):
+        route = BY_CODE['AP_IMPREST_JOURNAL']
+        self.assertEqual(route['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.SECOND_STAGE, 'navdeep')])
+        self.assertIn("request_type = 'EMPLOYEE_IMPREST' AND payment_against = 'AGAINST_JOURNAL'", route['query'])
+        self.assertNotIn('MART', route['query'])
+        # …and the Staff Advance / Imprest route (head, then Director) no longer takes it.
+        self.assertIn(f"NOT {hierarchy.IMPREST_JOURNAL}", BY_CODE['AP_STAFF_ADVANCE']['query'])
 
     def test_salary_splits_on_the_factory_budgets_without_overlap(self):
         salary = {r['code']: r['query'] for r in _routes_for('SALARY')}
@@ -319,7 +328,7 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] == 'AP_MART' or route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL') or route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             self.assertIn('purpose_code = ', route['query'])
 

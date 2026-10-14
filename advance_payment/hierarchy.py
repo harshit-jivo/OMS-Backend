@@ -64,6 +64,10 @@ OIL_AND_BEV = "company IN ('OIL', 'BEVERAGES')"
 NOT_STAFF = "request_type NOT IN ({})".format(', '.join(f"'{t}'" for t in sorted(HEAD_REQUEST_TYPES)))
 FACTORY_BUDGETS = '(' + ', '.join(f"'{b}'" for b in FACTORY_BUDGET_CODES) + ')'
 ADVANCE = "request_type = 'EMPLOYEE_ADVANCE'"
+#: Employee Imprest against the journal entries crediting the staff account —
+#: the monthly TA/DA and incentive: the picked Department Head, then Navdeep
+#: (user, 2026-10-14), whatever the purpose. Kept out of the Staff Advance route.
+IMPREST_JOURNAL = "(request_type = 'EMPLOYEE_IMPREST' AND payment_against = 'AGAINST_JOURNAL')"
 
 #: Purposes approved by one fixed owner, and whether the Director follows.
 FIXED_OWNER = {
@@ -194,8 +198,12 @@ def routes():
         # Imprest, and a salary advance outside the plant: the picked Department Head, then the Director.
         {'code': 'AP_STAFF_ADVANCE', 'name': 'Payments · Staff Advance / Imprest', 'company': 'ALL',
          'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN'),
-                         f"(request_type = 'EMPLOYEE_IMPREST' OR budget_code NOT IN {FACTORY_BUDGETS})"),
+                         f"(request_type = 'EMPLOYEE_IMPREST' OR budget_code NOT IN {FACTORY_BUDGETS})",
+                         f'NOT {IMPREST_JOURNAL}'),
          'stages': _chain(HEAD, True)},
+        {'code': 'AP_IMPREST_JOURNAL', 'name': 'Payments · Imprest against Journal Entry (TA/DA, incentive)',
+         'company': 'ALL', 'query': _where(OIL_AND_BEV, IMPREST_JOURNAL),
+         'stages': [(DEPARTMENT_HEAD_STAGE, HEAD), (SECOND_STAGE, 'navdeep')]},
         # A plant's staff salary advance (approval matrix, 2026-10-09): up to the
         # limit, the plant's approver; above it, the Director ("Sonu Veerji") alone.
         {'code': 'AP_STAFF_ADVANCE_FACTORY_OIL', 'name': 'Payments · Staff Advance · Oil plant · up to 20,000',
