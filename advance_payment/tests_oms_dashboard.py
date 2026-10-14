@@ -80,6 +80,16 @@ class OmsBoard(TestCase):
         mart = board.build('2026-10-01', '2026-10-14', company='mart', today=TODAY)
         self.assertEqual(mart['kpis']['raised']['amount'], 200)
 
+    def test_by_payment_purpose_and_budget_head(self):
+        a = self.request(raised=date(2026, 10, 2), amount='100')
+        b = self.request(raised=date(2026, 10, 3), amount='300')
+        AdvanceRequest.objects.filter(pk=a.pk).update(purpose_code='FREIGHT_OUT', purpose_label='Freight Outward',
+                                                      budget_code='DEL', budget_name='Del Bkhp')
+        AdvanceRequest.objects.filter(pk=b.pk).update(request_type='EXPENSE', budget_code='FACTORY', budget_name='Factory')
+        data = board.build('2026-10-01', '2026-10-14', today=TODAY)
+        self.assertEqual({p['name']: p['amount'] for p in data['by_purpose']}, {'Expense': 300, 'Freight Outward': 100})
+        self.assertEqual([h['name'] for h in data['by_budget']], ['Factory', 'Del Bkhp'])
+
     def test_refuses_a_bad_company_or_range(self):
         with self.assertRaises(board.DashboardInvalid):
             board.build('2026-10-01', '2026-10-14', company='ACME')

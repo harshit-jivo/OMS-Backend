@@ -62,6 +62,17 @@ def bill_or_advance(payment_against):
     return 'Other'
 
 
+def purpose_of(r):
+    """The payment purpose as raised; an Expense has none of its own, it is an expense."""
+    if r.purpose_label or r.purpose_code:
+        return r.purpose_label or r.purpose_code
+    return 'Expense' if r.request_type == RequestType.EXPENSE else 'No purpose'
+
+
+def budget_head_of(r):
+    return r.budget_name or r.budget_code or 'No budget head'
+
+
 def _ranked(rows, key, top=None):
     amounts, counts = defaultdict(float), Counter()
     for r in rows:
@@ -190,6 +201,9 @@ def build(from_value, to_value, *, company='', today=None):
         'bill_or_advance': _ranked(raised, lambda r: bill_or_advance(r.payment_against)),
         'by_company': _ranked(raised, lambda r: r.company),
         'top_payees': _ranked(raised, lambda r: r.partner_name or getattr(r.created_by, 'name', ''), top=8),
+        # What it was for, and whose budget it comes out of.
+        'by_purpose': _ranked(raised, purpose_of, top=12),
+        'by_budget': _ranked(raised, budget_head_of, top=12),
         'waiting_at': _ranked(pending, waiting_where),
         'waiting_on': _ranked(pending, waiting_on, top=8),
         'ageing': ageing,
