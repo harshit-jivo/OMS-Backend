@@ -5,6 +5,7 @@ from .views import DashboardKPIView,WDashboardKPIView,WDashboardChartsView,Order
 from .views import SchemeV2ListCreateView, SchemeV2DetailView, SchemeAssignmentView, SchemePreviewView, SchemeApplicableView
 from .views import DistributorReportView
 from .views.crystal import SalesOrderPrintView
+from .views.attachments import OrderAttachmentDetailView, OrderAttachmentsView
 from .views.queries import MasterOrderCreatorsView, MasterOrderListView
 
 urlpatterns=[
@@ -18,6 +19,10 @@ urlpatterns=[
     path('create/', CreateOrderView.as_view(), name='create-order'),
     path('<int:order_id>/delete-draft/', DeleteDraftOrderView.as_view(), name='delete-draft'),
     path('<int:order_id>/update/', UpdateOrderView.as_view(), name='update-order'),
+    # The order's customer PO files (Add Sales), shown to every reviewing desk.
+    path('<int:order_id>/attachments/', OrderAttachmentsView.as_view(), name='order-attachments'),
+    path('<int:order_id>/attachments/<int:attachment_id>/', OrderAttachmentDetailView.as_view(),
+         name='order-attachment-detail'),
     path('list/', OrderListView.as_view(), name='order_list'),
     path('<int:order_id>/approve/', ApproveOrderView.as_view(), name='approve_list'),
     path('<int:order_id>/reject/', RejectOrderView.as_view(), name='reject_list'),

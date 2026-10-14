@@ -183,6 +183,24 @@ class Order(models.Model):
 
     def __str__(self):
         return self.order_number
+
+    #: The desks that review an order and so may read its attached PO.
+    REVIEWER_ROLES = (
+        'billing', 'auditor', 'mart_approval',
+        'approver', 'rate approver', 'rate_approver', 'rate-approver', 'rateapprover',
+    )
+
+    def can_be_viewed_by(self, user):
+        """Who may read this order's attachments (`attachments.views`): its
+        creator, administrators, and the reviewing desks."""
+        from core.permissions import has_role, is_admin
+        return (
+            self.created_by_id == getattr(user, 'id', None)
+            or is_admin(user)
+            or has_role(user, *self.REVIEWER_ROLES)
+        )
+
+
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, related_name='items', on_delete=models.CASCADE)
     item_code = models.CharField(max_length=50)

@@ -14,14 +14,16 @@ from django.db import models
 class AttachmentType(models.TextChoices):
     """Which share a file belongs to, and what it depicts.
 
-    The first two live in PAYMENTS_IMAGES, the last two in
-    DEPOSIT_PAYMENTS_IMAGES — see storage.directory_for().
+    The first two live in PAYMENTS_IMAGES, the next two in
+    DEPOSIT_PAYMENTS_IMAGES, and a sales order's customer PO in
+    ORDER_PO_ATTACHMENTS — see storage.directory_for().
     """
 
     CHEQUE_IMAGE = 'CHEQUE_IMAGE', 'Cheque image'
     UPI_SCREENSHOT = 'UPI_SCREENSHOT', 'UPI screenshot'
     DEPOSIT_SLIP = 'DEPOSIT_SLIP', 'Bank deposit slip'
     DEPOSIT_RECEIPT = 'DEPOSIT_RECEIPT', 'Deposit receipt'
+    PURCHASE_ORDER = 'PURCHASE_ORDER', 'Purchase order'
 
 
 class Attachment(models.Model):
