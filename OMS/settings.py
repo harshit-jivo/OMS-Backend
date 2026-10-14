@@ -1059,6 +1059,13 @@ EINV_QR_SMB_PASSWORD = config('EINV_QR_SMB_PASSWORD', default='')
 #   DEPOSIT_PAYMENTS_IMAGES=\\JIVO-APP\Payments\Deposit_Payments
 PAYMENTS_IMAGES = config('PAYMENTS_IMAGES', default='')
 DEPOSIT_PAYMENTS_IMAGES = config('DEPOSIT_PAYMENTS_IMAGES', default='')
+# A sales order's customer PO, attached on Add Sales. Stored locally under
+# MEDIA_ROOT, nothing to do with SAP; a plain local path means plain file I/O
+# (attachments.storage only uses SMB for a \\share path). Files are named by a
+# random id and read through the permission-checked download endpoint — but
+# note that under DEBUG, MEDIA_ROOT is also served unauthenticated at /media/.
+ORDER_PO_ATTACHMENTS = config(
+    'ORDER_PO_ATTACHMENTS', default='') or os.path.join(MEDIA_ROOT, 'order_po')
 # Credentials for the share, as with EINV_QR_SMB_*. Blank = write as the
 # process account with no explicit SMB auth.
 PAYMENTS_SMB_USERNAME = config(

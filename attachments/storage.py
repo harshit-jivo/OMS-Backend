@@ -37,20 +37,18 @@ _MAGIC = {
     'pdf': (b'%PDF-',),
 }
 
-_DEPOSIT_TYPES = {
-    AttachmentType.DEPOSIT_SLIP,
-    AttachmentType.DEPOSIT_RECEIPT,
+#: The setting naming each type's share. Anything unlisted is a payment image.
+_DIRECTORY_SETTING = {
+    AttachmentType.DEPOSIT_SLIP: 'DEPOSIT_PAYMENTS_IMAGES',
+    AttachmentType.DEPOSIT_RECEIPT: 'DEPOSIT_PAYMENTS_IMAGES',
+    AttachmentType.PURCHASE_ORDER: 'ORDER_PO_ATTACHMENTS',
 }
 
 
 def directory_for(attachment_type):
     """The configured share for this attachment type."""
-    if attachment_type in _DEPOSIT_TYPES:
-        directory = getattr(settings, 'DEPOSIT_PAYMENTS_IMAGES', '') or ''
-        name = 'DEPOSIT_PAYMENTS_IMAGES'
-    else:
-        directory = getattr(settings, 'PAYMENTS_IMAGES', '') or ''
-        name = 'PAYMENTS_IMAGES'
+    name = _DIRECTORY_SETTING.get(attachment_type, 'PAYMENTS_IMAGES')
+    directory = getattr(settings, name, '') or ''
     if not directory:
         raise ValidationError(
             f'{name} is not configured; cannot store attachments.')
@@ -142,7 +140,7 @@ def save_upload(upload, attachment_type):
             fh.write(data)
         os.replace(tmp, path)                       # atomic swap into place
 
-    logger.info('Stored payment attachment %s -> %s', upload.name, path)
+    logger.info('Stored %s attachment %s -> %s', attachment_type, upload.name, path)
     return path
 
 
@@ -158,9 +156,8 @@ def _basename(path):
 
 def _allowed_directories():
     """Every configured attachment root. The allow-list for stored paths."""
-    return [d for d in (getattr(settings, 'PAYMENTS_IMAGES', '') or '',
-                        getattr(settings, 'DEPOSIT_PAYMENTS_IMAGES', '') or '')
-            if d]
+    names = {'PAYMENTS_IMAGES', *_DIRECTORY_SETTING.values()}
+    return [d for d in (getattr(settings, name, '') or '' for name in sorted(names)) if d]
 
 
 def _normalise(path):
