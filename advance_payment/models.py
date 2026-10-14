@@ -182,6 +182,10 @@ class PaymentAgainst(models.TextChoices):
     #: Customer refund against their open ledger items: payments received and
     #: credit memos less the invoices they still owe.
     AGAINST_LEDGER = 'AGAINST_LEDGER', 'Against Ledger'
+    #: Employee Imprest: against the journal entries that credit the
+    #: employee's staff account (ORGV…) — the monthly TA/DA and incentive
+    #: entries (2026-10-14). Stored as LEDGER documents, journal TransId + line.
+    AGAINST_JOURNAL = 'AGAINST_JOURNAL', 'Against Journal Entry'
     #: Customer refund of a typed amount, applied to nothing (e.g. a cheque
     #: dishonour charge), as SAP's own on-account payments are.
     ON_ACCOUNT = 'ON_ACCOUNT', 'On Account'

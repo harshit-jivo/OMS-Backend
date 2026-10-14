@@ -96,6 +96,14 @@ class WhoApproves(SimpleTestCase):
         self.assertEqual(BY_CODE['AP_OIL_PURCHASE']['stages'],
                          [(hierarchy.OWNER_STAGE, 'shunty'), (hierarchy.SECOND_STAGE, 'ziyaul')])
 
+    def test_incentive_and_ta_da_go_to_the_picked_head_then_navdeep(self):
+        for code in ('AP_INCENTIVE', 'AP_TA_DA'):
+            with self.subTest(code):
+                self.assertEqual(BY_CODE[code]['stages'],
+                                 [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.SECOND_STAGE, 'navdeep')])
+                self.assertEqual([name for name, _r in hierarchy.full_stages(BY_CODE[code])][-3:],
+                                 ['Payment Approval', 'Audit Approval', 'Final Approval'])
+
     def test_the_director_follows_where_the_hierarchy_says(self):
         with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages'])
         self.assertEqual(with_director, sorted([

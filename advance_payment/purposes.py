@@ -56,6 +56,9 @@ PAYMENT_PURPOSES = (
     ('EMP_ADVANCE', 'Employee Advance', 'People'),
     ('EMP_IMPREST', 'Employee Imprest / Float', 'People'),
     ('EXPENSE_CLAIM', 'Employee Expense Claim', 'People'),
+    # Paid to the employee's staff account (ORGV…), as SAP books them: 5630002 / 5630005 (2026-10-14).
+    ('INCENTIVE', 'Employee Incentive', 'People'),
+    ('TA_DA', 'TA / DA (Travelling & Daily Allowance)', 'People'),
     ('TDS', 'TDS / TCS', 'Statutory'),
     ('GST', 'GST', 'Statutory'),
     ('PF_ESI', 'EPF / ESIC / Labour Welfare', 'Statutory'),
@@ -83,6 +86,7 @@ HEAD_PURPOSES = frozenset({
     'FREIGHT_IN', 'FREIGHT_OUT', 'JOB_WORK', 'LABOUR', 'ADVERTISING', 'COMMISSION', 'RENT',
     'UTILITIES', 'PROFESSIONAL', 'REPAIRS', 'FUEL', 'TRAVEL', 'SECURITY', 'IT_SOFTWARE',
     'OTHER_EXPENSE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM', 'INTERCOMPANY',
+    'INCENTIVE', 'TA_DA',
 })
 
 #: Request types that always go to the requester's Department Head, then the

@@ -76,6 +76,10 @@ CASES = {
     # The bills are the expense already: there is no bill still to expect.
     (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.AGAINST_BILL): {'documents': DocumentKind.BILL},
     (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.OTHER): {'documents': None, 'expected_bill_date': True},
+    # The journal entries crediting the employee's staff account (TA/DA,
+    # incentive): paid as SAP pays them, through the journal (TransId + line).
+    (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.AGAINST_JOURNAL): {'documents': DocumentKind.LEDGER,
+                                                                     'journal_credits': True},
     # A refund: what the customer is owed back. Against their open ledger
     # items, or a typed amount applied to nothing.
     (RequestType.CUSTOMER, PaymentAgainst.AGAINST_LEDGER): {'documents': DocumentKind.LEDGER},
@@ -224,6 +228,8 @@ def clean(data, *, desk=False, user=None):
         amount = sum((ln['amount'] for ln in expense_lines), Decimal('0'))
     elif case['documents']:
         documents, amount = _clean_documents(data.get('documents'), case['documents'], problems)
+        if case.get('journal_credits'):
+            _journal_credits_only(documents, problems)
     else:
         if data.get('documents'):
             problems.append('This Payment Against takes a typed amount, not documents.')
@@ -497,6 +503,14 @@ def _ledger_fields(doc, label, problems):
         problems.append(f'Ledger item {label} has a journal line it cannot have.')
         return None
     return {'sap_object': obj, 'sap_line': line, 'direction': direction}
+
+
+def _journal_credits_only(documents, problems):
+    """Against Journal Entry: only journal entries that credit the account (owed to the employee)."""
+    for doc in documents:
+        if doc.get('sap_object') != 30 or doc.get('direction') != LedgerDirection.CREDIT:
+            problems.append(f'{doc.get("sap_doc_num") or doc.get("sap_doc_entry")} is not a journal entry '
+                            f'owed to the employee: only those can be paid against a journal entry.')
 
 
 def _clean_documents(raw, kind, problems):

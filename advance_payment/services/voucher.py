@@ -110,7 +110,7 @@ def _branch(advance):
         gone = [d.sap_doc_num or str(d.sap_doc_entry) for d in docs
                 if (d.sap_doc_entry, d.sap_line) not in items]
         if gone:
-            return None, f'{", ".join(gone)} no longer open on the customer’s account in SAP.'
+            return None, f'{", ".join(gone)} no longer open on the partner’s account in SAP.'
         branches = {items[(d.sap_doc_entry, d.sap_line)]['bpl_id'] for d in docs}
         if len(branches) > 1:
             return None, 'The ledger items belong to different SAP branches; SAP pays one branch at a time.'
@@ -136,6 +136,8 @@ def _remarks(advance):
     parts = [f'OMS {advance.request_no}', advance.partner_name]
     if docs:
         noun = {DocumentKind.BILL: 'Bill', DocumentKind.LEDGER: 'Refund against'}.get(docs[0].kind, 'PO')
+        if docs[0].kind == DocumentKind.LEDGER and advance.request_type != RequestType.CUSTOMER:
+            noun = 'JE'
         parts.append(f'{noun} ' + ', '.join(d.sap_doc_num or str(d.sap_doc_entry) for d in docs))
     if getattr(advance, 'budget_code', ''):
         parts.append('Budget ' + '/'.join(c for c in (advance.budget_code, advance.sub_budget_code) if c))
@@ -280,6 +282,14 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
         payload['DocType'] = 'rSupplier'
         payload['CardCode'] = advance.partner_code
         bills = [d for d in advance.documents.all() if d.kind == DocumentKind.BILL]
+        # Imprest against journal entries (TA/DA, incentive): each through the
+        # journal, TransId + line, as SAP's own payments to staff accounts are.
+        journals = [d for d in advance.documents.all() if d.kind == DocumentKind.LEDGER]
+        if journals:
+            payload['PaymentInvoices'] = [
+                {'LineNum': i, 'DocEntry': d.sap_doc_entry, 'DocLine': d.sap_line,
+                 'InvoiceType': 'it_JournalEntry', 'SumApplied': _money(d.amount)}
+                for i, d in enumerate(journals)]
         # An on-account payment (a PO advance, an imprest advance) sends NO
         # PaymentInvoices at all; an empty array is itself refused.
         if bills:

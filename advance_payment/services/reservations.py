@@ -401,7 +401,7 @@ def live_check(advance):
             left = available(kind, open_now, used.get(key))
         label = f'{DocumentKind(kind).label} {d.sap_doc_num or d.sap_doc_entry}'
         if status == 'GONE':
-            message = (f'{label} is no longer open on the customer’s account in SAP.' if kind == DocumentKind.LEDGER
+            message = (f'{label} is no longer open on the partner’s account in SAP.' if kind == DocumentKind.LEDGER
                        else f'{label} no longer exists in SAP.')
         elif status != 'OPEN':
             message = f'{label} is {status.lower()} in SAP.'

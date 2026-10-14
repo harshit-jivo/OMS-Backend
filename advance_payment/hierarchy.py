@@ -38,6 +38,7 @@ PEOPLE = {
     'sales_oil': 'Raju Vg',          # Jasvir Singh: Oil customer refunds
     'sales_bev': 'Raju Vg',          # Jasvir Singh: Beverages sales too (was Karanpreet; 2026-10-09)
     'mart': 'prabhjot',              # Prabhjot Singh: all of Mart
+    'navdeep': 'Navdeep',            # Navdeep Singh (Bhati): incentives and TA/DA, after the Department Head
     'payment': 'taran',
     'audit': 'parmeet',
     'final': 'kamal1',
@@ -87,6 +88,10 @@ FIXED_OWNER = {
 
 #: Purposes a second fixed owner approves after the first, instead of the Director.
 SECOND_OWNER = {'OIL_PURCHASE': 'ziyaul'}
+
+#: Department Head purposes a fixed second approver takes after the head,
+#: instead of the Director: incentives and TA/DA go to Navdeep (user, 2026-10-14).
+HEAD_THEN_SECOND = {'INCENTIVE': 'navdeep', 'TA_DA': 'navdeep'}
 
 #: Department Head purposes the Director approves after the head.
 HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'FA_OTHERS', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM'})
@@ -241,8 +246,11 @@ def routes():
             out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
                         'query': _where(*base), 'stages': stages})
         elif code in HEAD_PURPOSES:
+            stages = _chain(HEAD, code in HEAD_THEN_DIRECTOR)
+            if code in HEAD_THEN_SECOND:
+                stages.append((SECOND_STAGE, HEAD_THEN_SECOND[code]))
             out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
-                        'query': _where(*base), 'stages': _chain(HEAD, code in HEAD_THEN_DIRECTOR)})
+                        'query': _where(*base), 'stages': stages})
         else:
             raise ValueError(f'Purpose {code} has no route in the hierarchy.')
     return out + expense_routes()

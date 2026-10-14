@@ -34,6 +34,9 @@ class Command(BaseCommand):
         parser.add_argument('--apply', action='store_true', help='Write the workflows (default: show the plan).')
         parser.add_argument('--retire', default='',
                             help='Comma-separated codes of other ADVANCE_PAYMENT workflows to deactivate.')
+        parser.add_argument('--only', default='',
+                            help='Comma-separated workflow codes: write only these, leave every other '
+                                 'workflow (and its hand-made changes) as it is; retires nothing.')
         parser.add_argument('--user', action='append', default=[], metavar='ROLE=USERNAME',
                             help='Who holds a role, e.g. --user payment=taran. Repeatable.')
 
@@ -44,15 +47,26 @@ class Command(BaseCommand):
             if role not in people or not username:
                 raise CommandError(f'--user {pair!r}: expected ROLE=USERNAME with ROLE one of {", ".join(people)}.')
             people[role] = username
-        users = self._users(people)
         module = WorkflowModule.objects.filter(code=MODULE_CODE).first()
         if module is None:
             raise CommandError(f'Module {MODULE_CODE} is not registered. Register it first.')
 
         routes = hierarchy.routes()
         retire = [c.strip() for c in opts['retire'].split(',') if c.strip()]
-        # Workflows the hierarchy no longer has: deactivated with the rest.
-        retire += [c for c in hierarchy.retired_expense_routes() if c not in retire]
+        only = {c.strip() for c in opts['only'].split(',') if c.strip()}
+        if only:
+            unknown = only - {r['code'] for r in routes}
+            if unknown:
+                raise CommandError(f'--only: no such route {", ".join(sorted(unknown))}.')
+            routes = [r for r in routes if r['code'] in only]
+            # Only the roles those workflows use need a login here.
+            used = {hierarchy.HEAD_PLACEHOLDER if role == hierarchy.HEAD else role
+                    for route in routes for _name, role in hierarchy.full_stages(route)}
+            people = {role: name for role, name in people.items() if role in used}
+        else:
+            # Workflows the hierarchy no longer has: deactivated with the rest.
+            retire += [c for c in hierarchy.retired_expense_routes() if c not in retire]
+        users = self._users(people)
         self._plan(routes, people, retire)
         if not opts['apply']:
             self.stdout.write(self.style.WARNING('\nDry run: nothing written. Re-run with --apply.'))
@@ -74,7 +88,9 @@ class Command(BaseCommand):
         User = get_user_model()
         found, missing = {}, []
         for role, username in people.items():
-            user = User.objects.filter(username=username, is_active=True).first()
+            # The same login may be cased differently on each server ("Parmeet", "parmeet").
+            user = (User.objects.filter(username=username, is_active=True).first()
+                    or User.objects.filter(username__iexact=username, is_active=True).first())
             if user is None:
                 missing.append(f'{role}={username}')
             found[role] = user
