@@ -37,6 +37,11 @@ class TheCostsAcrossThem(SimpleTestCase):
     def test_by_what_the_money_was_for(self):
         cases = [
             (row(1, budget='Sales', account='SALARY EXPENSES', salary=True), 'SALARY'),
+            # TA/DA and incentives are salary (incentive by SAP's own salary test).
+            (row(1, budget='Sales', account='TA AND DA'), 'SALARY'),
+            (row(1, budget='Sales', account='TA/DA'), 'SALARY'),
+            (row(1, budget='Sales', account='INCENTIVE TO EMPLOYEES', salary=True), 'SALARY'),
+            (row(1, budget='BackOff', account='META DATA SERVICES'), None),
             (row(1, budget='Factory', account='ELECTRICITY EXPENSES'), 'ELECTRICITY'),
             (row(1, budget='BackOff', account='RENT'), 'RENT'),
             (row(1, budget='Sales', account='FREIGHT AND CARTAGE OUTWARD-INDIRECT EXP'), 'FREIGHT'),

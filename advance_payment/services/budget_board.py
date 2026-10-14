@@ -17,7 +17,8 @@ THE COSTS (`costs`, the side's pie) cut across those budgets by what the money
 was for — each posting under the first rule that fits (`cost_of`), and only
 these five shown:
 
-  Salary              a salary posting (SAP's own salary test), or budget Sal CF
+  Salary              a salary posting (SAP's own salary test — incentive to
+                      employees among them), TA/DA, or budget Sal CF
   Electricity         an electricity or generator account
   Rent                a rent account
   Freight             a freight / cartage / transport account, or budget
@@ -41,6 +42,7 @@ Jivo Mart's own. Read only. August is cached for hours (it is closed); the
 current month for ten minutes.
 """
 import calendar
+import re
 from collections import defaultdict
 from datetime import date
 
@@ -92,6 +94,10 @@ LEFT_OUT_SUB_BUDGETS = {('FACTORY', 'CIVIL')}
 
 FREIGHT_BUDGETS = {'TRANSPRT', 'DEL BKHP', 'DEL MAYP'}
 
+#: Travelling and daily allowance ("TA AND DA", 5630005) counts as salary (user,
+#: 2026-10-14) — as whole words, so a "META DATA" never does.
+TA_DA = re.compile(r'\bTA\s*(?:AND|&|/)?\s*DA\b')
+
 #: How much of each level of a breakdown is carried, largest first.
 TOP_BUDGETS = 15
 TOP_ACCOUNTS = 12
@@ -118,7 +124,7 @@ def cost_of(row):
     """The kind of cost a posting is (the rules in the module's docstring), or None for none of the five."""
     account = str(row.get('account_name') or row.get('ledger') or '').upper()
     budget = _budget(row)
-    if row.get('is_salary') or budget == 'SAL CF':
+    if row.get('is_salary') or budget == 'SAL CF' or TA_DA.search(account):
         cost = 'SALARY'
     elif 'ELECTRIC' in account or 'GENERATOR' in account:
         cost = 'ELECTRICITY'
