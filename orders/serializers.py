@@ -8,6 +8,42 @@ from sap_sync.models import Party as SapParty
 from sap_sync import product_lookup
 from decimal import Decimal
 
+#: Sub-group fallback for an item whose SAP type (OITM.U_TYPE) is blank. Where a
+#: sub-group sits in both lists, COMMODITY is checked first.
+_COMMODITY_SUB_GROUPS = {
+    "BLENDED", "COTTON SEED", "GIFT PACK", "GROUNDNUT", "MUSTARD", "PALMOLEIN",
+    "RICE BRAN", "SESAME", "SOYABEAN", "SUNFLOWER",
+}
+_PREMIUM_SUB_GROUPS = {
+    "BLENDED", "CANOLA", "COCONUT", "DRY FRUITS/NUTS", "EXTRA VIRGIN", "GHEE",
+    "GIFT PACK", "GROUNDNUT", "MUSTARD", "OLIVE", "SESAME", "SPICES",
+}
+VARIETY_TYPES = ("PREMIUM", "COMMODITY", "OTHERS")
+
+
+def item_variety_type(item):
+    """PREMIUM / COMMODITY / OTHERS for one order line — the ONE rule behind
+    the item badge, the variety cost cards and realisation.
+
+    SAP's own classification of the item (OITM.U_TYPE, synced as
+    `sap_products.type`) wins; it is set per SKU, so e.g. Olive Pomace and
+    Extra Virgin can differ. Where SAP leaves it blank (most products today),
+    the sub-group lists decide. These used to be two different lists in two
+    methods, so an olive line was badged Premium but costed as Commodity.
+    """
+    products = SapProduct.objects.filter(item_code=item.item_code)
+    product = products.filter(category=item.category).first() or products.first()
+    sap_type = str(getattr(product, "type", "") or "").strip().upper()
+    if sap_type in VARIETY_TYPES:
+        return sap_type
+    sub_group = getattr(product, "sub_group", None)
+    if sub_group in _COMMODITY_SUB_GROUPS:
+        return "COMMODITY"
+    if sub_group in _PREMIUM_SUB_GROUPS:
+        return "PREMIUM"
+    return "OTHERS"
+
+
 def get_scheme_item_code_raw(scheme_id):
     if not scheme_id:
         return None
@@ -381,35 +417,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 
     def get_variety_type(self, obj):
-        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
-        premium_list = [
-            "BLENDED",
-            "CANOLA",
-            "COCONUT",
-            "DRY FRUITS/NUTS",
-            "EXTRA VIRGIN",
-            "GHEE",
-            "GIFT PACK",
-            "GROUNDNUT",
-            "MUSTARD",
-            "OLIVE",
-            "SESAME",
-            "SPICES"
-        ]
-
-        sub_group =  SapProduct.objects.filter(item_code=obj.item_code , category=obj.category).values_list('sub_group', flat=True).first()
-        id = SapProduct.objects.filter(item_code=obj.item_code).values_list('id', flat=True).first()
-        category = getattr(obj, 'category', None)
-
-        if sub_group in commodity_list:
-            variety_type = "COMMODITY"
-        elif sub_group in premium_list:
-            variety_type = "PREMIUM"
-        else:
-            variety_type = "OTHERS"
-
-        print(f"{id} - {category} - {obj.item_name} - {sub_group} - {variety_type}")
-        return variety_type
+        return item_variety_type(obj)
     
 
     def get_last_purchase_price(self, obj):
@@ -561,69 +569,14 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         return state.name if state else party.state
     
     def get_vareity_cost(self, obj):
-         
-        commodity_list = ["BLENDED","COTTON SEED","GIFT PACK", "GROUNDNUT","MUSTARD","OLIVE","PALMOLEIN","RICE BRAN","SESAME","SOYABEAN","SUNFLOWER"]
-        others_list = [
-            "ATTA",
-            "COFFEE",
-            "DRINKS",
-            "DRY FRUITS/NUTS",
-            "FLAKES",
-            "GHEE",
-            "GIFT PACK",
-            "HONEY",
-            "RICE",
-            "SEEDS",
-            "SLICED OLIVE",
-            "SNACKS",
-            "SOYA CHUNK",
-            "SPICES",
-            "TEA",
-            "VITAMINS"
-        ]
-
-        premium_list = [
-            "BLENDED",
-            "CANOLA",
-            "COCONUT",
-            "DRY FRUITS/NUTS",
-            "EXTRA VIRGIN",
-            "GHEE",
-            "GIFT PACK",
-            "GROUNDNUT",
-            "MUSTARD",
-            "OLIVE",
-            "SESAME",
-            "SPICES"
-        ]
-
-        commodity_price = Decimal(0)
-        other_total = Decimal(0)
-        premium_total = Decimal(0)
-
+        totals = {variety: Decimal(0) for variety in VARIETY_TYPES}
         for item in OrderItem.objects.filter(order=obj.id):
-            product = SapProduct.objects.filter(item_code=item.item_code).first()
-            product_group = product.sub_group if product else None 
-
-            if product_group in commodity_list:
-                category = "COMMODITY"
-                commodity_price += item.total
-            elif product_group in others_list:
-                category = "OTHERS"
-                other_total += item.total
-            elif product_group in premium_list:
-                category = "PREMIUM"
-                premium_total += item.total
-            else:
-                category = "OTHERS"
-                other_total += item.total
-
-
+            totals[item_variety_type(item)] += item.total or Decimal(0)
         return {
-                    "commodity_price": commodity_price,
-                    "other_total": other_total,
-                    "premium_total": premium_total
-                }
+            "commodity_price": totals["COMMODITY"],
+            "other_total": totals["OTHERS"],
+            "premium_total": totals["PREMIUM"],
+        }
 
 
     def get_created_by_name(self, obj):
