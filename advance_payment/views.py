@@ -28,7 +28,7 @@ Responses use the project's `{success, message, data}` envelope.
 import hashlib
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -1398,31 +1398,76 @@ class _RequestView(APIView):
 _TERMS_TYPES = ('VENDOR', 'EXPENSE')
 
 
+#: The credit period assumed where SAP has none set for the vendor (decided 2026-10-14).
+DEFAULT_CREDIT_DAYS = 30
+
+
+def _bill_entries(row):
+    return [d['sap_doc_entry'] for d in row.get('documents') or () if d.get('kind') == 'BILL']
+
+
+def _credit_due(terms, bills):
+    """When the earliest of the request's bills falls due, and that bill's posting date.
+
+    Terms set in SAP: the bill's own due date there. Not set: its posting
+    date plus `DEFAULT_CREDIT_DAYS`.
+    """
+    dues = []
+    for bill in bills:
+        posted = bill.get('posting_date')
+        if terms['set'] and bill.get('due_date'):
+            due = bill['due_date']
+        elif posted:
+            due = (date.fromisoformat(str(posted)[:10]) + timedelta(days=terms['credit_days'])).isoformat()
+        else:
+            continue
+        dues.append((due, posted))
+    return min(dues) if dues else (None, None)
+
+
 def _with_credit_terms(rows):
     """Each row gains `credit_terms`: its payee's SAP payment terms, or None.
 
-    One SAP query per company for the whole list. A partner not in SAP, an
-    employee, or SAP being unreachable leaves it None: a list never fails over
-    a detail. Off when `ADVANCE_PAYMENT_CREDIT_TERMS` is False (the test settings).
+    `credit_days` is the period approvers work to: SAP's where it is set,
+    else `DEFAULT_CREDIT_DAYS` (`assumed`). On a request against bills,
+    `due_date` is when the earliest of them falls due (`_credit_due`), from
+    `posting_date`.
+
+    One SAP query per company for the terms, and one for the bills' dates. A
+    partner not in SAP, an employee, or SAP being unreachable leaves it None:
+    a list never fails over a detail. Off when `ADVANCE_PAYMENT_CREDIT_TERMS`
+    is False (the test settings).
     """
     if not getattr(settings, 'ADVANCE_PAYMENT_CREDIT_TERMS', True):
         for row in rows:
             row['credit_terms'] = None
         return rows
-    wanted = {}
+    wanted, bills_wanted = {}, {}
     for row in rows:
         code = row.get('partner_code') or ''
         if row.get('request_type') in _TERMS_TYPES and code and not row.get('partner_not_in_sap') \
                 and not code.startswith(request_service.NOT_IN_SAP_PREFIX):
             wanted.setdefault(row.get('company'), set()).add(code)
-    found = {}
+            bills_wanted.setdefault(row.get('company'), set()).update(_bill_entries(row))
+    found, bill_found = {}, {}
     for company, codes in wanted.items():
         try:
             found[company] = sap_service.credit_terms(company, codes)
         except sap_service.SapUnavailable:
             found[company] = {}
+        try:
+            bill_found[company] = sap_service.bill_dates(company, bills_wanted[company])
+        except sap_service.SapUnavailable:
+            bill_found[company] = {}
     for row in rows:
-        row['credit_terms'] = found.get(row.get('company'), {}).get(row.get('partner_code') or '')
+        terms = found.get(row.get('company'), {}).get(row.get('partner_code') or '')
+        if terms:
+            terms = {**terms, 'credit_days': terms['days'] if terms['set'] else DEFAULT_CREDIT_DAYS,
+                     'assumed': not terms['set']}
+            dates = bill_found.get(row.get('company'), {})
+            terms['due_date'], terms['posting_date'] = _credit_due(
+                terms, [dates[e] for e in _bill_entries(row) if e in dates])
+        row['credit_terms'] = terms
     return rows
 
 

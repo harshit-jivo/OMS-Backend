@@ -1465,6 +1465,27 @@ def credit_terms(company, card_codes):
     return out
 
 
+_BILL_DATES_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", "DocDate" AS "posting_date", "DocDueDate" AS "due_date"
+    FROM "{schema}"."OPCH"
+    WHERE "DocEntry" IN ({marks})
+'''
+
+
+def bill_dates(company, doc_entries):
+    """`{doc_entry: {posting_date, due_date}}` for A/P invoices (OPCH); one query.
+
+    The posting date is SAP's DocDate — what a credit period runs from. A
+    request keeps the bill's own document date (TaxDate), so it is read here.
+    """
+    entries = sorted({int(e) for e in doc_entries if e is not None})
+    if not entries:
+        return {}
+    sql = _BILL_DATES_SQL.format(schema=_schema(company), marks=', '.join('?' * len(entries)))
+    return {int(r['doc_entry']): {'posting_date': _date(r.get('posting_date')), 'due_date': _date(r.get('due_date'))}
+            for r in _run(company, sql, entries, 'bill dates')}
+
+
 def open_documents(company, card_code, limit=None, bills_only=False,
                    exclude_bills=False):
     """Every open document against one partner, oldest due first.
