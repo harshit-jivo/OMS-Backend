@@ -192,6 +192,12 @@ SETUP = {
     '1320000257': ('The SAP user OMS posts as ({user}) is not assigned to this branch in SAP. '
                    'Ask the SAP administrator to assign it: Administration → Setup → General → '
                    'Users → {user} → Branches. Then approve again.'),
+    # An advance paid on account (no bill to apply it to) to a partner whose
+    # master data has no Buyer / Sales Employee. Most imprest (ORGV) accounts
+    # in Beverages have none (177 of 248, 2026-10-15).
+    '460011': ('The business partner has no Buyer / Sales Employee in its SAP master data, which SAP '
+               'requires for an advance paid on account. Set it in SAP (Business Partner Master Data → '
+               'Buyer / Sales Employee), then approve again.'),
 }
 
 #: A transaction-notification rule: "(4612) After 5:00 PM ...".

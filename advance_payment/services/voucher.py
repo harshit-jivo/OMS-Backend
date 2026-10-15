@@ -404,6 +404,23 @@ def _next_version(advance):
     return (advance.vouchers.aggregate(n=Max('version'))['n'] or 0) + 1
 
 
+def _buyer_gap(advance, payload):
+    """SAP check 460011, asked before SAP is: an advance paid on account needs the
+    partner's Buyer / Sales Employee set in its master data. `[problem]` or `[]`;
+    SAP unreadable here, it is left for SAP itself to say."""
+    if not sap_rules.on_account(payload):
+        return []
+    try:
+        partner = sap_service.partner(advance.company, advance.partner_code)
+    except sap_service.SapUnavailable:
+        return []
+    if partner is None or partner.get('has_buyer', True):
+        return []
+    return [f'{advance.partner_name or advance.partner_code} ({advance.partner_code}) has no Buyer / Sales '
+            f'Employee in its SAP master data, which SAP requires for an advance paid on account '
+            f'(SAP check 460011). Set it in SAP, then approve again.']
+
+
 def post(advance, *, user):
     """Post the request's outgoing payment. Returns `Outcome`; never raises for SAP."""
     from payments import sap_client
@@ -474,7 +491,7 @@ def post(advance, *, user):
         # journal was booked must still be marked urgent — then checked, so a
         # gap is reported here in plain words rather than refused by SAP.
         sap_rules.apply(payload, advance, posting_date=posting_date)
-        gaps = sap_rules.problems(payload)
+        gaps = sap_rules.problems(payload) + _buyer_gap(advance, payload)
         if gaps:
             message = 'Not sent to SAP: ' + ' '.join(gaps)
             if tds_trans_id:

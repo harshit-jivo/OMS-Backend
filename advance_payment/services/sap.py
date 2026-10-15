@@ -1401,7 +1401,8 @@ _PARTNER_ONE_SQL = '''
         "Currency" AS "currency",
         "Balance"  AS "balance",
         IFNULL("frozenFor", 'N') AS "frozen",
-        IFNULL("validFor",  'Y') AS "valid"
+        IFNULL("validFor",  'Y') AS "valid",
+        IFNULL("SlpCode", -1) AS "slp_code"
     FROM "{schema}"."OCRD"
     WHERE "CardCode" = ?
 '''
@@ -1431,6 +1432,9 @@ def partner(company, card_code):
         'balance': _money(r.get('balance')),
         'frozen': _s(r.get('frozen')) == 'Y',
         'active': _s(r.get('valid')) == 'Y',
+        # Its Buyer / Sales Employee (OCRD.SlpCode; -1 is none): SAP refuses an
+        # advance paid on account to a partner without one (check 460011).
+        'has_buyer': int(r.get('slp_code') if r.get('slp_code') is not None else -1) != -1,
     }
 
 

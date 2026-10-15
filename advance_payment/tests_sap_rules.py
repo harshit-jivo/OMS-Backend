@@ -132,3 +132,33 @@ class EachCompanysSpelling(SimpleTestCase):
         with mock.patch.object(sap, '_run', side_effect=sap.SapUnavailable('down')):
             self.assertEqual(sap_rules.spelled_for({'U_Adv_Settl_Dt': 'x'}, 'JIVO_MART_HANADB'),
                              {'U_Adv_Settl_Dt': 'x'})
+
+
+class TheBuyerAnAdvanceNeeds(SimpleTestCase):
+    """SAP check 460011: an advance paid on account needs the partner's Buyer / Sales Employee."""
+
+    def test_its_refusal_says_what_to_set_in_sap(self):
+        message = sap_rules.explain(Exception(
+            '(460011) Buyer/Sales Employee/Person responsible for the advance payment to be entered in Business Master Data.'))
+        self.assertIn('Buyer / Sales Employee', message)
+        self.assertIn('then approve again', message)
+        self.assertNotIn('send this message to IT', message)
+
+    def test_is_asked_before_sap_for_an_advance_on_account(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from advance_payment.services import voucher
+
+        advance = SimpleNamespace(company='BEVERAGES', partner_code='ORGV000070', partner_name='MANJEET SINGH')
+        on_account = {'DocType': 'rSupplier', 'CardCode': 'ORGV000070'}
+        with mock.patch.object(voucher.sap_service, 'partner', return_value={'has_buyer': False}):
+            (gap,) = voucher._buyer_gap(advance, on_account)
+        self.assertIn('ORGV000070', gap)
+        self.assertIn('460011', gap)
+        with mock.patch.object(voucher.sap_service, 'partner', return_value={'has_buyer': True}):
+            self.assertEqual(voucher._buyer_gap(advance, on_account), [])
+        # Against bills, SAP does not ask: no lookup at all.
+        with mock.patch.object(voucher.sap_service, 'partner') as lookup:
+            self.assertEqual(voucher._buyer_gap(advance, {**on_account, 'PaymentInvoices': [{'DocEntry': 1}]}), [])
+        lookup.assert_not_called()
