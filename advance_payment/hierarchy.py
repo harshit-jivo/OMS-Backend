@@ -5,6 +5,7 @@ Each request goes to exactly one workflow:
 
     Mart                              -> Prabhjot, whatever it is for
     Employee / Employee Imprest       -> Department Head -> Director
+    Account Payment (any company)     -> Avtar
     anything else (Oil, Beverages)    -> the workflow of its Payment Purpose
 
 and every workflow then ends Payment -> Audit -> Final. "Department Head"
@@ -34,7 +35,7 @@ PEOPLE = {
     'ziyaul': 'ziyaul',              # salaries
     'factory_oil': 'gagan',          # Gagandeep Singh: Oil factory salaries
     'factory_bev': 'arvinder',       # Arvinder Singh: Beverages factory salaries
-    'avtar': 'avtar',                # interest, bank charges, loans, statutory
+    'avtar': 'avtar',                # interest, bank charges, loans, statutory; Account Payments
     'sales_oil': 'Raju Vg',          # Jasvir Singh: Oil customer refunds
     'sales_bev': 'Raju Vg',          # Jasvir Singh: Beverages sales too (was Karanpreet; 2026-10-09)
     'mart': 'prabhjot',              # Prabhjot Singh: all of Mart
@@ -68,6 +69,11 @@ ADVANCE = "request_type = 'EMPLOYEE_ADVANCE'"
 #: the monthly TA/DA and incentive: the picked Department Head, then Navdeep
 #: (user, 2026-10-14), whatever the purpose. Kept out of the Staff Advance route.
 IMPREST_JOURNAL = "(request_type = 'EMPLOYEE_IMPREST' AND payment_against = 'AGAINST_JOURNAL')"
+
+#: An Account Payment (one G/L account, no partner — Katebaa, TPT, BSU): Avtar,
+#: then Payment, in every company (user, 2026-10-15). Kept out of every other route.
+ACCOUNT = "request_type = 'ACCOUNT'"
+NOT_ACCOUNT = "request_type <> 'ACCOUNT'"
 
 #: Purposes approved by one fixed owner, and whether the Director follows.
 FIXED_OWNER = {
@@ -194,7 +200,10 @@ def routes():
     labels = {code: label for code, label, _g in PAYMENT_PURPOSES}
     out = [
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
-         'query': _where("company = 'MART'", "request_type <> 'EXPENSE'"), 'stages': [(OWNER_STAGE, 'mart')]},
+         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')"),
+         'stages': [(OWNER_STAGE, 'mart')]},
+        {'code': 'AP_ACCOUNT', 'name': 'Payments · Account Payment', 'company': 'ALL',
+         'query': _where(ACCOUNT), 'stages': [(OWNER_STAGE, 'avtar')]},
         # Imprest, and a salary advance outside the plant: the picked Department Head, then the Director.
         {'code': 'AP_STAFF_ADVANCE', 'name': 'Payments · Staff Advance / Imprest', 'company': 'ALL',
          'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN'),
@@ -223,25 +232,26 @@ def routes():
          'stages': [(DIRECTOR_STAGE, 'director')]},
     ]
     for code, label, _group in PAYMENT_PURPOSES:
-        base = (OIL_AND_BEV, NOT_STAFF, _purpose(code))
+        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, _purpose(code))
         if code == 'SALARY':
             out += [
                 {'code': 'AP_SALARY', 'name': f'Payments · {label}', 'company': 'ALL',
                  'query': _where(*base, f'budget_code NOT IN {FACTORY_BUDGETS}'),
                  'stages': _chain('ziyaul', False)},
                 {'code': 'AP_SALARY_FACTORY_OIL', 'name': f'Payments · {label} · Oil factory', 'company': 'OIL',
-                 'query': _where("company = 'OIL'", NOT_STAFF, _purpose(code), f'budget_code IN {FACTORY_BUDGETS}'),
+                 'query': _where("company = 'OIL'", NOT_STAFF, NOT_ACCOUNT, _purpose(code),
+                                 f'budget_code IN {FACTORY_BUDGETS}'),
                  'stages': _chain('factory_oil', False)},
                 {'code': 'AP_SALARY_FACTORY_BEV', 'name': f'Payments · {label} · Beverages factory',
                  'company': 'BEVERAGES',
-                 'query': _where("company = 'BEVERAGES'", NOT_STAFF, _purpose(code),
+                 'query': _where("company = 'BEVERAGES'", NOT_STAFF, NOT_ACCOUNT, _purpose(code),
                                  f'budget_code IN {FACTORY_BUDGETS}'),
                  'stages': _chain('factory_bev', False)},
             ]
         elif code == 'CUSTOMER_REFUND':
             out += [
                 {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
-                 'query': _where(f"company = '{company}'", NOT_STAFF, _purpose(code)),
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, _purpose(code)),
                  'stages': _chain(owner, False)}
                 for company, tag, title, owner in (('OIL', 'OIL', 'Oil', 'sales_oil'),
                                                    ('BEVERAGES', 'BEV', 'Beverages', 'sales_bev'))

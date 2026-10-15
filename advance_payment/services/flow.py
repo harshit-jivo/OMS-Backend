@@ -806,11 +806,11 @@ def _account_key(value):
 def _from_sap(advance, account, ifsc):
     """Is (account, IFSC) one of the payee's own SAP accounts?
 
-    An Employee's payee is a G/L with no bank details, and an Expense without
-    a vendor has no SAP partner at all: never. SAP out of reach: treated as
+    An Employee's or Account Payment's payee is a G/L with no bank details, and
+    an Expense without a vendor has no SAP partner at all: never. SAP out of reach: treated as
     typed, so the password is asked rather than skipped.
     """
-    if advance.request_type == 'EMPLOYEE_ADVANCE' or not advance.partner_code:
+    if advance.request_type in ('EMPLOYEE_ADVANCE', 'ACCOUNT') or not advance.partner_code:
         return False
     try:
         rows, _default = sap_service.partner_bank_accounts(advance.company, advance.partner_code)

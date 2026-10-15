@@ -1254,6 +1254,19 @@ class ExpenseAccountsView(_Lookup):
         return sap_service.expense_accounts(company)
 
 
+class PaymentAccountsView(_Lookup):
+    """GET /api/advance-payments/payment-accounts/?company=&search=&limit=
+
+    The G/L accounts an Account Payment may pay to (`sap.PAYMENT_ACCOUNT_PARENTS`):
+    `[{code, name, group, balance}]`; `[]` for a company with none.
+    """
+
+    resource = 'payment accounts'
+
+    def fetch(self, request, company):
+        return sap_service.payment_accounts(company, _search(request), _limit(request))
+
+
 class ExpenseMonthsView(_Lookup):
     """GET /api/advance-payments/expense-months/?company=
 

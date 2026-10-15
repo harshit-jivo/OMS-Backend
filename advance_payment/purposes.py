@@ -118,8 +118,8 @@ def saved_label(code):
 
 def needs_department_head(company, request_type, purpose_code, budget_code=''):
     """Whether this request is approved by the Department Head picked on the form."""
-    if company in NO_HEAD_COMPANIES:
-        return False
+    if company in NO_HEAD_COMPANIES or request_type == 'ACCOUNT':
+        return False  # Mart's one approver; an Account Payment's fixed route
     if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
         return False  # the plant's fixed approver, by amount
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES

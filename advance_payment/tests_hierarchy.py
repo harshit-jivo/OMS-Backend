@@ -44,8 +44,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
             with self.subTest(code):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
         # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
-        # Imprest against Journal Entry
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1)
+        # Imprest against Journal Entry; Account Payment
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -54,11 +54,12 @@ class EveryRequestHasOneRoute(SimpleTestCase):
 
     def test_mart_and_staff_advance_are_kept_out_of_the_purpose_routes(self):
         self.assertEqual(BY_CODE['AP_MART']['query'],
-                         "SELECT id FROM advance_payment_request WHERE company = 'MART' AND request_type <> 'EXPENSE'")
+                         "SELECT id FROM advance_payment_request WHERE company = 'MART' "
+                         "AND request_type NOT IN ('EXPENSE', 'ACCOUNT')")
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL') or route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
                 self.assertNotIn('MART', route['query'])
@@ -328,7 +329,7 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL') or route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             self.assertIn('purpose_code = ', route['query'])
 

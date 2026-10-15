@@ -88,6 +88,9 @@ CASES = {
     # payment, each with Month / Budget / Sub Budget. No SAP partner.
     (RequestType.EXPENSE, PaymentAgainst.DIRECT_EXPENSE): {'documents': None, 'expense': 'DIRECT'},
     (RequestType.EXPENSE, PaymentAgainst.INDIRECT_EXPENSE): {'documents': None, 'expense': 'INDIRECT'},
+    # Paid straight to one G/L account that is no business partner (Katebaa,
+    # TPT, BSU…): a typed amount, as SAP's own such payments are.
+    (RequestType.ACCOUNT, PaymentAgainst.ON_ACCOUNT): {'documents': None, 'account': True},
 }
 
 #: An Expense request takes at most this many lines.
@@ -211,6 +214,8 @@ def clean(data, *, desk=False, user=None):
             problems.append('Say who is being paid (Pay To).')
     elif not partner_code or not partner_name:
         problems.append('Choose who is being paid.')
+    elif case.get('account'):
+        partner_name = _clean_payment_account(company, partner_code, partner_name, problems)
     not_in_sap = partner_code.startswith(NOT_IN_SAP_PREFIX)
     if not_in_sap and request_type != RequestType.EMPLOYEE_ADVANCE:
         problems.append('Only an Employee advance may be raised for someone not yet in SAP.')
@@ -311,6 +316,24 @@ def clean(data, *, desk=False, user=None):
         documents=documents,
         expense_lines=expense_lines,
     )
+
+
+def _clean_payment_account(company, code, name, problems):
+    """An Account Payment's account must be one it may pay (`sap.payment_accounts`).
+    Returns the account's name as SAP has it."""
+    if company not in COMPANY_CODES:
+        return name
+    from advance_payment.services import sap as sap_service
+
+    try:
+        found = sap_service.payment_accounts(company, code=code, limit=1)
+    except sap_service.SapUnavailable:
+        problems.append('Could not check the account with SAP. Try again shortly.')
+        return name
+    if not found:
+        problems.append(f'{code} is not an account an Account Payment may pay in {company}.')
+        return name
+    return found[0]['name'][:200] or name
 
 
 def _clean_expense_vendor(company, partner_code, partner_name, problems):

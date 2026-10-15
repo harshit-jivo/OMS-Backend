@@ -172,6 +172,12 @@ class RequestType(models.TextChoices):
     #: utilities, bank charges… Each line carries SAP's Month, Budget and Sub
     #: Budget. Routed by the budget head's owner; Audit's approval posts it.
     EXPENSE = 'EXPENSE', 'Expense'
+    #: Paid straight to ONE balance-sheet G/L account that is no business
+    #: partner — a party SAP keeps as a ledger account (Mart's Katebaa,
+    #: 2120014-2120026; its TPT and BSU units, 1110401/1110403), as SAP's own
+    #: such payments are (OVPM DocType A, 2026-10-15). The accounts it may pay
+    #: are `sap.PAYMENT_ACCOUNT_PARENTS`. Avtar approves, then Payment.
+    ACCOUNT = 'ACCOUNT', 'Account Payment'
 
 
 class PaymentAgainst(models.TextChoices):

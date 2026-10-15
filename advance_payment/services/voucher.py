@@ -255,7 +255,9 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
             'ProfitCenter3': advance.budget_code,
             'ProfitCenter4': advance.sub_budget_code,
         } for line in advance.expense_lines.all()]
-    elif advance.request_type == RequestType.EMPLOYEE_ADVANCE:
+    elif advance.request_type in (RequestType.EMPLOYEE_ADVANCE, RequestType.ACCOUNT):
+        # One G/L account, no partner: the employee's advance account, or the
+        # account an Account Payment pays (Katebaa, TPT…), as SAP's own are.
         payload['DocType'] = 'rAccount'
         payload['PaymentAccounts'] = [{
             'AccountCode': advance.partner_code,

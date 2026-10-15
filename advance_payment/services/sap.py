@@ -2503,6 +2503,53 @@ _EXPENSE_ACCOUNTS_SQL = '''
 '''
 
 
+#: The G/L accounts an Account Payment may pay, by company: the postable
+#: children of these groups. Mart: 2120000 CREDITORS MART (Katebaa
+#: 2120014-2120026, G P Stationery, Ruia Exports…) and 1110400 TPT & BSU (its
+#: two units' accounts, 1110401 / 1110403) — the accounts Mart's own
+#: account-type payments go to (OVPM DocType A, read 2026-10-15). A company
+#: not listed has no Account Payment.
+PAYMENT_ACCOUNT_PARENTS = {
+    'MART': ('2120000', '1110400'),
+    **(getattr(settings, 'ADVANCE_PAYMENT_ACCOUNT_PARENTS', None) or {}),
+}
+
+_PAYABLE_ACCOUNTS_SQL = '''
+    SELECT A."AcctCode" AS "code", A."AcctName" AS "name", P."AcctName" AS "group", A."CurrTotal" AS "balance"
+    FROM "{schema}"."OACT" A
+    LEFT JOIN "{schema}"."OACT" P ON P."AcctCode" = A."FatherNum"
+    WHERE A."Postable" = 'Y' AND IFNULL(A."FrozenFor", 'N') = 'N'
+      AND A."FatherNum" IN ({parents})
+      {search}
+    ORDER BY A."AcctName"
+    LIMIT {limit}
+'''
+
+
+def payment_accounts(company, search=None, limit=None, code=None):
+    """The G/L accounts an Account Payment may pay to: `[{code, name, group, balance}]`.
+
+    `search` matches the name or the code; `code` asks for that one account
+    alone (empty when it is not one of them). `[]` for a company with none.
+    """
+    parents = PAYMENT_ACCOUNT_PARENTS.get(company) or ()
+    if not parents:
+        _schema(company)  # an unknown company is still an error
+        return []
+    pattern = _like(search)
+    where, params = '', list(parents)
+    if code:
+        where, params = 'AND A."AcctCode" = ?', params + [_s(code)]
+    elif pattern:
+        where = f'AND (UPPER(A."AcctName") LIKE ?{_ESC} OR A."AcctCode" LIKE ?{_ESC})'
+        params += [pattern, pattern]
+    sql = _PAYABLE_ACCOUNTS_SQL.format(
+        schema=_schema(company), parents=', '.join('?' for _ in parents), search=where, limit=_limit(limit))
+    return [{'code': _s(r.get('code')), 'name': _s(r.get('name')), 'group': _s(r.get('group')),
+             'balance': _money(r.get('balance'))}
+            for r in _run(company, sql, params, 'payment accounts')]
+
+
 def expense_accounts(company, kind=None):
     """The postable expense G/L accounts an Expense line may pay to:
     `[{code, name, group, kind}]`, `kind` DIRECT or INDIRECT; `kind=` keeps one."""
