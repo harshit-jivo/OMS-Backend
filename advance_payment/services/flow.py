@@ -1154,6 +1154,18 @@ def awaiting_ids(user):
     return ids
 
 
+def mark_with_head(plan):
+    """The stage straight after the Department Head's, when it falls to the same
+    person (the Director picked as Department Head): one approval covers both
+    (`_approve_once`), so the timeline says so rather than "to come". In place.
+    """
+    for before, entry in zip(plan, plan[1:]):
+        if (is_department_head_stage(before['name']) and entry['role'] == StageRole.APPROVAL
+                and entry['user_id'] and entry['user_id'] == before['user_id'] and entry['state'] == 'UPCOMING'):
+            entry['state'] = 'WITH_HEAD'
+    return plan
+
+
 def stage_plan(advance):
     """Every stage of the route with where the request stands on it, for the timeline."""
     flow = getattr(advance, 'flow', None)
@@ -1177,6 +1189,15 @@ def stage_plan(advance):
     for row in advance.logs.filter(action=LogAction.APPROVED, stage__isnull=False, id__gt=round_start):
         standing[row.stage_id] = row
     out = []
+    users = {}
+
+    def display_name(user_id):
+        """One person, one name on every stage: the login's name, else its username."""
+        if user_id not in users:
+            user = get_user_model().objects.filter(pk=user_id).first() if user_id else None
+            users[user_id] = (user.name or user.username) if user else ''
+        return users[user_id]
+
     for stage, role in named:
         row = decided.get(stage.id)
         if row is None and role == StageRole.APPROVAL:
@@ -1195,7 +1216,7 @@ def stage_plan(advance):
         else:
             assignment = get_stage_assignment(stage.id)
             user_id = assignment.effective_user_id if assignment else None
-            user_name = assignment.effective_username if assignment else ''
+            user_name = display_name(user_id) or (assignment.effective_username if assignment else '')
         out.append({
             'stage_id': stage.id,
             'name': stage.name,
@@ -1207,4 +1228,4 @@ def stage_plan(advance):
             'acted_by_id': row.actor_id if row else None,
             'acted_on': row.created_on.isoformat() if row else None,
         })
-    return out
+    return mark_with_head(out)

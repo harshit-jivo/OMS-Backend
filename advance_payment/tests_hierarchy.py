@@ -406,3 +406,26 @@ class HeadsTwoLoginsShare(SimpleTestCase):
         users = [self.login(1, 'asha a', 'Asha Rani'), self.login(2, 'asha b', 'Asha Devi')]
         employee = SimpleNamespace(employee_code='JWPL9999', employee_name='Asha', email=None)
         self.assertIsNone(heads.match_user(employee, users))
+
+
+class TheTimelineWhenTheHeadIsTheDirector(SimpleTestCase):
+    """The Director picked as Department Head approves once: the timeline must not show a second approval to come."""
+
+    def plan(self, director_id, state='UPCOMING'):
+        return [
+            {'name': DEPARTMENT_HEAD_STAGE, 'role': 'APPROVAL', 'user_id': 137, 'state': 'CURRENT'},
+            {'name': 'Director Approval', 'role': 'APPROVAL', 'user_id': director_id, 'state': state},
+            {'name': 'Payment Approval', 'role': 'PAYMENT', 'user_id': 134, 'state': 'UPCOMING'},
+        ]
+
+    def test_the_same_persons_next_stage_goes_with_the_heads(self):
+        plan = flow_service.mark_with_head(self.plan(137))
+        self.assertEqual([s['state'] for s in plan], ['CURRENT', 'WITH_HEAD', 'UPCOMING'])
+
+    def test_someone_elses_next_stage_is_still_to_come(self):
+        plan = flow_service.mark_with_head(self.plan(126))
+        self.assertEqual(plan[1]['state'], 'UPCOMING')
+
+    def test_a_stage_already_decided_keeps_its_state(self):
+        plan = flow_service.mark_with_head(self.plan(137, state='APPROVED'))
+        self.assertEqual(plan[1]['state'], 'APPROVED')
