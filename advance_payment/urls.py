@@ -138,6 +138,8 @@ urlpatterns = [
          name='advance-payment-cash-accounts'),
     path('expense-accounts/', views.ExpenseAccountsView.as_view(),
          name='advance-payment-expense-accounts'),
+    path('factory-limit/', views.FactoryLimitView.as_view(),
+         name='advance-payment-factory-limit'),
     path('payment-accounts/', views.PaymentAccountsView.as_view(),
          name='advance-payment-payment-accounts'),
     path('expense-months/', views.ExpenseMonthsView.as_view(),

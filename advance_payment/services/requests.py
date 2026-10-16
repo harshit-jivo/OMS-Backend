@@ -53,7 +53,7 @@ from advance_payment.models import (
     ReturnMethod,
 )
 from advance_payment.purposes import needs_department_head, purpose_label
-from advance_payment.services import clock
+from advance_payment.services import clock, daily_limit
 from core.companies import COMPANY_CODES
 
 #: The form's `NOT_IN_SAP_PREFIX`: an employee from the master with no SAP
@@ -767,6 +767,12 @@ def _write_documents(advance, documents):
         [RequestDocument(request=advance, **doc) for doc in documents])
 
 
+def _within_daily_limit(found):
+    """Refuse a request past the Factory daily limit (`services/daily_limit.py`)."""
+    if found:
+        raise RequestInvalid(found)
+
+
 def _write_expense_lines(advance, lines):
     advance.expense_lines.all().delete()
     ExpenseLine.objects.bulk_create([ExpenseLine(request=advance, **line) for line in lines])
@@ -798,6 +804,7 @@ def create(cleaned, *, user, files=()):
         try:
             with transaction.atomic():
                 _reserve(cleaned)
+                _within_daily_limit(daily_limit.check_new(cleaned.fields))
                 advance = AdvanceRequest.objects.create(
                     request_no=_next_request_no(year), created_by=user, **cleaned.fields)
                 _write_documents(advance, cleaned.documents)
@@ -900,6 +907,7 @@ def update(advance, cleaned, *, user, files=(), remove_file_ids=()):
     """
     check_files(files)
     _reserve(cleaned, company=advance.company, exclude_request=advance.pk)
+    _within_daily_limit(daily_limit.check_edit(advance, cleaned.fields))
     before, docs_before, lines_before = _snapshot(advance), _documents(advance), _expense_lines(advance)
     for name, value in cleaned.fields.items():
         setattr(advance, name, value)

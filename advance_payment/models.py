@@ -941,3 +941,40 @@ class DocumentAssignment(models.Model):
 
     def __str__(self):
         return f'{self.kind} {self.sap_doc_num} -> {self.assigned_to_id}'
+
+
+class FactoryDailyLimit(models.Model):
+    """Ziyaul's cap on one day's Factory payment requests in one company
+    (user, 2026-10-15/16; `services/daily_limit.py` says what counts).
+
+    One row per company and day he set it. A day without a row takes the last
+    limit set before it: it carries forward until he sets another.
+    """
+
+    company = models.CharField(max_length=20, choices=COMPANY_CHOICES)
+    day = models.DateField()
+    amount = models.DecimalField(max_digits=19, decimal_places=2)
+    set_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    set_on = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'advance_payment_factory_daily_limit'
+        ordering = ['-day']
+        constraints = [models.UniqueConstraint(fields=['company', 'day'], name='ap_factory_limit_once_a_day')]
+
+    def __str__(self):
+        return f'{self.company} {self.day}: {self.amount}'
+
+
+class FactoryDailyLimitChange(models.Model):
+    """Every time a day's limit was set or changed: by whom, from what, to what."""
+
+    limit = models.ForeignKey(FactoryDailyLimit, on_delete=models.CASCADE, related_name='changes')
+    old_amount = models.DecimalField(max_digits=19, decimal_places=2, null=True, blank=True)
+    new_amount = models.DecimalField(max_digits=19, decimal_places=2)
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    changed_on = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'advance_payment_factory_daily_limit_change'
+        ordering = ['-changed_on']

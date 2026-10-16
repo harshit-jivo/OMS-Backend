@@ -2550,6 +2550,46 @@ def payment_accounts(company, search=None, limit=None, code=None):
             for r in _run(company, sql, params, 'payment accounts')]
 
 
+#: The Factory daily limit's open bills (`services/daily_limit.py`): what SAP
+#: owes on factory spending that is not oil. SAP never tags a packing-material
+#: bill with a Budget (0 of 649 open lines, Oct 2026), so a bill line counts
+#: when its Budget is a factory one OR its item is of a factory group; an oil
+#: item (raw material or semi-finished named "…OIL…") never does.
+FACTORY_ITEM_GROUPS = ('PACKAGING MATERIAL', 'RAW MATERIAL', 'SEMI FINISHED GOODS', 'FA CONSUMABLES')
+OIL_ITEM_GROUPS = ('RAW MATERIAL', 'SEMI FINISHED GOODS')
+
+_FACTORY_OPEN_BILLS_SQL = '''
+    SELECT COUNT(DISTINCT H."DocEntry") AS "bills",
+           ROUND(SUM((H."DocTotal" - H."PaidToDate") * L."LineTotal" / NULLIF(T."total", 0)), 2) AS "open",
+           ROUND(SUM(CASE WHEN IFNULL(G."ItmsGrpNam", '') = 'PACKAGING MATERIAL'
+                          THEN (H."DocTotal" - H."PaidToDate") * L."LineTotal" / NULLIF(T."total", 0) ELSE 0 END),
+                 2) AS "packing"
+    FROM "{schema}"."OPCH" H
+    JOIN "{schema}"."PCH1" L ON L."DocEntry" = H."DocEntry"
+    JOIN (SELECT "DocEntry", SUM("LineTotal") AS "total" FROM "{schema}"."PCH1" GROUP BY "DocEntry") T
+      ON T."DocEntry" = H."DocEntry"
+    LEFT JOIN "{schema}"."OITM" I ON I."ItemCode" = L."ItemCode"
+    LEFT JOIN "{schema}"."OITB" G ON G."ItmsGrpCod" = I."ItmsGrpCod"
+    WHERE H."CANCELED" = 'N' AND H."DocStatus" = 'O'
+      AND NOT (IFNULL(G."ItmsGrpNam", '') IN ({oil_groups}) AND UPPER(IFNULL(I."ItemName", '')) LIKE '%OIL%')
+      AND (IFNULL(L."OcrCode3", '') IN ({budgets}) OR IFNULL(G."ItmsGrpNam", '') IN ({groups}))
+'''
+
+
+def factory_open_bills(company):
+    """Open A/P invoices on factory spending other than oil: `{bills, open, packing}`
+    (rupees as strings; each bill's open amount shared over its lines)."""
+    from advance_payment.purposes import FACTORY_BUDGETS
+
+    marks = lambda values: ', '.join('?' for _ in values)  # noqa: E731
+    sql = _FACTORY_OPEN_BILLS_SQL.format(schema=_schema(company), oil_groups=marks(OIL_ITEM_GROUPS),
+                                         budgets=marks(FACTORY_BUDGETS), groups=marks(FACTORY_ITEM_GROUPS))
+    rows = _run(company, sql, [*OIL_ITEM_GROUPS, *FACTORY_BUDGETS, *FACTORY_ITEM_GROUPS], 'factory open bills')
+    r = rows[0] if rows else {}
+    return {'bills': int(r.get('bills') or 0), 'open': _money(r.get('open') or 0),
+            'packing': _money(r.get('packing') or 0)}
+
+
 def expense_accounts(company, kind=None):
     """The postable expense G/L accounts an Expense line may pay to:
     `[{code, name, group, kind}]`, `kind` DIRECT or INDIRECT; `kind=` keeps one."""

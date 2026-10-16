@@ -1510,6 +1510,70 @@ class ExpenseDashboardView(APIView):
         return ok(data)
 
 
+class FactoryLimitView(APIView):
+    """GET /api/advance-payments/factory-limit/?company=OIL|BEVERAGES[&day=YYYY-MM-DD]
+    PUT /api/advance-payments/factory-limit/  {company, amount[, day]}
+
+    The Factory daily limit (`services/daily_limit.py`): the limit in force,
+    what the day's Factory requests use, what is left, the requests, the past
+    days and every change — and SAP's open Factory bills other than oil
+    (`open_bills`, None when SAP cannot be read). Anyone raising payments may
+    read it; only Ziyaul sets it.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def _company(self, value):
+        from advance_payment.services import daily_limit
+
+        company = (value or '').strip().upper()
+        if company not in daily_limit.LIMITED_COMPANIES:
+            return None, fail('company must be OIL or BEVERAGES.')
+        return company, None
+
+    def get(self, request):
+        from advance_payment.services import daily_limit
+
+        company, error = self._company(request.query_params.get('company'))
+        if error:
+            return error
+        try:
+            day = date.fromisoformat(request.query_params['day']) if request.query_params.get('day') else None
+        except ValueError:
+            return fail('day must be a date, YYYY-MM-DD.')
+        data = daily_limit.summary(company, user=request.user, day=day)
+        key = f'ap:factory-open-bills:{company}'
+        bills = cache.get(key)
+        if bills is None:
+            try:
+                bills = sap_service.factory_open_bills(company)
+                cache.set(key, bills, 10 * 60)
+            except sap_service.SapUnavailable:
+                bills = None
+        data['open_bills'] = bills
+        return ok(data)
+
+    def put(self, request):
+        from advance_payment.services import daily_limit
+
+        body = request.data if isinstance(request.data, dict) else {}
+        company, error = self._company(body.get('company'))
+        if error:
+            return error
+        try:
+            day = date.fromisoformat(body['day']) if body.get('day') else None
+        except ValueError:
+            return fail('day must be a date, YYYY-MM-DD.')
+        if not daily_limit.may_set(request.user):
+            return fail('Only Ziyaul sets the Factory daily limit.', status=http_status.HTTP_403_FORBIDDEN)
+        try:
+            daily_limit.set_limit(company, body.get('amount'), user=request.user, day=day)
+        except daily_limit.LimitInvalid as exc:
+            return fail(str(exc))
+        return ok(daily_limit.summary(company, user=request.user, day=day), 'Factory daily limit saved.')
+
+
 class BudgetBoardView(APIView):
     """GET /api/advance-payments/budget-board/?month=YYYY-MM&baseline=YYYY-MM
 

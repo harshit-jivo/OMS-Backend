@@ -35,7 +35,7 @@ PEOPLE = {
     'ziyaul': 'ziyaul',              # salaries
     'factory_oil': 'gagan',          # Gagandeep Singh: Oil factory salaries
     'factory_bev': 'arvinder',       # Arvinder Singh: Beverages factory salaries
-    'avtar': 'avtar',                # interest, bank charges, loans, statutory; Account Payments
+    'avtar': 'Avtarsingh',           # Avtar Singh: interest, bank charges, loans, statutory; Account Payments
     'sales_oil': 'Raju Vg',          # Jasvir Singh: Oil customer refunds
     'sales_bev': 'Raju Vg',          # Jasvir Singh: Beverages sales too (was Karanpreet; 2026-10-09)
     'mart': 'prabhjot',              # Prabhjot Singh: all of Mart
