@@ -10,7 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -36,6 +36,7 @@ def fields(**overrides):
     return out
 
 
+@override_settings(ADVANCE_PAYMENT_FACTORY_LIMIT=True)
 class Base(TestCase):
     def setUp(self):
         self.ziyaul = make_user('ziyaul')
@@ -188,3 +189,15 @@ class TheScreen(Base):
         self.assertEqual(saved.json()['data']['limit']['amount'], '200000.00')
         self.assertFalse(saved.json()['data']['limit']['carried'])
         self.assertTrue(saved.json()['data']['can_set'])
+
+
+class SwitchedOff(Base):
+    """Off for now (user, 2026-10-16): nothing is refused, whatever the limit."""
+
+    @override_settings(ADVANCE_PAYMENT_FACTORY_LIMIT=False)
+    def test_refuses_nothing(self):
+        self.limit('1000')
+        mine = self.raised(amount=Decimal('5000'))
+        self.assertEqual(daily_limit.check_new(fields(amount=Decimal('900000'))), [])
+        self.assertEqual(daily_limit.check_edit(mine, fields(amount=Decimal('900000'))), [])
+        self.assertFalse(daily_limit.summary('OIL', user=self.ziyaul)['enabled'])

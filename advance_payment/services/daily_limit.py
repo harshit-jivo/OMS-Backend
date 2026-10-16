@@ -51,6 +51,12 @@ LIVE_STATUSES = (RequestStatus.IN_APPROVAL, RequestStatus.RETURNED, RequestStatu
 HISTORY_DAYS = 14
 
 
+def enabled():
+    """Switched off for now (user, 2026-10-16): nothing is refused until the
+    `ADVANCE_PAYMENT_FACTORY_LIMIT` setting is True."""
+    return bool(getattr(settings, 'ADVANCE_PAYMENT_FACTORY_LIMIT', False))
+
+
 class LimitInvalid(Exception):
     """Setting the limit broke a rule; the message says which."""
 
@@ -133,6 +139,8 @@ def problems(company, budget_code, purpose_code, amount, *, day, exclude_request
 
 def check_new(fields):
     """A request being raised: today's limit."""
+    if not enabled():
+        return []
     return problems(fields.get('company'), fields.get('budget_code', ''), fields.get('purpose_code', ''),
                     fields.get('amount'), day=clock.today())
 
@@ -141,6 +149,8 @@ def check_edit(advance, fields):
     """An edit is checked only when it adds to what the request uses, against
     the day it was raised: an unchanged request is never refused because the
     limit was lowered after it."""
+    if not enabled():
+        return []
     company = fields.get('company', advance.company)
     budget, purpose = fields.get('budget_code', advance.budget_code), fields.get('purpose_code', advance.purpose_code)
     amount = fields.get('amount', advance.amount)
@@ -215,6 +225,7 @@ def summary(company, *, user, day=None):
         'changes': [{'day': c.limit.day.isoformat(), 'old': None if c.old_amount is None else str(c.old_amount),
                      'new': str(c.new_amount), 'by': _who(c.changed_by), 'on': c.changed_on.isoformat()}
                     for c in changes],
+        'enabled': enabled(),
         'can_set': may_set(user),
         'setter': setter_username(),
     }
