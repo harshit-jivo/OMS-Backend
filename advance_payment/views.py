@@ -798,6 +798,27 @@ class TdsOptionsView(_Lookup):
         })
 
 
+class DocumentDeductionsView(_Lookup):
+    """GET /api/advance-payments/document-deductions/?company=&kind=bill|po&doc_entries=1,2
+
+    What SAP already took off a request's bills (or POs' bills) — the TDS it
+    withheld and the debit notes against them — for the Payment desk and later
+    (user, 2026-10-16): `results` is `[{doc_entry, tds, bills, debits}]`.
+    """
+
+    resource = 'TDS and debit notes'
+
+    def fetch(self, request, company):
+        kind = (request.query_params.get('kind') or 'bill').strip().lower()
+        if kind not in ('bill', 'po'):
+            raise ValueError('kind must be bill or po.')
+        try:
+            entries = [int(e) for e in (request.query_params.get('doc_entries') or '').split(',') if e.strip()]
+        except ValueError:
+            raise ValueError('doc_entries must be DocEntries separated by commas.') from None
+        return sap_service.document_deductions(company, kind, entries)
+
+
 class DocumentHistoryView(_Lookup):
     """GET /api/advance-payments/document-history/?company=&kind=po|bill|ledger&doc_entry=[&line=]
 

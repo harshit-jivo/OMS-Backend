@@ -2226,6 +2226,36 @@ def bills_with_tds(company, doc_entries):
             for r in _run(company, sql, entries, 'bill TDS')}
 
 
+_BILLS_ALL_TDS_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", IFNULL("WTSum", 0) AS "tds"
+    FROM "{schema}"."OPCH" WHERE "DocEntry" IN ({marks})
+'''
+
+
+def document_deductions(company, kind, doc_entries):
+    """What SAP already took off a request's bills or POs (user, 2026-10-16),
+    for the desks from Payment on: `[{doc_entry, tds, bills, debits}]`.
+
+    `tds` is the TDS SAP withheld — on the bill itself, or on a PO's bills
+    (`bills` says how many; None for a bill). `debits` is `{amount, notes}` of
+    the debit notes against it, or None when those could not be read.
+    """
+    entries = sorted({int(e) for e in doc_entries})
+    if not entries:
+        return []
+    rows = [{'doc_entry': e} for e in entries]
+    if kind == 'po':
+        _with_bill_tds(company, rows)
+        for r in rows:
+            r['tds'], r['bills'] = r.pop('tds_on_bills'), r.pop('billed')
+    else:
+        sql = _BILLS_ALL_TDS_SQL.format(schema=_schema(company), marks=', '.join('?' * len(entries)))
+        tds = {int(r['doc_entry']): _money(r.get('tds')) for r in _run(company, sql, entries, 'bill TDS')}
+        for r in rows:
+            r['tds'], r['bills'] = tds.get(r['doc_entry'], '0'), None
+    return _with_debits(company, kind, rows)
+
+
 def vendor_control_account(company, card_code):
     """The vendor's control account (OCRD.DebPayAcct): the G/L a journal line on them books to."""
     rows = _run(company, f'SELECT "DebPayAcct" AS "account" FROM "{_schema(company)}"."OCRD" WHERE "CardCode" = ?',

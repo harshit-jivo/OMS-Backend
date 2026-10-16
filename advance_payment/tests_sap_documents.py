@@ -486,3 +486,32 @@ class TheDebitsAgainstABillOrAPO(SimpleTestCase):
                 mock.patch.object(sap, '_run', side_effect=sap.SapUnavailable('down')):
             rows = sap._with_debits('OIL', 'po', [{'doc_entry': 5}])
         self.assertIsNone(rows[0]['debits'])
+
+
+class WhatSapTookOffTheRequestsDocuments(SimpleTestCase):
+    """The desks' TDS and debit notes per bill or PO, from Payment on (user, 2026-10-16)."""
+
+    def test_each_bill_says_its_tds_and_debit_notes(self):
+        def run(_company, sql, _params, _what):
+            if '"RPC1"' in sql:
+                return [{'doc': 7, 'note': 725025903, 'amount': Decimal('8140')}]
+            return [{'doc_entry': 7, 'tds': Decimal('23695.00')}, {'doc_entry': 8, 'tds': Decimal('0')}]
+        with mock.patch.object(sap, '_schema', return_value='S'), mock.patch.object(sap, '_run', side_effect=run):
+            out = sap.document_deductions('MART', 'bill', ['8', 7])
+        self.assertEqual(out, [
+            {'doc_entry': 7, 'tds': '23695.00', 'bills': None, 'debits': {'amount': '8140.00', 'notes': [725025903]}},
+            {'doc_entry': 8, 'tds': '0', 'bills': None, 'debits': {'amount': '0.00', 'notes': []}},
+        ])
+
+    def test_a_po_says_the_tds_on_its_bills(self):
+        def run(_company, sql, _params, _what):
+            return [] if '"RPC1"' in sql else [{'po': 5, 'tds': Decimal('500'), 'bills': 2}]
+        with mock.patch.object(sap, '_schema', return_value='S'), mock.patch.object(sap, '_run', side_effect=run):
+            out = sap.document_deductions('OIL', 'po', [5])
+        self.assertEqual(out[0]['tds'], '500')
+        self.assertEqual(out[0]['bills'], 2)
+
+    def test_nothing_asked_nothing_read(self):
+        with mock.patch.object(sap, '_run') as run:
+            self.assertEqual(sap.document_deductions('OIL', 'bill', []), [])
+        run.assert_not_called()
