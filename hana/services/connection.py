@@ -994,15 +994,26 @@ class Queries():
         
     @staticmethod
     def get_inventory_details(item_code,branch):
+        """Stock per warehouse for one item, and whether it is batch-managed.
+
+        A batch-managed item's stock is the sum of its batches (OIBT). An item
+        that is not batch-managed (OITM.ManBtchNum = 'N') has no batches at
+        all, so OIBT alone reported it as having no stock anywhere; its stock
+        is the warehouse on-hand figure (OITW) instead. `ManBtchNum` tells the
+        caller which rule applies, so it can skip batch selection.
+        """
         s = Queries._schema_for_branch(branch)
         return f"""
-           SELECT 
-                DISTINCT T0."WhsCode",
-                SUM(T0."Quantity")
+            SELECT T0."WhsCode", SUM(T0."Quantity") AS "SUM(Quantity)", 'Y' AS "ManBtchNum"
             FROM "{s}"."OIBT" AS T0
             WHERE T0."Quantity" > 0 AND T0."ItemCode" = ?
-            GROUP  BY T0."WhsCode"
-        """, [item_code]
+            GROUP BY T0."WhsCode"
+            UNION ALL
+            SELECT W."WhsCode", W."OnHand" AS "SUM(Quantity)", 'N' AS "ManBtchNum"
+            FROM "{s}"."OITW" AS W
+            INNER JOIN "{s}"."OITM" AS I ON I."ItemCode" = W."ItemCode"
+            WHERE W."ItemCode" = ? AND I."ManBtchNum" = 'N' AND W."OnHand" > 0
+        """, [item_code, item_code]
         
     @staticmethod
     def get_item_price(item_code ,  price_list,branch):
