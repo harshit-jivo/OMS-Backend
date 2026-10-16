@@ -111,7 +111,7 @@ class TheBoard(SimpleTestCase):
     def test_sales_names_its_owner_in_each_company(self):
         sales = next(h for h in self.build()['heads'] if h['key'] == 'SALES')
         self.assertEqual([(o['label'], o['name']) for o in sales['owners']],
-                         [('Oil', 'Raju'), ('Mart', 'Prabhjot'), ('Beverages', 'Shunty')])
+                         [('Oil', 'Raju Vg'), ('Mart', 'Prabhjot Vg'), ('Beverages', 'Shunty Vg')])
         self.assertEqual([(c['company'], c['base'], c['current']) for c in sales['by_company']],
                          [('OIL', 650, 500), ('MART', 30, 0)])
         # Each company's own breakdown, for its card: Oil's E-COM spend, none of Mart's salary.

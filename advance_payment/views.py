@@ -1497,6 +1497,8 @@ class ExpenseDashboardView(APIView):
     def get(self, request):
         from advance_payment.services import expense_dashboard
 
+        if _owner_only(request.user):
+            return fail('Your board shows your own budget head only.', status=http_status.HTTP_403_FORBIDDEN)
         params = request.query_params
         try:
             data = expense_dashboard.build(
@@ -1588,6 +1590,16 @@ class BudgetBoardView(APIView):
     def get(self, request):
         from advance_payment.services import budget_board, expense_dashboard
 
+        # An owner sees their own head only; an administrator everything, or
+        # any owner's board as they see it (`?view=`).
+        admin = is_admin(request.user)
+        if admin:
+            asked = request.query_params.get('view') or ''
+            view = budget_board.view_by_key(asked) if asked else None
+            if asked and view is None:
+                return fail(f'No such board view: {asked}.')
+        else:
+            view = budget_board.view_for(request.user)
         try:
             data = budget_board.build(request.query_params.get('month') or '',
                                       request.query_params.get('baseline') or '')
@@ -1595,7 +1607,39 @@ class BudgetBoardView(APIView):
             return fail(str(exc))
         except expense_dashboard.SapUnavailable as exc:
             return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        if view is not None:
+            data = budget_board.scoped(data, view)
+        else:
+            data['view'] = None
+        data['can_switch'] = admin
+        data['views'] = [budget_board.view_summary(v) for v in budget_board.VIEWS] if admin else []
         return ok(data)
+
+
+def _owner_only(user):
+    """An owner's login (not an administrator): the board of their own head, nothing else."""
+    from advance_payment.services import budget_board
+
+    return not is_admin(user) and budget_board.view_for(user) is not None
+
+
+class BudgetBoardMeView(APIView):
+    """GET /api/advance-payments/budget-board/me/
+
+    Whose board this login sees, before any figure is read: `{view, can_switch}`
+    — `view` null for the whole board. The page shows an owner their Budgets
+    alone, without the Payment requests view.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ap_perms.CanViewExpenseDashboard()]
+
+    def get(self, request):
+        from advance_payment.services import budget_board
+
+        admin = is_admin(request.user)
+        view = None if admin else budget_board.view_for(request.user)
+        return ok({'view': budget_board.view_summary(view) if view else None, 'can_switch': admin})
 
 
 class OmsDashboardView(APIView):
@@ -1611,6 +1655,8 @@ class OmsDashboardView(APIView):
     def get(self, request):
         from advance_payment.services import expense_dashboard, oms_dashboard
 
+        if _owner_only(request.user):
+            return fail('Your board shows your own budget head only.', status=http_status.HTTP_403_FORBIDDEN)
         params = request.query_params
         try:
             data = oms_dashboard.build(params.get('from') or '', params.get('to') or '',

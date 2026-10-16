@@ -78,10 +78,90 @@ COSTS = (
 
 #: Who owns a head, by company: Sales has one owner per company (user, 2026-10-14).
 OWNERS = {
-    'SALES': [{'company': 'OIL', 'label': 'Oil', 'name': 'Raju'},
-              {'company': 'MART', 'label': 'Mart', 'name': 'Prabhjot'},
-              {'company': 'BEVERAGES', 'label': 'Beverages', 'name': 'Shunty'}],
+    'SALES': [{'company': 'OIL', 'label': 'Oil', 'name': 'Raju Vg'},
+              {'company': 'MART', 'label': 'Mart', 'name': 'Prabhjot Vg'},
+              {'company': 'BEVERAGES', 'label': 'Beverages', 'name': 'Shunty Vg'}],
+    'FACTORY': [{'company': 'OIL', 'label': 'Oil', 'name': 'Gagan Vg'},
+                {'company': 'BEVERAGES', 'label': 'Beverages', 'name': 'Arvinder Vg'}],
+    # A whole head, every company (no `company`): its one owner (user, 2026-10-16).
+    'BACKOFFICE': [{'company': '', 'label': '', 'name': 'Nirmal Didi'}],
+    'DELIVERY': [{'company': '', 'label': '', 'name': 'Sandeep Vg'}],
+    'INTEREST': [{'company': '', 'label': '', 'name': 'Avtar Vg'}],
+    'FINANCE': [{'company': '', 'label': '', 'name': 'Avtar Vg'}],
 }
+
+#: EACH OWNER'S OWN BOARD (user, 2026-10-16): an owner signed in sees only
+#: their part — `parts`, `(head, company or None for the whole head)`, and any
+#: `costs` — never the rest. `users`: their OMS logins, matched without regard
+#: to case ("Raju Vg" is also "Raju VG"); overridable by setting
+#: ADVANCE_PAYMENT_BOARD_VIEW_USERS = {view key: [usernames]}. Freight's owner
+#: has no OMS login yet (2026-10-16). An administrator sees everything, and may
+#: look at any owner's board as the owner sees it.
+VIEWS = [
+    {'key': 'SALES_OIL', 'label': 'Sales · Oil', 'owner': 'Raju Vg', 'parts': [('SALES', 'OIL')],
+     'users': ['Raju Vg']},
+    {'key': 'SALES_MART', 'label': 'Sales · Mart', 'owner': 'Prabhjot Vg', 'parts': [('SALES', 'MART')],
+     'users': ['Prabhjot']},
+    {'key': 'SALES_BEVERAGES', 'label': 'Sales · Beverages', 'owner': 'Shunty Vg',
+     'parts': [('SALES', 'BEVERAGES')], 'users': ['Shunty Vg']},
+    {'key': 'FACTORY_OIL', 'label': 'Factory · Oil', 'owner': 'Gagan Vg', 'parts': [('FACTORY', 'OIL')],
+     'users': ['gagan']},
+    {'key': 'FACTORY_BEVERAGES', 'label': 'Factory · Beverages', 'owner': 'Arvinder Vg',
+     'parts': [('FACTORY', 'BEVERAGES')], 'users': ['arvinder']},
+    {'key': 'BACKOFFICE', 'label': 'Back Office', 'owner': 'Nirmal Didi', 'parts': [('BACKOFFICE', None)],
+     'users': ['nirmal']},
+    {'key': 'FREIGHT', 'label': 'Freight (delivery)', 'owner': 'Sandeep Vg', 'parts': [('DELIVERY', None)],
+     'users': []},
+    # Bank Interest, and the interest and finance costs across every head.
+    {'key': 'FINANCE', 'label': 'Bank Interest & Finance', 'owner': 'Avtar Vg', 'parts': [('INTEREST', None)],
+     'costs': ['FINANCE'], 'users': ['Avtarsingh']},
+]
+
+
+def _view_users(view):
+    from django.conf import settings
+
+    override = (getattr(settings, 'ADVANCE_PAYMENT_BOARD_VIEW_USERS', None) or {}).get(view['key'])
+    return [u.lower() for u in (view['users'] if override is None else override)]
+
+
+def view_by_key(key):
+    return next((v for v in VIEWS if v['key'] == key), None)
+
+
+def view_for(user):
+    """The owner's board this login sees, or None (the whole board)."""
+    name = (user.get_username() if user else '').lower()
+    return next((v for v in VIEWS if name and name in _view_users(v)), None)
+
+
+def view_summary(view):
+    return {'key': view['key'], 'label': view['label'], 'owner': view['owner']}
+
+
+def _part(head, company):
+    """A head as one company's part of it: its figures, owner and breakdown alone."""
+    if company is None:
+        return head
+    part = next((c for c in head['by_company'] if c['company'] == company), None)
+    base = part['base'] if part else 0.0
+    current = part['current'] if part else 0.0
+    return {**head, 'base': base, 'current': current, 'ratio': _ratio(current, base),
+            'entries': part.get('entries', 0) if part else 0, 'tree': part.get('tree', []) if part else [],
+            'by_company': [part] if part else [],
+            'owners': [o for o in head['owners'] if o['company'] in (company, '')]}
+
+
+def scoped(board, view):
+    """The board as `view`'s owner sees it: their head (or their company's part
+    of it) and their costs; the total is theirs."""
+    by_key = {h['key']: h for h in board['heads']}
+    heads = [_part(by_key[key], company) for key, company in view['parts'] if key in by_key]
+    costs = [c for c in board['costs'] if c['key'] in view.get('costs', ())]
+    base, current = sum(h['base'] for h in heads), sum(h['current'] for h in heads)
+    return {**board, 'heads': heads, 'costs': costs,
+            'total': {'base': _money(base), 'current': _money(current), 'ratio': _ratio(current, base)},
+            'view': view_summary(view)}
 
 #: The only Mart postings the board counts: its salaries and its freight (user, 2026-10-14).
 MART_KEEPS = {'SALARY', 'FREIGHT'}
