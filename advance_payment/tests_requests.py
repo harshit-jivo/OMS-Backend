@@ -645,3 +645,32 @@ class ASpecialSapAccount(SimpleTestCase):
             spaced = ([{'account_number': '0258 105-0033', 'ifsc': 'HDFC0000378'}], '')
             with mock.patch.object(flow_service.sap_service, 'partner_bank_accounts', return_value=spaced):
                 self.assertTrue(flow_service._from_sap(advance, '02581050033', 'HDFC0000378'))
+
+
+class ABillsHoldAmount(SimpleTestCase):
+    """What the requester holds back from a bill (user, 2026-10-16): SAP keeps no
+    hold, so the request does — and only when it is filled in."""
+
+    def bill(self, **overrides):
+        data = vendor_bill_request()
+        data['documents'] = [{**data['documents'][0], **overrides}]
+        return data
+
+    def test_blank_holds_nothing_back(self):
+        cleaned = _clean(self.bill(amount='288746'))
+        self.assertIsNone(cleaned.documents[0]['hold_amount'])
+
+    def test_filled_the_line_pays_at_most_open_less_the_hold(self):
+        cleaned = _clean(self.bill(hold_amount='38746', amount='250000'))
+        self.assertEqual(cleaned.documents[0]['hold_amount'], Decimal('38746.00'))
+        with self.assertRaises(request_service.RequestInvalid) as caught:
+            _clean(self.bill(hold_amount='38746', amount='250001'))
+        self.assertIn('250001.00 is more than the 250000.00 payable — the 288746.00 open less the '
+                      '38746.00 on hold', caught.exception.problems[0])
+
+    def test_zero_is_no_hold_and_nonsense_is_refused(self):
+        self.assertIsNone(_clean(self.bill(hold_amount='0', amount='288746')).documents[0]['hold_amount'])
+        for hold, says in (('-1', 'below zero'), ('300000', 'more than the 288746.00 still open')):
+            with self.subTest(hold), self.assertRaises(request_service.RequestInvalid) as caught:
+                _clean(self.bill(hold_amount=hold, amount='1000'))
+            self.assertIn(says, caught.exception.problems[0])

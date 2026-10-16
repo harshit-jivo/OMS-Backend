@@ -477,6 +477,10 @@ class RequestDocument(models.Model):
     open_amount = models.DecimalField(max_digits=19, decimal_places=2)
     mode = models.CharField(max_length=10, choices=AllocationMode.choices, default=AllocationMode.FIXED)
     percentage = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    #: A bill only: what the requester holds back from the vendor (user,
+    #: 2026-10-16) — SAP keeps no hold amount. Set, the line may pay at most
+    #: the open amount less it; null (never filled), nothing is held.
+    hold_amount = models.DecimalField(max_digits=19, decimal_places=2, null=True, blank=True)
     #: What this line pays, in rupees, whichever mode it was entered in.
     amount = models.DecimalField(max_digits=19, decimal_places=2)
     #: The document's latest SAP attachment at the time, and what reading it

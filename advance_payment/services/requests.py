@@ -591,6 +591,21 @@ def _clean_documents(raw, kind, problems):
         if amount > open_amount:
             problems.append(f'Document {label}: {amount} is more than the {open_amount} still open.')
             continue
+        # A bill's hold (user, 2026-10-16): only when the requester filled it in.
+        hold = _money(doc.get('hold_amount'))
+        if hold is not None and kind != DocumentKind.BILL:
+            problems.append(f'Document {label}: only a bill takes a hold amount.')
+            continue
+        if hold is not None and hold < 0:
+            problems.append(f'Document {label}: the hold amount cannot be below zero.')
+            continue
+        if hold is not None and hold > open_amount:
+            problems.append(f'Document {label}: the hold of {hold} is more than the {open_amount} still open.')
+            continue
+        if hold and amount > open_amount - hold:
+            problems.append(f'Document {label}: {amount} is more than the {open_amount - hold} payable — '
+                            f'the {open_amount} open less the {hold} on hold.')
+            continue
         total += -amount if ledger and ledger['direction'] == LedgerDirection.DEBIT else amount
         lines.append({
             'kind': kind,
@@ -606,6 +621,7 @@ def _clean_documents(raw, kind, problems):
             'mode': mode,
             'percentage': percentage,
             'amount': amount,
+            'hold_amount': hold if hold else None,
             'attachment_file': _text(doc.get('attachment_file'), 255),
             'attachment_count': max(0, _int(doc.get('attachment_count')) or 0),
             'attachment_date': _date(doc.get('attachment_date')),

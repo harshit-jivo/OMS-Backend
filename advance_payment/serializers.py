@@ -106,6 +106,7 @@ def document_data(doc):
         'mode': doc.mode,
         'percentage': _amount(doc.percentage),
         'amount': _amount(doc.amount),
+        'hold_amount': _amount(doc.hold_amount),
         'attachment_file': doc.attachment_file,
         'attachment_count': doc.attachment_count,
         'attachment_date': _iso(doc.attachment_date),
