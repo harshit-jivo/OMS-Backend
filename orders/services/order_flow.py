@@ -171,6 +171,9 @@ def _get_next_foc_status(current_status, fallback_name='Billing'):
     return _get_status_by_name(fallback_name)
 
 def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type=ORDER_FLOW_TYPE_ASM, force_foc_flow=False, config=None, requires_rate_approval=None):
+    from orders.services.rate_approval import _has_sc_items
+    if _has_sc_items(items):
+        return OrderStatus.objects.get(code='RATE_APPROVAL'), True
     if force_foc_flow:
         if flow_type == ORDER_FLOW_TYPE_BILLING:
             return _get_status_by_name('Auditor Approval'), False
@@ -209,6 +212,9 @@ def _get_initial_flow_status(items, to_float, fallback_name='Billing', flow_type
 
 def _get_next_order_flow_status(order, current_status, fallback_name=None, flow_type=ORDER_FLOW_TYPE_ASM):
     if getattr(order, 'is_foc', False):
+        if getattr(current_status, 'code', '') == 'RATE_APPROVAL':
+            return _get_status_by_name(
+                'Auditor Approval' if flow_type == ORDER_FLOW_TYPE_BILLING else 'Billing')
         if flow_type == ORDER_FLOW_TYPE_BILLING:
             return _get_next_flow_status(current_status, fallback_name or 'Auditor Approval', flow_type=flow_type)
         return _get_next_foc_status(current_status, fallback_name or 'Billing')
@@ -222,6 +228,11 @@ def _get_next_flow_status(current_status, fallback_name=None, flow_type=ORDER_FL
         return _get_status_by_name(fallback_name) if fallback_name else None
 
     configured_statuses = _get_configured_stage_statuses(config=config, flow_type=flow_type)
+    # Mandatory SC approval can precede a flow whose optional rate stage is off.
+    if (getattr(current_status, 'code', '') == 'RATE_APPROVAL'
+            and not any(stage.id == current_status.id for stage in configured_statuses)):
+        return next((stage for stage in configured_statuses
+                     if stage.code != 'RATE_APPROVAL'), None)
     current_id = getattr(current_status, 'id', None)
     for index, status_obj in enumerate(configured_statuses):
         if status_obj.id == current_id:

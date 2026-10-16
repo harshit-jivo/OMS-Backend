@@ -15,6 +15,7 @@ line need approval" required placing an order over HTTP.
 """
 from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 
 from orders.models import (
     OrderItemApprovalMapping,
@@ -75,6 +76,26 @@ def _is_commodity_item(item):
     return _get_item_sub_group(item).upper() in COMMODITY_SUB_GROUPS
 
 
+def _is_sc_item(item):
+    return _item_field(item, 'item_code').upper().startswith('SC')
+
+
+def _has_sc_items(items):
+    return any(_is_sc_item(item) for item in items)
+
+
+def _sc_rate_approver():
+    # There is also a similarly named tracker account; only the approver
+    # account is eligible to sign off these items.
+    matches = list(User.objects.filter(
+        username__iexact='Raju Vg', role__name__iexact='approver',
+        is_active=True,
+    )[:2])
+    if len(matches) != 1:
+        raise ValidationError('SC items require one active Raju Vg rate approver account.')
+    return matches[0]
+
+
 def _authorised_basic_rate(card_code, item_code, category):
     """The basic rate this party is authorised to be charged for this item.
 
@@ -105,6 +126,9 @@ def _get_rate_approval_reason(item, authorised_rate, basic_price):
     (613 of 647). The assignment is also the real authority: the form's Price
     List field can be edited by the salesperson.
     """
+    if _is_sc_item(item):
+        return f"{_item_field(item, 'item_name', 'item_code')}: SC item requires Raju Vg rate approval"
+
     if item.get('qty') not in (None, ''):
         # Guarded parse: a malformed qty must not 500 the whole order-create.
         try:
@@ -232,6 +256,8 @@ def _get_item_sub_group(item):
 
 
 def _get_rate_approvers_for_item(item):
+    if _is_sc_item(item):
+        return [_sc_rate_approver()]
     category = str(getattr(item, 'category', '') or '').strip()
     sub_group = _get_item_sub_group(item)
     if not category:
