@@ -58,6 +58,7 @@ from orders.services.order_flow import ORDER_FLOW_TYPE_ASM, ORDER_FLOW_TYPE_BILL
 from orders.services.order_templates import _save_template_if_unique
 from orders.services.rate_approval import (
     _authorised_basic_rate,
+    _has_sc_items,
     _get_rate_approval_reason,
     _rate_approval_remarks,
     assign_rate_approvers,
@@ -523,7 +524,8 @@ class UpdateOrderView(APIView):
             }, status=status.HTTP_200_OK)
 
         editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
-        is_billing_editor = _is_billing_review_edit(editor_role, previous_status)
+        is_billing_editor = (_is_billing_review_edit(editor_role, previous_status)
+                             and not _has_sc_items(items))
         order_flow_type = _get_order_flow_type_for_order(order)
 
         if is_billing_editor:
@@ -732,7 +734,8 @@ class CreateOrderView(APIView):
                 }, status=status.HTTP_200_OK)
 
             editor_role = getattr(getattr(user, "role", None), "name", "").lower() if user else ""
-            is_billing_editor = _is_billing_review_edit(editor_role, previous_status)
+            is_billing_editor = (_is_billing_review_edit(editor_role, previous_status)
+                             and not _has_sc_items(items))
             order_flow_type = _get_order_flow_type_for_order(order)
 
             if is_billing_editor:
