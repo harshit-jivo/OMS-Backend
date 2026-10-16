@@ -192,14 +192,22 @@ TRACKER_MY_QUEUE_RESPONSE = inline_serializer(name='TrackerMyQueue', fields={
 
 class VendorsView(APIView):
     """SAP vendors for the entry form's searchable party dropdown (fast,
-    cached, direct HANA query)."""
+    cached, direct HANA query).
+
+    `?branch=<id>&unit=<id>`: the invoice's company's own vendors
+    (`sap.company_schema`) — each company has its own codes. Oil's without them.
+    """
     permission_classes = [IsTrackerEntry]
 
     def get(self, request):
-        from .sap import fetch_vendors
+        from .models import Branch, Unit
+        from .sap import company_schema, fetch_vendors
         force = request.query_params.get('refresh') == '1'
+        branch = Branch.objects.filter(pk=request.query_params.get('branch') or None).first()
+        unit = Unit.objects.filter(pk=request.query_params.get('unit') or None).first()
+        schema = company_schema(getattr(branch, 'name', ''), getattr(unit, 'name', ''))
         try:
-            return Response(fetch_vendors(force_refresh=force))
+            return Response(fetch_vendors(force_refresh=force, schema=schema))
         except Exception as exc:
             return Response(
                 {'detail': f'Could not fetch vendors from SAP: {exc}'},

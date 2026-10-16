@@ -153,7 +153,34 @@ class InvoiceWriteSerializer(serializers.ModelSerializer):
                 'invoice_number': f'Invoice {number} already exists for '
                                   f'{name or code}.',
             })
+        self._vendor_in_company(attrs, code)
         return attrs
+
+    def _vendor_in_company(self, attrs, code):
+        """The vendor code must be one of the invoice's own company (2026-10-16):
+        each company has its own codes, and another company's code means the
+        Save-in-SAP sweep can never match the posted bill. Checked when the
+        vendor, branch or unit is set or changed; SAP unreachable, not checked."""
+        if not code:
+            return
+        changed = self.instance is None or any(
+            f in attrs and attrs[f] != getattr(self.instance, f) for f in ('party_code', 'branch', 'unit'))
+        if not changed:
+            return
+        from .sap import company_schema, vendor_codes
+
+        def pick(name):
+            return attrs[name] if name in attrs else getattr(self.instance, name, None)
+
+        branch, unit = pick('branch'), pick('unit')
+        schema = company_schema(getattr(branch, 'name', ''), getattr(unit, 'name', ''))
+        codes = vendor_codes(schema)
+        if codes is not None and code.upper() not in codes:
+            company = schema.split('_')[1].title() if '_' in schema else schema
+            raise serializers.ValidationError({
+                'party_code': f'{code} is not a vendor in {company}\'s SAP. Choose the branch and unit '
+                              f'first, then pick the vendor again.',
+            })
 
     class Meta:
         model = Invoice

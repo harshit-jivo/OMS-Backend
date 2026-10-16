@@ -9,14 +9,21 @@ the dropdown stays snappy.
 GSTIN is taken from OCRD."LicTradNo" (the Federal Tax ID field, which holds the
 GSTIN in the India localization); if that is blank we fall back to any non-empty
 CRD1."GSTRegnNo" for the party.
+
+PER COMPANY (2026-10-16): each company keeps its own business-partner codes —
+ARNAV TRANSPORT is VENDA000956 in Oil but VENDA000935 in Mart — so the list is
+read from the company the invoice belongs to (`company_schema`: its branch and
+unit), never Oil's for everyone. With Oil's codes on Mart invoices the
+Save-in-SAP sweep, which matches number + vendor code inside the invoice's
+company, could never find them.
 """
 from django.conf import settings
 from django.core.cache import cache
 
 from hana.services.connection import HANAConnection
 
-# v2: cache key bumped so the supplier-only cache is discarded and customers appear.
-VENDOR_CACHE_KEY = 'tracker_sap_vendors_v2'
+# v3: one list per company schema.
+VENDOR_CACHE_KEY = 'tracker_sap_vendors_v3:{schema}'
 VENDOR_CACHE_TTL = 600  # seconds (10 min)
 
 # A tracker invoice is a *purchase* document, so it lands in the A/P tables:
@@ -45,8 +52,7 @@ class SapUnavailable(Exception):
     """
 
 
-def _vendor_query():
-    schema = settings.DATABASES['hana']['OIL_SCHEMA']
+def _vendor_query(schema):
     return f'''
         SELECT
             T0."CardCode"   AS "card_code",
@@ -67,15 +73,20 @@ def _vendor_query():
     '''
 
 
-def fetch_vendors(force_refresh=False):
-    """List of vendors: [{card_code, card_name, gstin, state}]. Cached."""
+def fetch_vendors(force_refresh=False, schema=None):
+    """One company's business partners: [{card_code, card_name, gstin, state}]. Cached.
+
+    `schema`: the company's HANA schema (`company_schema`); Oil's when not given.
+    """
+    schema = schema or settings.HANA_OIL_COMPANY_DB
+    key = VENDOR_CACHE_KEY.format(schema=schema)
     if not force_refresh:
-        cached = cache.get(VENDOR_CACHE_KEY)
+        cached = cache.get(key)
         if cached is not None:
             return cached
 
     with HANAConnection() as conn:
-        rows = conn.execute(_vendor_query())
+        rows = conn.execute(_vendor_query(schema))
 
     vendors = [{
         'card_code': (r.get('card_code') or '').strip(),
@@ -86,21 +97,35 @@ def fetch_vendors(force_refresh=False):
         'state': (r.get('state') or '').strip(),
     } for r in rows]
 
-    cache.set(VENDOR_CACHE_KEY, vendors, VENDOR_CACHE_TTL)
+    cache.set(key, vendors, VENDOR_CACHE_TTL)
     return vendors
+
+
+def vendor_codes(schema):
+    """The card codes of one company, upper-case; None when SAP cannot be read."""
+    try:
+        return {v['card_code'].upper() for v in fetch_vendors(schema=schema)}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Tracker invoice  ->  SAP A/P document (OPCH / ORPC)
 # ---------------------------------------------------------------------------
 def schema_for_invoice(invoice):
-    """Company DB schema a tracker invoice belongs to.
+    """Company DB schema a tracker invoice belongs to (`company_schema`)."""
+    return company_schema(getattr(invoice.branch, 'name', ''), getattr(invoice.unit, 'name', ''))
+
+
+def company_schema(branch_name, unit_name):
+    """Company DB schema for a branch and unit — the one rule, for an invoice
+    and for the entry form's vendor list alike.
 
     Branch wins over unit: 'Mart' is its own company DB, while Wellness
     invoices are split between the Oil and Beverage companies by unit.
     """
-    branch = (getattr(invoice.branch, 'name', '') or '').upper()
-    unit = (getattr(invoice.unit, 'name', '') or '').upper()
+    branch = (branch_name or '').upper()
+    unit = (unit_name or '').upper()
     if 'MART' in branch or 'MART' in unit:
         return getattr(settings, 'HANA_MART_COMPANY_DB', '')
     if unit.startswith('BEVERAGE'):
