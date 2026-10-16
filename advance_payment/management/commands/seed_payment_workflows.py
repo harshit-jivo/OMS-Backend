@@ -65,7 +65,8 @@ class Command(BaseCommand):
             people = {role: name for role, name in people.items() if role in used}
         else:
             # Workflows the hierarchy no longer has: deactivated with the rest.
-            retire += [c for c in hierarchy.retired_expense_routes() if c not in retire]
+            retire += [c for c in [*hierarchy.retired_expense_routes(), *hierarchy.RETIRED_ROUTES]
+                       if c not in retire]
         users = self._users(people)
         self._plan(routes, people, retire)
         if not opts['apply']:

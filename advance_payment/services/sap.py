@@ -32,6 +32,7 @@ a blank branch and this module turns that into a 400.
 """
 import logging
 import re
+from collections import defaultdict
 from decimal import Decimal
 
 from django.conf import settings
@@ -337,7 +338,7 @@ def open_purchase_orders(company, card_code=None, search=None, limit=None, from_
         # When it was created in SAP: decides whether OMS tracks it (reservations.tracked).
         'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, 'open purchase orders')]
-    return _with_bill_tds(company, _with_attachments(company, 'OPOR', rows))
+    return _with_debits(company, 'po', _with_bill_tds(company, _with_attachments(company, 'OPOR', rows)))
 
 
 #: The TDS SAP withheld on each PO's bills. SAP never carries TDS on a PO
@@ -385,6 +386,76 @@ def _with_bill_tds(company, rows):
         hit = found.get(r['doc_entry'])
         r['tds_on_bills'] = _money(hit['tds'] if hit else 0)
         r['billed'] = int(hit['bills']) if hit else 0
+    return rows
+
+
+#: The debit notes against a bill or a PO (user, 2026-10-16): SAP's A/P
+#: credit memos (ORPC) made from the bill — RPC1.BaseType 18 — or, for a PO,
+#: from any of its bills (straight from the PO, or through its goods receipts,
+#: as `_PO_BILL_TDS_SQL`). Cancelled ones do not count.
+#:
+#: The amount is what SAP APPLIED to the bill: the memo's DocTotal (after its
+#: TDS), shared over the bills it was made from by their lines' gross. SAP adds
+#: exactly that to the bill's PaidToDate (checked on live bills, 2026-10-16):
+#: a bill's "paid" is its debit notes plus its payments.
+#: Oct 2026: 75 open Oil bills, 9 Beverages, 100 Mart carry one.
+_BILL_DEBITS_SQL = '''
+    SELECT L."BaseEntry" AS "doc", C."DocNum" AS "note",
+           SUM(L."GTotal" / NULLIF(G."gross", 0) * C."DocTotal") AS "amount"
+    FROM "{schema}"."RPC1" L
+    JOIN "{schema}"."ORPC" C ON C."DocEntry" = L."DocEntry"
+    JOIN (SELECT "DocEntry", SUM("GTotal") AS "gross" FROM "{schema}"."RPC1" GROUP BY "DocEntry") G
+      ON G."DocEntry" = C."DocEntry"
+    WHERE L."BaseType" = 18 AND L."BaseEntry" IN ({marks}) AND IFNULL(C."CANCELED", 'N') = 'N'
+    GROUP BY L."BaseEntry", C."DocNum"
+'''
+
+_PO_DEBITS_SQL = '''
+    SELECT P."po" AS "doc", C."DocNum" AS "note",
+           SUM(L."GTotal" / NULLIF(G."gross", 0) * C."DocTotal") AS "amount"
+    FROM (
+        SELECT DISTINCT B."DocEntry" AS "bill", B."BaseEntry" AS "po"
+        FROM "{schema}"."PCH1" B
+        WHERE B."BaseType" = 22 AND B."BaseEntry" IN ({marks})
+        UNION
+        SELECT DISTINCT B."DocEntry", GL."BaseEntry"
+        FROM "{schema}"."PCH1" B
+        JOIN "{schema}"."PDN1" GL ON GL."DocEntry" = B."BaseEntry"
+        WHERE B."BaseType" = 20 AND GL."BaseType" = 22 AND GL."BaseEntry" IN ({marks})
+    ) P
+    JOIN "{schema}"."RPC1" L ON L."BaseType" = 18 AND L."BaseEntry" = P."bill"
+    JOIN "{schema}"."ORPC" C ON C."DocEntry" = L."DocEntry"
+    JOIN (SELECT "DocEntry", SUM("GTotal") AS "gross" FROM "{schema}"."RPC1" GROUP BY "DocEntry") G
+      ON G."DocEntry" = C."DocEntry"
+    WHERE IFNULL(C."CANCELED", 'N') = 'N'
+    GROUP BY P."po", C."DocNum"
+'''
+
+
+def _with_debits(company, kind, rows):
+    """Each bill (`kind` 'bill') or PO ('po') row with `debits`: `{amount, notes}` —
+    what SAP's debit notes took off it, and their numbers; amount "0" and
+    no notes when there are none. A lookup that fails leaves the list standing,
+    with `debits` None: the rows say nothing rather than the picker refusing to open.
+    """
+    entries = [r['doc_entry'] for r in rows]
+    found = defaultdict(list)
+    if entries:
+        marks = ', '.join('?' * len(entries))
+        sql, params = ((_BILL_DEBITS_SQL, entries) if kind == 'bill' else (_PO_DEBITS_SQL, entries + entries))
+        try:
+            for r in _run(company, sql.format(schema=_schema(company), marks=marks), params, f'debits on {kind}s'):
+                found[int(r['doc'])].append(r)
+        except SapUnavailable:
+            logger.warning('advance_payment: debits on %ss unreadable for %s', kind, company)
+            for r in rows:
+                r['debits'] = None
+            return rows
+    for r in rows:
+        hits = sorted(found.get(r['doc_entry'], []), key=lambda h: int(h['note']))
+        total = sum((Decimal(str(h['amount'] or 0)) for h in hits), Decimal('0'))
+        r['debits'] = {'amount': _money(total.quantize(Decimal('0.01'))),
+                       'notes': [int(h['note']) for h in hits]}
     return rows
 
 
@@ -483,7 +554,8 @@ def open_invoices(company, party_type='vendor', card_code=None, search=None,
         'tds': _money(r.get('tds')),
         'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, f'open {party_type} invoices')]
-    return _with_attachments(company, table, rows)
+    rows = _with_attachments(company, table, rows)
+    return _with_debits(company, 'bill', rows) if table == 'OPCH' else rows
 
 
 # ---------------------------------------------------------------------------
@@ -2238,6 +2310,10 @@ def live_documents(company, kind, doc_entries):
             'due_date': _date(r.get('due_date')), 'doc_total': _money(r.get('doc_total')),
             'created_on': _date(r.get('created_on')),
         }
+    if table == 'OPCH' and out:
+        # A bill's debit notes: what OMS's own sums must take off its total.
+        for r in _with_debits(company, 'bill', [{'doc_entry': e} for e in out]):
+            out[r['doc_entry']]['debit'] = (r.get('debits') or {}).get('amount', '0')
     return out
 
 
@@ -2558,8 +2634,10 @@ def payment_accounts(company, search=None, limit=None, code=None):
 FACTORY_ITEM_GROUPS = ('PACKAGING MATERIAL', 'RAW MATERIAL', 'SEMI FINISHED GOODS', 'FA CONSUMABLES')
 OIL_ITEM_GROUPS = ('RAW MATERIAL', 'SEMI FINISHED GOODS')
 
-_FACTORY_OPEN_BILLS_SQL = '''
-    SELECT COUNT(DISTINCT H."DocEntry") AS "bills",
+_FACTORY_DUE_BILLS_SQL = '''
+    SELECT H."DocEntry" AS "doc_entry", H."DocNum" AS "doc_num", H."CardCode" AS "card_code",
+           H."CardName" AS "card_name", H."NumAtCard" AS "party_ref", H."DocDate" AS "doc_date",
+           H."DocDueDate" AS "due_date", H."DocTotal" AS "doc_total",
            ROUND(SUM((H."DocTotal" - H."PaidToDate") * L."LineTotal" / NULLIF(T."total", 0)), 2) AS "open",
            ROUND(SUM(CASE WHEN IFNULL(G."ItmsGrpNam", '') = 'PACKAGING MATERIAL'
                           THEN (H."DocTotal" - H."PaidToDate") * L."LineTotal" / NULLIF(T."total", 0) ELSE 0 END),
@@ -2570,24 +2648,60 @@ _FACTORY_OPEN_BILLS_SQL = '''
       ON T."DocEntry" = H."DocEntry"
     LEFT JOIN "{schema}"."OITM" I ON I."ItemCode" = L."ItemCode"
     LEFT JOIN "{schema}"."OITB" G ON G."ItmsGrpCod" = I."ItmsGrpCod"
-    WHERE H."CANCELED" = 'N' AND H."DocStatus" = 'O'
+    WHERE H."CANCELED" = 'N' AND H."DocStatus" = 'O' AND H."DocDueDate" <= ?
       AND NOT (IFNULL(G."ItmsGrpNam", '') IN ({oil_groups}) AND UPPER(IFNULL(I."ItemName", '')) LIKE '%OIL%')
       AND (IFNULL(L."OcrCode3", '') IN ({budgets}) OR IFNULL(G."ItmsGrpNam", '') IN ({groups}))
+    GROUP BY H."DocEntry", H."DocNum", H."CardCode", H."CardName", H."NumAtCard", H."DocDate",
+             H."DocDueDate", H."DocTotal"
 '''
 
 
-def factory_open_bills(company):
-    """Open A/P invoices on factory spending other than oil: `{bills, open, packing}`
-    (rupees as strings; each bill's open amount shared over its lines)."""
+def factory_due_bills(company, today=None):
+    """The DUE A/P invoices on factory spending other than oil — due today or
+    before (user, 2026-10-16) — their total, and by vendor with each bill:
+    `{bills, open, packing, vendors: [{card_code, card_name, amount, bills: [...]}]}`,
+    largest vendor first. Rupees as strings; a bill's open amount is shared over
+    its lines, and only its factory lines count.
+    """
     from advance_payment.purposes import FACTORY_BUDGETS
+    from advance_payment.services import clock
 
+    today = today or clock.today()
     marks = lambda values: ', '.join('?' for _ in values)  # noqa: E731
-    sql = _FACTORY_OPEN_BILLS_SQL.format(schema=_schema(company), oil_groups=marks(OIL_ITEM_GROUPS),
-                                         budgets=marks(FACTORY_BUDGETS), groups=marks(FACTORY_ITEM_GROUPS))
-    rows = _run(company, sql, [*OIL_ITEM_GROUPS, *FACTORY_BUDGETS, *FACTORY_ITEM_GROUPS], 'factory open bills')
-    r = rows[0] if rows else {}
-    return {'bills': int(r.get('bills') or 0), 'open': _money(r.get('open') or 0),
-            'packing': _money(r.get('packing') or 0)}
+    sql = _FACTORY_DUE_BILLS_SQL.format(schema=_schema(company), oil_groups=marks(OIL_ITEM_GROUPS),
+                                        budgets=marks(FACTORY_BUDGETS), groups=marks(FACTORY_ITEM_GROUPS))
+    rows = _run(company, sql, [today, *OIL_ITEM_GROUPS, *FACTORY_BUDGETS, *FACTORY_ITEM_GROUPS],
+                'factory due bills')
+    vendors = {}
+    total = packing = Decimal('0')
+    for r in rows:
+        amount = Decimal(str(r.get('open') or 0))
+        if amount <= 0:
+            continue
+        total += amount
+        packing += Decimal(str(r.get('packing') or 0))
+        due = r.get('due_date')
+        due = due.date() if hasattr(due, 'hour') else due  # HANA gives a timestamp
+        code = _s(r.get('card_code'))
+        v = vendors.setdefault(code, {'card_code': code, 'card_name': _s(r.get('card_name')),
+                                      'amount': Decimal('0'), 'bills': []})
+        v['amount'] += amount
+        v['bills'].append({
+            'doc_entry': int(r['doc_entry']),
+            'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+            'party_ref': _s(r.get('party_ref')),
+            'doc_date': _date(r.get('doc_date')),
+            'due_date': _date(due),
+            'days_overdue': (today - due).days if due else None,
+            'doc_total': _money(r.get('doc_total')),
+            'open': _money(amount),
+        })
+    out = sorted(vendors.values(), key=lambda v: -v['amount'])
+    for v in out:
+        v['bills'].sort(key=lambda b: b['due_date'] or '')
+        v['amount'] = _money(v['amount'])
+    return {'bills': sum(len(v['bills']) for v in out), 'open': _money(total), 'packing': _money(packing),
+            'vendors': out}
 
 
 def expense_accounts(company, kind=None):

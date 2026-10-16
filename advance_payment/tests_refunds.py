@@ -190,6 +190,28 @@ class WhatOmsHolds(SimpleTestCase):
         self.assertEqual((offered[0]['oms']['tracked'], offered[0]['oms']['available']), (True, '435'))
         self.assertEqual((offered[0]['balance_due'], offered[0]['paid_to_date']), ('460', '40'))
 
+    def test_a_new_bills_debit_notes_come_off_its_total_too(self):
+        # AP 626094417 (user, 2026-10-16): total 2,13,141, debit note 2,116, nothing
+        # paid, AP-2026-0165 holds 2,11,025 -> open 2,11,025, nothing left.
+        rows = [{'doc_entry': 14008, 'balance_due': '211025', 'doc_total': '213141', 'paid_to_date': '2116',
+                 'created_on': '2026-10-09', 'debits': {'amount': '2116.00', 'notes': [626095053]}}]
+        held = [(14008, 0, Decimal('211025'), 1, RequestStatus.IN_APPROVAL)]
+        with _usage_rows(*held), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            offered = reservations.annotate('OIL', DocumentKind.BILL, rows, key=lambda r: (r['doc_entry'], 0),
+                                            open_field='balance_due', total_field='doc_total',
+                                            paid_field='paid_to_date', drop_exhausted=False)
+        self.assertEqual((offered[0]['balance_due'], offered[0]['paid_to_date']), ('211025.00', '0'))
+        self.assertEqual(offered[0]['oms']['available'], '0.00')
+
+    def test_a_save_against_a_new_bill_takes_off_its_debit_notes(self):
+        line_ = {'kind': DocumentKind.BILL, 'sap_doc_entry': 14008, 'sap_line': 0, 'sap_doc_num': '626094417',
+                 'open_amount': Decimal('213141'), 'amount': Decimal('213141')}
+        facts = {14008: {'created_on': '2026-10-09', 'doc_total': '213141', 'debit': '2116.00'}}
+        with _usage_rows(facts=facts), self.settings(ADVANCE_PAYMENT_TRACK_FROM='2026-10-08'):
+            found = reservations.problems('OIL', [line_])
+            self.assertEqual(reservations.problems('OIL', [{**line_, 'amount': Decimal('211025')}]), [])
+        self.assertIn('only 211025.00 is available — of its total 213141, debit notes take 2116.00', found[0])
+
     def test_an_older_bill_keeps_sap_real_balance_less_what_oms_holds(self):
         # Created before the cut-off: paid in SAP before OMS. SAP's balance (100)
         # less 25 held = 75. Figures not rewritten.

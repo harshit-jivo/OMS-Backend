@@ -1512,6 +1512,41 @@ class ExpenseDashboardView(APIView):
         return ok(data)
 
 
+def _factory_due_bills(company):
+    """SAP's due factory bills (`sap.factory_due_bills`), cached 10 minutes; None when SAP cannot be read."""
+    key = f'ap:factory-due-bills:{company}'
+    bills = cache.get(key)
+    if bills is None:
+        try:
+            bills = sap_service.factory_due_bills(company)
+            cache.set(key, bills, 10 * 60)
+        except sap_service.SapUnavailable:
+            return None
+    return bills
+
+
+class FactoryLimitBillsView(APIView):
+    """GET /api/advance-payments/factory-limit/bills/?company=OIL|BEVERAGES
+
+    The due factory bills behind the limit page's figure, by vendor, each with
+    its bills (`sap.factory_due_bills`). 503 when SAP cannot be read.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def get(self, request):
+        from advance_payment.services import daily_limit
+
+        company = (request.query_params.get('company') or '').strip().upper()
+        if company not in daily_limit.LIMITED_COMPANIES:
+            return fail('company must be OIL or BEVERAGES.')
+        bills = _factory_due_bills(company)
+        if bills is None:
+            return fail('SAP could not be read. Try again shortly.', status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        return ok(bills)
+
+
 class FactoryLimitView(APIView):
     """GET /api/advance-payments/factory-limit/?company=OIL|BEVERAGES[&day=YYYY-MM-DD]
     PUT /api/advance-payments/factory-limit/  {company, amount[, day]}
@@ -1545,15 +1580,9 @@ class FactoryLimitView(APIView):
         except ValueError:
             return fail('day must be a date, YYYY-MM-DD.')
         data = daily_limit.summary(company, user=request.user, day=day)
-        key = f'ap:factory-open-bills:{company}'
-        bills = cache.get(key)
-        if bills is None:
-            try:
-                bills = sap_service.factory_open_bills(company)
-                cache.set(key, bills, 10 * 60)
-            except sap_service.SapUnavailable:
-                bills = None
-        data['open_bills'] = bills
+        bills = _factory_due_bills(company)
+        # The totals here; the vendors and their bills at `factory-limit/bills/`.
+        data['open_bills'] = None if bills is None else {k: v for k, v in bills.items() if k != 'vendors'}
         return ok(data)
 
     def put(self, request):

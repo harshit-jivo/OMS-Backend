@@ -83,9 +83,8 @@ FIXED_OWNER = {
     'RAW_MATERIAL': ('bhupinder', False),
     'PACKING_MATERIAL': ('bhupinder', False),
     'SEMI_FINISHED': ('bhupinder', False),
-    'FA_PM': ('bhupinder', True),
+    # Civil works stay with Bhupinder; the plant's own assets go to the plant (below).
     'FA_CIVIL': ('bhupinder', True),
-    'FA_CONSUMABLES': ('bhupinder', True),
     'CAPITAL': ('bhupinder', True),
     'TDS': ('avtar', False),
     'GST': ('avtar', False),
@@ -96,6 +95,16 @@ FIXED_OWNER = {
     'LOAN_REPAY': ('avtar', False),
 }
 
+#: Fixed assets of the plant — plant & machinery, spares, others — go to the
+#: plant's own approver, then the Director (user, 2026-10-16): Oil to Gagan,
+#: Beverages to Arvinder. One workflow per company. Civil stays with Bhupinder.
+PLANT_PURPOSES = ('FA_PM', 'FA_CONSUMABLES', 'FA_OTHERS')
+PLANT_APPROVERS = (('OIL', 'OIL', 'Oil', 'factory_oil'), ('BEVERAGES', 'BEV', 'Beverages', 'factory_bev'))
+
+#: Workflows the hierarchy no longer has, deactivated when it is seeded:
+#: the plant's fixed assets had one workflow for both companies until 2026-10-16.
+RETIRED_ROUTES = ('AP_FA_PM', 'AP_FA_CONSUMABLES', 'AP_FA_OTHERS')
+
 #: Purposes a second fixed owner approves after the first, instead of the Director.
 SECOND_OWNER = {'OIL_PURCHASE': 'ziyaul'}
 
@@ -104,7 +113,7 @@ SECOND_OWNER = {'OIL_PURCHASE': 'ziyaul'}
 HEAD_THEN_SECOND = {'INCENTIVE': 'navdeep', 'TA_DA': 'navdeep'}
 
 #: Department Head purposes the Director approves after the head.
-HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'FA_OTHERS', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM'})
+HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM'})
 
 
 def _where(*conditions):
@@ -255,6 +264,13 @@ def routes():
                  'stages': _chain(owner, False)}
                 for company, tag, title, owner in (('OIL', 'OIL', 'Oil', 'sales_oil'),
                                                    ('BEVERAGES', 'BEV', 'Beverages', 'sales_bev'))
+            ]
+        elif code in PLANT_PURPOSES:
+            out += [
+                {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, _purpose(code)),
+                 'stages': _chain(owner, True)}
+                for company, tag, title, owner in PLANT_APPROVERS
             ]
         elif code in FIXED_OWNER:
             owner, director = FIXED_OWNER[code]

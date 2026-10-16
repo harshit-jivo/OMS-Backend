@@ -41,6 +41,7 @@ Every PO (whatever its date) and every bill CREATED in SAP on or after
 own figures are not used:
 
     open       = the document's total  -  what OMS has PAID against it
+                 (a bill: less its SAP debit notes too, 2026-10-16)
     available  = open                  -  what OMS requests HOLD (in approval)
 
 A PO's "already received" (GRPOs, goods in) is never deducted: an advance is
@@ -127,12 +128,24 @@ def sap_facts(company, kind, entries):
         live = sap_service.live_documents(company, kind, entries)
     except sap_service.SapUnavailable:
         return {}
-    return {e: {'created_on': v.get('created_on'), 'doc_total': v.get('doc_total')} for e, v in live.items()}
+    return {e: {'created_on': v.get('created_on'), 'doc_total': v.get('doc_total'), 'debit': v.get('debit')}
+            for e, v in live.items()}
 
 
 def created_dates(company, kind, entries):
     """`{doc_entry: created_on}` (see `sap_facts`)."""
     return {e: f['created_on'] for e, f in sap_facts(company, kind, entries).items()}
+
+
+def payable(total, debit=None):
+    """A tracked document's base: its total, less a bill's SAP debit notes (user,
+    2026-10-16) — money the vendor will not be paid, which SAP itself takes off."""
+    return Decimal(str(total or 0)) - Decimal(str(debit or 0))
+
+
+def debit_of(row):
+    """A SAP bill row's debit notes (`sap._with_debits`), 0 when it has none or SAP could not say."""
+    return Decimal(str(((row or {}).get('debits') or {}).get('amount') or 0))
 
 
 def oms_left(total, use):
@@ -254,11 +267,14 @@ def problems(company, documents, *, exclude_request=None):
             fact = facts.get(int(d['sap_doc_entry'])) or {}
             if tracked(kind, fact.get('created_on')) and fact.get('doc_total') is not None:
                 # From the cut-off OMS alone tracks it: total less paid and held.
-                left = oms_left(fact['doc_total'], use)
+                left = oms_left(payable(fact['doc_total'], fact.get('debit')), use)
                 if d['amount'] > left:
                     label = d.get('sap_doc_num') or d['sap_doc_entry']
+                    debit = Decimal(str(fact.get('debit') or 0))
                     found.append(f'{DocumentKind(kind).label} {label}: only {left} is available — of its total '
-                                 f'{fact["doc_total"]}, OMS has paid {(use or {}).get("paid", ZERO)} and other '
+                                 f'{fact["doc_total"]}'
+                                 + (f', debit notes take {debit}' if debit else '')
+                                 + f', OMS has paid {(use or {}).get("paid", ZERO)} and other '
                                  f'requests hold {(use or {}).get("reserved", ZERO)}.')
                 continue
             if not use:
@@ -287,10 +303,12 @@ def annotate(company, kind, rows, *, key, open_field, total_field=None, paid_fie
         is_tracked = tracked(kind, r.get('created_on'))
         if is_tracked and total_field and r.get(total_field) is not None:
             paid = (use or {}).get('paid', ZERO)
-            r[open_field] = str(max(Decimal(str(r[total_field])) - paid, ZERO))
+            # A bill's debit notes come off too: SAP takes them off its balance.
+            base = payable(r[total_field], debit_of(r) if kind == DocumentKind.BILL else ZERO)
+            r[open_field] = str(max(base - paid, ZERO))
             if paid_field:
                 r[paid_field] = str(paid)
-            left = oms_left(r[total_field], use)
+            left = oms_left(base, use)
         else:
             # Older (or nothing to work from): SAP's open less what OMS holds and paid.
             left = available(kind, r.get(open_field), use)
@@ -394,7 +412,7 @@ def live_check(advance):
         if status != 'OPEN':
             left = ZERO
         elif tracked(kind, created_on) and now.get('doc_total') is not None:
-            left = oms_left(now['doc_total'], used.get(key))
+            left = oms_left(payable(now['doc_total'], now.get('debit')), used.get(key))
             if kind == DocumentKind.BILL:
                 left = min(left, open_now)
         else:

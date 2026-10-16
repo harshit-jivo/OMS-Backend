@@ -42,6 +42,9 @@ class Base(TestCase):
         self.ziyaul = make_user('ziyaul')
         self.creator = make_user('dl-creator', extra_pages=['Advance_Payment'])
         self.n = 0
+        from django.core.cache import cache
+
+        cache.clear()  # SAP's due bills are cached between requests
         patcher = mock.patch.object(clock, 'today', return_value=TODAY)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -171,7 +174,7 @@ class TheScreen(Base):
         self.raised(amount=Decimal('25000'))
         client = APIClient()
         client.force_authenticate(self.creator)
-        with mock.patch('advance_payment.services.sap.factory_open_bills',
+        with mock.patch('advance_payment.services.sap.factory_due_bills',
                         return_value={'bills': 3, 'open': '500000', 'packing': '200000'}):
             data = client.get('/api/advance-payments/factory-limit/', {'company': 'OIL'}).json()['data']
         self.assertEqual(data['limit']['amount'], '100000.00')
@@ -201,3 +204,47 @@ class SwitchedOff(Base):
         self.assertEqual(daily_limit.check_new(fields(amount=Decimal('900000'))), [])
         self.assertEqual(daily_limit.check_edit(mine, fields(amount=Decimal('900000'))), [])
         self.assertFalse(daily_limit.summary('OIL', user=self.ziyaul)['enabled'])
+
+
+class TheDueBills(Base):
+    """The page's SAP figure: only bills due today or before, by vendor (user, 2026-10-16)."""
+
+    def test_by_vendor_largest_first_each_with_its_bills(self):
+        from datetime import datetime as dt
+
+        from advance_payment.services import sap
+
+        rows = [
+            {'doc_entry': 1, 'doc_num': 101, 'card_code': 'V1', 'card_name': 'Tins', 'party_ref': 'T/1',
+             'doc_date': dt(2026, 9, 1), 'due_date': dt(2026, 10, 1), 'doc_total': '50000', 'open': '40000',
+             'packing': '40000'},
+            {'doc_entry': 2, 'doc_num': 102, 'card_code': 'V2', 'card_name': 'Spares', 'party_ref': '',
+             'doc_date': dt(2026, 9, 20), 'due_date': dt(2026, 10, 16), 'doc_total': '90000', 'open': '90000',
+             'packing': '0'},
+            {'doc_entry': 3, 'doc_num': 103, 'card_code': 'V1', 'card_name': 'Tins', 'party_ref': '',
+             'doc_date': dt(2026, 8, 1), 'due_date': dt(2026, 9, 1), 'doc_total': '30000', 'open': '30000',
+             'packing': '30000'},
+        ]
+        with mock.patch.object(sap, '_schema', return_value='S'), \
+                mock.patch.object(sap, '_run', return_value=rows) as run:
+            out = sap.factory_due_bills('OIL', today=TODAY)
+        self.assertIn('"DocDueDate" <= ?', run.call_args.args[1])
+        self.assertEqual(run.call_args.args[2][0], TODAY)
+        self.assertEqual((out['bills'], out['open'], out['packing']), (3, '160000', '70000'))
+        self.assertEqual([(v['card_code'], v['amount']) for v in out['vendors']], [('V2', '90000'), ('V1', '70000')])
+        tins = out['vendors'][1]
+        self.assertEqual([(b['doc_num'], b['days_overdue']) for b in tins['bills']], [(103, 45), (101, 15)])
+
+    def test_the_page_shows_the_totals_and_the_bills_are_their_own_call(self):
+        client = APIClient()
+        client.force_authenticate(self.creator)
+        found = {'bills': 1, 'open': '9', 'packing': '0', 'vendors': [{'card_code': 'V1', 'card_name': 'X',
+                                                                      'amount': '9', 'bills': []}]}
+        from django.core.cache import cache
+
+        cache.clear()
+        with mock.patch('advance_payment.services.sap.factory_due_bills', return_value=found):
+            page = client.get('/api/advance-payments/factory-limit/', {'company': 'OIL'}).json()['data']
+            bills = client.get('/api/advance-payments/factory-limit/bills/', {'company': 'OIL'}).json()['data']
+        self.assertNotIn('vendors', page['open_bills'])
+        self.assertEqual(bills['vendors'][0]['card_code'], 'V1')

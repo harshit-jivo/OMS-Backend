@@ -78,11 +78,11 @@ RETIRED = {
 }
 
 #: Purposes the hierarchy sends to the Department Head the requester picks
-#: ("by department"), not to a fixed approver. Electricity & Utilities and
-#: Fixed Assets – Others then go on to Director Approval; that is configured
-#: on their workflows.
+#: ("by department"), not to a fixed approver. Electricity & Utilities then
+#: goes on to Director Approval; that is configured on its workflow. (Fixed
+#: Assets – Others goes to the plant's approver since 2026-10-16.)
 HEAD_PURPOSES = frozenset({
-    'FINISHED_GOODS', 'FA_OTHERS', 'CONSUMABLES', 'LAB',
+    'FINISHED_GOODS', 'CONSUMABLES', 'LAB',
     'FREIGHT_IN', 'FREIGHT_OUT', 'JOB_WORK', 'LABOUR', 'ADVERTISING', 'COMMISSION', 'RENT',
     'UTILITIES', 'PROFESSIONAL', 'REPAIRS', 'FUEL', 'TRAVEL', 'SECURITY', 'IT_SOFTWARE',
     'OTHER_EXPENSE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM', 'INTERCOMPANY',

@@ -44,8 +44,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
             with self.subTest(code):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
         # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
-        # Imprest against Journal Entry; Account Payment
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1)
+        # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -117,9 +117,27 @@ class WhoApproves(SimpleTestCase):
     def test_the_director_follows_where_the_hierarchy_says(self):
         with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages'])
         self.assertEqual(with_director, sorted([
-            'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FREIGHT_IMPORT', 'AP_FA_PM', 'AP_FA_CIVIL',
-            'AP_FA_OTHERS', 'AP_FA_CONSUMABLES', 'AP_CAPITAL', 'AP_UTILITIES',
+            'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FREIGHT_IMPORT', 'AP_FA_CIVIL',
+            'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
+            'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES',
             'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM']))
+
+    def test_the_plants_fixed_assets_go_to_its_approver_civil_to_bhupinder(self):
+        # Plant & machinery, spares, others: Oil -> Gagan, Beverages -> Arvinder, then the Director.
+        for code in ('FA_PM', 'FA_CONSUMABLES', 'FA_OTHERS'):
+            with self.subTest(code):
+                oil, bev = BY_CODE[f'AP_{code}_OIL'], BY_CODE[f'AP_{code}_BEV']
+                self.assertIn("company = 'OIL'", oil['query'])
+                self.assertIn("company = 'BEVERAGES'", bev['query'])
+                self.assertEqual(oil['stages'], [(hierarchy.OWNER_STAGE, 'factory_oil'),
+                                                 (hierarchy.DIRECTOR_STAGE, 'director')])
+                self.assertEqual(bev['stages'], [(hierarchy.OWNER_STAGE, 'factory_bev'),
+                                                 (hierarchy.DIRECTOR_STAGE, 'director')])
+                self.assertNotIn(f'AP_{code}', BY_CODE)
+        self.assertEqual(self.first('FA_CIVIL'), [(hierarchy.OWNER_STAGE, 'bhupinder'),
+                                                  (hierarchy.DIRECTOR_STAGE, 'director')])
+        self.assertFalse(needs_department_head('OIL', 'VENDOR', 'FA_OTHERS'))
+        self.assertEqual(set(hierarchy.RETIRED_ROUTES), {'AP_FA_PM', 'AP_FA_CONSUMABLES', 'AP_FA_OTHERS'})
 
     def test_ghee_and_other_raw_material_go_to_bhupinder(self):
         self.assertEqual(self.first('RAW_MATERIAL'), [(hierarchy.OWNER_STAGE, 'bhupinder')])

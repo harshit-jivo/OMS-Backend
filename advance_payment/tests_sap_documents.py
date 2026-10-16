@@ -200,7 +200,8 @@ class TdsInSap(SimpleTestCase):
         row = {'doc_entry': 7, 'doc_num': 624104114, 'doc_total': '100000', 'paid_to_date': '0',
                'balance_due': '100000', 'tds': Decimal('37500')}
         with mock.patch.object(sap, '_run', return_value=[row]), \
-                mock.patch.object(sap, '_with_attachments', side_effect=lambda _c, _t, rows: rows):
+                mock.patch.object(sap, '_with_attachments', side_effect=lambda _c, _t, rows: rows), \
+                mock.patch.object(sap, '_with_debits', side_effect=lambda _c, _k, rows: rows):
             (bill,) = sap.open_invoices('OIL', 'vendor', card_code='V1')
         self.assertEqual(bill['tds'], '37500')
 
@@ -457,3 +458,31 @@ class HowLongItHasStood(SimpleTestCase):
     def test_nothing_outstanding_has_no_days(self):
         self.assertEqual(self.stood([((6, 1), '-100'), ((7, 1), '100.004')]), {'since': None, 'days': None})
 
+
+
+class TheDebitsAgainstABillOrAPO(SimpleTestCase):
+    """SAP's debit notes (A/P credit memos) made from a bill, or from a PO's bills (user, 2026-10-16)."""
+
+    def run_with(self, rows, kind, found):
+        with mock.patch.object(sap, '_schema', return_value='S'), \
+                mock.patch.object(sap, '_run', return_value=found) as run:
+            out = sap._with_debits('OIL', kind, rows)
+        return out, run
+
+    def test_a_bill_carries_its_debit_notes_and_their_total(self):
+        out, run = self.run_with([{'doc_entry': 7}, {'doc_entry': 8}], 'bill', [
+            {'doc': 7, 'note': 725025904, 'amount': Decimal('1000.004')},
+            {'doc': 7, 'note': 725025903, 'amount': Decimal('21982.2436')},
+        ])
+        self.assertEqual(out[0]['debits'], {'amount': '22982.25', 'notes': [725025903, 725025904]})
+        self.assertEqual(out[1]['debits']['notes'], [])
+        self.assertIn('"RPC1"', run.call_args.args[1])
+
+    def test_a_po_looks_through_its_bills_and_unreadable_says_nothing(self):
+        _out, run = self.run_with([{'doc_entry': 5}], 'po', [])
+        self.assertIn('"PDN1"', run.call_args.args[1])
+        self.assertEqual(run.call_args.args[2], [5, 5])
+        with mock.patch.object(sap, '_schema', return_value='S'), \
+                mock.patch.object(sap, '_run', side_effect=sap.SapUnavailable('down')):
+            rows = sap._with_debits('OIL', 'po', [{'doc_entry': 5}])
+        self.assertIsNone(rows[0]['debits'])
