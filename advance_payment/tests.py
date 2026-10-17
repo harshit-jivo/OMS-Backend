@@ -458,10 +458,11 @@ class ThePaymentPurposes(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.data["data"]
         self.assertEqual(data["groups"], ["Goods", "Services", "People", "Statutory", "Finance"])
-        self.assertEqual(data["count"], 43)
+        self.assertEqual(data["count"], 44)  # Insurance Premium added 2026-10-17
         self.assertEqual(data["results"][0],
                          {"code": "OIL_PURCHASE", "label": "Oil Purchase – Imported or Domestic",
-                          "group": "Goods", "needs_head": False})
+                          "group": "Goods", "needs_head": False, "due_date": False})
+        self.assertEqual([r["code"] for r in data["results"] if r["due_date"]], ["UTILITIES", "INSURANCE"])
         codes = [r["code"] for r in data["results"]]
         self.assertIn("FA_CIVIL", codes)
         self.assertTrue(all(next(r for r in data["results"] if r["code"] == c)["needs_head"] for c in ("INCENTIVE", "TA_DA")))

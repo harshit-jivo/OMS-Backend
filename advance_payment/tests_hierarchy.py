@@ -17,7 +17,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from advance_payment import hierarchy
+from advance_payment import hierarchy, purposes
 from advance_payment.models import (
     DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE, StageRole, is_department_head_stage,
 )
@@ -44,8 +44,9 @@ class EveryRequestHasOneRoute(SimpleTestCase):
             with self.subTest(code):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
         # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
-        # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3)
+        # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company;
+        # Utilities' and Insurance's bills due within 2 days
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -88,7 +89,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
 
 class WhoApproves(SimpleTestCase):
     def first(self, purpose):
-        [route] = _routes_for(purpose)
+        # A bill due within 2 days has its own route; this is the usual one.
+        [route] = [r for r in _routes_for(purpose) if not r['code'].endswith(hierarchy.DUE_SOON_SUFFIX)]
         return route['stages']
 
     def test_by_department_purposes_go_to_the_picked_department_head(self):
@@ -119,7 +121,7 @@ class WhoApproves(SimpleTestCase):
         self.assertEqual(with_director, sorted([
             'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FREIGHT_IMPORT', 'AP_FA_CIVIL',
             'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
-            'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES',
+            'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES', 'AP_INSURANCE',
             'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM']))
 
     def test_the_plants_fixed_assets_go_to_its_approver_civil_to_bhupinder(self):
@@ -448,3 +450,151 @@ class TheTimelineWhenTheHeadIsTheDirector(SimpleTestCase):
     def test_a_stage_already_decided_keeps_its_state(self):
         plan = flow_service.mark_with_head(self.plan(137, state='APPROVED'))
         self.assertEqual(plan[1]['state'], 'APPROVED')
+
+
+class BillsDueSoon(SimpleTestCase):
+    """Utilities and insurance due within 2 days go straight to Payment (user, 2026-10-17).
+
+    Due 20 Oct: raised on the 18th or before, Department Head then Director;
+    on the 19th or later (or overdue), straight to Payment Approval. The date
+    is the Bill Due Date the requester types.
+    """
+
+    def test_each_purpose_has_the_usual_route_and_one_straight_to_payment(self):
+        for code in ('UTILITIES', 'INSURANCE'):
+            with self.subTest(code):
+                routes = {r['code']: r for r in _routes_for(code)}
+                self.assertEqual(set(routes), {f'AP_{code}', f'AP_{code}_DUE_SOON'})
+                self.assertEqual(routes[f'AP_{code}']['stages'],
+                                 [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.DIRECTOR_STAGE, 'director')])
+                self.assertEqual(routes[f'AP_{code}_DUE_SOON']['stages'], [])
+                self.assertEqual([n for n, _r in hierarchy.full_stages(routes[f'AP_{code}_DUE_SOON'])],
+                                 ['Payment Approval', 'Audit Approval', 'Final Approval'])
+
+    def test_the_two_routes_never_both_match(self):
+        for code in ('UTILITIES', 'INSURANCE'):
+            with self.subTest(code):
+                usual, soon = BY_CODE[f'AP_{code}']['query'], BY_CODE[f'AP_{code}_DUE_SOON']['query']
+                self.assertTrue(usual.endswith(f'AND NOT {hierarchy.BILL_DUE_SOON}'))
+                self.assertTrue(soon.endswith(f'AND {hierarchy.BILL_DUE_SOON}'))
+                self.assertEqual(usual.replace(f'NOT {hierarchy.BILL_DUE_SOON}', ''),
+                                 soon.replace(hierarchy.BILL_DUE_SOON, ''))
+
+    def test_due_soon_is_the_typed_date_before_today_plus_two_in_india(self):
+        self.assertEqual(hierarchy.BILL_DUE_SOON,
+                         "(bill_due_date IS NOT NULL "
+                         "AND bill_due_date < (now() AT TIME ZONE 'Asia/Kolkata')::date + 2)")
+        self.assertEqual(purposes.DUE_SOON_DAYS, 2)
+
+    def test_only_these_routes_look_at_the_due_date(self):
+        with_rule = sorted(r['code'] for r in ALL_ROUTES if 'due_date' in r['query'])
+        self.assertEqual(with_rule, ['AP_INSURANCE', 'AP_INSURANCE_DUE_SOON',
+                                     'AP_UTILITIES', 'AP_UTILITIES_DUE_SOON'])
+
+    def test_every_due_soon_purpose_is_a_department_head_one(self):
+        self.assertTrue(purposes.DUE_SOON_PURPOSES <= HEAD_PURPOSES)
+        self.assertEqual(purposes.DUE_SOON_PURPOSES, {'UTILITIES', 'INSURANCE'})
+
+    def test_the_route_starts_at_payment(self):
+        stages = hierarchy.full_stages(BY_CODE['AP_INSURANCE_DUE_SOON'])
+        named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
+                                    enumerate(stages, start=1)])
+        self.assertEqual(named[0][1], StageRole.PAYMENT)
+        self.assertFalse(any(is_department_head_stage(s.name) for s, _r in named))
+
+    def test_the_list_says_which_purposes_take_a_due_date(self):
+        flagged = sorted(p['code'] for p in purposes.purposes() if p['due_date'])
+        self.assertEqual(flagged, ['INSURANCE', 'UTILITIES'])
+        self.assertEqual(purposes.purpose_label('INSURANCE'), 'Insurance Premium')
+
+
+def _due_request(purpose='UTILITIES', **overrides):
+    """A vendor paid on account for `purpose`, with its Bill Due Date."""
+    data = vendor_bill_request(purpose_code=purpose, department_head_code='TEMP0001',
+                               payment_against='ON_ACCOUNT', documents=[], amount='45886',
+                               bill_due_date='2026-10-20')
+    data.update(overrides)
+    return data
+
+
+def _problems(data):
+    try:
+        _clean(data)
+    except request_service.RequestInvalid as exc:
+        return exc.problems
+    return []
+
+
+class TheBillDueDate(SimpleTestCase):
+    """The requester types it; the bill or policy showing it is attached."""
+
+    def test_utilities_and_insurance_on_account_carry_it(self):
+        for purpose in ('UTILITIES', 'INSURANCE'):
+            with self.subTest(purpose):
+                cleaned = _clean(_due_request(purpose))
+                self.assertEqual(str(cleaned.fields['bill_due_date']), '2026-10-20')
+                self.assertEqual(cleaned.fields['payment_against'], 'ON_ACCOUNT')
+                self.assertEqual(cleaned.documents, [])
+
+    def test_it_is_required_and_may_be_past(self):
+        self.assertIn("Enter the Bill Due Date: the due date on the bill, or the policy's renewal date.",
+                      _problems(_due_request(bill_due_date='')))
+        self.assertEqual(_problems(_due_request(bill_due_date='2026-09-01')), [])  # overdue: allowed
+
+    def test_against_a_bill_it_is_asked_too(self):
+        cleaned = _clean(vendor_bill_request(purpose_code='UTILITIES', department_head_code='TEMP0001',
+                                             bill_due_date='2026-10-25'))
+        self.assertEqual(str(cleaned.fields['bill_due_date']), '2026-10-25')
+
+    def test_other_purposes_are_not_asked_and_keep_none(self):
+        cleaned = _clean(vendor_bill_request(bill_due_date='2026-10-20'))
+        self.assertIsNone(cleaned.fields['bill_due_date'])
+
+    def test_who_is_asked(self):
+        ask = purposes.needs_bill_due_date
+        self.assertTrue(ask('OIL', 'VENDOR', 'INSURANCE'))
+        self.assertTrue(ask('BEVERAGES', 'VENDOR', 'UTILITIES'))
+        self.assertFalse(ask('MART', 'VENDOR', 'UTILITIES'))          # Prabhjot, whatever it is for
+        self.assertFalse(ask('OIL', 'EMPLOYEE_IMPREST', 'UTILITIES'))  # the Employee / Imprest route
+        self.assertFalse(ask('OIL', 'VENDOR', 'RENT'))
+
+    def test_on_account_is_only_for_utilities_and_insurance(self):
+        problems = _problems(_due_request('RENT', bill_due_date=''))
+        self.assertIn('A vendor is paid On Account only for Electricity, Water & Utilities or an '
+                      'Insurance Premium. Pay against its bill or its PO.', problems)
+
+    def test_raising_one_needs_the_bill_or_policy_attached(self):
+        cleaned = _clean(_due_request())
+        with mock.patch.object(request_service, 'check_files'):
+            with self.assertRaises(request_service.RequestInvalid) as caught:
+                request_service.create(cleaned, user=SimpleNamespace(pk=1), files=[])
+        self.assertEqual(caught.exception.problems, [request_service.DUE_DATE_PROOF])
+
+    def test_an_edit_may_not_remove_the_last_attachment(self):
+        cleaned = _clean(_due_request())
+        advance = mock.MagicMock()
+        advance.files.filter.return_value.exclude.return_value.exists.return_value = False
+        with mock.patch.object(request_service, 'check_files'), \
+                mock.patch.object(request_service, '_reserve') as reserve:
+            with self.assertRaises(request_service.RequestInvalid) as caught:
+                request_service.update(advance, cleaned, user=SimpleNamespace(pk=1), files=[],
+                                       remove_file_ids=[9])
+        self.assertEqual(caught.exception.problems, [request_service.DUE_DATE_PROOF])
+        reserve.assert_not_called()  # refused before anything is written
+        advance.files.filter.return_value.exclude.assert_called_once_with(pk__in=[9])
+
+
+class APremiumPaidOnAccount(SimpleTestCase):
+    """Posted as SAP pays insurers and electricity boards: to the vendor, on account."""
+
+    def test_posts_to_the_vendor_with_no_bill_and_a_settlement_date(self):
+        from advance_payment.services import voucher as voucher_service
+        from advance_payment.tests_requests import DAY, advance_of, line, payout
+
+        advance = advance_of('VENDOR', amount='873200', partner='VENDA000356')
+        body = voucher_service.build_payload(advance, payout(line(1, 'RTGS', '873200')), posting_date=DAY,
+                                             series=2601, bpl_id=1, memo='OMS AP-2026-0201/1')
+        self.assertEqual((body['DocType'], body['CardCode']), ('rSupplier', 'VENDA000356'))
+        self.assertNotIn('PaymentInvoices', body)
+        self.assertEqual(body['U_Type_of_Advance'], 'One Time Settlement')
+        self.assertEqual(body['U_Adv_Settl_Dt'], '2026-10-25')  # 30 days on, as SAP's own (10 to 25 days)

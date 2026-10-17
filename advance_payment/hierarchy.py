@@ -22,8 +22,8 @@ import re
 
 from advance_payment.models import DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE
 from advance_payment.purposes import (
-    FACTORY_BUDGETS as FACTORY_BUDGET_CODES, HEAD_PURPOSES, HEAD_REQUEST_TYPES, PAYMENT_PURPOSES,
-    STAFF_ADVANCE_LIMIT,
+    DUE_SOON_DAYS, DUE_SOON_PURPOSES, FACTORY_BUDGETS as FACTORY_BUDGET_CODES, HEAD_PURPOSES,
+    HEAD_REQUEST_TYPES, PAYMENT_PURPOSES, STAFF_ADVANCE_LIMIT,
 )
 
 #: Who approves, by role, with the username each had on the test server.
@@ -113,7 +113,20 @@ SECOND_OWNER = {'OIL_PURCHASE': 'ziyaul'}
 HEAD_THEN_SECOND = {'INCENTIVE': 'navdeep', 'TA_DA': 'navdeep'}
 
 #: Department Head purposes the Director approves after the head.
-HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM'})
+HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'INSURANCE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM'})
+
+
+#: The request's Bill Due Date falls within DUE_SOON_DAYS days of today, or is
+#: already past (`purposes.DUE_SOON_PURPOSES`): its route skips the approval
+#: stages. "Today" is India's (`clock.today()`), not the database session's
+#: UTC date. Evaluated when the request is submitted or resubmitted. A request
+#: with no Bill Due Date (raised before it was asked) is never "due soon", so
+#: `NOT BILL_DUE_SOON` takes it: the usual route.
+BILL_DUE_SOON = (
+    "(bill_due_date IS NOT NULL "
+    f"AND bill_due_date < (now() AT TIME ZONE 'Asia/Kolkata')::date + {DUE_SOON_DAYS})"
+)
+DUE_SOON_SUFFIX = '_DUE_SOON'
 
 
 def _where(*conditions):
@@ -279,6 +292,18 @@ def routes():
                 stages.append((SECOND_STAGE, SECOND_OWNER[code]))
             out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
                         'query': _where(*base), 'stages': stages})
+        elif code in DUE_SOON_PURPOSES:
+            # Two routes, kept apart by the Bill Due Date: the usual one, and
+            # straight to Payment for a bill due within DUE_SOON_DAYS days.
+            # Every such purpose is a Department Head one (pinned by the tests).
+            out += [
+                {'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
+                 'query': _where(*base, f'NOT {BILL_DUE_SOON}'),
+                 'stages': _chain(HEAD, code in HEAD_THEN_DIRECTOR)},
+                {'code': f'AP_{code}{DUE_SOON_SUFFIX}',
+                 'name': f'Payments · {label} · bill due within {DUE_SOON_DAYS} days',
+                 'company': 'ALL', 'query': _where(*base, BILL_DUE_SOON), 'stages': []},
+            ]
         elif code in HEAD_PURPOSES:
             stages = _chain(HEAD, code in HEAD_THEN_DIRECTOR)
             if code in HEAD_THEN_SECOND:

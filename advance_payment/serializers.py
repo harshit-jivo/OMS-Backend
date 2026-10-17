@@ -251,6 +251,8 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'currency': advance.currency,
         'expected_date': _iso(advance.expected_date),
         'expected_bill_date': _iso(advance.expected_bill_date),
+        # Utilities / insurance: typed by the requester; due within 2 days, the approvals were skipped.
+        'bill_due_date': _iso(advance.bill_due_date),
         'return_method': advance.return_method,
         'return_method_other': advance.return_method_other,
         'installments': advance.installments,

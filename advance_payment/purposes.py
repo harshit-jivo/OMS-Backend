@@ -45,6 +45,8 @@ PAYMENT_PURPOSES = (
     ('COMMISSION', 'Commission & Brokerage', 'Services'),
     ('RENT', 'Rent', 'Services'),
     ('UTILITIES', 'Electricity, Water & Utilities', 'Services'),
+    # Paid to the insurer on account before its bill, as SAP's own premiums are (2026-10-17).
+    ('INSURANCE', 'Insurance Premium', 'Services'),
     ('PROFESSIONAL', 'Legal & Professional Fees', 'Services'),
     ('REPAIRS', 'Repairs & Maintenance', 'Services'),
     ('FUEL', 'Fuel & Vehicle Running', 'Services'),
@@ -84,10 +86,29 @@ RETIRED = {
 HEAD_PURPOSES = frozenset({
     'FINISHED_GOODS', 'CONSUMABLES', 'LAB',
     'FREIGHT_IN', 'FREIGHT_OUT', 'JOB_WORK', 'LABOUR', 'ADVERTISING', 'COMMISSION', 'RENT',
-    'UTILITIES', 'PROFESSIONAL', 'REPAIRS', 'FUEL', 'TRAVEL', 'SECURITY', 'IT_SOFTWARE',
+    'UTILITIES', 'INSURANCE', 'PROFESSIONAL', 'REPAIRS', 'FUEL', 'TRAVEL', 'SECURITY', 'IT_SOFTWARE',
     'OTHER_EXPENSE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM', 'INTERCOMPANY',
     'INCENTIVE', 'TA_DA',
 })
+
+#: Purposes paid by a due date (user, 2026-10-17): the requester types the
+#: Bill Due Date — the due date printed on the utility's bill, the policy's
+#: renewal date — and attaches the bill or policy that shows it. SAP cannot
+#: say: these vendors' bills carry their posting date as the due date.
+#:
+#: Raised fewer than DUE_SOON_DAYS days before it, or after it, the request
+#: skips its approval stages and goes straight to Payment Approval; raised
+#: earlier, it takes its usual route (Department Head, then Director). Due
+#: 20 Oct: raised on the 18th or before, the full route; on the 19th or later,
+#: straight to Payment. The Payment desk checks the date against the bill.
+DUE_SOON_PURPOSES = frozenset({'UTILITIES', 'INSURANCE'})
+DUE_SOON_DAYS = 2
+
+#: The purposes a Vendor may be paid ON ACCOUNT for — before, or without
+#: naming, its bill — as SAP pays electricity boards and insurers (2026-10-17:
+#: 134 of 143 of their payments since April 2025). They have no POs. Every
+#: other vendor payment is against a bill or a PO.
+VENDOR_ON_ACCOUNT_PURPOSES = DUE_SOON_PURPOSES
 
 #: Request types that always go to the requester's Department Head, then the
 #: Director (Staff Advance / Imprest), whatever the purpose.
@@ -125,11 +146,26 @@ def needs_department_head(company, request_type, purpose_code, budget_code=''):
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES
 
 
+def needs_bill_due_date(company, request_type, purpose_code):
+    """Whether the request names its Bill Due Date: a `DUE_SOON_PURPOSES`
+    purpose on a route that reads it — the purpose routes of Oil and
+    Beverages. Mart's one approver, the Employee / Imprest route, Account
+    Payments and Expenses are not routed by purpose, so they are not asked."""
+    if company in NO_HEAD_COMPANIES or request_type in HEAD_REQUEST_TYPES:
+        return False
+    if request_type in ('ACCOUNT', 'EXPENSE'):
+        return False
+    return purpose_code in DUE_SOON_PURPOSES
+
+
 def purposes():
-    """`[{code, label, group, needs_head}]`, as the form lists them.
+    """`[{code, label, group, needs_head, due_date}]`, as the form lists them.
 
     `needs_head`: this purpose (outside Mart) is approved by the Department
-    Head the requester picks.
+    Head the requester picks. `due_date`: it is paid by a Bill Due Date the
+    requester types (`DUE_SOON_PURPOSES`), and a Vendor may be paid on account
+    for it (`VENDOR_ON_ACCOUNT_PURPOSES`).
     """
-    return [{'code': code, 'label': label, 'group': group, 'needs_head': code in HEAD_PURPOSES}
+    return [{'code': code, 'label': label, 'group': group, 'needs_head': code in HEAD_PURPOSES,
+             'due_date': code in DUE_SOON_PURPOSES}
             for code, label, group in PAYMENT_PURPOSES]

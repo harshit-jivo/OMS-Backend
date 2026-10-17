@@ -341,6 +341,12 @@ class AdvanceRequest(models.Model):
     # ── Dates and repayment, as the form asks them ────────────────────────
     expected_date = models.DateField(null=True, blank=True, help_text='Against PO: Expected Bill Date.')
     expected_bill_date = models.DateField(null=True, blank=True, help_text='Employee Imprest.')
+    #: Utilities and insurance (`purposes.DUE_SOON_PURPOSES`): the due date on
+    #: the utility's bill or the policy's renewal date, typed by the requester
+    #: and checked by the Payment desk against the attached bill. Due within
+    #: 2 days, the request skips its approval stages (`hierarchy.BILL_DUE_SOON`).
+    bill_due_date = models.DateField(null=True, blank=True,
+                                     help_text='Utilities / insurance: the due date on the bill.')
     return_method = models.CharField(max_length=20, choices=ReturnMethod.choices, blank=True, default='')
     return_method_other = models.CharField(max_length=120, blank=True, default='')
     installments = models.PositiveSmallIntegerField(null=True, blank=True)

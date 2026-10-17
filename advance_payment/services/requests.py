@@ -52,7 +52,9 @@ from advance_payment.models import (
     RequestType,
     ReturnMethod,
 )
-from advance_payment.purposes import needs_department_head, purpose_label
+from advance_payment.purposes import (
+    VENDOR_ON_ACCOUNT_PURPOSES, needs_bill_due_date, needs_department_head, purpose_label,
+)
 from advance_payment.services import clock, daily_limit
 from core.companies import COMPANY_CODES
 
@@ -70,6 +72,9 @@ CASES = {
     # The Expected Bill Date is asked, but optional (since 2026-10-07).
     (RequestType.VENDOR, PaymentAgainst.AGAINST_PO): {'documents': DocumentKind.PO, 'expected_date': True},
     (RequestType.VENDOR, PaymentAgainst.AGAINST_BILL): {'documents': DocumentKind.BILL},
+    # Utilities and insurance only (`VENDOR_ON_ACCOUNT_PURPOSES`): a typed
+    # amount on account, matched to the bill when accounts book it.
+    (RequestType.VENDOR, PaymentAgainst.ON_ACCOUNT): {'documents': None, 'on_account_purposes': True},
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.ADVANCE): {'documents': None, 'repayment': True},
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.OTHER): {'documents': None},
     (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.ADVANCE): {'documents': None, 'expected_bill_date': True},
@@ -286,6 +291,16 @@ def clean(data, *, desk=False, user=None):
     if against == PaymentAgainst.OTHER and not against_other:
         problems.append('Say what the payment is against.')
 
+    purpose = routing.get('purpose_code', '')
+    if case.get('on_account_purposes') and purpose and purpose not in VENDOR_ON_ACCOUNT_PURPOSES:
+        problems.append('A vendor is paid On Account only for Electricity, Water & Utilities or an '
+                        'Insurance Premium. Pay against its bill or its PO.')
+    bill_due_date = None
+    if company in COMPANY_CODES and needs_bill_due_date(company, request_type, purpose):
+        bill_due_date = _date(data.get('bill_due_date'))
+        if bill_due_date is None:
+            problems.append("Enter the Bill Due Date: the due date on the bill, or the policy's renewal date.")
+
     if problems:
         raise RequestInvalid(problems)
 
@@ -301,6 +316,7 @@ def clean(data, *, desk=False, user=None):
             'amount': amount,
             'expected_date': expected_date,
             'expected_bill_date': expected_bill_date,
+            'bill_due_date': bill_due_date,
             'return_method': repayment.get('return_method', ''),
             'return_method_other': repayment.get('return_method_other', ''),
             'installments': repayment.get('installments'),
@@ -807,6 +823,16 @@ def _reserve(cleaned, *, company=None, exclude_request=None):
         raise RequestInvalid(found)
 
 
+def needs_due_date_proof(fields):
+    """A Bill Due Date is asked: the bill or policy showing it must be attached,
+    for the Payment desk to check the date that may skip the approvals."""
+    return bool(fields.get('bill_due_date'))
+
+
+DUE_DATE_PROOF = ('Attach the bill or the insurance policy that shows the Bill Due Date: '
+                  'the Payment desk checks the date against it.')
+
+
 def create(cleaned, *, user, files=()):
     """Insert the request, its documents and files. The caller submits it.
 
@@ -815,6 +841,8 @@ def create(cleaned, *, user, files=()):
     retried with the next number.
     """
     check_files(files)
+    if needs_due_date_proof(cleaned.fields) and not files:
+        raise RequestInvalid([DUE_DATE_PROOF])
     year = clock.today().year
     for _attempt in range(5):
         try:
@@ -848,6 +876,7 @@ _COMPARED = {
     'amount': lambda a: a.amount,
     'expected_date': lambda a: a.expected_date,
     'expected_bill_date': lambda a: a.expected_bill_date,
+    'bill_due_date': lambda a: a.bill_due_date,
     'return_method': lambda a: a.return_method,
     'return_method_other': lambda a: a.return_method_other,
     'installments': lambda a: a.installments,
@@ -922,6 +951,10 @@ def update(advance, cleaned, *, user, files=(), remove_file_ids=()):
     the EDITED log row, which the request page shows as Was → Now.
     """
     check_files(files)
+    if needs_due_date_proof(cleaned.fields) and not files and not advance.files.filter(
+            purpose=FilePurpose.SUPPORTING).exclude(pk__in=list(remove_file_ids)).exists():
+        # Checked before anything is written: a file removed is gone from storage at once.
+        raise RequestInvalid([DUE_DATE_PROOF])
     _reserve(cleaned, company=advance.company, exclude_request=advance.pk)
     _within_daily_limit(daily_limit.check_edit(advance, cleaned.fields))
     before, docs_before, lines_before = _snapshot(advance), _documents(advance), _expense_lines(advance)
