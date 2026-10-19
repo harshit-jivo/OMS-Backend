@@ -27,7 +27,8 @@ from advance_payment.services import heads
 from advance_payment.services import requests as request_service
 from advance_payment.tests_requests import _clean, vendor_bill_request
 
-ALL_ROUTES = hierarchy.routes()
+#: The routes a request can be chosen for: not the two the waiting requests were moved onto (2026-10-19).
+ALL_ROUTES = [r for r in hierarchy.routes() if not r.get('never_chosen')]
 #: The payment routes (by purpose); Expense routes (by budget head) are pinned in `ExpenseRoutes`.
 ROUTES = [r for r in ALL_ROUTES if not r.get('expense')]
 EXPENSE_ROUTES = [r for r in ALL_ROUTES if r.get('expense')]
@@ -45,8 +46,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
         # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
         # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company;
-        # Utilities' and Insurance's bills due within 2 days
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2)
+        # Utilities' and Insurance's bills due within 2 days; every bill (AP_AGAINST_BILL); Mart's small imprests
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -54,13 +55,15 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertTrue(all(len(c) <= 60 for c in codes))
 
     def test_mart_and_staff_advance_are_kept_out_of_the_purpose_routes(self):
-        self.assertEqual(BY_CODE['AP_MART']['query'],
-                         "SELECT id FROM advance_payment_request WHERE company = 'MART' "
-                         "AND request_type NOT IN ('EXPENSE', 'ACCOUNT')")
+        mart = BY_CODE['AP_MART']['query']
+        for part in ("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", hierarchy.NOT_BILL,
+                     f'NOT {hierarchy.FREIGHT_ROUTED}', f'NOT {hierarchy.MART_SMALL_IMPREST}'):
+            self.assertIn(part, mart)
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or                     route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or \
+                    route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
                 self.assertNotIn('MART', route['query'])
@@ -100,9 +103,12 @@ class WhoApproves(SimpleTestCase):
         self.assertEqual(BY_CODE['AP_STAFF_ADVANCE']['stages'],
                          [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.DIRECTOR_STAGE, 'director')])
 
-    def test_only_import_expenses_go_to_himanshu(self):
-        himanshu = sorted(r['code'] for r in ROUTES if ('Budget Owner Approval', 'himanshu') in r['stages'])
-        self.assertEqual(himanshu, ['AP_FREIGHT_IMPORT'])
+    def test_every_freight_goes_to_navdeep_first_and_no_one_else(self):
+        for code in ('FREIGHT_IN', 'FREIGHT_OUT', 'FREIGHT_IMPORT'):
+            with self.subTest(code):
+                self.assertEqual(self.first(code), [(hierarchy.FREIGHT_STAGE, 'navdeep')])
+                self.assertEqual(BY_CODE[f'AP_{code}']['company'], 'ALL')
+        self.assertEqual([r['code'] for r in ROUTES if any(role == 'himanshu' for _n, role in r['stages'])], [])
 
     def test_oil_purchase_goes_to_shunty_then_ziyaul(self):
         self.assertEqual(BY_CODE['AP_OIL_PURCHASE']['stages'],
@@ -113,13 +119,13 @@ class WhoApproves(SimpleTestCase):
             with self.subTest(code):
                 self.assertEqual(BY_CODE[code]['stages'],
                                  [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.SECOND_STAGE, 'navdeep')])
-                self.assertEqual([name for name, _r in hierarchy.full_stages(BY_CODE[code])][-3:],
-                                 ['Payment Approval', 'Audit Approval', 'Final Approval'])
+                self.assertEqual([name for name, _r in hierarchy.full_stages(BY_CODE[code])][-4:],
+                                 ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
 
     def test_the_director_follows_where_the_hierarchy_says(self):
         with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages'])
         self.assertEqual(with_director, sorted([
-            'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FREIGHT_IMPORT', 'AP_FA_CIVIL',
+            'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FA_CIVIL',
             'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
             'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES', 'AP_INSURANCE',
             'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM']))
@@ -144,14 +150,21 @@ class WhoApproves(SimpleTestCase):
     def test_ghee_and_other_raw_material_go_to_bhupinder(self):
         self.assertEqual(self.first('RAW_MATERIAL'), [(hierarchy.OWNER_STAGE, 'bhupinder')])
 
-    def test_every_route_ends_payment_audit_final(self):
+    def test_every_route_ends_payment_ca_audit_final(self):
         for route in ROUTES:
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
-                self.assertEqual([r for _n, r in stages[-3:]], ['payment', 'audit', 'final'])
+                self.assertEqual([r for _n, r in stages[-4:]], ['payment', 'ca', 'audit', 'final'])
                 named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
                                             enumerate(stages, start=1)])
-                self.assertEqual([r for _s, r in named][-3:], [StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL])
+                self.assertEqual([r for _s, r in named][-4:],
+                                 [StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT, StageRole.FINAL])
+
+
+def _po_request(**overrides):
+    """A vendor advance against a PO: still routed by its purpose."""
+    return vendor_bill_request(payment_against='AGAINST_PO', documents=[
+        {'kind': 'PO', 'sap_doc_entry': 14008, 'open_amount': '350000', 'amount': '1000'}], **overrides)
 
 
 class TheFormNamesTheDepartmentHead(SimpleTestCase):
@@ -163,12 +176,12 @@ class TheFormNamesTheDepartmentHead(SimpleTestCase):
 
     def test_a_by_department_purpose_names_an_hod_with_a_login(self):
         with self.assertRaisesRegex(request_service.RequestInvalid, 'Choose the Department Head'):
-            _clean(vendor_bill_request(purpose_code='RENT'))
+            _clean(_po_request(purpose_code='RENT'))
         with self.assertRaisesRegex(request_service.RequestInvalid, 'not an active HOD'):
-            _clean(vendor_bill_request(purpose_code='RENT', department_head_code='JWPL9999'))
+            _clean(_po_request(purpose_code='RENT', department_head_code='JWPL9999'))
         with self.assertRaisesRegex(request_service.RequestInvalid, 'Arshdeep Singh .JWPL3005. has no OMS login'):
-            _clean(vendor_bill_request(purpose_code='RENT', department_head_code='JWPL3005'))
-        cleaned = _clean(vendor_bill_request(purpose_code='RENT', department_head_code='temp0001'))
+            _clean(_po_request(purpose_code='RENT', department_head_code='JWPL3005'))
+        cleaned = _clean(_po_request(purpose_code='RENT', department_head_code='temp0001'))
         self.assertEqual(cleaned.fields['department_head_employee'].employee_code, 'TEMP0001')
         self.assertEqual(cleaned.fields['department_head'].username, 'nirmal')  # who approves
 
@@ -322,7 +335,7 @@ class ExpenseRoutes(SimpleTestCase):
         for route in EXPENSE_ROUTES:
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
-                self.assertEqual(stages[-2:], [('Payment Approval', 'payment'),
+                self.assertEqual(stages[-3:], [('Payment Approval', 'payment'), (hierarchy.CA_STAGE, 'ca'),
                                                (EXPENSE_AUDIT_STAGE, 'expense_audit')])
                 named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
                                             enumerate(stages, start=1)])
@@ -349,7 +362,8 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or                     route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT',
+                                 'AP_AGAINST_BILL') or route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             self.assertIn('purpose_code = ', route['query'])
 
@@ -469,7 +483,7 @@ class BillsDueSoon(SimpleTestCase):
                                  [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.DIRECTOR_STAGE, 'director')])
                 self.assertEqual(routes[f'AP_{code}_DUE_SOON']['stages'], [])
                 self.assertEqual([n for n, _r in hierarchy.full_stages(routes[f'AP_{code}_DUE_SOON'])],
-                                 ['Payment Approval', 'Audit Approval', 'Final Approval'])
+                                 ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
 
     def test_the_two_routes_never_both_match(self):
         for code in ('UTILITIES', 'INSURANCE'):
@@ -549,10 +563,10 @@ class TheBillDueDate(SimpleTestCase):
                       _problems(_due_request(bill_due_date='')))
         self.assertEqual(_problems(_due_request(bill_due_date='2026-09-01')), [])  # overdue: allowed
 
-    def test_against_a_bill_it_is_asked_too(self):
-        cleaned = _clean(vendor_bill_request(purpose_code='UTILITIES', department_head_code='TEMP0001',
-                                             bill_due_date='2026-10-25'))
-        self.assertEqual(str(cleaned.fields['bill_due_date']), '2026-10-25')
+    def test_against_a_bill_it_is_not_asked(self):
+        # Every bill goes straight to Payment (2026-10-19): its due date decides nothing.
+        cleaned = _clean(vendor_bill_request(purpose_code='UTILITIES', bill_due_date='2026-10-25'))
+        self.assertIsNone(cleaned.fields['bill_due_date'])
 
     def test_other_purposes_are_not_asked_and_keep_none(self):
         cleaned = _clean(vendor_bill_request(bill_due_date='2026-10-20'))
@@ -654,11 +668,11 @@ class DueSoonSkipsTheHead(SimpleTestCase):
 class AgainstABillThePaymentDateIsStillAsked(SimpleTestCase):
     """Only On Account (and a bill due soon) is paid the day it is raised."""
 
-    def test_a_far_off_utility_bill_keeps_its_typed_payment_date(self):
+    def test_a_utility_bill_keeps_its_typed_payment_date_and_names_no_head(self):
         import datetime
         from advance_payment.services import clock
         with mock.patch.object(clock, 'today', return_value=datetime.date(2026, 10, 15)):
             cleaned = _clean(vendor_bill_request(purpose_code='UTILITIES', department_head_code='TEMP0001',
                                                  bill_due_date='2026-10-25', payment_date='2026-10-22'))
         self.assertEqual(str(cleaned.fields['payment_date']), '2026-10-22')
-        self.assertIsNotNone(cleaned.fields['department_head_employee'])
+        self.assertIsNone(cleaned.fields['department_head_employee'])

@@ -85,11 +85,20 @@ RETIRED = {
 #: Assets – Others goes to the plant's approver since 2026-10-16.)
 HEAD_PURPOSES = frozenset({
     'FINISHED_GOODS', 'CONSUMABLES', 'LAB',
-    'FREIGHT_IN', 'FREIGHT_OUT', 'JOB_WORK', 'LABOUR', 'ADVERTISING', 'COMMISSION', 'RENT',
+    'JOB_WORK', 'LABOUR', 'ADVERTISING', 'COMMISSION', 'RENT',
     'UTILITIES', 'INSURANCE', 'PROFESSIONAL', 'REPAIRS', 'FUEL', 'TRAVEL', 'SECURITY', 'IT_SOFTWARE',
     'OTHER_EXPENSE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM', 'INTERCOMPANY',
     'INCENTIVE', 'TA_DA',
 })
+
+#: Freight (user, 2026-10-19): whatever it is paid against, Navdeep approves
+#: it first, then the Payment desk — no Department Head is asked. Not on an
+#: Employee / Imprest request, which keeps its own route.
+FREIGHT_PURPOSES = ('FREIGHT_IN', 'FREIGHT_OUT', 'FREIGHT_IMPORT')
+
+#: Paid against bills (user, 2026-10-19): straight to the Payment desk — no
+#: Department Head, no owner, no Director — whatever it is for (freight aside).
+AGAINST_BILL = 'AGAINST_BILL'
 
 #: Purposes paid by a due date (user, 2026-10-17): the requester types the
 #: Bill Due Date — the due date printed on the utility's bill, the policy's
@@ -137,10 +146,14 @@ def saved_label(code):
     return _LABELS.get(code) or RETIRED.get(code, '')
 
 
-def needs_department_head(company, request_type, purpose_code, budget_code=''):
+def needs_department_head(company, request_type, purpose_code, budget_code='', payment_against=''):
     """Whether this request is approved by the Department Head picked on the form."""
     if company in NO_HEAD_COMPANIES or request_type == 'ACCOUNT':
         return False  # Mart's one approver; an Account Payment's fixed route
+    if payment_against == AGAINST_BILL:
+        return False  # straight to the Payment desk (user, 2026-10-19)
+    if purpose_code in FREIGHT_PURPOSES and request_type not in HEAD_REQUEST_TYPES:
+        return False  # Navdeep, then the Payment desk
     if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
         return False  # the plant's fixed approver, by amount
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES
@@ -155,7 +168,7 @@ def is_due_soon(bill_due_date, today):
     return bill_due_date is not None and (bill_due_date - today).days <= DUE_SOON_DAYS
 
 
-def needs_bill_due_date(company, request_type, purpose_code):
+def needs_bill_due_date(company, request_type, purpose_code, payment_against=''):
     """Whether the request names its Bill Due Date: a `DUE_SOON_PURPOSES`
     purpose on a route that reads it — the purpose routes of Oil and
     Beverages. Mart's one approver, the Employee / Imprest route, Account
@@ -164,6 +177,8 @@ def needs_bill_due_date(company, request_type, purpose_code):
         return False
     if request_type in ('ACCOUNT', 'EXPENSE'):
         return False
+    if payment_against == AGAINST_BILL:
+        return False  # straight to the Payment desk whenever it is due
     return purpose_code in DUE_SOON_PURPOSES
 
 

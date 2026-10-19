@@ -107,15 +107,20 @@ class FlowError(Exception):
 
 #: The fixed tails a route may end with: the full one, or (an Expense route)
 #: Payment and Audit only, where Audit posts.
-FIXED_TAILS = (list(FIXED_ROLES), [StageRole.PAYMENT, StageRole.AUDIT])
+FIXED_TAILS = (
+    list(FIXED_ROLES), [StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT],
+    # Routes seeded before the CA desk (2026-10-19), until they are seeded again.
+    [StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL], [StageRole.PAYMENT, StageRole.AUDIT],
+)
 
 
 def roles(stages):
     """`[(stage, role)]` for a workflow's stages; FlowError if they break the rule.
 
     The rule: any number of approval stages, then exactly Payment Approval,
-    Audit Approval, Final Approval, once each, last and in that order — or,
-    for an Expense route, Payment Approval and Audit Approval only.
+    CA Approval, Audit Approval, Final Approval, once each, last and in that
+    order — or, for an Expense route, Payment, CA and Audit only. A route
+    without CA (seeded before it) is still accepted.
     """
     named = [(stage, StageRole.of(stage.name)) for stage in stages]
     fixed = [role for _s, role in named if role != StageRole.APPROVAL]
@@ -124,10 +129,10 @@ def roles(stages):
         if fixed == tail_roles and tail == tail_roles:
             return named
     raise FlowError(
-        'The workflow must end with three stages named exactly Payment Approval, '
+        'The workflow must end with stages named exactly Payment Approval, CA Approval, '
         'Audit Approval and Final Approval, in that order (an Expense workflow: Payment '
-        'Approval and Audit Approval). Any stages before them are approvals and may be '
-        'named freely.', status=409)
+        'Approval, CA Approval and Audit Approval). Any stages before them are approvals '
+        'and may be named freely.', status=409)
 
 
 def posting_role(named):
@@ -704,7 +709,7 @@ def recall(advance, *, user, remarks='', version=None):
 #: payment details against the evidence: making it approve something it can
 #: see is wrong, purely so Final can be the one to send it back, adds a
 #: pointless round trip and an approval nobody meant.
-SEND_BACK_ROLES = (StageRole.FINAL, StageRole.AUDIT)
+SEND_BACK_ROLES = (StageRole.FINAL, StageRole.AUDIT, StageRole.CA)
 
 
 @transaction.atomic
@@ -718,7 +723,7 @@ def send_back(advance, *, user, remarks, version=None):
     _remarks_required(remarks, 'sending it back')
     flow = _acting(advance, user, version)
     if StageRole(flow.current_role) not in SEND_BACK_ROLES:
-        raise FlowError('Only the Audit or Final stage may send a request back '
+        raise FlowError('Only the CA, Audit or Final stage may send a request back '
                         'to Payment.', status=409)
     payment = next(((s, r) for s, r in _stages(flow) if r == StageRole.PAYMENT), None)
     advance = flow.request
@@ -976,7 +981,7 @@ def may_add_file(flow, user, purpose):
 
 #: The stages that see the payee's account: whom it is paid to, from where,
 #: the proofs, and the payee's SAP balance and ledger.
-ACCOUNT_ROLES = (StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL)
+ACCOUNT_ROLES = (StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT, StageRole.FINAL)
 
 
 def sees_account(advance, user):

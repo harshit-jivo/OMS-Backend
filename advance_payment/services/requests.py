@@ -271,7 +271,7 @@ def clean(data, *, desk=False, user=None):
     # DUE_SOON_DAYS days (or overdue), the request goes straight to Payment:
     # no Department Head is asked, and it is paid the day it is raised.
     bill_due_date = None
-    if company in COMPANY_CODES and needs_bill_due_date(company, request_type, purpose):
+    if company in COMPANY_CODES and needs_bill_due_date(company, request_type, purpose, against):
         bill_due_date = _date(data.get('bill_due_date'))
         if bill_due_date is None:
             problems.append("Enter the Bill Due Date: the due date on the bill, or the policy's renewal date.")
@@ -284,7 +284,7 @@ def clean(data, *, desk=False, user=None):
         routing['department_head_employee'], routing['department_head'] = None, None
     else:
         routing['department_head_employee'], routing['department_head'] = _clean_department_head(
-            company, request_type, purpose, data, problems)
+            company, request_type, purpose, data, problems, against)
     if payment_date is None:
         problems.append('Enter the Payment Date.')
     routing.update(effect_month=expense.get('effect_month', ''),
@@ -715,7 +715,7 @@ def _clean_routing(company, data, problems, *, expense=False):
     return out
 
 
-def _clean_department_head(company, request_type, purpose, data, problems):
+def _clean_department_head(company, request_type, purpose, data, problems, against=''):
     """`(employee, user)`: the HOD the requester picked and the login that approves; Nones where none is asked.
 
     The head is an HOD of the employee master, sent by employee code; the
@@ -726,7 +726,7 @@ def _clean_department_head(company, request_type, purpose, data, problems):
     """
     from advance_payment.services import heads
 
-    if not needs_department_head(company, request_type, purpose, _text(data.get('budget_code'), 20)):
+    if not needs_department_head(company, request_type, purpose, _text(data.get('budget_code'), 20), against):
         return None, None
     code = _text(data.get('department_head_code'), 20)
     if not code:

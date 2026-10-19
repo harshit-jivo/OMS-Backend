@@ -3,12 +3,14 @@
 Agreed with the business on 2026-10-05 (`Budget_Approval_Hierarchy.xlsx`).
 Each request goes to exactly one workflow:
 
+    Against Bill (any company)        -> straight to Payment (user, 2026-10-19)
+    Freight (any company)             -> Navdeep, then Payment, bills included
     Mart                              -> Prabhjot, whatever it is for
     Employee / Employee Imprest       -> Department Head -> Director
     Account Payment (any company)     -> Avtar
     anything else (Oil, Beverages)    -> the workflow of its Payment Purpose
 
-and every workflow then ends Payment -> Audit -> Final. "Department Head"
+and every workflow then ends Payment -> CA (Navdeep) -> Audit -> Final. "Department Head"
 is the person the requester picks on the form (see `purposes.HEAD_PURPOSES`),
 not a fixed user: the stage is named `DEPARTMENT_HEAD_STAGE` and its
 configured user is only a placeholder.
@@ -22,7 +24,7 @@ import re
 
 from advance_payment.models import DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE
 from advance_payment.purposes import (
-    DUE_SOON_DAYS, DUE_SOON_PURPOSES, FACTORY_BUDGETS as FACTORY_BUDGET_CODES, HEAD_PURPOSES,
+    DUE_SOON_DAYS, DUE_SOON_PURPOSES, FACTORY_BUDGETS as FACTORY_BUDGET_CODES, FREIGHT_PURPOSES, HEAD_PURPOSES,
     HEAD_REQUEST_TYPES, PAYMENT_PURPOSES, STAFF_ADVANCE_LIMIT,
 )
 
@@ -47,7 +49,8 @@ PEOPLE = {
     'backoffice': 'nirmal',          # Nirmal Didi Ji: BackOff
     'transport': 'paramdeep',        # Paramdeep Singh: Transprt
     'marketing': 'karanpreet',       # Karanpreet Singh: Med MKT
-    'expense_audit': 'bhavani',      # Bhavani: the Expense routes' auditor (Parmeet audits payments)
+    'expense_audit': 'bhavani',
+    'ca': 'Navdeep',                 # Navdeep Singh: the CA desk, after Payment on every route (2026-10-19)      # Bhavani: the Expense routes' auditor (Parmeet audits payments)
 }
 
 #: The Department Head stage's configured user: never asked to act (the
@@ -60,6 +63,18 @@ OWNER_STAGE = 'Budget Owner Approval'
 DIRECTOR_STAGE = 'Director Approval'
 #: A second owner who is not the Director (Oil Purchase: Ziyaul).
 SECOND_STAGE = 'Second Approval'
+#: Freight's one approver before Payment: Navdeep (user, 2026-10-19).
+FREIGHT_STAGE = 'Freight Approval'
+#: The CA desk: Navdeep, right after Payment on every route (user, 2026-10-19).
+CA_STAGE = 'CA Approval'
+#: Mart's small imprests: Navdeep, before Payment (user, 2026-10-19).
+IMPREST_STAGE = 'Imprest Approval'
+#: The requests already waiting at an approval stage on 2026-10-19, moved to
+#: Navdeep at the business's request: his approval, then Payment.
+MOVED_STAGE = 'Navdeep Approval'
+#: Those routes are never chosen for a request: their query matches nothing.
+#: They exist for the requests moved onto them, and so re-seeding gives them CA.
+NEVER_CHOSEN = 'SELECT id FROM advance_payment_request WHERE 1 = 0'
 
 OIL_AND_BEV = "company IN ('OIL', 'BEVERAGES')"
 NOT_STAFF = "request_type NOT IN ({})".format(', '.join(f"'{t}'" for t in sorted(HEAD_REQUEST_TYPES)))
@@ -75,11 +90,23 @@ IMPREST_JOURNAL = "(request_type = 'EMPLOYEE_IMPREST' AND payment_against = 'AGA
 ACCOUNT = "request_type = 'ACCOUNT'"
 NOT_ACCOUNT = "request_type <> 'ACCOUNT'"
 
+#: Paid against bills (user, 2026-10-19): straight to the Payment desk, in
+#: every company and for every type and purpose — freight aside, which goes to
+#: Navdeep first. Kept out of every other route.
+FREIGHT = "purpose_code IN ({})".format(', '.join(f"'{p}'" for p in FREIGHT_PURPOSES))
+#: Freight on its own route: any company, any Payment Against — not an
+#: Employee / Imprest request (those keep their own route) or an Account Payment.
+FREIGHT_ROUTED = f'({FREIGHT} AND {NOT_STAFF} AND {NOT_ACCOUNT})'
+AGAINST_BILL = "payment_against = 'AGAINST_BILL'"
+NOT_BILL = "payment_against <> 'AGAINST_BILL'"
+#: Mart's Employee Imprest up to the limit (user, 2026-10-19): Navdeep, then
+#: Payment; above it, Prabhjot as every other Mart request. Not against bills.
+MART_SMALL_IMPREST = f"(request_type = 'EMPLOYEE_IMPREST' AND amount <= {STAFF_ADVANCE_LIMIT})"
+
 #: Purposes approved by one fixed owner, and whether the Director follows.
 FIXED_OWNER = {
     # Oil purchases: Shunty, then Ziyaul — not the Director (user, 2026-10-08).
     'OIL_PURCHASE': ('shunty', False),
-    'FREIGHT_IMPORT': ('himanshu', True),
     'RAW_MATERIAL': ('bhupinder', False),
     'PACKING_MATERIAL': ('bhupinder', False),
     'SEMI_FINISHED': ('bhupinder', False),
@@ -205,6 +232,16 @@ def expense_routes():
     return out
 
 
+def moved_routes():
+    """The two routes the requests waiting on 2026-10-19 were moved onto: Navdeep, then Payment."""
+    return [
+        {'code': 'AP_MOVED_TO_NAVDEEP', 'name': 'Payments · moved to Navdeep (19 Oct 2026)', 'company': 'ALL',
+         'query': NEVER_CHOSEN, 'stages': [(MOVED_STAGE, 'navdeep')], 'never_chosen': True},
+        {'code': 'AP_EXP_MOVED_TO_NAVDEEP', 'name': 'Expense · moved to Navdeep (19 Oct 2026)', 'company': 'ALL',
+         'query': NEVER_CHOSEN, 'stages': [(MOVED_STAGE, 'navdeep')], 'expense': True, 'never_chosen': True},
+    ]
+
+
 def retired_expense_routes():
     """The Expense workflows split by Electricity until 2026-10-09: the Director
     now follows every owner, so one workflow per budget head serves both."""
@@ -222,13 +259,17 @@ def routes():
     labels = {code: label for code, label, _g in PAYMENT_PURPOSES}
     out = [
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
-         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')"),
+         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
+                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}'),
          'stages': [(OWNER_STAGE, 'mart')]},
+        {'code': 'AP_MART_IMPREST_SMALL', 'name': f'Payments · Mart · Employee Imprest · up to {STAFF_ADVANCE_LIMIT:,}',
+         'company': 'MART', 'query': _where("company = 'MART'", NOT_BILL, MART_SMALL_IMPREST),
+         'stages': [(IMPREST_STAGE, 'navdeep')]},
         {'code': 'AP_ACCOUNT', 'name': 'Payments · Account Payment', 'company': 'ALL',
          'query': _where(ACCOUNT), 'stages': [(OWNER_STAGE, 'avtar')]},
         # Imprest, and a salary advance outside the plant: the picked Department Head, then the Director.
         {'code': 'AP_STAFF_ADVANCE', 'name': 'Payments · Staff Advance / Imprest', 'company': 'ALL',
-         'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN'),
+         'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN'), NOT_BILL,
                          f"(request_type = 'EMPLOYEE_IMPREST' OR budget_code NOT IN {FACTORY_BUDGETS})",
                          f'NOT {IMPREST_JOURNAL}'),
          'stages': _chain(HEAD, True)},
@@ -254,26 +295,32 @@ def routes():
          'stages': [(DIRECTOR_STAGE, 'director')]},
     ]
     for code, label, _group in PAYMENT_PURPOSES:
-        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, _purpose(code))
+        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code))
+        if code in FREIGHT_PURPOSES:
+            # Every company and Payment Against, bills included: Navdeep first.
+            out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
+                        'query': _where(NOT_STAFF, NOT_ACCOUNT, _purpose(code)),
+                        'stages': [(FREIGHT_STAGE, 'navdeep')]})
+            continue
         if code == 'SALARY':
             out += [
                 {'code': 'AP_SALARY', 'name': f'Payments · {label}', 'company': 'ALL',
                  'query': _where(*base, f'budget_code NOT IN {FACTORY_BUDGETS}'),
                  'stages': _chain('ziyaul', False)},
                 {'code': 'AP_SALARY_FACTORY_OIL', 'name': f'Payments · {label} · Oil factory', 'company': 'OIL',
-                 'query': _where("company = 'OIL'", NOT_STAFF, NOT_ACCOUNT, _purpose(code),
+                 'query': _where("company = 'OIL'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
                                  f'budget_code IN {FACTORY_BUDGETS}'),
                  'stages': _chain('factory_oil', False)},
                 {'code': 'AP_SALARY_FACTORY_BEV', 'name': f'Payments · {label} · Beverages factory',
                  'company': 'BEVERAGES',
-                 'query': _where("company = 'BEVERAGES'", NOT_STAFF, NOT_ACCOUNT, _purpose(code),
+                 'query': _where("company = 'BEVERAGES'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
                                  f'budget_code IN {FACTORY_BUDGETS}'),
                  'stages': _chain('factory_bev', False)},
             ]
         elif code == 'CUSTOMER_REFUND':
             out += [
                 {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
-                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, _purpose(code)),
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code)),
                  'stages': _chain(owner, False)}
                 for company, tag, title, owner in (('OIL', 'OIL', 'Oil', 'sales_oil'),
                                                    ('BEVERAGES', 'BEV', 'Beverages', 'sales_bev'))
@@ -281,7 +328,7 @@ def routes():
         elif code in PLANT_PURPOSES:
             out += [
                 {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
-                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, _purpose(code)),
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code)),
                  'stages': _chain(owner, True)}
                 for company, tag, title, owner in PLANT_APPROVERS
             ]
@@ -312,16 +359,20 @@ def routes():
                         'query': _where(*base), 'stages': stages})
         else:
             raise ValueError(f'Purpose {code} has no route in the hierarchy.')
-    return out + expense_routes()
+    # Every bill, whatever it is for (freight aside): straight to the Payment desk.
+    out.append({'code': 'AP_AGAINST_BILL', 'name': 'Payments · Against Bill', 'company': 'ALL',
+                'query': _where(AGAINST_BILL, f'NOT {FREIGHT_ROUTED}'), 'stages': []})
+    return out + expense_routes() + moved_routes()
 
 
 def full_stages(route):
     """All stages of a route, in order: `[(name, role)]`, the fixed ones last.
 
-    Payment -> Audit -> Final; an Expense route ends Payment -> Expense Audit
-    (its own auditor), whose approval posts.
+    Payment -> CA -> Audit -> Final; an Expense route ends Payment -> CA ->
+    Expense Audit (its own auditor), whose approval posts. The CA desk is on
+    every route (user, 2026-10-19).
     """
+    payment = [('Payment Approval', 'payment'), (CA_STAGE, 'ca')]
     if route.get('expense'):
-        return [*route['stages'], ('Payment Approval', 'payment'), (EXPENSE_AUDIT_STAGE, 'expense_audit')]
-    return [*route['stages'], ('Payment Approval', 'payment'), ('Audit Approval', 'audit'),
-            ('Final Approval', 'final')]
+        return [*route['stages'], *payment, (EXPENSE_AUDIT_STAGE, 'expense_audit')]
+    return [*route['stages'], *payment, ('Audit Approval', 'audit'), ('Final Approval', 'final')]

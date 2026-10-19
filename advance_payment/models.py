@@ -246,6 +246,10 @@ class StageRole(models.TextChoices):
     APPROVAL = 'APPROVAL', 'Approval'
     #: Fills the payment details; approves only when they are complete.
     PAYMENT = 'PAYMENT', 'Payment Approval'
+    #: The CA desk (Navdeep, user 2026-10-19): right after Payment on every
+    #: route. Checks the payment details; approves, rejects or sends back to
+    #: Payment. Nothing reaches SAP yet.
+    CA = 'CA', 'CA Approval'
     #: Approves or rejects; nothing reaches SAP yet.
     AUDIT = 'AUDIT', 'Audit Approval'
     #: Approving posts the voucher to SAP, then completes: the money may go.
@@ -263,14 +267,15 @@ class StageRole(models.TextChoices):
         key = ' '.join(str(stage_name or '').split()).lower()
         if key == EXPENSE_AUDIT_STAGE.lower():
             return cls.AUDIT
-        for role in (cls.PAYMENT, cls.AUDIT, cls.FINAL):
+        for role in (cls.PAYMENT, cls.CA, cls.AUDIT, cls.FINAL):
             if role.label.lower() == key:
                 return role
         return cls.APPROVAL
 
 
-#: The fixed stages, in the order a route must end with them.
-FIXED_ROLES = (StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL)
+#: The fixed stages, in the order a route must end with them. CA sits between
+#: Payment and Audit; a route seeded before it existed (no CA) still runs.
+FIXED_ROLES = (StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT, StageRole.FINAL)
 
 #: An approval stage with this exact name is not handled by its configured
 #: user: it goes to the Department Head the requester picked on the request

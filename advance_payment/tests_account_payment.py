@@ -116,12 +116,12 @@ class ItsRoute(SimpleTestCase):
         self.assertEqual(route['company'], 'ALL')
         self.assertEqual(route['query'], "SELECT id FROM advance_payment_request WHERE request_type = 'ACCOUNT'")
         self.assertEqual(hierarchy.full_stages(route), [
-            (hierarchy.OWNER_STAGE, 'avtar'), ('Payment Approval', 'payment'),
+            (hierarchy.OWNER_STAGE, 'avtar'), ('Payment Approval', 'payment'), (hierarchy.CA_STAGE, 'ca'),
             ('Audit Approval', 'audit'), ('Final Approval', 'final')])
 
     def test_no_other_route_takes_it(self):
         for route in hierarchy.routes():
-            if route['code'] == 'AP_ACCOUNT':
+            if route['code'] == 'AP_ACCOUNT' or route.get('never_chosen'):
                 continue
             with self.subTest(route['code']):
                 query = route['query']

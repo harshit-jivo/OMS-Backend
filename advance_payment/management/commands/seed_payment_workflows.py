@@ -109,17 +109,47 @@ class Command(BaseCommand):
         if retire:
             self.stdout.write(f'\nretire: {", ".join(retire)}')
 
+    @staticmethod
+    def _write_stages(workflow, stages, users):
+        """The workflow's stages, matched to the existing rows by NAME, not sequence.
+
+        A request mid-route points at a stage row: matched by name, a request at
+        Audit stays at Audit when a stage is inserted before it (the CA desk,
+        2026-10-19), instead of the row being renamed under it. A stage the
+        route no longer has is deactivated, never deleted, and numbered BEFORE
+        the live stages, so a request still sitting on it moves on to the
+        route's first live stage when approved.
+        """
+        def key(name):
+            return ' '.join(name.split()).lower()
+
+        rows = list(WorkflowStage.objects.filter(workflow=workflow).order_by('-is_active', 'sequence', 'id'))
+        by_name = {}
+        for row in rows:
+            by_name.setdefault(key(row.name), row)
+        wanted = []
+        for name, role in stages:
+            user = users[hierarchy.HEAD_PLACEHOLDER if role == hierarchy.HEAD else role]
+            row = by_name.pop(key(name), None) or WorkflowStage(workflow=workflow, name=name)
+            row.name, row.user, row.is_active = name, user, True
+            wanted.append(row)
+        kept = {id(r) for r in wanted}
+        retired = [r for r in rows if id(r) not in kept]
+        # Out of the way first: (workflow, sequence) is unique.
+        for i, row in enumerate(rows, start=1000):
+            WorkflowStage.objects.filter(pk=row.pk).update(sequence=i)
+        retired_ids = {id(r) for r in retired}
+        for sequence, row in enumerate([*retired, *wanted], start=1):
+            row.sequence = sequence
+            if id(row) in retired_ids:
+                row.is_active = False
+            row.save()
+
     def _write(self, module, route, users):
         workflow, _created = Workflow.objects.update_or_create(
             module=module, code=route['code'],
             defaults={'name': route['name'], 'company': route['company'], 'is_active': True})
-        stages = hierarchy.full_stages(route)
-        for sequence, (name, role) in enumerate(stages, start=1):
-            user = users[hierarchy.HEAD_PLACEHOLDER if role == hierarchy.HEAD else role]
-            WorkflowStage.objects.update_or_create(
-                workflow=workflow, sequence=sequence,
-                defaults={'name': name, 'user': user, 'is_active': True})
-        WorkflowStage.objects.filter(workflow=workflow, sequence__gt=len(stages)).update(is_active=False)
+        self._write_stages(workflow, hierarchy.full_stages(route), users)
         query, _created = WorkflowQuery.objects.update_or_create(
             workflow=workflow, name=f'{route["code"]}_QUERY',
             defaults={'company': route['company'], 'query_text': route['query'], 'is_active': True})
