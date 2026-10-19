@@ -1416,8 +1416,13 @@ _OPEN_DOC_SQL = '''
                  P19."NumAtCard", P14."NumAtCard",
                  P46."CounterRef", P24."CounterRef") AS "party_ref",
         COALESCE(P18."DocStatus", P13."DocStatus",
-                 P19."DocStatus", P14."DocStatus")   AS "doc_status"
+                 P19."DocStatus", P14."DocStatus")   AS "doc_status",
+        -- A manual journal entry's Journal Voucher, the number accounts key it
+        -- under (OJDT.BatchNum); null when it was posted directly.
+        HJ."BatchNum"                    AS "voucher_num"
     FROM "{schema}"."JDT1" T0
+    LEFT JOIN "{schema}"."OJDT" HJ
+           ON T0."TransType" = 30 AND HJ."TransId" = T0."TransId"
     LEFT JOIN "{schema}"."OPCH" P18
            ON T0."TransType" = 18 AND P18."DocEntry" = T0."SourceID"
     LEFT JOIN "{schema}"."OINV" P13
@@ -1639,6 +1644,9 @@ def open_documents(company, card_code, limit=None, bills_only=False,
             # a payment. What the person paying it is actually holding.
             'party_ref': _s(r.get('party_ref')),
             'doc_status': _s(r.get('doc_status')),
+            # A journal entry keyed through a Journal Voucher: its JV number,
+            # which is what accounts quote ("JV 7101"); null otherwise.
+            'voucher_num': int(r['voucher_num']) if r.get('voucher_num') else None,
             'ref2': _s(r.get('ref2')),
             'document_date': _date(r.get('document_date')),
             'posting_date': _date(r.get('posting_date')),

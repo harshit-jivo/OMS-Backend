@@ -483,7 +483,7 @@ class BillsDueSoon(SimpleTestCase):
     def test_due_soon_is_the_typed_date_before_today_plus_two_in_india(self):
         self.assertEqual(hierarchy.BILL_DUE_SOON,
                          "(bill_due_date IS NOT NULL "
-                         "AND bill_due_date < (now() AT TIME ZONE 'Asia/Kolkata')::date + 2)")
+                         "AND bill_due_date <= (now() AT TIME ZONE 'Asia/Kolkata')::date + 2)")
         self.assertEqual(purposes.DUE_SOON_DAYS, 2)
 
     def test_only_these_routes_look_at_the_due_date(self):
@@ -527,6 +527,14 @@ def _problems(data):
 
 class TheBillDueDate(SimpleTestCase):
     """The requester types it; the bill or policy showing it is attached."""
+
+    def setUp(self):
+        # Five days before the sample due date (20 Oct): the full route, so a head is asked.
+        import datetime
+        from advance_payment.services import clock
+        patcher = mock.patch.object(clock, 'today', return_value=datetime.date(2026, 10, 15))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_utilities_and_insurance_on_account_carry_it(self):
         for purpose in ('UTILITIES', 'INSURANCE'):
@@ -598,3 +606,59 @@ class APremiumPaidOnAccount(SimpleTestCase):
         self.assertNotIn('PaymentInvoices', body)
         self.assertEqual(body['U_Type_of_Advance'], 'One Time Settlement')
         self.assertEqual(body['U_Adv_Settl_Dt'], '2026-10-25')  # 30 days on, as SAP's own (10 to 25 days)
+
+
+class DueSoonSkipsTheHead(SimpleTestCase):
+    """Due within 2 days, or overdue: no Department Head, paid the day it is raised (user, 2026-10-19).
+    Due later: the Department Head the requester picks, then the Director."""
+
+    def clean_on(self, today, **overrides):
+        import datetime
+        from advance_payment.services import clock
+        with mock.patch.object(clock, 'today', return_value=datetime.date.fromisoformat(today)):
+            return _clean(_due_request(**overrides))
+
+    def test_due_within_two_days_drops_the_head_and_pays_today(self):
+        for today in ('2026-10-18', '2026-10-19', '2026-10-20', '2026-10-25'):  # 2 days, 1 day, the day, overdue
+            with self.subTest(today):
+                cleaned = self.clean_on(today, payment_date='2026-12-31', department_head_code='')
+                self.assertIsNone(cleaned.fields['department_head'])
+                self.assertIsNone(cleaned.fields['department_head_employee'])
+                self.assertEqual(str(cleaned.fields['payment_date']), today)
+
+    def test_a_head_sent_anyway_is_dropped(self):
+        cleaned = self.clean_on('2026-10-19', department_head_code='TEMP0001')
+        self.assertIsNone(cleaned.fields['department_head'])
+
+    def test_more_than_two_days_ahead_needs_the_head_and_still_pays_today_on_account(self):
+        cleaned = self.clean_on('2026-10-17', payment_date='2026-10-19')  # due in 3 days
+        self.assertIsNotNone(cleaned.fields['department_head_employee'])
+        # Vendor On Account: never asked, always the day it is raised.
+        self.assertEqual(str(cleaned.fields['payment_date']), '2026-10-17')
+        with self.assertRaises(request_service.RequestInvalid) as caught:
+            self.clean_on('2026-10-17', department_head_code='')
+        self.assertIn('Choose the Department Head who approves this request.', caught.exception.problems)
+
+    def test_the_rule(self):
+        import datetime
+        due, day = datetime.date(2026, 10, 20), datetime.date.fromisoformat
+        self.assertFalse(purposes.is_due_soon(due, day('2026-10-16')))
+        self.assertFalse(purposes.is_due_soon(due, day('2026-10-17')))
+        self.assertTrue(purposes.is_due_soon(due, day('2026-10-18')))
+        self.assertTrue(purposes.is_due_soon(due, day('2026-10-19')))
+        self.assertTrue(purposes.is_due_soon(due, day('2026-10-21')))
+        self.assertFalse(purposes.is_due_soon(None, day('2026-10-19')))
+
+
+
+class AgainstABillThePaymentDateIsStillAsked(SimpleTestCase):
+    """Only On Account (and a bill due soon) is paid the day it is raised."""
+
+    def test_a_far_off_utility_bill_keeps_its_typed_payment_date(self):
+        import datetime
+        from advance_payment.services import clock
+        with mock.patch.object(clock, 'today', return_value=datetime.date(2026, 10, 15)):
+            cleaned = _clean(vendor_bill_request(purpose_code='UTILITIES', department_head_code='TEMP0001',
+                                                 bill_due_date='2026-10-25', payment_date='2026-10-22'))
+        self.assertEqual(str(cleaned.fields['payment_date']), '2026-10-22')
+        self.assertIsNotNone(cleaned.fields['department_head_employee'])

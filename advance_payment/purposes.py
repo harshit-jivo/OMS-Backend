@@ -96,11 +96,11 @@ HEAD_PURPOSES = frozenset({
 #: renewal date — and attaches the bill or policy that shows it. SAP cannot
 #: say: these vendors' bills carry their posting date as the due date.
 #:
-#: Raised fewer than DUE_SOON_DAYS days before it, or after it, the request
-#: skips its approval stages and goes straight to Payment Approval; raised
-#: earlier, it takes its usual route (Department Head, then Director). Due
-#: 20 Oct: raised on the 18th or before, the full route; on the 19th or later,
-#: straight to Payment. The Payment desk checks the date against the bill.
+#: Due DUE_SOON_DAYS days or fewer after the day it is raised, or already past,
+#: the request skips its approval stages and goes straight to Payment Approval;
+#: due later, it takes its usual route (Department Head, then Director). Due
+#: 20 Oct: raised on the 17th or before, the full route; on the 18th or later,
+#: straight to Payment (user, 2026-10-19). The Payment desk checks the date.
 DUE_SOON_PURPOSES = frozenset({'UTILITIES', 'INSURANCE'})
 DUE_SOON_DAYS = 2
 
@@ -144,6 +144,15 @@ def needs_department_head(company, request_type, purpose_code, budget_code=''):
     if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
         return False  # the plant's fixed approver, by amount
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES
+
+
+def is_due_soon(bill_due_date, today):
+    """Due DUE_SOON_DAYS days or fewer after the day it is raised, or already
+    past: straight to Payment — no Department Head, no Director, and paid the
+    day it is raised (user, 2026-10-19). Due 20 Oct: raised on the 18th or
+    later, straight to Payment; on the 17th or before, the head and the
+    Director. The SQL twin is `hierarchy.BILL_DUE_SOON`."""
+    return bill_due_date is not None and (bill_due_date - today).days <= DUE_SOON_DAYS
 
 
 def needs_bill_due_date(company, request_type, purpose_code):

@@ -116,7 +116,7 @@ HEAD_THEN_SECOND = {'INCENTIVE': 'navdeep', 'TA_DA': 'navdeep'}
 HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'INSURANCE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM'})
 
 
-#: The request's Bill Due Date falls within DUE_SOON_DAYS days of today, or is
+#: The request's Bill Due Date is DUE_SOON_DAYS days or fewer from today, or
 #: already past (`purposes.DUE_SOON_PURPOSES`): its route skips the approval
 #: stages. "Today" is India's (`clock.today()`), not the database session's
 #: UTC date. Evaluated when the request is submitted or resubmitted. A request
@@ -124,7 +124,7 @@ HEAD_THEN_DIRECTOR = frozenset({'UTILITIES', 'INSURANCE', 'EMP_ADVANCE', 'EMP_IM
 #: `NOT BILL_DUE_SOON` takes it: the usual route.
 BILL_DUE_SOON = (
     "(bill_due_date IS NOT NULL "
-    f"AND bill_due_date < (now() AT TIME ZONE 'Asia/Kolkata')::date + {DUE_SOON_DAYS})"
+    f"AND bill_due_date <= (now() AT TIME ZONE 'Asia/Kolkata')::date + {DUE_SOON_DAYS})"
 )
 DUE_SOON_SUFFIX = '_DUE_SOON'
 
@@ -294,14 +294,14 @@ def routes():
                         'query': _where(*base), 'stages': stages})
         elif code in DUE_SOON_PURPOSES:
             # Two routes, kept apart by the Bill Due Date: the usual one, and
-            # straight to Payment for a bill due within DUE_SOON_DAYS days.
+            # straight to Payment for a bill due in DUE_SOON_DAYS days or fewer.
             # Every such purpose is a Department Head one (pinned by the tests).
             out += [
                 {'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
                  'query': _where(*base, f'NOT {BILL_DUE_SOON}'),
                  'stages': _chain(HEAD, code in HEAD_THEN_DIRECTOR)},
                 {'code': f'AP_{code}{DUE_SOON_SUFFIX}',
-                 'name': f'Payments · {label} · bill due within {DUE_SOON_DAYS} days',
+                 'name': f'Payments · {label} · bill due in {DUE_SOON_DAYS} days or less',
                  'company': 'ALL', 'query': _where(*base, BILL_DUE_SOON), 'stages': []},
             ]
         elif code in HEAD_PURPOSES:

@@ -53,7 +53,7 @@ from advance_payment.models import (
     ReturnMethod,
 )
 from advance_payment.purposes import (
-    VENDOR_ON_ACCOUNT_PURPOSES, needs_bill_due_date, needs_department_head, purpose_label,
+    VENDOR_ON_ACCOUNT_PURPOSES, is_due_soon, needs_bill_due_date, needs_department_head, purpose_label,
 )
 from advance_payment.services import clock, daily_limit
 from core.companies import COMPANY_CODES
@@ -250,8 +250,6 @@ def clean(data, *, desk=False, user=None):
     payment_date = _date(data.get('payment_date'))
     if payment_date is None and case.get('expense') and not _text(data.get('payment_date')):
         payment_date = clock.today()  # not asked: the day it is raised
-    if payment_date is None:
-        problems.append('Enter the Payment Date.')
 
     # Vendor -> Against PO's Expected Bill Date is optional: blank is fine, but
     # something typed must be a date.
@@ -268,8 +266,27 @@ def clean(data, *, desk=False, user=None):
         problems.append('Enter the Remarks.')  # optional on an Expense
 
     routing = _clean_routing(company, data, problems, expense=bool(case.get('expense')))
-    routing['department_head_employee'], routing['department_head'] = _clean_department_head(
-        company, request_type, routing.get('purpose_code', ''), data, problems)
+    purpose = routing.get('purpose_code', '')
+    # Utilities and insurance: the Bill Due Date decides the rest. Due within
+    # DUE_SOON_DAYS days (or overdue), the request goes straight to Payment:
+    # no Department Head is asked, and it is paid the day it is raised.
+    bill_due_date = None
+    if company in COMPANY_CODES and needs_bill_due_date(company, request_type, purpose):
+        bill_due_date = _date(data.get('bill_due_date'))
+        if bill_due_date is None:
+            problems.append("Enter the Bill Due Date: the due date on the bill, or the policy's renewal date.")
+    due_soon = is_due_soon(bill_due_date, clock.today())
+    if due_soon or (request_type == RequestType.VENDOR and against == PaymentAgainst.ON_ACCOUNT):
+        # Not asked: paid the day it is raised (user, 2026-10-19) — a bill due
+        # soon, and every vendor paid on account (utilities, insurance).
+        payment_date = clock.today()
+    if due_soon:
+        routing['department_head_employee'], routing['department_head'] = None, None
+    else:
+        routing['department_head_employee'], routing['department_head'] = _clean_department_head(
+            company, request_type, purpose, data, problems)
+    if payment_date is None:
+        problems.append('Enter the Payment Date.')
     routing.update(effect_month=expense.get('effect_month', ''),
                    is_electricity=bool(expense.get('is_electricity')),
                    expense_tds_code=expense.get('tds_code', ''))
@@ -291,15 +308,9 @@ def clean(data, *, desk=False, user=None):
     if against == PaymentAgainst.OTHER and not against_other:
         problems.append('Say what the payment is against.')
 
-    purpose = routing.get('purpose_code', '')
     if case.get('on_account_purposes') and purpose and purpose not in VENDOR_ON_ACCOUNT_PURPOSES:
         problems.append('A vendor is paid On Account only for Electricity, Water & Utilities or an '
                         'Insurance Premium. Pay against its bill or its PO.')
-    bill_due_date = None
-    if company in COMPANY_CODES and needs_bill_due_date(company, request_type, purpose):
-        bill_due_date = _date(data.get('bill_due_date'))
-        if bill_due_date is None:
-            problems.append("Enter the Bill Due Date: the due date on the bill, or the policy's renewal date.")
 
     if problems:
         raise RequestInvalid(problems)
