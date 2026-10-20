@@ -1,7 +1,7 @@
 """Department Heads: picked from the employee master, approved through their OMS login.
 
 The Department Head picker lists the employee master's HODs
-(`Employee.role = HOD`, loaded from JSAP). Approving needs an OMS login, and the
+(`Employee.role = HOD`, loaded from JSAP), and the few named in `EXTRA_HEADS`. Approving needs an OMS login, and the
 master is not linked to `users_user`, so each HOD is matched to a user
 ROUGHLY, by what the two tables share:
 
@@ -44,7 +44,21 @@ KNOWN_LOGINS = {
     'JWPL0035': 'Shunty Vg',     # Shunty Veerji Accounts: "Shunty Veerji", not "Shunty Ary" (both Shunty)
     'JWPL1556': 'bhupinder',     # Bhupinder Singh: the approver login, not "bhupinder payment" (Mart's desk)
     'JWPL2217': 'prabhjot',      # Prabhu: Prabhjot Singh, not "raunak" ("Prabhjot singh raunak")
+    # The Back Office functions' heads (2026-10-20).
+    'JWPL0139': 'Gurvinder Sir',  # Gurvinderjeet Singh: IT
+    'JWPL0037': 'sarabjeet',      # Sarabjeet Kaur: HR
+    'JWPL3069': 'bikramjeet',     # Bikramjeet Singh: Administration
 }
+
+#: Department Heads who are not HODs in JSAP's master, offered all the same:
+#: the Back Office functions' heads (user, 2026-10-20) — Sarabjeet Kaur
+#: (HR, a Sub-HOD) and Bikramjeet Singh (Administration, an Executive). By
+#: code, so a reload of the master from JSAP does not take them away.
+EXTRA_HEADS = frozenset({'JWPL0037', 'JWPL3069'})
+
+
+def _heads():
+    return Employee.objects.active().filter(Q(role=EmployeeRole.HOD) | Q(employee_code__in=EXTRA_HEADS))
 
 
 def _squash(text):
@@ -103,7 +117,7 @@ def match_user(employee, users=None):
 
 def heads(search=''):
     """The HODs the picker offers, each with the user it routes to: `[(employee, user or None)]`."""
-    rows = Employee.objects.active().filter(role=EmployeeRole.HOD).order_by('employee_name')
+    rows = _heads().order_by('employee_name')
     for word in (search or '').split():
         rows = rows.filter(Q(employee_name__icontains=word) | Q(employee_code__icontains=word))
     users = _active_users()
@@ -112,6 +126,5 @@ def heads(search=''):
 
 def head_by_code(code):
     """An active HOD by employee code, and their user: `(employee, user)`; either may be None."""
-    employee = (Employee.objects.active().filter(role=EmployeeRole.HOD, employee_code=(code or '').strip().upper())
-                .first())
+    employee = _heads().filter(employee_code=(code or '').strip().upper()).first()
     return employee, (match_user(employee) if employee else None)

@@ -48,7 +48,7 @@ PEOPLE = {
     'audit': 'parmeet',
     'final': 'kamal1',
     # Expense requests only: owners of budget heads not named above.
-    'backoffice': 'nirmal',          # Nirmal Didi Ji: BackOff
+    'backoffice': 'nirmal',          # Nirmal Didi Ji: BackOff; after the Back Office functions' heads
     'transport': 'paramdeep',        # Paramdeep Singh: Transprt
     'marketing': 'karanpreet',       # Karanpreet Singh: Med MKT
     'expense_audit': 'bhavani',      # Bhavani: the Expense routes' auditor (Parmeet audits payments)
@@ -134,6 +134,20 @@ PLANT_APPROVERS = (('OIL', 'OIL', 'Oil', 'factory_oil'), ('BEVERAGES', 'BEV', 'B
 #: Workflows the hierarchy no longer has, deactivated when it is seeded:
 #: the plant's fixed assets had one workflow for both companies until 2026-10-16.
 RETIRED_ROUTES = ('AP_FA_PM', 'AP_FA_CONSUMABLES', 'AP_FA_OTHERS')
+
+#: The Back Office functions (user, 2026-10-20): the Department Head the
+#: requester picks — the function's head: HR Sarabjeet Kaur, IT Gurvinderjeet
+#: Singh, Legal Karanpreet Singh, Administration Bikramjeet Singh, Accounts
+#: Avtar Singh Rupal — then Nirmal Didi Ji, and no Director. Any department;
+#: Mart keeps its one approver.
+BACK_OFFICE_PURPOSES = ('BO_HR', 'BO_IT', 'BO_LEGAL', 'BO_ADMIN', 'BO_ACCOUNTS')
+BACK_OFFICE_STAGE = 'Back Office Approval'
+
+#: Jivo Mart's Raw Material and Packing Material are bought centrally, through
+#: Jivo Wellness, under Bhupinder (user, 2026-10-20): Mart's requests for them
+#: go to him, not to Prabhjot.
+MART_CENTRAL_PURPOSES = ('RAW_MATERIAL', 'PACKING_MATERIAL')
+MART_CENTRAL = "purpose_code IN ('RAW_MATERIAL', 'PACKING_MATERIAL')"
 
 #: Purposes a second fixed owner approves after the first, instead of the Director.
 SECOND_OWNER = {'OIL_PURCHASE': 'ziyaul'}
@@ -271,8 +285,13 @@ def routes():
     out = [
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
          'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
-                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}'),
+                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {MART_CENTRAL}'),
          'stages': [(OWNER_STAGE, 'mart')]},
+        {'code': 'AP_MART_RM_PM', 'name': 'Payments · Mart · Raw & Packing Material (central, Bhupinder)',
+         'company': 'MART',
+         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
+                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', MART_CENTRAL),
+         'stages': [(OWNER_STAGE, 'bhupinder')]},
         {'code': 'AP_MART_IMPREST_SMALL', 'name': f'Payments · Mart · Employee Imprest · up to {STAFF_ADVANCE_LIMIT:,}',
          'company': 'MART', 'query': _where("company = 'MART'", NOT_BILL, MART_SMALL_IMPREST),
          'stages': [(IMPREST_STAGE, 'navdeep')]},
@@ -343,6 +362,10 @@ def routes():
                  'stages': _chain(owner, True)}
                 for company, tag, title, owner in PLANT_APPROVERS
             ]
+        elif code in BACK_OFFICE_PURPOSES:
+            out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
+                        'query': _where(*base), 'stages': [(DEPARTMENT_HEAD_STAGE, HEAD),
+                                                           (BACK_OFFICE_STAGE, 'backoffice')]})
         elif code in FIXED_OWNER:
             owner, director = FIXED_OWNER[code]
             stages = _chain(owner, director)

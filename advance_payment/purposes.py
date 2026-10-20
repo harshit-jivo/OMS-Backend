@@ -21,7 +21,7 @@ no Department Head.
 """
 
 #: The groups, in the order the form lists them.
-PURPOSE_GROUPS = ('Goods', 'Services', 'People', 'Statutory', 'Finance')
+PURPOSE_GROUPS = ('Goods', 'Services', 'Back Office', 'People', 'Statutory', 'Finance')
 
 #: `(code, label, group)`, in the order the form lists them.
 PAYMENT_PURPOSES = (
@@ -54,6 +54,12 @@ PAYMENT_PURPOSES = (
     ('SECURITY', 'Security & Housekeeping', 'Services'),
     ('IT_SOFTWARE', 'IT, Software & Subscriptions', 'Services'),
     ('OTHER_EXPENSE', 'Other Expense', 'Services'),
+    # The Back Office functions (user, 2026-10-20): the head picked, then Nirmal Didi Ji.
+    ('BO_HR', 'Back Office – Human Resources (HR)', 'Back Office'),
+    ('BO_IT', 'Back Office – Information Technology (IT)', 'Back Office'),
+    ('BO_LEGAL', 'Back Office – Legal', 'Back Office'),
+    ('BO_ADMIN', 'Back Office – Administration', 'Back Office'),
+    ('BO_ACCOUNTS', 'Back Office – Accounts', 'Back Office'),
     ('SALARY', 'Salary & Wages', 'People'),
     ('EMP_ADVANCE', 'Employee Advance', 'People'),
     ('EMP_IMPREST', 'Employee Imprest / Float', 'People'),
@@ -89,6 +95,9 @@ HEAD_PURPOSES = frozenset({
     'UTILITIES', 'INSURANCE', 'PROFESSIONAL', 'REPAIRS', 'FUEL', 'TRAVEL', 'SECURITY', 'IT_SOFTWARE',
     'OTHER_EXPENSE', 'EMP_ADVANCE', 'EMP_IMPREST', 'EXPENSE_CLAIM', 'INTERCOMPANY',
     'INCENTIVE', 'TA_DA',
+    # The Back Office functions (2026-10-20): the requester picks the function's
+    # head (Sarabjeet, Gurvinder, Karanpreet, Bikramjeet, Avtar), then Nirmal Didi Ji.
+    'BO_HR', 'BO_IT', 'BO_LEGAL', 'BO_ADMIN', 'BO_ACCOUNTS',
 })
 
 #: Freight (user, 2026-10-19): whatever it is paid against, Navdeep approves

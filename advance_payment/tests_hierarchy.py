@@ -46,8 +46,9 @@ class EveryRequestHasOneRoute(SimpleTestCase):
                 self.assertTrue(_routes_for(code), f'{code} has no route')
         # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
         # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company;
-        # Utilities' and Insurance's bills due within 2 days; every bill (AP_AGAINST_BILL); Mart's small imprests
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1)
+        # Utilities' and Insurance's bills due within 2 days; every bill (AP_AGAINST_BILL); Mart's small imprests;
+        # Mart's Raw & Packing Material (central, Bhupinder)
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -62,7 +63,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or \
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_IMPREST_JOURNAL',
+                                 'AP_ACCOUNT') or \
                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
@@ -374,8 +376,8 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT',
-                                 'AP_AGAINST_BILL') or route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_IMPREST_JOURNAL',
+                                 'AP_ACCOUNT', 'AP_AGAINST_BILL') or route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             self.assertIn('purpose_code = ', route['query'])
 
@@ -693,3 +695,32 @@ class AgainstABillThePaymentDateIsStillAsked(SimpleTestCase):
                                                  bill_due_date='2026-10-25', payment_date='2026-10-22'))
         self.assertEqual(str(cleaned.fields['payment_date']), '2026-10-22')
         self.assertIsNone(cleaned.fields['department_head_employee'])
+
+
+class TheBackOfficeFunctions(SimpleTestCase):
+    """2026-10-20: HR, IT, Legal, Administration, Accounts — the head picked, then Nirmal; no Director."""
+
+    def test_five_purposes_each_the_picked_head_then_nirmal(self):
+        for code in ('BO_HR', 'BO_IT', 'BO_LEGAL', 'BO_ADMIN', 'BO_ACCOUNTS'):
+            with self.subTest(code):
+                route = BY_CODE[f'AP_{code}']
+                self.assertIn(f"purpose_code = '{code}'", route['query'])
+                self.assertEqual(route['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD),
+                                                   (hierarchy.BACK_OFFICE_STAGE, 'backoffice')])
+                self.assertNotIn(('Director Approval', 'director'), hierarchy.full_stages(route))
+                self.assertTrue(purposes.needs_department_head('OIL', 'VENDOR', code))
+                self.assertFalse(purposes.needs_department_head('MART', 'VENDOR', code))
+        self.assertEqual(hierarchy.PEOPLE['backoffice'], 'nirmal')
+        self.assertEqual(StageRole.of(hierarchy.BACK_OFFICE_STAGE), StageRole.APPROVAL)
+
+
+class MartsRawAndPackingMaterial(SimpleTestCase):
+    """2026-10-20: bought centrally through Jivo Wellness, under Bhupinder — not Prabhjot."""
+
+    def test_mart_rm_and_pm_go_to_bhupinder_the_rest_of_mart_to_prabhjot(self):
+        central = BY_CODE['AP_MART_RM_PM']
+        self.assertEqual(central['stages'], [(hierarchy.OWNER_STAGE, 'bhupinder')])
+        self.assertIn(hierarchy.MART_CENTRAL, central['query'])
+        self.assertIn(f'NOT {hierarchy.MART_CENTRAL}', BY_CODE['AP_MART']['query'])
+        self.assertEqual(BY_CODE['AP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
+

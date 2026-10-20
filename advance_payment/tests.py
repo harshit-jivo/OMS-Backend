@@ -457,8 +457,8 @@ class ThePaymentPurposes(SimpleTestCase):
         response = self._get()
         self.assertEqual(response.status_code, 200)
         data = response.data["data"]
-        self.assertEqual(data["groups"], ["Goods", "Services", "People", "Statutory", "Finance"])
-        self.assertEqual(data["count"], 44)  # Insurance Premium added 2026-10-17
+        self.assertEqual(data["groups"], ["Goods", "Services", "Back Office", "People", "Statutory", "Finance"])
+        self.assertEqual(data["count"], 49)  # Insurance Premium added 2026-10-17; 5 Back Office 2026-10-20
         self.assertEqual(data["results"][0],
                          {"code": "OIL_PURCHASE", "label": "Oil Purchase – Imported or Domestic",
                           "group": "Goods", "needs_head": False, "due_date": False})
@@ -473,4 +473,5 @@ class ThePaymentPurposes(SimpleTestCase):
     def test_every_purpose_is_in_a_listed_group_and_codes_are_unique(self, _perm):
         results = self._get().data["data"]["results"]
         self.assertEqual(len({p["code"] for p in results}), len(results))
-        self.assertTrue(all(p["group"] in ("Goods", "Services", "People", "Statutory", "Finance") for p in results))
+        self.assertTrue(all(p["group"] in ("Goods", "Services", "Back Office", "People", "Statutory", "Finance")
+                            for p in results))
