@@ -24,7 +24,13 @@ from workflow.models import Workflow, WorkflowModule, WorkflowQuery, WorkflowSta
 from workflow.services.conditions import validate_and_stamp
 
 from advance_payment import hierarchy
+from advance_payment.models import ACCOUNTS_STAGE, FlowStatus, RequestFlow
+from advance_payment.services import flow as flow_service
 from advance_payment.services.flow import MODULE_CODE
+
+#: A stage renamed in place: the row keeps its requests under its new name.
+#: An Expense route's Payment desk became the Accounts desk (2026-10-20).
+RENAMED = {ACCOUNTS_STAGE: 'Payment Approval'}
 
 
 class Command(BaseCommand):
@@ -127,10 +133,14 @@ class Command(BaseCommand):
         by_name = {}
         for row in rows:
             by_name.setdefault(key(row.name), row)
+        names = {key(name) for name, _role in stages}
         wanted = []
         for name, role in stages:
             user = users[hierarchy.HEAD_PLACEHOLDER if role == hierarchy.HEAD else role]
-            row = by_name.pop(key(name), None) or WorkflowStage(workflow=workflow, name=name)
+            # Renamed: the old row, unless the route still has a stage of the old name.
+            old = RENAMED.get(name)
+            renamed = by_name.pop(key(old), None) if old and key(old) not in names else None
+            row = by_name.pop(key(name), None) or renamed or WorkflowStage(workflow=workflow, name=name)
             row.name, row.user, row.is_active = name, user, True
             wanted.append(row)
         kept = {id(r) for r in wanted}
@@ -145,11 +155,27 @@ class Command(BaseCommand):
                 row.is_active = False
             row.save()
 
+    def _refresh_waiting(self, workflow):
+        """Who a waiting request is with, again: a stage's user may have changed
+        (the Accounts desk took Expense Payment over, 2026-10-20), and the
+        queues list by the flow's copy of it."""
+        flows = (RequestFlow.objects.select_related('request', 'current_stage')
+                 .filter(workflow=workflow, status=FlowStatus.PENDING, current_stage__isnull=False))
+        moved = 0
+        for flow in flows:
+            user_id = flow_service.stage_user_id(flow.request, flow.current_stage)
+            if user_id != flow.current_user_id:
+                RequestFlow.objects.filter(pk=flow.pk).update(current_user_id=user_id)
+                moved += 1
+        if moved:
+            self.stdout.write(f"  {workflow.code}: {moved} waiting request(s) now with their stage's user")
+
     def _write(self, module, route, users):
         workflow, _created = Workflow.objects.update_or_create(
             module=module, code=route['code'],
             defaults={'name': route['name'], 'company': route['company'], 'is_active': True})
         self._write_stages(workflow, hierarchy.full_stages(route), users)
+        self._refresh_waiting(workflow)
         query, _created = WorkflowQuery.objects.update_or_create(
             workflow=workflow, name=f'{route["code"]}_QUERY',
             defaults={'company': route['company'], 'query_text': route['query'], 'is_active': True})

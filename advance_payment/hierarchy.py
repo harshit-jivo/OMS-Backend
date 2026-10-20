@@ -11,7 +11,8 @@ Each request goes to exactly one workflow:
     anything else (Oil, Beverages)    -> the workflow of its Payment Purpose
 
 and every workflow starts at Payment, then those approvals, then ends
-CA (Navdeep) -> Audit -> Final (2026-10-20). "Department Head"
+CA (Navdeep) -> Audit -> Final (2026-10-20). An Expense workflow keeps its
+approvals first: approvals -> Payment -> CA -> Expense Audit. "Department Head"
 is the person the requester picks on the form (see `purposes.HEAD_PURPOSES`),
 not a fixed user: the stage is named `DEPARTMENT_HEAD_STAGE` and its
 configured user is only a placeholder.
@@ -23,7 +24,7 @@ the hierarchy here, and re-run the command.
 """
 import re
 
-from advance_payment.models import DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE
+from advance_payment.models import ACCOUNTS_STAGE, DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE
 from advance_payment.purposes import (
     DUE_SOON_DAYS, DUE_SOON_PURPOSES, FACTORY_BUDGETS as FACTORY_BUDGET_CODES, FREIGHT_PURPOSES, HEAD_PURPOSES,
     HEAD_REQUEST_TYPES, PAYMENT_PURPOSES, STAFF_ADVANCE_LIMIT,
@@ -50,8 +51,9 @@ PEOPLE = {
     'backoffice': 'nirmal',          # Nirmal Didi Ji: BackOff
     'transport': 'paramdeep',        # Paramdeep Singh: Transprt
     'marketing': 'karanpreet',       # Karanpreet Singh: Med MKT
-    'expense_audit': 'bhavani',
-    'ca': 'Navdeep',                 # Navdeep Singh: the CA desk, after Payment on every route (2026-10-19)      # Bhavani: the Expense routes' auditor (Parmeet audits payments)
+    'expense_audit': 'bhavani',      # Bhavani: the Expense routes' auditor (Parmeet audits payments)
+    'accounts': 'satnamsingh',       # Satnam Singh: the Accounts desk, the Expense routes' Payment desk (2026-10-20)
+    'ca': 'Navdeep',                 # Navdeep Singh: the CA desk, after Payment on every route (2026-10-19)
 }
 
 #: The Department Head stage's configured user: never asked to act (the
@@ -377,11 +379,13 @@ def full_stages(route):
     """All stages of a route, in order: `[(name, role)]`, the fixed ones last.
 
     Payment first, then the route's approvals, then CA -> Audit -> Final
-    (user, 2026-10-20); an Expense route ends CA -> Expense Audit (its own
-    auditor), whose approval posts. The CA desk is on every route (2026-10-19).
+    (user, 2026-10-20). An Expense route keeps its approvals FIRST, then
+    Accounts (its own Payment desk, Satnam Singh) -> CA -> Expense Audit (its
+    own auditor), whose approval posts (user, 2026-10-20). The CA desk is on
+    every route (2026-10-19).
     """
     approvals = [(name, role) for name, role in route['stages'] if not _held_by_ca(role)]
-    head = [('Payment Approval', 'payment'), *approvals, (CA_STAGE, 'ca')]
+    payment, ca = ('Payment Approval', 'payment'), (CA_STAGE, 'ca')
     if route.get('expense'):
-        return [*head, (EXPENSE_AUDIT_STAGE, 'expense_audit')]
-    return [*head, ('Audit Approval', 'audit'), ('Final Approval', 'final')]
+        return [*approvals, (ACCOUNTS_STAGE, 'accounts'), ca, (EXPENSE_AUDIT_STAGE, 'expense_audit')]
+    return [payment, *approvals, ca, ('Audit Approval', 'audit'), ('Final Approval', 'final')]

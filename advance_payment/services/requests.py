@@ -211,6 +211,8 @@ def clean(data, *, desk=False, user=None):
     if case.get('expense'):
         # The money goes to G/L accounts. Who is paid is named; a SAP vendor is
         # optional (Payment is then offered its bank accounts), and names them.
+        _clean_expense_payee(data, partner_code, problems, desk=desk)
+        expense_bill = _clean_expense_bill(data, partner_code, problems, desk=desk)
         partner_name = _clean_expense_vendor(company, partner_code, partner_name, problems)
         if not partner_name and user is not None:
             # Not asked: no vendor, so the person raising it is who is paid.
@@ -228,6 +230,8 @@ def clean(data, *, desk=False, user=None):
     documents = []
     expense_lines = []
     expense = {}
+    if not case.get('expense'):
+        expense_bill = {'expense_category': '', 'expense_bill_number': '', 'expense_bill_date': None}
     if case.get('expense'):
         if data.get('documents'):
             problems.append('An Expense request pays its lines, not documents.')
@@ -328,6 +332,7 @@ def clean(data, *, desk=False, user=None):
             'expected_date': expected_date,
             'expected_bill_date': expected_bill_date,
             'bill_due_date': bill_due_date,
+            **expense_bill,
             'return_method': repayment.get('return_method', ''),
             'return_method_other': repayment.get('return_method_other', ''),
             'installments': repayment.get('installments'),
@@ -363,9 +368,70 @@ def _clean_payment_account(company, code, name, problems):
     return found[0]['name'][:200] or name
 
 
+#: Who an Expense is paid to (user, 2026-10-20): a SAP vendor, or an employee's
+#: imprest account — both SAP suppliers, told apart by their code series.
+EXPENSE_PAYEES = {'VENDOR': 'a vendor', 'IMPREST': "an employee's imprest account"}
+IMPREST_PREFIX = 'ORGV'
+
+
+def expense_payee_of(partner_code):
+    """'IMPREST' for an ORGV imprest account, 'VENDOR' for any other code, '' for none."""
+    if not partner_code:
+        return ''
+    return 'IMPREST' if partner_code.upper().startswith(IMPREST_PREFIX) else 'VENDOR'
+
+
+def _clean_expense_payee(data, partner_code, problems, *, desk=False):
+    """Pay To: Vendor or Imprest, and the partner it names — both required on the
+    requester's form (2026-10-20). The Payment desk's corrections leave who is
+    paid as it was, so an older request with nobody named still passes there."""
+    if desk:
+        return
+    payee = _text(data.get('expense_payee')).upper()
+    if payee not in EXPENSE_PAYEES:
+        problems.append('Choose who is paid (Pay To): a Vendor or an Imprest.')
+        return
+    if not partner_code:
+        problems.append('Choose the vendor.' if payee == 'VENDOR' else "Choose the employee's imprest account.")
+        return
+    if expense_payee_of(partner_code) != payee:
+        problems.append(f'{partner_code} is not {EXPENSE_PAYEES[payee]}.')
+
+
+EXPENSE_CATEGORIES = ('ITEM', 'SERVICE')
+
+
+def _clean_expense_bill(data, partner_code, problems, *, desk=False):
+    """An Expense paid to a vendor names the bill it pays (2026-10-20).
+
+    * Bill Number and Doc Date (the bill's date): required from the requester,
+      the bill attached (`create`); the Payment desk may correct them.
+    * Category (Item / Service, as SAP books the vendor's bills): not shown to
+      the requester — the form fills it from SAP where it can — and the Payment
+      desk's to set or correct; required before Payment approves
+      (`flow.expense_problems`).
+
+    Paid to an imprest, none of it is asked."""
+    if expense_payee_of(partner_code) != 'VENDOR':
+        return {'expense_category': '', 'expense_bill_number': '', 'expense_bill_date': None}
+    category = _text(data.get('expense_category')).upper()
+    number = _text(data.get('expense_bill_number'), 100)
+    bill_date = _date(data.get('expense_bill_date'))
+    if category and category not in EXPENSE_CATEGORIES:
+        problems.append("The bill's category is Item or Service.")
+        category = ''
+    if not desk and not number:
+        problems.append("Enter the vendor's Bill Number.")
+    if not desk and bill_date is None:
+        problems.append("Enter the bill's Doc Date.")
+    if bill_date is not None and bill_date > clock.today():
+        problems.append('The Doc Date cannot be in the future.')
+    return {'expense_category': category, 'expense_bill_number': number, 'expense_bill_date': bill_date}
+
+
 def _clean_expense_vendor(company, partner_code, partner_name, problems):
-    """An Expense's optional vendor must be one of SAP's. Returns who is paid:
-    the name typed, else the vendor's own."""
+    """An Expense's vendor or imprest account must be one of SAP's suppliers.
+    Returns who is paid: the name sent, else the partner's own."""
     if not partner_code or company not in COMPANY_CODES:
         return partner_name
     from advance_payment.services import sap as sap_service
@@ -387,7 +453,9 @@ def form_of(advance):
     return {
         'company': advance.company, 'request_type': advance.request_type,
         'payment_against': advance.payment_against, 'partner_code': advance.partner_code,
-        'partner_name': advance.partner_name,
+        'partner_name': advance.partner_name, 'expense_payee': expense_payee_of(advance.partner_code),
+        'expense_category': advance.expense_category, 'expense_bill_number': advance.expense_bill_number,
+        'expense_bill_date': advance.expense_bill_date.isoformat() if advance.expense_bill_date else '',
         'payment_date': advance.payment_date.isoformat() if advance.payment_date else '',
         'remarks': advance.remarks, 'owner_label': advance.owner_label,
         'budget_code': advance.budget_code, 'sub_budget_code': advance.sub_budget_code,
@@ -404,10 +472,13 @@ def form_of(advance):
 #: Not the company, the budget head, who is paid (the vendor) or any amount:
 #: those are the requester's (return it to them to change one). The lines'
 #: amounts are checked unchanged by `flow.edit_expense`.
-EXPENSE_EDITABLE = ('sub_budget_code', 'effect_month', 'is_electricity', 'expense_tds_code', 'expense_lines')
+EXPENSE_EDITABLE = ('sub_budget_code', 'effect_month', 'is_electricity', 'expense_tds_code', 'expense_lines',
+                    # And (2026-10-20) the budget head, and the bill: its category, number, Doc Date.
+                    'budget_code', 'expense_category', 'expense_bill_number', 'expense_bill_date')
 #: ...and the request's fields that follow from them (direct or indirect, by the G/Ls).
 _EXPENSE_FIELDS = ('payment_against', 'sub_budget_code', 'sub_budget_name', 'effect_month', 'is_electricity',
-                   'expense_tds_code')
+                   'expense_tds_code', 'budget_code', 'budget_name',
+                   'expense_category', 'expense_bill_number', 'expense_bill_date')
 
 
 def edit_expense(advance, cleaned):
@@ -835,13 +906,14 @@ def _reserve(cleaned, *, company=None, exclude_request=None):
 
 
 def needs_due_date_proof(fields):
-    """A Bill Due Date is asked: the bill or policy showing it must be attached,
-    for the Payment desk to check the date that may skip the approvals."""
-    return bool(fields.get('bill_due_date'))
+    """A file must come with it: the bill or policy showing a Bill Due Date (the
+    Payment desk checks the date that may skip the approvals), or the vendor's
+    bill an Expense pays (2026-10-20)."""
+    return bool(fields.get('bill_due_date') or fields.get('expense_bill_number'))
 
 
-DUE_DATE_PROOF = ('Attach the bill or the insurance policy that shows the Bill Due Date: '
-                  'the Payment desk checks the date against it.')
+DUE_DATE_PROOF = ('Attach the bill (or the insurance policy) the request pays: '
+                  'the Payment desk checks it against what is entered.')
 
 
 def create(cleaned, *, user, files=()):
@@ -888,6 +960,9 @@ _COMPARED = {
     'expected_date': lambda a: a.expected_date,
     'expected_bill_date': lambda a: a.expected_bill_date,
     'bill_due_date': lambda a: a.bill_due_date,
+    'expense_category': lambda a: a.expense_category or None,
+    'expense_bill_number': lambda a: a.expense_bill_number or None,
+    'expense_bill_date': lambda a: a.expense_bill_date,
     'return_method': lambda a: a.return_method,
     'return_method_other': lambda a: a.return_method_other,
     'installments': lambda a: a.installments,

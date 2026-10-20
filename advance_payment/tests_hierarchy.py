@@ -19,7 +19,7 @@ from django.test import SimpleTestCase
 
 from advance_payment import hierarchy, purposes
 from advance_payment.models import (
-    DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE, StageRole, is_department_head_stage,
+    ACCOUNTS_STAGE, DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE, StageRole, is_department_head_stage,
 )
 from advance_payment.purposes import HEAD_PURPOSES, PAYMENT_PURPOSES, needs_department_head
 from advance_payment.services import flow as flow_service
@@ -340,14 +340,19 @@ class ExpenseRoutes(SimpleTestCase):
         for route in EXPENSE_ROUTES:
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
-                self.assertEqual(stages[0], ('Payment Approval', 'payment'))
-                self.assertEqual(stages[-2:], [(hierarchy.CA_STAGE, 'ca'), (EXPENSE_AUDIT_STAGE, 'expense_audit')])
+                # An Expense keeps its approvals first (2026-10-20): then Accounts, CA, its Audit.
+                self.assertEqual(stages[-3:], [(ACCOUNTS_STAGE, 'accounts'), (hierarchy.CA_STAGE, 'ca'),
+                                               (EXPENSE_AUDIT_STAGE, 'expense_audit')])
+                self.assertTrue(all(role not in ('payment', 'accounts', 'ca') for _n, role in stages[:-3]))
                 named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
                                             enumerate(stages, start=1)])
                 self.assertEqual(named[-1][1], StageRole.AUDIT)
                 self.assertEqual(flow_service.posting_role(named), StageRole.AUDIT)
         self.assertEqual(hierarchy.PEOPLE['expense_audit'], 'bhavani')
         self.assertNotEqual(hierarchy.PEOPLE['expense_audit'], hierarchy.PEOPLE['audit'])
+        # The Accounts desk: Satnam Singh, not the payments' Payment desk.
+        self.assertEqual(hierarchy.PEOPLE['accounts'], 'satnamsingh')
+        self.assertNotEqual(hierarchy.PEOPLE['accounts'], hierarchy.PEOPLE['payment'])
 
     def test_who_approves_an_expense(self):
         director = (hierarchy.DIRECTOR_STAGE, 'director')
@@ -376,6 +381,11 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertEqual(StageRole.of('Expense Audit Approval'), StageRole.AUDIT)
         self.assertEqual(StageRole.of('expense  audit approval'), StageRole.AUDIT)
         self.assertEqual(StageRole.of('Audit Approval'), StageRole.AUDIT)
+
+    def test_the_accounts_desk_is_a_payment_stage_by_its_own_name(self):
+        self.assertEqual(StageRole.of('Accounts Approval'), StageRole.PAYMENT)
+        self.assertEqual(StageRole.of(' accounts  approval '), StageRole.PAYMENT)
+        self.assertEqual(StageRole.of('Accounts Head Approval'), StageRole.APPROVAL)
 
     def test_a_payment_route_without_final_is_refused_but_payment_audit_is_an_expense_tail(self):
         stage = lambda n, i: SimpleNamespace(name=n, sequence=i)  # noqa: E731

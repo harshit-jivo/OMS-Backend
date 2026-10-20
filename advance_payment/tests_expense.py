@@ -50,9 +50,13 @@ RAISER = SimpleNamespace(name='Kamal Kumar', get_username=lambda: 'kamal')
 
 
 def expense_request(**overrides):
-    """What the form sends: no payee, ownership, payment date, month or sub budget."""
+    """What the form sends: who is paid (Pay To, 2026-10-20), but no ownership,
+    payment date, month or sub budget."""
     data = {
         'company': 'OIL', 'request_type': 'EXPENSE', 'budget_code': 'Factory', 'is_electricity': True,
+        'expense_payee': 'VENDOR', 'partner_code': 'VENDA000101',
+        # The vendor's bill it pays (2026-10-20): category, number, date.
+        'expense_category': 'SERVICE', 'expense_bill_number': 'INV-2026-118', 'expense_bill_date': '2026-10-05',
         'remarks': '',
         'expense_lines': [
             {'amount': '11800', 'gl_account': '5680011'},
@@ -88,8 +92,8 @@ class TheExpenseForm(SimpleTestCase):
         f = cleaned.fields
         self.assertEqual(f['amount'], Decimal('14800.50'))
         self.assertEqual((f['request_type'], f['payment_against']), ('EXPENSE', 'INDIRECT_EXPENSE'))
-        # Paid to whoever raised it; dated the day it is raised, in that month.
-        self.assertEqual((f['partner_code'], f['partner_name']), ('', 'Kamal Kumar'))
+        # Paid to the vendor named; dated the day it is raised, in that month.
+        self.assertEqual((f['partner_code'], f['partner_name']), ('VENDA000101', 'ABC Technologies'))
         self.assertEqual((f['payment_date'], f['effect_month']), (date(2026, 10, 8), '10-2026'))
         self.assertEqual((f['owner_label'], f['remarks'], f['sub_budget_code']), ('', '', ''))
         self.assertEqual((f['budget_code'], f['is_electricity'], f['purpose_code']), ('Factory', True, ''))
@@ -130,9 +134,9 @@ class TheExpenseForm(SimpleTestCase):
 
     def test_what_an_expense_must_have(self):
         with self.assertRaises(request_service.RequestInvalid) as caught:
-            _clean(expense_request(budget_code='', expense_lines=[]), user=None)
+            _clean(expense_request(budget_code='', expense_lines=[], partner_code=''), user=None)
         problems = ' '.join(caught.exception.problems)
-        for expected in ('Choose the Department', 'Add at least one expense line', 'Say who is being paid'):
+        for expected in ('Choose the Department', 'Add at least one expense line', 'Choose the vendor'):
             self.assertIn(expected, problems)
         for not_asked in ('Payment Purpose', 'Sub Budget', 'Month', 'Ownership', 'Payment Date', 'Remarks'):
             self.assertNotIn(not_asked, problems)
@@ -279,11 +283,11 @@ class ThePaymentStage(SimpleTestCase):
                 mock.patch.object(flow_service, 'log') as log:
             yield log
 
-    def test_payment_corrects_all_but_company_budget_and_amounts_and_it_is_logged(self):
+    def test_payment_corrects_all_but_company_payee_and_amounts_and_it_is_logged(self):
         the_advance = advance([expense_line(1, '5', '')])
         changes = {'sub_budget': {'old': None, 'new': 'IT — IT'}}
         with self.acting(the_advance) as log, sap_lookups(), \
-                mock.patch.object(request_service, 'form_of', return_value=expense_request(partner_name='Kamal Kumar')), \
+                mock.patch.object(request_service, 'form_of', return_value=expense_request(partner_name='Kamal Kumar', partner_code='', expense_payee='')), \
                 mock.patch.object(request_service, 'edit_expense', return_value=changes) as write:
             flow_service.edit_expense(the_advance, {
                 'budget_code': 'BackOff', 'company': 'MART', 'sub_budget_code': 'IT', 'partner_code': 'VENDA000101',
@@ -294,7 +298,8 @@ class ThePaymentStage(SimpleTestCase):
         cleaned = write.call_args.args[1]
         # Laid over the request: only what the desk may change.
         f = cleaned.fields
-        self.assertEqual((f['company'], f['budget_code'], f['request_type']), ('OIL', 'Factory', 'EXPENSE'))
+        # The budget head is the desk's to change since 2026-10-20; the company and type are not.
+        self.assertEqual((f['company'], f['budget_code'], f['request_type']), ('OIL', 'BackOff', 'EXPENSE'))
         self.assertEqual((f['sub_budget_code'], f['effect_month']), ('IT', '09-2026'))
         self.assertEqual((f['partner_code'], f['partner_name']), ('', 'Kamal Kumar'))  # who is paid: not the desk's
         self.assertEqual((f['amount'], f['expense_tds_code']), (Decimal('14800.50'), 'C194-2'))
@@ -306,7 +311,7 @@ class ThePaymentStage(SimpleTestCase):
     def test_a_correction_is_checked_as_the_form_is_and_keeps_the_amounts(self):
         the_advance = advance([expense_line(1, '5', '')])
         with self.acting(the_advance), sap_lookups(), \
-                mock.patch.object(request_service, 'form_of', return_value=expense_request(partner_name='Kamal Kumar')):
+                mock.patch.object(request_service, 'form_of', return_value=expense_request(partner_name='Kamal Kumar', partner_code='', expense_payee='')):
             with self.assertRaisesRegex(flow_service.FlowError, 'not an expense account'):
                 flow_service.edit_expense(the_advance, {'expense_lines': [
                     {'amount': '11800', 'gl_account': '1104107'}, {'amount': '3000.50', 'gl_account': '5670001'}]},
@@ -330,15 +335,17 @@ class ThePaymentStage(SimpleTestCase):
             fields={'payment_against': 'INDIRECT_EXPENSE', 'partner_code': 'VENDA000101', 'partner_name': 'ABC',
                     'amount': Decimal('20'), 'budget_code': 'BackOff', 'budget_name': 'Back Office',
                     'sub_budget_code': 'IT', 'sub_budget_name': 'IT', 'effect_month': '10-2026',
-                    'is_electricity': False, 'expense_tds_code': 'C194-2', 'company': 'MART'},
+                    'is_electricity': False, 'expense_tds_code': 'C194-2', 'company': 'MART',
+                    'expense_category': 'SERVICE', 'expense_bill_number': 'INV-9', 'expense_bill_date': None},
             expense_lines=[{'line_no': 1, 'amount': Decimal('20')}])
         with mock.patch.object(request_service, '_snapshot', side_effect=[{'budget': 'Factory'}, {'budget': 'BackOff'}]), \
                 mock.patch.object(request_service, '_expense_lines',
                                   side_effect=[{'Line 1': 'no G/L · 5.00'}, {'Line 1': '5670001 · 20.00'}]), \
                 mock.patch.object(request_service, '_write_expense_lines') as write:
             changes = request_service.edit_expense(row, cleaned)
-        # Not the budget head, the company or the amount: those stay the requester's.
-        self.assertEqual((row.budget_code, row.sub_budget_code, row.expense_tds_code), ('Factory', 'IT', 'C194-2'))
+        # The budget head and the bill are the desk's too (2026-10-20); not the company or the amount.
+        self.assertEqual((row.budget_code, row.sub_budget_code, row.expense_tds_code), ('BackOff', 'IT', 'C194-2'))
+        self.assertEqual((row.expense_category, row.expense_bill_number), ('SERVICE', 'INV-9'))
         self.assertFalse(hasattr(row, 'amount') or hasattr(row, 'company') or hasattr(row, 'partner_code'))
         write.assert_called_once_with(row, cleaned.expense_lines)
         self.assertEqual(changes, {'budget': {'old': 'Factory', 'new': 'BackOff'},
@@ -365,3 +372,136 @@ class AuditPosts(SimpleTestCase):
         post.assert_called_once()
         self.assertEqual(the_advance.status, 'COMPLETED')
         self.assertIn('COMPLETED', [c.args[1] for c in log.call_args_list])
+
+
+
+class WhoAnExpenseIsPaidTo(SimpleTestCase):
+    """Pay To (user, 2026-10-20): a Vendor or an Imprest, and the partner it names — both required."""
+
+    def test_pay_to_and_the_partner_are_required(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, r'Choose who is paid \(Pay To\)'):
+            _clean(expense_request(expense_payee=''))
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Choose the vendor'):
+            _clean(expense_request(partner_code=''))
+        with self.assertRaisesRegex(request_service.RequestInvalid, "Choose the employee's imprest account"):
+            _clean(expense_request(expense_payee='IMPREST', partner_code=''))
+
+    def test_the_partner_must_be_of_its_pay_to(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, "VENDA000101 is not an employee's imprest account"):
+            _clean(expense_request(expense_payee='IMPREST'))
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'ORGV000044 is not a vendor'):
+            _clean(expense_request(partner_code='ORGV000044'))
+
+    def test_an_imprest_account_is_paid(self):
+        imprest = {'card_code': 'ORGV000044', 'card_name': 'ZIYAUL HAQUE IMPREST JWPL0042', 'party_type': 'vendor'}
+        f = _clean(expense_request(expense_payee='IMPREST', partner_code='ORGV000044'), partner=imprest).fields
+        self.assertEqual((f['partner_code'], f['partner_name']), ('ORGV000044', 'ZIYAUL HAQUE IMPREST JWPL0042'))
+        self.assertEqual(request_service.expense_payee_of('ORGV000044'), 'IMPREST')
+        self.assertEqual(request_service.expense_payee_of('VENDA000101'), 'VENDOR')
+        self.assertEqual(request_service.expense_payee_of(''), '')
+
+
+
+class TheVendorsBill(SimpleTestCase):
+    """An Expense paid to a vendor names its bill: category, number, date (2026-10-20)."""
+
+    def test_they_are_kept(self):
+        f = _clean(expense_request()).fields
+        self.assertEqual((f['expense_category'], f['expense_bill_number'], str(f['expense_bill_date'])),
+                         ('SERVICE', 'INV-2026-118', '2026-10-05'))
+        self.assertTrue(request_service.needs_due_date_proof(f))  # the bill must be attached
+
+    def test_number_and_doc_date_are_required_the_category_is_not(self):
+        with self.assertRaises(request_service.RequestInvalid) as caught:
+            _clean(expense_request(expense_category='', expense_bill_number='', expense_bill_date=''))
+        self.assertEqual(caught.exception.problems, ["Enter the vendor's Bill Number.", "Enter the bill's Doc Date."])
+        # The category is the Payment desk's: the requester may leave it.
+        self.assertEqual(_clean(expense_request(expense_category='')).fields['expense_category'], '')
+
+    def test_a_future_doc_date_or_an_unknown_category_is_refused(self):
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'The Doc Date cannot be in the future'):
+            _clean(expense_request(expense_bill_date='2099-01-01'))
+        with self.assertRaisesRegex(request_service.RequestInvalid, 'Item or Service'):
+            _clean(expense_request(expense_category='GOODS'))
+
+    def test_the_desk_may_correct_them_and_need_not_resend_them(self):
+        f = _clean(expense_request(expense_bill_number='', expense_bill_date='', expense_category='ITEM'),
+                   desk=True).fields
+        self.assertEqual((f['expense_category'], f['expense_bill_number']), ('ITEM', ''))
+        for name in ('budget_code', 'expense_category', 'expense_bill_number', 'expense_bill_date'):
+            self.assertIn(name, request_service.EXPENSE_EDITABLE)
+
+    def test_an_imprest_is_asked_none_of_it(self):
+        imprest = {'card_code': 'ORGV000044', 'card_name': 'ZIYAUL HAQUE IMPREST JWPL0042', 'party_type': 'vendor'}
+        f = _clean(expense_request(expense_payee='IMPREST', partner_code='ORGV000044', expense_category='',
+                                   expense_bill_number='', expense_bill_date=''), partner=imprest).fields
+        self.assertEqual((f['expense_category'], f['expense_bill_number'], f['expense_bill_date']), ('', '', None))
+        self.assertFalse(request_service.needs_due_date_proof(f))
+
+
+def _bill_row(entry, num, doc_type, code, parent, name='X', date='2026-10-01'):
+    return {'doc_entry': entry, 'doc_num': num, 'doc_date': date, 'vendor_ref': f'REF{num}', 'doc_type': doc_type,
+            'code': code, 'name': name, 'parent': parent, 'group': 'GENERAL EXPENSES'}
+
+
+class TheVendorsBillHistory(SimpleTestCase):
+    """Per category, the latest bill with an expense account, and its accounts."""
+
+    def history(self, rows):
+        from advance_payment.services import sap as sap_service
+        with mock.patch.object(sap_service, '_run', return_value=rows),                 mock.patch.object(sap_service, '_schema', return_value='S'):
+            return sap_service.vendor_expense_history('OIL', 'VENDA000222')
+
+    def test_the_latest_expense_bill_of_each_category(self):
+        rows = [
+            _bill_row(9, 109, 'S', '1103006', '1103000', date='2026-10-09'),        # newest: no expense line
+            _bill_row(8, 108, 'S', '5680011', '5680000', 'ELECTRICITY', '2026-10-08'),
+            _bill_row(8, 108, 'S', '5680003', '5680000', 'TELEPHONE', '2026-10-08'),
+            _bill_row(7, 107, 'S', '5680025', '5680000', 'LEGAL', '2026-10-07'),     # older: not read
+            _bill_row(6, 106, 'I', '5100008', '5100000', 'CASUAL LABOUR', '2026-10-06'),
+        ]
+        out = self.history(rows)
+        self.assertEqual([h['category'] for h in out], ['SERVICE', 'ITEM'])
+        self.assertEqual(out[0]['bill']['doc_num'], 108)
+        self.assertEqual([(a['code'], a['kind']) for a in out[0]['accounts']],
+                         [('5680011', 'INDIRECT'), ('5680003', 'INDIRECT')])
+        self.assertEqual([(a['code'], a['kind']) for a in out[1]['accounts']], [('5100008', 'DIRECT')])
+
+    def test_a_category_with_no_expense_bill_has_its_newest_bill_and_no_accounts(self):
+        out = self.history([_bill_row(5, 105, 'I', '1103006', '1103000')])
+        self.assertEqual(out, [{'category': 'ITEM', 'bill': {'doc_num': 105, 'doc_date': '2026-10-01',
+                                                             'vendor_ref': 'REF105'}, 'accounts': []}])
+        self.assertEqual(self.history([]), [])
+
+
+class PaymentNeedsTheCategory(SimpleTestCase):
+    """Paid to a vendor, Payment may not approve until the bill's category is set (2026-10-20)."""
+
+    def advance(self, partner_code, category):
+        lines = [SimpleNamespace(line_no=1, gl_account='5680011', effect_month='10-2026')]
+        return SimpleNamespace(request_type=RequestType.EXPENSE, partner_code=partner_code, expense_category=category,
+                               sub_budget_code='IT', effect_month='10-2026',
+                               expense_lines=SimpleNamespace(all=lambda: lines))
+
+    def test_a_vendor_expense_needs_it_an_imprest_does_not(self):
+        self.assertEqual(flow_service.expense_problems(self.advance('VENDA000101', '')),
+                         ["Choose the bill's Category: Item or Service."])
+        self.assertEqual(flow_service.expense_problems(self.advance('VENDA000101', 'SERVICE')), [])
+        self.assertEqual(flow_service.expense_problems(self.advance('ORGV000044', '')), [])
+
+
+class TheBillsDocDateInSap(SimpleTestCase):
+    """Posted to SAP (2026-10-20): Document Date = the bill's Doc Date; Posting Date = the day it is posted."""
+
+    def test_a_vendor_expense_carries_its_bills_date(self):
+        lines = [expense_line(1, '11800', '5680011')]
+        body = voucher_service.build_payload(
+            advance(lines, partner_code='VENDA000101', expense_bill_date=date(2026, 9, 1)),
+            payout(line(1, 'NEFT', '11800')), posting_date=DAY, series=2601, bpl_id=1, memo='OMS AP-2026-0021/1')
+        self.assertEqual((body['DocDate'], body['TaxDate']), (DAY.isoformat(), '2026-09-01'))
+
+    def test_without_one_both_are_the_posting_day(self):
+        body = voucher_service.build_payload(advance([expense_line(1, '10', '5680011')]),
+                                             payout(line(1, 'NEFT', '10')), posting_date=DAY, series=2601,
+                                             bpl_id=1, memo='OMS AP-2026-0021/1')
+        self.assertEqual((body['DocDate'], body['TaxDate']), (DAY.isoformat(), DAY.isoformat()))

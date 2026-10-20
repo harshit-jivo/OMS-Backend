@@ -40,6 +40,7 @@ Every endpoint requires `Advance_Payment` and takes a mandatory `?company=`
   GET /cash-accounts/         ?company=                     (our cash G/Ls)
   GET /budgets/               ?company=                     (the form's Department: budget heads)
   GET /expense-accounts/      ?company=                     (Expense: the expense G/L accounts)
+  GET /vendor-expense-history/ ?company=&card_code=         (Expense: the vendor's bills, by Item / Service)
   GET /expense-months/        ?company=                     (Expense: SAP's Effective Months, Variety)
 
 `/open-invoices/` lists unpaid invoices across a company, for picking one.
@@ -140,6 +141,8 @@ urlpatterns = [
          name='advance-payment-cash-accounts'),
     path('expense-accounts/', views.ExpenseAccountsView.as_view(),
          name='advance-payment-expense-accounts'),
+    path('vendor-expense-history/', views.VendorExpenseHistoryView.as_view(),
+         name='advance-payment-vendor-expense-history'),
     path('factory-limit/bills/', views.FactoryLimitBillsView.as_view(),
          name='advance-payment-factory-limit-bills'),
     path('factory-limit/', views.FactoryLimitView.as_view(),

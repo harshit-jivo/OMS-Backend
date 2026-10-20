@@ -2760,6 +2760,65 @@ def expense_accounts(company, kind=None):
     return out
 
 
+#: A vendor's A/P invoices, newest first, line by line: what an Expense paid to
+#: them is booked like (user, 2026-10-20). DocType I = Item, S = Service.
+_VENDOR_BILL_HISTORY_SQL = '''
+    SELECT TOP 300 H."DocEntry" AS "doc_entry", H."DocNum" AS "doc_num", H."DocDate" AS "doc_date",
+           H."NumAtCard" AS "vendor_ref", H."DocType" AS "doc_type",
+           L."AcctCode" AS "code", A."AcctName" AS "name", A."FatherNum" AS "parent", P."AcctName" AS "group"
+    FROM "{schema}"."OPCH" H
+    JOIN "{schema}"."PCH1" L ON L."DocEntry" = H."DocEntry"
+    LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = L."AcctCode"
+    LEFT JOIN "{schema}"."OACT" P ON P."AcctCode" = A."FatherNum"
+    WHERE H."CardCode" = ? AND H."CANCELED" = 'N'
+    ORDER BY H."DocDate" DESC, H."DocEntry" DESC, L."LineNum"
+'''
+
+#: SAP's A/P invoice DocType, as the form names it.
+BILL_CATEGORIES = {'I': 'ITEM', 'S': 'SERVICE'}
+
+
+def vendor_expense_history(company, card_code):
+    """How SAP has booked this vendor's bills, per category, newest first:
+    `[{category, bill: {doc_num, doc_date, vendor_ref}, accounts: [{code, name, group, kind}]}]`.
+
+    `category` ITEM or SERVICE (OPCH.DocType). For each, the latest bill that
+    has an expense-account line, and its expense accounts in line order — the
+    G/L an Expense to this vendor starts from; a category with no such bill
+    has its newest bill and no accounts. `[]` for a vendor never billed.
+    """
+    code = _s(card_code)
+    if not code:
+        return []
+    rows = _run(company, _VENDOR_BILL_HISTORY_SQL.format(schema=_schema(company)), [code], 'vendor bill history')
+    expense_parents = set(EXPENSE_PARENTS + DIRECT_EXPENSE_PARENTS)
+    found = {}
+    order = []
+    for r in rows:
+        category = BILL_CATEGORIES.get(_s(r.get('doc_type')), 'ITEM')
+        entry = found.get(category)
+        if entry is None:
+            entry = found[category] = {'category': category, 'bill': None, 'accounts': [], 'doc_entry': None}
+            order.append(category)
+        if entry['accounts'] and entry['doc_entry'] != int(r['doc_entry']):
+            continue  # this category's latest expense bill is already read
+        parent = _s(r.get('parent'))
+        direct = parent in DIRECT_EXPENSE_PARENTS
+        is_expense = parent in expense_parents and not (direct and _NOT_PAID_DIRECT.search(_s(r.get('name'))))
+        bill = {'doc_num': r.get('doc_num'), 'doc_date': _date(r.get('doc_date')), 'vendor_ref': _s(r.get('vendor_ref'))}
+        if entry['bill'] is None:
+            entry['bill'] = bill  # its newest bill, until one with an expense line is found
+        if not is_expense:
+            continue
+        if not entry['accounts']:
+            entry['bill'], entry['doc_entry'] = bill, int(r['doc_entry'])
+        account = {'code': _s(r.get('code')), 'name': _s(r.get('name')), 'group': _s(r.get('group')),
+                   'kind': 'DIRECT' if direct else 'INDIRECT'}
+        if account['code'] not in {a['code'] for a in entry['accounts']}:
+            entry['accounts'].append(account)
+    return [{k: v for k, v in found[c].items() if k != 'doc_entry'} for c in order]
+
+
 _MONTHS_SQL = '''
     SELECT "PrcCode" AS "code" FROM "{schema}"."OPRC" WHERE "Active" = 'Y' AND "DimCode" = ?
 '''

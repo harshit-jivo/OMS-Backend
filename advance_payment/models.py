@@ -232,6 +232,10 @@ class RequestStatus(models.TextChoices):
 #: (Bhavani) and the payments auditor (Parmeet) read apart everywhere.
 EXPENSE_AUDIT_STAGE = 'Expense Audit Approval'
 
+#: The Payment desk of an Expense route: the Accounts desk (Satnam Singh, user
+#: 2026-10-20). Its own name, its own person; it does what Payment does.
+ACCOUNTS_STAGE = 'Accounts Approval'
+
 
 class StageRole(models.TextChoices):
     """What a stage DOES, told from its name in the Workflows page.
@@ -260,13 +264,15 @@ class StageRole(models.TextChoices):
     def of(cls, stage_name):
         """The role of an engine stage, by its name (case and spacing ignored).
 
-        Payment / Audit / Final by their exact names — and "Expense Audit
-        Approval", the Expense routes' own auditor, is Audit; every other name
-        is a general APPROVAL stage.
+        Payment / Audit / Final by their exact names — and the Expense routes'
+        own desks: "Accounts Approval" is Payment, "Expense Audit Approval" is
+        Audit; every other name is a general APPROVAL stage.
         """
         key = ' '.join(str(stage_name or '').split()).lower()
         if key == EXPENSE_AUDIT_STAGE.lower():
             return cls.AUDIT
+        if key == ACCOUNTS_STAGE.lower():
+            return cls.PAYMENT
         for role in (cls.PAYMENT, cls.CA, cls.AUDIT, cls.FINAL):
             if role.label.lower() == key:
                 return role
@@ -352,6 +358,15 @@ class AdvanceRequest(models.Model):
     #: 2 days, the request skips its approval stages (`hierarchy.BILL_DUE_SOON`).
     bill_due_date = models.DateField(null=True, blank=True,
                                      help_text='Utilities / insurance: the due date on the bill.')
+    #: An Expense paid to a vendor (2026-10-20): the bill it pays — its
+    #: category as SAP books the vendor's bills (ITEM / SERVICE), the vendor's
+    #: bill number and its date. Required then, with the bill attached.
+    expense_category = models.CharField(max_length=10, blank=True, default='',
+                                        help_text='Expense to a vendor: ITEM or SERVICE.')
+    expense_bill_number = models.CharField(max_length=100, blank=True, default='',
+                                           help_text="Expense to a vendor: the vendor's bill number.")
+    expense_bill_date = models.DateField(null=True, blank=True,
+                                         help_text="Expense to a vendor: the vendor's bill date.")
     return_method = models.CharField(max_length=20, choices=ReturnMethod.choices, blank=True, default='')
     return_method_other = models.CharField(max_length=120, blank=True, default='')
     installments = models.PositiveSmallIntegerField(null=True, blank=True)

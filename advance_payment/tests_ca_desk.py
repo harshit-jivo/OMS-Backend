@@ -55,8 +55,11 @@ class TheCaDesk(SimpleTestCase):
         for route in BY_CODE.values():
             with self.subTest(route['code']):
                 names = [n for n, _r in hierarchy.full_stages(route)]
-                self.assertEqual(names[0], 'Payment Approval')
-                self.assertEqual(names[-2 if route.get('expense') else -3], 'CA Approval')
+                if route.get('expense'):  # approvals first, then Accounts, CA, its Audit
+                    self.assertEqual(names[-3:-1], ['Accounts Approval', 'CA Approval'])
+                else:  # Payment first, then approvals, then CA, Audit, Final
+                    self.assertEqual(names[0], 'Payment Approval')
+                    self.assertEqual(names[-3], 'CA Approval')
 
 
 class BillsGoStraightToPayment(SimpleTestCase):
@@ -174,6 +177,33 @@ class ReSeedingKeepsWaitingRequestsOnTheirStage(SimpleTestCase):
         self.assertLess(head.sequence, min(r.sequence for r in live))
 
 
+class TheAccountsDesk(SimpleTestCase):
+    """2026-10-20: an Expense route's Payment desk is the Accounts desk (Satnam Singh)."""
+
+    def test_the_payment_row_is_renamed_in_place_so_its_requests_stay(self):
+        owner, director, payment, ca, audit = (
+            _row(1, 'Budget Owner Approval', 1), _row(2, 'Director Approval', 2), _row(3, 'Payment Approval', 3),
+            _row(4, 'CA Approval', 4), _row(5, 'Expense Audit Approval', 5))
+        table = _Stages([owner, director, payment, ca, audit])
+        users = {role: f'user:{role}' for role in ('backoffice', 'director', 'accounts', 'ca', 'expense_audit')}
+        with mock.patch.object(seed, 'WorkflowStage', table):
+            seed.Command._write_stages('wf', hierarchy.full_stages(BY_CODE['AP_EXP_BEV_BACKOFF']), users)
+        live = sorted((r for r in table.rows if r.is_active), key=lambda r: r.sequence)
+        self.assertEqual([(r.name, r.user) for r in live], [
+            ('Budget Owner Approval', 'user:backoffice'), ('Director Approval', 'user:director'),
+            ('Accounts Approval', 'user:accounts'), ('CA Approval', 'user:ca'),
+            ('Expense Audit Approval', 'user:expense_audit')])
+        self.assertIs(live[2], payment)
+        self.assertEqual(len(table.rows), 5)
+
+    def test_a_payment_route_keeps_its_payment_desk(self):
+        self.assertEqual(hierarchy.full_stages(BY_CODE['AP_RENT'])[0], ('Payment Approval', 'payment'))
+        stages = hierarchy.full_stages(BY_CODE['AP_EXP_BEV_BACKOFF'])
+        self.assertNotIn(('Payment Approval', 'payment'), stages)
+        named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in enumerate(stages, 1)])
+        self.assertEqual([r for _s, r in named][-3:], [StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT])
+
+
 class TheRequestsMovedToNavdeep(SimpleTestCase):
     """The requests waiting at an approval stage on 2026-10-19 were moved to Navdeep, then Payment."""
 
@@ -188,7 +218,7 @@ class TheRequestsMovedToNavdeep(SimpleTestCase):
         self.assertEqual([n for n, _r in hierarchy.full_stages(moved['AP_MOVED_TO_NAVDEEP'])],
                          ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
         self.assertEqual([n for n, _r in hierarchy.full_stages(moved['AP_EXP_MOVED_TO_NAVDEEP'])],
-                         ['Payment Approval', 'CA Approval', 'Expense Audit Approval'])
+                         ['Accounts Approval', 'CA Approval', 'Expense Audit Approval'])
         self.assertTrue(all(code in BY_CODE for code in moved))  # seeded with the rest
 
 

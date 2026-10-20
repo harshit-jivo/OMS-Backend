@@ -151,7 +151,8 @@ def roles(stages):
     raise FlowError(
         'A workflow starts with the stage named exactly Payment Approval, then any approval '
         'stages (named freely), and ends with CA Approval, Audit Approval and Final Approval, '
-        'in that order (an Expense workflow ends CA Approval and Audit Approval).', status=409)
+        'in that order (an Expense workflow: its approvals, then Accounts Approval, CA Approval '
+        'and Expense Audit Approval).', status=409)
 
 
 def posting_role(named):
@@ -959,6 +960,9 @@ def expense_problems(advance):
     out = [f'Line {ln.line_no}: choose its expense G/L account.' for ln in lines if not ln.gl_account]
     if not advance.sub_budget_code:
         out.append('Choose the Sub Budget.')
+    # Paid to a vendor: how SAP books the bill, the desk's to set (2026-10-20).
+    if request_service.expense_payee_of(advance.partner_code) == 'VENDOR' and not advance.expense_category:
+        out.append("Choose the bill's Category: Item or Service.")
     # The month is the Payment desk's to set: SAP needs one on every line.
     if any(not (ln.effect_month or advance.effect_month) for ln in lines):
         out.append('Choose the Month.')
@@ -981,9 +985,10 @@ def _same_amounts(before, after):
 def edit_expense(advance, data, *, user, version=None):
     """Payment stage only: correct an Expense request.
 
-    The desk may change what `requests.EXPENSE_EDITABLE` names — the sub
-    budget, month, electricity, TDS and each line's G/L, GST, month, TDS and
-    remarks — never the company, the budget head, who is paid or an amount.
+    The desk may change what `requests.EXPENSE_EDITABLE` names — the budget
+    head and sub budget, month, electricity, TDS, the bill's category, number
+    and Doc Date (2026-10-20), and each line's G/L, GST, month, TDS and
+    remarks — never the company, who is paid or an amount.
     `data` holds only what changes; it is laid over the request and the whole
     is checked as the requester's form is.
     The route is not re-chosen: the request has passed its approvals.

@@ -1275,6 +1275,24 @@ class ExpenseAccountsView(_Lookup):
         return sap_service.expense_accounts(company)
 
 
+class VendorExpenseHistoryView(_Lookup):
+    """GET /api/advance-payments/vendor-expense-history/?company=&card_code=
+
+    How SAP books the vendor's bills, per category (Item / Service), newest
+    first, each with its latest expense bill and that bill's expense G/L
+    accounts (`sap.vendor_expense_history`): what an Expense to the vendor
+    starts from (user, 2026-10-20). `[]` for a vendor never billed.
+    """
+
+    resource = 'vendor bill history'
+
+    def fetch(self, request, company):
+        card_code = (request.query_params.get('card_code') or '').strip()
+        if not card_code:
+            raise ValueError('card_code is required (the vendor).')
+        return sap_service.vendor_expense_history(company, card_code)
+
+
 class PaymentAccountsView(_Lookup):
     """GET /api/advance-payments/payment-accounts/?company=&search=&limit=
 

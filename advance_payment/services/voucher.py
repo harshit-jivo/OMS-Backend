@@ -230,6 +230,11 @@ def build_payload(advance, payout, *, posting_date, series, bpl_id, memo, tds_tr
         'Remarks': _remarks(advance),
         'JournalRemarks': memo,
     }
+    # An Expense paid to a vendor: SAP's Document Date is the bill's own Doc Date
+    # (2026-10-20); the Posting Date stays the day it is posted.
+    bill_date = getattr(advance, 'expense_bill_date', None)
+    if advance.request_type == RequestType.EXPENSE and bill_date:
+        payload['TaxDate'] = bill_date.isoformat()
     if series is not None:
         payload['Series'] = int(series)
     if bpl_id is not None:
