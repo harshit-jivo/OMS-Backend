@@ -154,6 +154,8 @@ class WhoApproves(SimpleTestCase):
 
     def test_every_route_starts_at_payment_and_ends_ca_audit_final(self):
         for route in ROUTES:
+            if route.get('approvals_first'):
+                continue  # a moved route (TheFixedAssetsMovedToTheDirector)
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
                 self.assertEqual(stages[0], ('Payment Approval', 'payment'))

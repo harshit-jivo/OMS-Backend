@@ -336,7 +336,9 @@ class ThePaymentStage(SimpleTestCase):
                     'amount': Decimal('20'), 'budget_code': 'BackOff', 'budget_name': 'Back Office',
                     'sub_budget_code': 'IT', 'sub_budget_name': 'IT', 'effect_month': '10-2026',
                     'is_electricity': False, 'expense_tds_code': 'C194-2', 'company': 'MART',
-                    'expense_category': 'SERVICE', 'expense_bill_number': 'INV-9', 'expense_bill_date': None},
+                    'expense_category': 'SERVICE', 'expense_bill_number': 'INV-9', 'expense_bill_date': None,
+                    'expense_bpl_id': 2, 'expense_bpl_name': 'FACTORY', 'expense_due_date': None,
+                    'expense_grpo_entry': None, 'expense_grpo_num': None},
             expense_lines=[{'line_no': 1, 'amount': Decimal('20')}])
         with mock.patch.object(request_service, '_snapshot', side_effect=[{'budget': 'Factory'}, {'budget': 'BackOff'}]), \
                 mock.patch.object(request_service, '_expense_lines',
@@ -478,10 +480,12 @@ class PaymentNeedsTheCategory(SimpleTestCase):
     """Paid to a vendor, Payment may not approve until the bill's category is set (2026-10-20)."""
 
     def advance(self, partner_code, category):
-        lines = [SimpleNamespace(line_no=1, gl_account='5680011', effect_month='10-2026')]
+        lines = [SimpleNamespace(line_no=1, gl_account='5680011', effect_month='10-2026', tax_code='IGST@18',
+                                 variety='CANOLA', state='HR', tds_code='')]
         return SimpleNamespace(request_type=RequestType.EXPENSE, partner_code=partner_code, expense_category=category,
-                               sub_budget_code='IT', effect_month='10-2026',
-                               expense_lines=SimpleNamespace(all=lambda: lines))
+                               sub_budget_code='IT', effect_month='10-2026', expense_bpl_id=2,
+                               expense_bill_number='INV-9', expense_bill_date=date(2026, 9, 1),
+                               expense_grpo_entry=None, expense_lines=SimpleNamespace(all=lambda: lines))
 
     def test_a_vendor_expense_needs_it_an_imprest_does_not(self):
         self.assertEqual(flow_service.expense_problems(self.advance('VENDA000101', '')),
@@ -505,3 +509,114 @@ class TheBillsDocDateInSap(SimpleTestCase):
                                              payout(line(1, 'NEFT', '10')), posting_date=DAY, series=2601,
                                              bpl_id=1, memo='OMS AP-2026-0021/1')
         self.assertEqual((body['DocDate'], body['TaxDate']), (DAY.isoformat(), DAY.isoformat()))
+
+
+# ---------------------------------------------------------------------------
+# An Expense to a vendor is booked as an A/P invoice (2026-10-20)
+# ---------------------------------------------------------------------------
+from advance_payment.services import ap_invoice  # noqa: E402
+
+
+def ap_line(no, taxable, gl='5680011', **extra):
+    values = dict(pk=100 + no, line_no=no, taxable_amount=Decimal(taxable), amount=Decimal(taxable),
+                  gl_account=gl, gl_name='Rent', effect_month='', remarks='', tds_amount=Decimal('0'),
+                  tds_code='', tds_account='', tax_code='IGST@18', variety='CANOLA', state='HR', location=None)
+    values.update(extra)
+    return SimpleNamespace(**values)
+
+
+def vendor_bill(lines=(), **extra):
+    values = dict(partner_code='VENDA000101', partner_name='ABC Technologies', expense_category='SERVICE',
+                  expense_bill_number='inv/ 2026-118', expense_bill_date=date(2026, 9, 1), expense_due_date=None,
+                  expense_bpl_id=2, expense_bpl_name='FACTORY', expense_grpo_entry=None, expense_grpo_num=None,
+                  expense_tds_code='')
+    values.update(extra)
+    return advance(lines, **values)
+
+
+class TheApInvoiceIsForAVendorsExpense(SimpleTestCase):
+    def test_a_vendor_expense_books_one_an_imprest_or_a_payment_does_not(self):
+        self.assertTrue(ap_invoice.applies(vendor_bill()))
+        self.assertFalse(ap_invoice.applies(vendor_bill(partner_code='ORGV000044')))
+        self.assertFalse(ap_invoice.applies(vendor_bill(request_type=RequestType.VENDOR)))
+
+    def test_what_the_accounts_desk_must_set(self):
+        bare = vendor_bill([ap_line(1, '100', tax_code='', variety='', state='')], expense_bpl_id=None)
+        self.assertEqual(ap_invoice.problems(bare), [
+            'Choose the Branch the A/P invoice is booked to.',
+            'Line 1: choose its Tax Code, Variety, State.'])
+        self.assertEqual(ap_invoice.problems(vendor_bill([ap_line(1, '100')])), [])
+
+    def test_one_tds_code_per_invoice(self):
+        bill = vendor_bill([ap_line(1, '100', tds_code='C194'), ap_line(2, '50', tds_code='1024')])
+        self.assertEqual(ap_invoice.problems(bill), ['An A/P invoice takes one TDS code; the lines have 1024, C194.'])
+
+    def test_an_item_bill_needs_its_grpo_not_line_fields(self):
+        item = vendor_bill([ap_line(1, '100', tax_code='', variety='', state='')], expense_category='ITEM')
+        self.assertEqual(ap_invoice.problems(item), ['Choose the GRPO this Item bill is copied from.'])
+        self.assertEqual(ap_invoice.problems(vendor_bill([ap_line(1, '100')], expense_category='ITEM',
+                                                         expense_grpo_entry=27962)), [])
+
+    def test_the_accounts_desk_needs_no_bank_details_for_it(self):
+        bill = vendor_bill([ap_line(1, '100')])
+        self.assertEqual(flow_service.expense_problems(bill), [])
+
+
+class TheApInvoicePayload(SimpleTestCase):
+    def test_a_service_bill_line_by_line_with_its_five_dimensions(self):
+        bill = vendor_bill([ap_line(1, '10000.00', remarks='October rent', tds_code='C194'),
+                            ap_line(2, '500.00', gl='5690002', tax_code='RIGST@5', variety='OLIVE', state='DL',
+                                    location=1, effect_month='09-2026')],
+                           expense_due_date=date(2026, 10, 30))
+        body = ap_invoice.build_payload(bill, posting_date=DAY, series=3686, bpl_id=2, memo='OMS AP-2026-0021/1',
+                                        default_location=2)
+        self.assertEqual({k: body[k] for k in ('CardCode', 'DocType', 'DocDate', 'TaxDate', 'DocDueDate', 'NumAtCard',
+                                               'BPL_IDAssignedToInvoice', 'Series', 'JournalMemo')},
+                         {'CardCode': 'VENDA000101', 'DocType': 'dDocument_Service', 'DocDate': DAY.isoformat(),
+                          'TaxDate': '2026-09-01', 'DocDueDate': '2026-10-30', 'NumAtCard': 'INV/ 2026-118',
+                          'BPL_IDAssignedToInvoice': 2, 'Series': 3686, 'JournalMemo': 'OMS AP-2026-0021/1'})
+        first, second = body['DocumentLines']
+        self.assertEqual(first, {'AccountCode': '5680011', 'ItemDescription': 'October rent', 'LineTotal': 10000.0,
+                                 'TaxCode': 'IGST@18', 'LocationCode': 2, 'CostingCode': 'CANOLA',
+                                 'CostingCode2': '10-2026', 'CostingCode3': 'Factory', 'CostingCode4': 'Accounts',
+                                 'CostingCode5': 'HR', 'WTLiable': 'tYES'})
+        self.assertEqual((second['LocationCode'], second['CostingCode2'], second['WTLiable']), (1, '09-2026', 'tNO'))
+        self.assertEqual(body['WithholdingTaxDataCollection'], [{'WTCode': 'C194'}])
+
+    def test_an_item_bill_is_copied_from_its_grpos_open_lines(self):
+        grpo = {'doc_entry': 27962, 'category': 'ITEM', 'lines': [{'line_num': 1}, {'line_num': 3}]}
+        bill = vendor_bill([ap_line(1, '100')], expense_category='ITEM', expense_grpo_entry=27962,
+                           expense_tds_code='194Q')
+        body = ap_invoice.build_payload(bill, posting_date=DAY, series=1, bpl_id=2, memo='m', grpo=grpo)
+        self.assertEqual(body['DocType'], 'dDocument_Items')
+        self.assertEqual(body['DocumentLines'], [
+            {'BaseType': 20, 'BaseEntry': 27962, 'BaseLine': 1, 'WTLiable': 'tYES'},
+            {'BaseType': 20, 'BaseEntry': 27962, 'BaseLine': 3, 'WTLiable': 'tYES'}])
+        self.assertEqual(body['WithholdingTaxDataCollection'], [{'WTCode': '194Q'}])
+
+    def test_the_series_kind_follows_gst_charged(self):
+        taxes = [{'code': 'IGST@18', 'rate': '18', 'reverse_charge': False},
+                 {'code': 'RIGST@5', 'rate': '5', 'reverse_charge': True},
+                 {'code': 'Exampt', 'rate': '0', 'reverse_charge': False}]
+        self.assertTrue(ap_invoice.charges_gst(taxes, ['Exampt', 'IGST@18']))
+        self.assertFalse(ap_invoice.charges_gst(taxes, ['RIGST@5', 'Exampt']))
+
+
+class TheBillMatchesItsGrpo(SimpleTestCase):
+    def test_the_bill_number_is_matched_on_letters_and_digits(self):
+        from advance_payment.services import sap as sap_service
+
+        self.assertEqual(sap_service.bill_key(' inv/ 2026-118 '), 'INV2026118')
+        rows = [
+            {'doc_entry': 2, 'doc_num': 20, 'doc_date': None, 'vendor_ref': 'X-1', 'doc_total': 5, 'bpl_id': 2,
+             'bpl_name': 'F', 'attachment_entry': None, 'doc_type': 'I', 'line_num': 0, 'item_code': 'A',
+             'description': '', 'open_qty': 1, 'price': 5, 'open_amount': 5, 'tax_code': '', 'warehouse': ''},
+            {'doc_entry': 1, 'doc_num': 10, 'doc_date': None, 'vendor_ref': 'INV/2026/118', 'doc_total': 7,
+             'bpl_id': 2, 'bpl_name': 'F', 'attachment_entry': 9, 'doc_type': 'S', 'line_num': 0, 'item_code': '',
+             'description': 'Oil', 'open_qty': 0, 'price': 7, 'open_amount': 7, 'tax_code': 'GST05R',
+             'warehouse': ''}]
+        with mock.patch.object(sap_service, '_run', return_value=rows), \
+                mock.patch.object(sap_service, '_schema', return_value='S'):
+            found = sap_service.open_grpos('OIL', 'VENDA000101', bill_number='inv 2026 118')
+        self.assertEqual([(g['doc_num'], g['matches'], g['category']) for g in found],
+                         [(10, True, 'SERVICE'), (20, False, 'ITEM')])

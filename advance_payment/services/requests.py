@@ -110,6 +110,9 @@ EXPENSE_GST = {
     'IGST_5': ('IGST 5%', Decimal('5')),
     'IGST_18': ('IGST 18%', Decimal('18')),
 }
+#: The record's GST for the SAP tax codes it has a choice for (an Expense to a
+#: vendor names SAP's tax code; the record follows it).
+TAX_CODE_GST = {'CG+SG@5': 'CGST_SGST_5', 'CG+SG@18': 'CGST_SGST_18', 'IGST@5': 'IGST_5', 'IGST@18': 'IGST_18'}
 #: A line's TDS choice meaning "no TDS on this line", whatever the request's.
 NO_TDS = 'NONE'
 _PAISA = Decimal('0.01')
@@ -231,7 +234,8 @@ def clean(data, *, desk=False, user=None):
     expense_lines = []
     expense = {}
     if not case.get('expense'):
-        expense_bill = {'expense_category': '', 'expense_bill_number': '', 'expense_bill_date': None}
+        expense_bill = {'expense_category': '', 'expense_bill_number': '', 'expense_bill_date': None,
+                        **_NO_AP_INVOICE}
     if case.get('expense'):
         if data.get('documents'):
             problems.append('An Expense request pays its lines, not documents.')
@@ -411,9 +415,14 @@ def _clean_expense_bill(data, partner_code, problems, *, desk=False):
       desk's to set or correct; required before Payment approves
       (`flow.expense_problems`).
 
+    Booked as an A/P invoice (2026-10-20), the Accounts desk also sets the
+    SAP branch, the due date (blank: the vendor's payment terms) and — an Item
+    bill — the open GRPO it is copied from; `ap_invoice.problems` says what
+    is still missing before it is approved.
+
     Paid to an imprest, none of it is asked."""
     if expense_payee_of(partner_code) != 'VENDOR':
-        return {'expense_category': '', 'expense_bill_number': '', 'expense_bill_date': None}
+        return {'expense_category': '', 'expense_bill_number': '', 'expense_bill_date': None, **_NO_AP_INVOICE}
     category = _text(data.get('expense_category')).upper()
     number = _text(data.get('expense_bill_number'), 100)
     bill_date = _date(data.get('expense_bill_date'))
@@ -426,7 +435,22 @@ def _clean_expense_bill(data, partner_code, problems, *, desk=False):
         problems.append("Enter the bill's Doc Date.")
     if bill_date is not None and bill_date > clock.today():
         problems.append('The Doc Date cannot be in the future.')
-    return {'expense_category': category, 'expense_bill_number': number, 'expense_bill_date': bill_date}
+    due_date = _date(data.get('expense_due_date'))
+    if due_date is None and _text(data.get('expense_due_date')):
+        problems.append('The Due Date is not a valid date.')
+    elif due_date is not None and bill_date is not None and due_date < bill_date:
+        problems.append('The Due Date cannot be before the Doc Date.')
+    bpl_id = _int(data.get('expense_bpl_id'))
+    grpo = _int(data.get('expense_grpo_entry')) if category == 'ITEM' else None
+    return {'expense_category': category, 'expense_bill_number': number, 'expense_bill_date': bill_date,
+            'expense_bpl_id': bpl_id, 'expense_bpl_name': _text(data.get('expense_bpl_name'), 100) if bpl_id else '',
+            'expense_due_date': due_date, 'expense_grpo_entry': grpo,
+            'expense_grpo_num': _int(data.get('expense_grpo_num')) if grpo else None}
+
+
+#: Not booked as an A/P invoice: none of its fields.
+_NO_AP_INVOICE = {'expense_bpl_id': None, 'expense_bpl_name': '', 'expense_due_date': None,
+                  'expense_grpo_entry': None, 'expense_grpo_num': None}
 
 
 def _clean_expense_vendor(company, partner_code, partner_name, problems):
@@ -456,6 +480,9 @@ def form_of(advance):
         'partner_name': advance.partner_name, 'expense_payee': expense_payee_of(advance.partner_code),
         'expense_category': advance.expense_category, 'expense_bill_number': advance.expense_bill_number,
         'expense_bill_date': advance.expense_bill_date.isoformat() if advance.expense_bill_date else '',
+        'expense_bpl_id': advance.expense_bpl_id, 'expense_bpl_name': advance.expense_bpl_name,
+        'expense_due_date': advance.expense_due_date.isoformat() if advance.expense_due_date else '',
+        'expense_grpo_entry': advance.expense_grpo_entry, 'expense_grpo_num': advance.expense_grpo_num,
         'payment_date': advance.payment_date.isoformat() if advance.payment_date else '',
         'remarks': advance.remarks, 'owner_label': advance.owner_label,
         'budget_code': advance.budget_code, 'sub_budget_code': advance.sub_budget_code,
@@ -463,7 +490,9 @@ def form_of(advance):
         'expense_tds_code': advance.expense_tds_code,
         'expense_lines': [{'amount': str(ln.amount), 'gst_code': ln.gst_code,
                            'gl_account': ln.gl_account, 'effect_month': ln.effect_month,
-                           'remarks': ln.remarks, 'tds_override': ln.tds_override}
+                           'remarks': ln.remarks, 'tds_override': ln.tds_override,
+                           'variety': ln.variety, 'state': ln.state, 'tax_code': ln.tax_code,
+                           'location': ln.location}
                           for ln in advance.expense_lines.all()],
     }
 
@@ -473,12 +502,17 @@ def form_of(advance):
 #: those are the requester's (return it to them to change one). The lines'
 #: amounts are checked unchanged by `flow.edit_expense`.
 EXPENSE_EDITABLE = ('sub_budget_code', 'effect_month', 'is_electricity', 'expense_tds_code', 'expense_lines',
-                    # And (2026-10-20) the budget head, and the bill: its category, number, Doc Date.
-                    'budget_code', 'expense_category', 'expense_bill_number', 'expense_bill_date')
+                    # And (2026-10-20) the budget head, and the bill: its category, number, Doc Date;
+                    # and what its A/P invoice needs: branch, due date, GRPO.
+                    'budget_code', 'expense_category', 'expense_bill_number', 'expense_bill_date',
+                    'expense_bpl_id', 'expense_bpl_name', 'expense_due_date', 'expense_grpo_entry',
+                    'expense_grpo_num')
 #: ...and the request's fields that follow from them (direct or indirect, by the G/Ls).
 _EXPENSE_FIELDS = ('payment_against', 'sub_budget_code', 'sub_budget_name', 'effect_month', 'is_electricity',
                    'expense_tds_code', 'budget_code', 'budget_name',
-                   'expense_category', 'expense_bill_number', 'expense_bill_date')
+                   'expense_category', 'expense_bill_number', 'expense_bill_date',
+                   'expense_bpl_id', 'expense_bpl_name', 'expense_due_date', 'expense_grpo_entry',
+                   'expense_grpo_num')
 
 
 def edit_expense(advance, cleaned):
@@ -528,12 +562,22 @@ def _clean_expense(company, data, problems, *, desk=False, partner_code=''):
         problems.append(f'At most {MAX_EXPENSE_LINES} expense lines.')
         raw = raw[:MAX_EXPENSE_LINES]
     accounts, months, codes = {}, set(), {}
+    # Booked as an A/P invoice (2026-10-20): each line's tax code, Variety,
+    # State and location — checked against SAP when the Accounts desk sets them.
+    ap = desk and expense_payee_of(partner_code) == 'VENDOR'
+    taxes, varieties, states, locations = {}, set(), set(), set()
     if company in COMPANY_CODES:
         try:
             accounts = {a['code']: a for a in sap_service.expense_accounts(company)}
             months = set(sap_service.expense_months(company))
             if desk:
                 codes = {c['code']: c for c in sap_service.tds_codes(company, partner_code)}
+            if ap:
+                options = sap_service.ap_invoice_options(company)
+                taxes = {t['code']: t for t in options['tax_codes']}
+                varieties = {v['code'] for v in options['varieties']}
+                states = {v['code'] for v in options['states']}
+                locations = {v['code'] for v in options['locations']}
         except sap_service.SapUnavailable:
             problems.append('Could not check the expense accounts with SAP. Try again shortly.')
             return {**out, 'effect_month': month}
@@ -574,7 +618,25 @@ def _clean_expense(company, data, problems, *, desk=False, partner_code=''):
         if line_month and months and line_month not in months:
             problems.append(f'Line {n}: month "{line_month}" is not one of SAP\'s Effective Months.')
         amount = amount or Decimal('0')
+        variety = _text(line.get('variety'), 20)
+        state = _text(line.get('state'), 10)
+        tax_code = _text(line.get('tax_code'), 20)
+        location = _int(line.get('location'))
+        if ap:
+            for label, value, known in (('Variety', variety, varieties), ('State', state, states),
+                                        ('Tax Code', tax_code, taxes)):
+                if value and known and value not in known:
+                    problems.append(f'Line {n}: {label} "{value}" is not one of SAP\'s.')
+            if location is not None and locations and location not in locations:
+                problems.append(f'Line {n}: location {location} is not one of SAP\'s GST locations.')
         rate = EXPENSE_GST[gst_code][1]
+        if ap and tax_code in taxes:
+            # SAP's tax code decides the taxable amount: GST charged on the bill
+            # comes out of the invoice value; reverse charge does not (the
+            # vendor charged none), and the record's GST follows the code.
+            chosen_tax = taxes[tax_code]
+            rate = Decimal('0') if chosen_tax['reverse_charge'] else Decimal(chosen_tax['rate'])
+            gst_code = TAX_CODE_GST.get(tax_code, '') if not chosen_tax['reverse_charge'] else ''
         taxable = (amount * 100 / (100 + rate)).quantize(_PAISA, rounding=ROUND_HALF_UP)
         cleaned = {'line_no': n, 'taxable_amount': taxable, 'gst_code': gst_code, 'gst_amount': amount - taxable,
                    'amount': amount, 'gl_account': gl,
@@ -582,6 +644,7 @@ def _clean_expense(company, data, problems, *, desk=False, partner_code=''):
                    # The request's month is every line's unless it names its own.
                    'effect_month': '' if line_month == month else line_month,
                    'remarks': remarks,
+                   'variety': variety, 'state': state, 'tax_code': tax_code, 'location': location,
                    'tds_override': '', 'tds_code': '', 'tds_label': '', 'tds_rate': None, 'tds_account': '',
                    'tds_amount': Decimal('0')}
         if desk:
@@ -963,6 +1026,9 @@ _COMPARED = {
     'expense_category': lambda a: a.expense_category or None,
     'expense_bill_number': lambda a: a.expense_bill_number or None,
     'expense_bill_date': lambda a: a.expense_bill_date,
+    'branch': lambda a: a.expense_bpl_name or a.expense_bpl_id,
+    'expense_due_date': lambda a: a.expense_due_date,
+    'grpo': lambda a: a.expense_grpo_num or a.expense_grpo_entry,
     'return_method': lambda a: a.return_method,
     'return_method_other': lambda a: a.return_method_other,
     'installments': lambda a: a.installments,
@@ -1015,7 +1081,8 @@ def _expense_lines(advance):
         gst = EXPENSE_GST.get(ln.gst_code, (ln.gst_code, 0))[0]
         value = f'{_shown(ln.taxable_amount)} + {gst} = {_shown(ln.amount)}' if ln.gst_code else _shown(ln.amount)
         tds = f'TDS {ln.tds_code} {_shown(ln.tds_amount)}' if ln.tds_amount else None
-        return ' · '.join(v for v in (ln.gl_account or 'no G/L', ln.effect_month or None, value, tds,
+        sap = ' / '.join(v for v in (ln.tax_code, ln.variety, ln.state) if v) or None
+        return ' · '.join(v for v in (ln.gl_account or 'no G/L', ln.effect_month or None, value, tds, sap,
                                       ln.remarks or None) if v)
     return {f'Line {ln.line_no}': shown(ln) for ln in advance.expense_lines.all()}
 

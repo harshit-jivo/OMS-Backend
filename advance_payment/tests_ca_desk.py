@@ -57,6 +57,8 @@ class TheCaDesk(SimpleTestCase):
                 names = [n for n, _r in hierarchy.full_stages(route)]
                 if route.get('expense'):  # approvals first, then Accounts, CA, its Audit
                     self.assertEqual(names[-3:-1], ['Accounts Approval', 'CA Approval'])
+                elif route.get('approvals_first'):  # moved: its approvals, then Payment
+                    self.assertEqual(names[-4:-2], ['Payment Approval', 'CA Approval'])
                 else:  # Payment first, then approvals, then CA, Audit, Final
                     self.assertEqual(names[0], 'Payment Approval')
                     self.assertEqual(names[-3], 'CA Approval')
@@ -208,7 +210,7 @@ class TheRequestsMovedToNavdeep(SimpleTestCase):
     """The requests waiting at an approval stage on 2026-10-19 were moved to Navdeep, then Payment."""
 
     def test_two_routes_never_chosen_navdeep_then_payment_ca_and_the_rest(self):
-        moved = {r['code']: r for r in hierarchy.moved_routes()}
+        moved = {r['code']: r for r in hierarchy.moved_routes() if r['code'] != 'AP_MOVED_TO_DIRECTOR'}
         self.assertEqual(set(moved), {'AP_MOVED_TO_NAVDEEP', 'AP_EXP_MOVED_TO_NAVDEEP'})
         for route in moved.values():
             with self.subTest(route['code']):
@@ -291,3 +293,24 @@ class PastApprovedStages(SimpleTestCase):
                 {'role': StageRole.APPROVAL, 'user_id': 9, 'state': 'UPCOMING'},
                 {'role': StageRole.CA, 'user_id': 9, 'state': 'UPCOMING'}]
         self.assertEqual([e['state'] for e in flow_service.mark_with_ca(plan)], ['APPROVED', 'WITH_CA', 'UPCOMING'])
+
+
+class TheFixedAssetsMovedToTheDirector(SimpleTestCase):
+    """2026-10-20: Fixed Assets waiting at Payment, past their owner, go to the Director, then Payment."""
+
+    def test_director_then_payment_ca_audit_final_never_chosen(self):
+        route = BY_CODE['AP_MOVED_TO_DIRECTOR']
+        self.assertEqual(route['query'], hierarchy.NEVER_CHOSEN)
+        stages = hierarchy.full_stages(route)
+        self.assertEqual([n for n, _r in stages], ['Director Approval', 'Payment Approval', 'CA Approval',
+                                                   'Audit Approval', 'Final Approval'])
+        # The engine still runs the approvals-first shape.
+        named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in enumerate(stages, 1)])
+        self.assertEqual([r for _s, r in named], [StageRole.APPROVAL, StageRole.PAYMENT, StageRole.CA,
+                                                 StageRole.AUDIT, StageRole.FINAL])
+
+    def test_a_new_fixed_asset_request_still_meets_its_owner_then_the_director(self):
+        for code in ('AP_FA_CIVIL', 'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_OTHERS_OIL', 'AP_FA_CONSUMABLES_BEV'):
+            with self.subTest(code):
+                names = [n for n, _r in hierarchy.full_stages(BY_CODE[code])]
+                self.assertEqual(names[:3], ['Payment Approval', 'Budget Owner Approval', 'Director Approval'])

@@ -2830,3 +2830,216 @@ def expense_months(company):
                                              [MONTH_DIMENSION], 'effective months')]
     months = [c for c in codes if _MONTH_CODE.match(c)]
     return sorted(months, key=lambda c: (c[3:], c[:2]), reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# An Expense to a vendor, booked as an A/P invoice (user, 2026-10-20)
+# ---------------------------------------------------------------------------
+# The step after the GRPO: SAP's own expense bills (OPCH, read 2026-10-20)
+# carry on every expense line Variety (dim 1), Month (2), Budget (3), Sub
+# Budget (4) and State (5), a GST tax code and the GST location, and on the
+# header the branch the bill is booked to. Item bills are copied from their
+# GRPO: SAP refuses an item A/P invoice without one (its rule 1800002).
+
+AP_INVOICE_OBJECT = '18'
+#: The dimensions the Accounts desk picks on each line.
+VARIETY_DIMENSION, STATE_DIMENSION = 1, 5
+
+_AP_BRANCHES_SQL = '''
+    SELECT "BPLId" AS "bpl_id", "BPLName" AS "name", "State" AS "state"
+    FROM "{schema}"."OBPL" WHERE IFNULL("Disabled", 'N') = 'N' ORDER BY "BPLId"
+'''
+#: How each branch's bills of the last year were booked: their GST location,
+#: and how many service bills (the default branch is the busiest).
+_AP_BRANCH_USE_SQL = '''
+    SELECT H."BPLId" AS "bpl_id", L."LocCode" AS "location", H."DocType" AS "doc_type",
+           COUNT(DISTINCT H."DocEntry") AS "n"
+    FROM "{schema}"."OPCH" H JOIN "{schema}"."PCH1" L ON L."DocEntry" = H."DocEntry"
+    WHERE H."DocDate" >= ADD_DAYS(CURRENT_DATE, -365) AND H."CANCELED" = 'N' AND L."LocCode" IS NOT NULL
+    GROUP BY H."BPLId", L."LocCode", H."DocType"
+'''
+_AP_LOCATIONS_SQL = '''SELECT "Code" AS "code", "Location" AS "name" FROM "{schema}"."OLCT" ORDER BY "Code"'''
+_AP_TAX_CODES_SQL = '''
+    SELECT "Code" AS "code", "Name" AS "name", "Rate" AS "rate"
+    FROM "{schema}"."OSTC" WHERE IFNULL("Lock", 'N') = 'N' ORDER BY "Code"
+'''
+_AP_DIMENSION_SQL = '''
+    SELECT "OcrCode" AS "code", "OcrName" AS "name" FROM "{schema}"."OOCR"
+    WHERE "DimCode" = ? AND "Active" = 'Y' ORDER BY "OcrCode"
+'''
+
+
+def is_reverse_charge(tax_code):
+    """A GST code the buyer pays itself (RCM): SAP's own name says so."""
+    return 'RCM' in _s(tax_code.get('name')).upper() if isinstance(tax_code, dict) else False
+
+
+def ap_invoice_options(company):
+    """What the Accounts desk picks an A/P invoice's fields from:
+
+    `{branches: [{bpl_id, name, state, location, used}], default_branch,
+      locations: [{code, name}], tax_codes: [{code, name, rate, reverse_charge}],
+      varieties: [{code, name}], states: [{code, name}]}`.
+    A branch's `location` is the GST location its bills use most; the default
+    branch is the one SAP books most service bills to.
+    """
+    schema = _schema(company)
+    locations, used = defaultdict(lambda: defaultdict(int)), defaultdict(int)
+    for r in _run(company, _AP_BRANCH_USE_SQL.format(schema=schema), [], 'SAP branch use'):
+        bpl, n = int(r['bpl_id']), int(r.get('n') or 0)
+        locations[bpl][int(r['location'])] += n
+        if _s(r.get('doc_type')) == 'S':
+            used[bpl] += n
+    branches = [{'bpl_id': int(r['bpl_id']), 'name': _s(r.get('name')), 'state': _s(r.get('state')),
+                 'location': max(locations[int(r['bpl_id'])].items(), key=lambda kv: kv[1])[0]
+                 if locations.get(int(r['bpl_id'])) else None,
+                 'used': used.get(int(r['bpl_id']), 0)}
+                for r in _run(company, _AP_BRANCHES_SQL.format(schema=schema), [], 'SAP branches')]
+    busiest = max(branches, key=lambda b: b['used'], default=None)
+    taxes = [{'code': _s(r.get('code')), 'name': _s(r.get('name')),
+              'rate': f"{Decimal(str(r.get('rate') or 0)).normalize():f}"}
+             for r in _run(company, _AP_TAX_CODES_SQL.format(schema=schema), [], 'tax codes')]
+    for t in taxes:
+        t['reverse_charge'] = is_reverse_charge(t)
+
+    def dimension(code, what):
+        return [{'code': _s(r.get('code')), 'name': _s(r.get('name'))}
+                for r in _run(company, _AP_DIMENSION_SQL.format(schema=schema), [code], what)]
+
+    return {
+        'branches': branches,
+        'default_branch': busiest['bpl_id'] if busiest and busiest['used'] else None,
+        'locations': [{'code': int(r['code']), 'name': _s(r.get('name'))}
+                      for r in _run(company, _AP_LOCATIONS_SQL.format(schema=schema), [], 'GST locations')],
+        'tax_codes': taxes,
+        'varieties': dimension(VARIETY_DIMENSION, 'varieties'),
+        'states': dimension(STATE_DIMENSION, 'states'),
+    }
+
+
+def bill_key(text):
+    """A bill number as the match sees it: letters and digits, upper case —
+    "inv/ 2026-118" and "INV2026118" are the same bill."""
+    return re.sub(r'[^A-Z0-9]', '', _s(text).upper())
+
+
+_OPEN_GRPOS_SQL = '''
+    SELECT H."DocEntry" AS "doc_entry", H."DocNum" AS "doc_num", H."DocDate" AS "doc_date",
+           H."NumAtCard" AS "vendor_ref", H."DocTotal" AS "doc_total", H."BPLId" AS "bpl_id",
+           H."BPLName" AS "bpl_name", H."AtcEntry" AS "attachment_entry", H."DocType" AS "doc_type",
+           L."LineNum" AS "line_num", L."ItemCode" AS "item_code", L."Dscription" AS "description",
+           L."OpenQty" AS "open_qty", L."Price" AS "price", L."OpenSum" AS "open_amount",
+           L."TaxCode" AS "tax_code", L."WhsCode" AS "warehouse"
+    FROM "{schema}"."OPDN" H
+    JOIN "{schema}"."PDN1" L ON L."DocEntry" = H."DocEntry"
+    WHERE H."CardCode" = ? AND H."DocStatus" = 'O' AND H."CANCELED" = 'N' AND L."LineStatus" = 'O'
+      {only}
+    ORDER BY H."DocDate" DESC, H."DocEntry" DESC, L."LineNum"
+    LIMIT 1000
+'''
+
+
+def open_grpos(company, card_code, *, bill_number='', doc_entry=None):
+    """The vendor's open GRPOs and their open lines, newest first:
+    `[{doc_entry, doc_num, doc_date, vendor_ref, doc_total, open_amount, bpl_id,
+       bpl_name, attachment_entry, matches, lines: [{line_num, item_code, ...}]}]`.
+
+    `matches`: its vendor ref is `bill_number` (`bill_key`) — the GRPO an Item
+    bill is copied from. `doc_entry`: that one GRPO only.
+    """
+    code = _s(card_code)
+    if not code:
+        return []
+    only, params = '', [code]
+    if doc_entry is not None:
+        only, params = 'AND H."DocEntry" = ?', [code, int(doc_entry)]
+    rows = _run(company, _OPEN_GRPOS_SQL.format(schema=_schema(company), only=only), params, 'open GRPOs')
+    key = bill_key(bill_number)
+    found, order = {}, []
+    for r in rows:
+        entry = int(r['doc_entry'])
+        grpo = found.get(entry)
+        if grpo is None:
+            grpo = found[entry] = {
+                'doc_entry': entry, 'doc_num': r.get('doc_num'), 'doc_date': _date(r.get('doc_date')),
+                'vendor_ref': _s(r.get('vendor_ref')), 'doc_total': _money(r.get('doc_total')),
+                'bpl_id': int(r['bpl_id']) if r.get('bpl_id') is not None else None,
+                'bpl_name': _s(r.get('bpl_name')),
+                'attachment_entry': int(r['attachment_entry']) if r.get('attachment_entry') else None,
+                'matches': bool(key) and bill_key(r.get('vendor_ref')) == key,
+                # An item GRPO's A/P invoice is an item one; a service GRPO's, a service one.
+                'category': BILL_CATEGORIES.get(_s(r.get('doc_type')), 'ITEM'),
+                'open_amount': Decimal('0'), 'lines': []}
+            order.append(entry)
+        grpo['open_amount'] += Decimal(str(r.get('open_amount') or 0))
+        grpo['lines'].append({
+            'line_num': int(r['line_num']), 'item_code': _s(r.get('item_code')),
+            'description': _s(r.get('description')), 'open_qty': _money(r.get('open_qty')),
+            'price': _money(r.get('price')), 'open_amount': _money(r.get('open_amount')),
+            'tax_code': _s(r.get('tax_code')), 'warehouse': _s(r.get('warehouse'))})
+    out = [found[e] for e in order]
+    for grpo in out:
+        grpo['open_amount'] = _money(grpo['open_amount'])
+    # The GRPOs of this bill first.
+    return sorted(out, key=lambda g: not g['matches'])
+
+
+_AP_SERIES_SQL = '''
+    SELECT "Series" AS "series", "SeriesName" AS "name" FROM "{schema}"."NNM1"
+    WHERE "ObjectCode" = ? AND "BPLId" = ? AND IFNULL("Locked", 'N') = 'N' AND "SeriesName" LIKE ?
+    ORDER BY "Series" DESC
+'''
+_AP_SERIES_USED_SQL = '''
+    SELECT N."SeriesName" AS "name", COUNT(*) AS "n"
+    FROM "{schema}"."OPCH" H JOIN "{schema}"."NNM1" N ON N."Series" = H."Series"
+    WHERE H."BPLId" = ? AND H."DocType" = ? AND H."DocDate" >= ADD_DAYS(CURRENT_DATE, -120)
+    GROUP BY N."SeriesName" ORDER BY 2 DESC
+'''
+
+
+def ap_invoice_series(company, bpl_id, posting_date, *, gst, service=True):
+    """The A/P invoice series for a branch and month: `(series, name)` or None.
+
+    SAP keeps one per branch, month and kind, named `<BR>_<K><MM><YY>`
+    (Oil Factory, October 2026: HR_G1026 a GST invoice, HR_B1026 one without
+    GST charged — exempt, or reverse charge only). `gst`: a line charges GST.
+    A branch named otherwise (Delhi ISD: DISD1026) takes the series its
+    bills of that kind used most lately, for this month.
+    """
+    month = f'{posting_date:%m}{posting_date:%y}'
+    schema = _schema(company)
+    rows = _run(company, _AP_SERIES_SQL.format(schema=schema),
+                [AP_INVOICE_OBJECT, int(bpl_id), f'%{month}'], 'A/P invoice series')
+    if not rows:
+        return None
+    kind = 'G' if gst else 'B'
+    for r in rows:
+        name = _s(r.get('name'))
+        if len(name) >= 6 and name[-6] == '_' and name[-5] == kind:
+            return int(r['series']), name
+    used = _run(company, _AP_SERIES_USED_SQL.format(schema=schema),
+                [int(bpl_id), 'S' if service else 'I'], 'A/P invoice series used')
+    by_prefix = {_s(r.get('name'))[:-4]: (int(r['series']), _s(r.get('name'))) for r in rows}
+    for r in used:
+        hit = by_prefix.get(_s(r.get('name'))[:-4])
+        if hit:
+            return hit
+    return int(rows[0]['series']), _s(rows[0].get('name'))
+
+
+_AP_BY_MEMO_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", "DocNum" AS "doc_num", "DocTotal" AS "doc_total"
+    FROM "{schema}"."OPCH"
+    WHERE "JrnlMemo" = ? AND "CANCELED" = 'N'
+    ORDER BY "DocEntry" DESC
+'''
+
+
+def purchase_invoice_by_memo(company, memo):
+    """The live A/P invoice whose journal memo is `memo`, or None — how a post
+    whose answer was lost is found rather than booked twice."""
+    rows = _run(company, _AP_BY_MEMO_SQL.format(schema=_schema(company)), [memo], 'A/P invoices')
+    if not rows:
+        return None
+    return {'doc_entry': int(rows[0]['doc_entry']), 'doc_num': rows[0].get('doc_num'),
+            'doc_total': _money(rows[0].get('doc_total'))}

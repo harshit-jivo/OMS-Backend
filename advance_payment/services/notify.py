@@ -87,8 +87,10 @@ def awaiting(flow, *, actor, note=''):
 def completed(advance, *, actor, posted=False):
     from advance_payment.services import voucher as voucher_service
 
-    doc_num = getattr(voucher_service.live(advance), 'sap_doc_num', None) if posted else None
-    tail = f'. Posted to SAP as payment {doc_num}.' if doc_num else '. Approved and posted to SAP.'
+    live = voucher_service.live(advance) if posted else None
+    doc_num = getattr(live, 'sap_doc_num', None)
+    what = 'A/P invoice' if getattr(live, 'sap_object', '') == 'PURCHASE_INVOICE' else 'payment'
+    tail = f'. Posted to SAP as {what} {doc_num}.' if doc_num else '. Approved and posted to SAP.'
     _later(event_type=COMPLETED, title='Payment request completed', message=_describe(advance) + tail,
            recipients=[advance.created_by], entity=advance, actor=actor)
 

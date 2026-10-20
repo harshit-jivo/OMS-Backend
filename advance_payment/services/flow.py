@@ -82,6 +82,7 @@ from advance_payment.services import payout as payout_service
 from advance_payment.services import requests as request_service
 from advance_payment.services import sap as sap_service
 from advance_payment.services import voucher as voucher_service
+from advance_payment.services import ap_invoice
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +561,9 @@ def _post_voucher(flow, user):
     advance = flow.request
     if voucher_service.live(advance) is not None:
         return ''
-    outcome = voucher_service.post(advance, user=user)
+    # An Expense to a vendor is booked as its A/P invoice, not paid (2026-10-20).
+    poster = ap_invoice if ap_invoice.applies(advance) else voucher_service
+    outcome = poster.post(advance, user=user)
     if not outcome.ok:
         log(advance, LogAction.SAP_POST_FAILED, user=user, flow=flow,
             data={'error': outcome.message, 'voucher': outcome.voucher.version})
@@ -640,7 +643,9 @@ def approve(advance, *, user, remarks='', version=None):
         if role == StageRole.PAYMENT:
             if advance.partner_not_in_sap:
                 _link_partner(flow, user)
-            problems = payout_service.problems(advance) + expense_problems(advance)
+            # An Expense to a vendor books its bill, not a payment: no bank details.
+            paid = not ap_invoice.applies(advance)
+            problems = (payout_service.problems(advance) if paid else []) + expense_problems(advance)
             if problems:
                 raise FlowError('The payment details are not ready: ' + ' '.join(problems),
                                 problems=problems)
@@ -957,7 +962,10 @@ def expense_problems(advance):
     lines = list(advance.expense_lines.all())
     if not lines:
         return ['The request has no expense lines.']
-    out = [f'Line {ln.line_no}: choose its expense G/L account.' for ln in lines if not ln.gl_account]
+    # An Item bill is copied from its GRPO, accounts and all.
+    item_bill = ap_invoice.applies(advance) and ap_invoice.is_item_bill(advance)
+    out = [] if item_bill else [f'Line {ln.line_no}: choose its expense G/L account.'
+                                for ln in lines if not ln.gl_account]
     if not advance.sub_budget_code:
         out.append('Choose the Sub Budget.')
     # Paid to a vendor: how SAP books the bill, the desk's to set (2026-10-20).
@@ -966,7 +974,8 @@ def expense_problems(advance):
     # The month is the Payment desk's to set: SAP needs one on every line.
     if any(not (ln.effect_month or advance.effect_month) for ln in lines):
         out.append('Choose the Month.')
-    return out
+    # Booked as an A/P invoice: what the invoice needs (2026-10-20).
+    return out + ap_invoice.problems(advance)
 
 
 def _same_amounts(before, after):

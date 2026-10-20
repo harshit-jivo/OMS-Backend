@@ -4,6 +4,7 @@ import re
 from rest_framework import serializers
 
 from advance_payment.models import Employee
+from advance_payment.services import ap_invoice
 
 _PHONE = re.compile(r'^\+?[0-9][0-9\s-]{6,18}$')
 
@@ -171,6 +172,8 @@ def voucher_data(voucher):
         'status': voucher.status,
         'sap_doc_entry': voucher.sap_doc_entry,
         'sap_doc_num': voucher.sap_doc_num,
+        # OUTGOING_PAYMENT, or (an Expense to a vendor) PURCHASE_INVOICE.
+        'sap_object': voucher.sap_object,
         'error': voucher.error,
         'posted_by': _user(voucher.posted_by),
         'posted_on': _iso(voucher.posted_on),
@@ -257,6 +260,13 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'expense_category': advance.expense_category,
         'expense_bill_number': advance.expense_bill_number,
         'expense_bill_date': _iso(advance.expense_bill_date),
+        # ...booked as an A/P invoice: the Accounts desk's branch, due date and (an Item bill) GRPO.
+        'expense_bpl_id': advance.expense_bpl_id,
+        'expense_bpl_name': advance.expense_bpl_name,
+        'expense_due_date': _iso(advance.expense_due_date),
+        'expense_grpo_entry': advance.expense_grpo_entry,
+        'expense_grpo_num': advance.expense_grpo_num,
+        'books_ap_invoice': ap_invoice.applies(advance),
         'return_method': advance.return_method,
         'return_method_other': advance.return_method_other,
         'installments': advance.installments,
@@ -299,6 +309,7 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
             'tds_override': ln.tds_override, 'tds_code': ln.tds_code, 'tds_label': ln.tds_label,
             'tds_rate': str(ln.tds_rate) if ln.tds_rate is not None else None,
             'tds_amount': str(ln.tds_amount), 'net': str(ln.net),
+            'variety': ln.variety, 'state': ln.state, 'tax_code': ln.tax_code, 'location': ln.location,
         } for ln in advance.expense_lines.all()],
         'files': [file_data(f) for f in advance.files.all()
                   if see_account or f.purpose == 'SUPPORTING'],

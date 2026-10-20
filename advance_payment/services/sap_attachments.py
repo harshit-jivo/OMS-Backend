@@ -40,7 +40,7 @@ import requests
 from django.conf import settings
 from django.db import transaction
 
-from advance_payment.models import FilePurpose, LogAction, RequestFile, VoucherStatus
+from advance_payment.models import FilePurpose, LogAction, RequestFile, VoucherObject, VoucherStatus
 from advance_payment.services import sap_attachment_rows
 
 logger = logging.getLogger(__name__)
@@ -326,15 +326,18 @@ def attach_after_posting(advance, *, user):
                 voucher.attachment_error = problem[:500]
                 voucher.save(update_fields=['attachment_error'])
                 return 0, problem
+            # The payment, or (an Expense to a vendor) the A/P invoice it booked.
+            invoice = getattr(voucher, 'sap_object', '') == VoucherObject.PURCHASE_INVOICE
+            target = 'PurchaseInvoices' if invoice else 'VendorPayments'
             try:
-                sap_client.request('PATCH', f'/VendorPayments({int(voucher.sap_doc_entry)})',
+                sap_client.request('PATCH', f'/{target}({int(voucher.sap_doc_entry)})',
                                    company_db=company_db, json_body={'AttachmentEntry': entry})
             except sap_client.SapError as exc:
                 # Any refusal, not only the share's: a PATCH of a posted payment
                 # runs SAP's posting rules again (after 5 PM: "(4612) Urgency
                 # field is mandatory"), which an attachment is not subject to.
                 # Only the attachment number is set, and only where there is none.
-                if exc.status_code is None or not sap_attachment_rows.enabled():
+                if exc.status_code is None or invoice or not sap_attachment_rows.enabled():
                     raise
                 sap_attachment_rows.link_payment(company_db, int(voucher.sap_doc_entry), entry)
             voucher.attachment_entry = entry

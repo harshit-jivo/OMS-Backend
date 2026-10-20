@@ -367,6 +367,20 @@ class AdvanceRequest(models.Model):
                                            help_text="Expense to a vendor: the vendor's bill number.")
     expense_bill_date = models.DateField(null=True, blank=True,
                                          help_text="Expense to a vendor: the vendor's bill date.")
+    #: An Expense to a vendor is booked in SAP as an A/P INVOICE (user,
+    #: 2026-10-20): the step after the GRPO. The Accounts desk sets what the
+    #: invoice needs beyond the bill: the SAP branch it is booked to, its due
+    #: date (blank: the vendor's payment terms), and — an Item bill — the
+    #: open GRPO it is copied from, matched by the bill number.
+    expense_bpl_id = models.PositiveIntegerField(null=True, blank=True,
+                                                 help_text='Expense to a vendor: the SAP branch (BPLId).')
+    expense_bpl_name = models.CharField(max_length=100, blank=True, default='')
+    expense_due_date = models.DateField(null=True, blank=True,
+                                        help_text="Expense to a vendor: the A/P invoice's due date.")
+    expense_grpo_entry = models.PositiveIntegerField(null=True, blank=True,
+                                                     help_text='Item bill: the GRPO DocEntry it is copied from.')
+    expense_grpo_num = models.PositiveIntegerField(null=True, blank=True,
+                                                   help_text="Item bill: that GRPO's DocNum.")
     return_method = models.CharField(max_length=20, choices=ReturnMethod.choices, blank=True, default='')
     return_method_other = models.CharField(max_length=120, blank=True, default='')
     installments = models.PositiveSmallIntegerField(null=True, blank=True)
@@ -570,6 +584,13 @@ class ExpenseLine(models.Model):
     tds_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     tds_account = models.CharField(max_length=20, blank=True, default='')
     tds_amount = models.DecimalField(max_digits=19, decimal_places=2, default=0)
+    #: The A/P invoice's line (an Expense to a vendor, 2026-10-20), the
+    #: Accounts desk's: SAP's Variety (dimension 1) and State (dimension 5),
+    #: its GST tax code (OSTC) and the GST location (OLCT).
+    variety = models.CharField(max_length=20, blank=True, default='')
+    state = models.CharField(max_length=10, blank=True, default='')
+    tax_code = models.CharField(max_length=20, blank=True, default='')
+    location = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         db_table = 'advance_payment_expense_line'
@@ -780,6 +801,8 @@ class RequestFlow(models.Model):
 class VoucherObject(models.TextChoices):
     OUTGOING_PAYMENT = 'OUTGOING_PAYMENT', 'Outgoing payment (OVPM)'
     JOURNAL_ENTRY = 'JOURNAL_ENTRY', 'Journal entry (OJDT)'
+    #: An Expense to a vendor: its A/P invoice, no payment (2026-10-20).
+    PURCHASE_INVOICE = 'PURCHASE_INVOICE', 'A/P invoice (OPCH)'
 
 
 class VoucherStatus(models.TextChoices):

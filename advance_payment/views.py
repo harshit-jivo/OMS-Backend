@@ -1293,6 +1293,39 @@ class VendorExpenseHistoryView(_Lookup):
         return sap_service.vendor_expense_history(company, card_code)
 
 
+class ApInvoiceOptionsView(_Lookup):
+    """GET /api/advance-payments/ap-invoice-options/?company=
+
+    What the Accounts desk picks an Expense's A/P invoice fields from
+    (`sap.ap_invoice_options`): SAP's branches (each with its GST location),
+    the default branch, GST locations, tax codes, Varieties and States.
+    """
+
+    resource = 'A/P invoice options'
+
+    def fetch(self, request, company):
+        return sap_service.ap_invoice_options(company)
+
+
+class OpenGrposView(_Lookup):
+    """GET /api/advance-payments/open-grpos/?company=&card_code=&bill_number=
+
+    The vendor's open GRPOs and their open lines (`sap.open_grpos`), those
+    whose vendor ref is the bill number first, marked `matches`: the GRPO an
+    Item bill's A/P invoice is copied from. With none matching, the desk
+    picks one of the rest by hand (user, 2026-10-20).
+    """
+
+    resource = 'open GRPOs'
+
+    def fetch(self, request, company):
+        card_code = (request.query_params.get('card_code') or '').strip()
+        if not card_code:
+            raise ValueError('card_code is required (the vendor).')
+        return sap_service.open_grpos(company, card_code,
+                                      bill_number=request.query_params.get('bill_number') or '')
+
+
 class PaymentAccountsView(_Lookup):
     """GET /api/advance-payments/payment-accounts/?company=&search=&limit=
 

@@ -236,12 +236,20 @@ def expense_routes():
 
 
 def moved_routes():
-    """The two routes the requests waiting on 2026-10-19 were moved onto: Navdeep, then Payment."""
+    """The routes requests were moved onto, never chosen for a new one: those
+    waiting on 2026-10-19 (Navdeep, then Payment), and the Fixed Assets at
+    Payment on 2026-10-20 (the Director, then Payment)."""
     return [
         {'code': 'AP_MOVED_TO_NAVDEEP', 'name': 'Payments · moved to Navdeep (19 Oct 2026)', 'company': 'ALL',
          'query': NEVER_CHOSEN, 'stages': [(MOVED_STAGE, 'navdeep')], 'never_chosen': True},
         {'code': 'AP_EXP_MOVED_TO_NAVDEEP', 'name': 'Expense · moved to Navdeep (19 Oct 2026)', 'company': 'ALL',
          'query': NEVER_CHOSEN, 'stages': [(MOVED_STAGE, 'navdeep')], 'expense': True, 'never_chosen': True},
+        # Fixed Assets waiting at Payment that had passed their owner (user,
+        # 2026-10-20): the Director first, then Payment fills the payment —
+        # approvals first, as routes were before Payment came first.
+        {'code': 'AP_MOVED_TO_DIRECTOR', 'name': 'Payments · Fixed Assets moved to the Director (20 Oct 2026)',
+         'company': 'ALL', 'query': NEVER_CHOSEN, 'stages': [(DIRECTOR_STAGE, 'director')],
+         'never_chosen': True, 'approvals_first': True},
     ]
 
 
@@ -388,4 +396,6 @@ def full_stages(route):
     payment, ca = ('Payment Approval', 'payment'), (CA_STAGE, 'ca')
     if route.get('expense'):
         return [*approvals, (ACCOUNTS_STAGE, 'accounts'), ca, (EXPENSE_AUDIT_STAGE, 'expense_audit')]
+    if route.get('approvals_first'):  # a moved route: its approvals, then Payment
+        return [*approvals, payment, ca, ('Audit Approval', 'audit'), ('Final Approval', 'final')]
     return [payment, *approvals, ca, ('Audit Approval', 'audit'), ('Final Approval', 'final')]
