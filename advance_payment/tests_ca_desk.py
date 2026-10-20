@@ -51,11 +51,12 @@ class TheCaDesk(SimpleTestCase):
         self.assertIn(StageRole.CA, flow_service.ACCOUNT_ROLES)
         self.assertIn(StageRole.CA, flow_service.SEND_BACK_ROLES)
 
-    def test_is_on_every_route(self):
+    def test_is_on_every_route_after_its_approvals(self):
         for route in BY_CODE.values():
             with self.subTest(route['code']):
                 names = [n for n, _r in hierarchy.full_stages(route)]
-                self.assertEqual(names[names.index('Payment Approval') + 1], 'CA Approval')
+                self.assertEqual(names[0], 'Payment Approval')
+                self.assertEqual(names[-2 if route.get('expense') else -3], 'CA Approval')
 
 
 class BillsGoStraightToPayment(SimpleTestCase):
@@ -142,7 +143,21 @@ def _row(pk, name, sequence, user='old'):
 
 
 class ReSeedingKeepsWaitingRequestsOnTheirStage(SimpleTestCase):
-    def test_audit_stays_audit_when_ca_is_inserted_and_a_dropped_stage_goes_first(self):
+    def test_payment_moves_first_and_ca_goes_in_the_same_rows_kept(self):
+        head, payment, audit, final = (_row(1, 'Department Head Approval', 1), _row(2, 'Payment Approval', 2),
+                                       _row(3, 'Audit Approval', 3), _row(4, 'Final Approval', 4))
+        table = _Stages([head, payment, audit, final])
+        users = {role: f'user:{role}' for role in ('payment', 'ca', 'audit', 'final', 'final')}
+        with mock.patch.object(seed, 'WorkflowStage', table):
+            seed.Command._write_stages('wf', hierarchy.full_stages(BY_CODE['AP_RENT']), users)
+        live = sorted((r for r in table.rows if r.is_active), key=lambda r: r.sequence)
+        self.assertEqual([r.name for r in live], ['Payment Approval', 'Department Head Approval', 'CA Approval',
+                                                  'Audit Approval', 'Final Approval'])
+        # The same rows, so requests on them stay put.
+        self.assertEqual([live[0], live[1], live[3], live[4]], [payment, head, audit, final])
+        self.assertEqual(sorted(r.sequence for r in table.rows), list(range(1, 6)))
+
+    def test_a_stage_the_route_drops_is_retired_and_numbered_first(self):
         head, payment, audit, final = (_row(1, 'Department Head Approval', 1), _row(2, 'Payment Approval', 2),
                                        _row(3, 'Audit Approval', 3), _row(4, 'Final Approval', 4))
         table = _Stages([head, payment, audit, final])
@@ -151,16 +166,12 @@ class ReSeedingKeepsWaitingRequestsOnTheirStage(SimpleTestCase):
             seed.Command._write_stages('wf', hierarchy.full_stages(BY_CODE['AP_FREIGHT_IN']), users)
         live = sorted((r for r in table.rows if r.is_active), key=lambda r: r.sequence)
         self.assertEqual([(r.name, r.user) for r in live], [
-            ('Freight Approval', 'user:navdeep'), ('Payment Approval', 'user:payment'),
-            ('CA Approval', 'user:ca'), ('Audit Approval', 'user:audit'), ('Final Approval', 'user:final')])
-        # The same rows, so requests on them stay put.
-        self.assertIs(live[1], payment)
-        self.assertIs(live[3], audit)
-        self.assertIs(live[4], final)
-        # The Department Head stage is retired, numbered before every live stage.
+            ('Payment Approval', 'user:payment'), ('CA Approval', 'user:ca'),
+            ('Audit Approval', 'user:audit'), ('Final Approval', 'user:final')])
+        self.assertIs(live[0], payment)
+        self.assertIs(live[2], audit)
         self.assertFalse(head.is_active)
         self.assertLess(head.sequence, min(r.sequence for r in live))
-        self.assertEqual(sorted(r.sequence for r in table.rows), list(range(1, 7)))
 
 
 class TheRequestsMovedToNavdeep(SimpleTestCase):
@@ -173,8 +184,80 @@ class TheRequestsMovedToNavdeep(SimpleTestCase):
             with self.subTest(route['code']):
                 self.assertEqual(route['query'], 'SELECT id FROM advance_payment_request WHERE 1 = 0')
                 self.assertEqual(route['stages'], [(hierarchy.MOVED_STAGE, 'navdeep')])
+        # Payment first; Navdeep's own approval is his CA one (2026-10-20).
         self.assertEqual([n for n, _r in hierarchy.full_stages(moved['AP_MOVED_TO_NAVDEEP'])],
-                         ['Navdeep Approval', 'Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+                         ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
         self.assertEqual([n for n, _r in hierarchy.full_stages(moved['AP_EXP_MOVED_TO_NAVDEEP'])],
-                         ['Navdeep Approval', 'Payment Approval', 'CA Approval', 'Expense Audit Approval'])
+                         ['Payment Approval', 'CA Approval', 'Expense Audit Approval'])
         self.assertTrue(all(code in BY_CODE for code in moved))  # seeded with the rest
+
+
+
+class PaymentFirst(SimpleTestCase):
+    """2026-10-20: Payment first, then the approvals, then CA, Audit, Final."""
+
+    def test_the_order_and_the_earlier_shape_still_run(self):
+        new = _named(['Payment Approval', 'HOD', 'Director', 'CA Approval', 'Audit Approval', 'Final Approval'])
+        self.assertTrue(flow_service.payment_first(new))
+        old = _named(['HOD', 'Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+        self.assertFalse(flow_service.payment_first(old))
+        expense = _named(['Payment Approval', 'Owner', 'CA Approval', 'Expense Audit Approval'])
+        self.assertEqual(flow_service.posting_role(expense), StageRole.AUDIT)
+        for bad in (['HOD', 'Payment Approval', 'Director', 'CA Approval', 'Audit Approval', 'Final Approval'],
+                    ['Payment Approval', 'CA Approval', 'HOD', 'Audit Approval', 'Final Approval'],
+                    ['Payment Approval', 'HOD']):
+            with self.subTest(bad), self.assertRaises(flow_service.FlowError):
+                _named(bad)
+
+    def test_navdeeps_own_approval_is_dropped_where_he_holds_ca(self):
+        for code in ('AP_FREIGHT_IN', 'AP_MART_IMPREST_SMALL', 'AP_TA_DA', 'AP_INCENTIVE', 'AP_IMPREST_JOURNAL'):
+            with self.subTest(code):
+                roles = [r for _n, r in hierarchy.full_stages(BY_CODE[code])]
+                self.assertEqual(roles.count('ca'), 1)
+                self.assertNotIn('navdeep', roles)
+
+
+class _Flow(SimpleNamespace):
+    pass
+
+
+class PastApprovedStages(SimpleTestCase):
+    """From Payment, past approvals already made this round, and past the CA person's own stage."""
+
+    def _walk(self, route, approved=(), ca_user=9, users=None):
+        users = users or {}
+        flow = _Flow(request='req', at=None)
+        stages = [(SimpleNamespace(id=i, name=name), role) for i, (name, role) in enumerate(route, start=1)]
+
+        def nxt(f):
+            index = next(i for i, (s, _r) in enumerate(stages) if s.id == f.at)
+            return stages[index + 1] if index + 1 < len(stages) else None
+
+        def point(f, stage, _role):
+            f.at = stage.id
+        flow.at = 1
+        with mock.patch.object(flow_service, '_ca_user_id', return_value=ca_user), \
+                mock.patch.object(flow_service, '_next', side_effect=nxt), \
+                mock.patch.object(flow_service, '_point_at', side_effect=point), \
+                mock.patch.object(flow_service, '_approved_this_round', side_effect=lambda f, s: s.id in approved), \
+                mock.patch.object(flow_service, 'stage_user_id', side_effect=lambda req, s: users.get(s.id, 100 + s.id)):
+            following = flow_service._past_approved(flow, nxt(flow))
+        return following[0].name if following else None
+
+    ROUTE = [('Payment Approval', StageRole.PAYMENT), ('HOD', StageRole.APPROVAL),
+             ('Director', StageRole.APPROVAL), ('CA Approval', StageRole.CA), ('Audit Approval', StageRole.AUDIT)]
+
+    def test_approvals_already_made_this_round_are_passed(self):
+        self.assertEqual(self._walk(self.ROUTE, approved={2, 3}), 'CA Approval')
+        self.assertEqual(self._walk(self.ROUTE, approved={2}), 'Director')
+        self.assertEqual(self._walk(self.ROUTE), 'HOD')  # a new round: asked again
+
+    def test_the_ca_persons_own_approval_is_passed(self):
+        # Navdeep picked as HOD: he approves once, at CA.
+        self.assertEqual(self._walk(self.ROUTE, users={2: 9}), 'Director')
+
+    def test_the_timeline_says_so(self):
+        plan = [{'role': StageRole.PAYMENT, 'user_id': 1, 'state': 'APPROVED'},
+                {'role': StageRole.APPROVAL, 'user_id': 9, 'state': 'UPCOMING'},
+                {'role': StageRole.CA, 'user_id': 9, 'state': 'UPCOMING'}]
+        self.assertEqual([e['state'] for e in flow_service.mark_with_ca(plan)], ['APPROVED', 'WITH_CA', 'UPCOMING'])

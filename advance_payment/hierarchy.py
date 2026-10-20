@@ -10,7 +10,8 @@ Each request goes to exactly one workflow:
     Account Payment (any company)     -> Avtar
     anything else (Oil, Beverages)    -> the workflow of its Payment Purpose
 
-and every workflow then ends Payment -> CA (Navdeep) -> Audit -> Final. "Department Head"
+and every workflow starts at Payment, then those approvals, then ends
+CA (Navdeep) -> Audit -> Final (2026-10-20). "Department Head"
 is the person the requester picks on the form (see `purposes.HEAD_PURPOSES`),
 not a fixed user: the stage is named `DEPARTMENT_HEAD_STAGE` and its
 configured user is only a placeholder.
@@ -365,14 +366,22 @@ def routes():
     return out + expense_routes() + moved_routes()
 
 
+def _held_by_ca(role):
+    """An approval the CA desk's own person would make: dropped, so they approve
+    the request once, at CA (user, 2026-10-20) — freight, Mart's small imprests,
+    TA/DA and incentives, the moved requests: Navdeep's approval IS his CA one."""
+    return role != HEAD and PEOPLE.get(role) == PEOPLE['ca']
+
+
 def full_stages(route):
     """All stages of a route, in order: `[(name, role)]`, the fixed ones last.
 
-    Payment -> CA -> Audit -> Final; an Expense route ends Payment -> CA ->
-    Expense Audit (its own auditor), whose approval posts. The CA desk is on
-    every route (user, 2026-10-19).
+    Payment first, then the route's approvals, then CA -> Audit -> Final
+    (user, 2026-10-20); an Expense route ends CA -> Expense Audit (its own
+    auditor), whose approval posts. The CA desk is on every route (2026-10-19).
     """
-    payment = [('Payment Approval', 'payment'), (CA_STAGE, 'ca')]
+    approvals = [(name, role) for name, role in route['stages'] if not _held_by_ca(role)]
+    head = [('Payment Approval', 'payment'), *approvals, (CA_STAGE, 'ca')]
     if route.get('expense'):
-        return [*route['stages'], *payment, (EXPENSE_AUDIT_STAGE, 'expense_audit')]
-    return [*route['stages'], *payment, ('Audit Approval', 'audit'), ('Final Approval', 'final')]
+        return [*head, (EXPENSE_AUDIT_STAGE, 'expense_audit')]
+    return [*head, ('Audit Approval', 'audit'), ('Final Approval', 'final')]

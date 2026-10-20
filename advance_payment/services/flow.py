@@ -88,8 +88,9 @@ logger = logging.getLogger(__name__)
 #: The code the module is registered under in the Workflows page.
 MODULE_CODE = 'ADVANCE_PAYMENT'
 
-#: Where each role may stand on a route: approvals first, then the three fixed stages.
-ROLE_ORDER = [StageRole.APPROVAL, *FIXED_ROLES]
+#: Where each role stands on a route (user, 2026-10-20): Payment first, then the
+#: approvals, then CA, Audit and Final.
+ROLE_ORDER = [StageRole.PAYMENT, StageRole.APPROVAL, StageRole.CA, StageRole.AUDIT, StageRole.FINAL]
 
 
 class FlowError(Exception):
@@ -107,32 +108,50 @@ class FlowError(Exception):
 
 #: The fixed tails a route may end with: the full one, or (an Expense route)
 #: Payment and Audit only, where Audit posts.
-FIXED_TAILS = (
-    list(FIXED_ROLES), [StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT],
-    # Routes seeded before the CA desk (2026-10-19), until they are seeded again.
-    [StageRole.PAYMENT, StageRole.AUDIT, StageRole.FINAL], [StageRole.PAYMENT, StageRole.AUDIT],
+#: How a route may end, after Payment and its approvals: CA (from 2026-10-19),
+#: Audit and Final — an Expense route, CA and its Audit, which posts. Longest
+#: first. A route seeded before CA (no CA stage) still runs.
+TAILS = (
+    [StageRole.CA, StageRole.AUDIT, StageRole.FINAL], [StageRole.AUDIT, StageRole.FINAL],
+    [StageRole.CA, StageRole.AUDIT], [StageRole.AUDIT],
 )
+
+
+def _valid_order(seq):
+    """Payment, then any approvals, then a TAIL (user, 2026-10-20) — or the
+    earlier shape, approvals then Payment, still run by a route not yet re-seeded."""
+    for tail in TAILS:
+        if seq[-len(tail):] == tail:
+            head = seq[:-len(tail)]
+            if not head:
+                return False
+            if head[0] == StageRole.PAYMENT and all(r == StageRole.APPROVAL for r in head[1:]):
+                return True
+            return head[-1] == StageRole.PAYMENT and all(r == StageRole.APPROVAL for r in head[:-1])
+    return False
+
+
+def payment_first(named):
+    """Whether a route starts at Payment (2026-10-20), its approvals after it."""
+    return bool(named) and named[0][1] == StageRole.PAYMENT
 
 
 def roles(stages):
     """`[(stage, role)]` for a workflow's stages; FlowError if they break the rule.
 
-    The rule: any number of approval stages, then exactly Payment Approval,
-    CA Approval, Audit Approval, Final Approval, once each, last and in that
-    order — or, for an Expense route, Payment, CA and Audit only. A route
-    without CA (seeded before it) is still accepted.
+    The rule (user, 2026-10-20): Payment Approval first, then any number of
+    approval stages named freely, then CA Approval, Audit Approval and Final
+    Approval, once each and in that order — an Expense route ends CA and
+    Audit. Still accepted: a route without CA, and one in the earlier shape
+    (approvals first, then Payment), until it is seeded again.
     """
     named = [(stage, StageRole.of(stage.name)) for stage in stages]
-    fixed = [role for _s, role in named if role != StageRole.APPROVAL]
-    for tail_roles in FIXED_TAILS:
-        tail = [role for _s, role in named[-len(tail_roles):]]
-        if fixed == tail_roles and tail == tail_roles:
-            return named
+    if _valid_order([role for _s, role in named]):
+        return named
     raise FlowError(
-        'The workflow must end with stages named exactly Payment Approval, CA Approval, '
-        'Audit Approval and Final Approval, in that order (an Expense workflow: Payment '
-        'Approval, CA Approval and Audit Approval). Any stages before them are approvals '
-        'and may be named freely.', status=409)
+        'A workflow starts with the stage named exactly Payment Approval, then any approval '
+        'stages (named freely), and ends with CA Approval, Audit Approval and Final Approval, '
+        'in that order (an Expense workflow ends CA Approval and Audit Approval).', status=409)
 
 
 def posting_role(named):
@@ -328,7 +347,15 @@ def approvals_kept(advance):
 
 
 def returned_after_approval(advance):
-    """For the creator's screen: may a resubmit go straight back to Payment?"""
+    """For the creator's screen: may a resubmit go straight back to Payment, past
+    approvals that stand? Never on a route that starts at Payment (2026-10-20):
+    its approvals come after Payment and are asked again."""
+    flow = getattr(advance, 'flow', None)
+    try:
+        if flow is not None and payment_first(_stages(flow)):
+            return False
+    except FlowError:
+        pass
     return _after_approval(_last_return(advance))
 
 
@@ -415,6 +442,9 @@ def _resubmit(flow, advance, *, user, remarks=''):
     kept = approvals_kept(advance)
     flow.cycle += 1
     first = _reroute(flow, advance, at_payment=kept)
+    # On a route that starts at Payment nothing is skipped: its approvals come after.
+    named = _stages(flow)
+    kept = kept and not payment_first(named)
     _save(flow)
     advance.status = RequestStatus.IN_APPROVAL
     advance.save(update_fields=['status', 'updated_on'])
@@ -558,6 +588,41 @@ def _approve_once(flow, following, *, user):
     return _next(flow)
 
 
+def _approved_this_round(flow, stage):
+    """Whether `stage` already approved the request in this cycle — its latest
+    decision in the cycle is an approval, not taken back since."""
+    last = (RequestLog.objects.filter(request=flow.request, cycle=flow.cycle, stage_id=stage.id,
+                                      action__in=[LogAction.APPROVED, LogAction.RECALLED,
+                                                  LogAction.REJECTED, LogAction.RETURNED])
+            .order_by('-id').first())
+    return last is not None and last.action == LogAction.APPROVED
+
+
+def _ca_user_id(flow):
+    """Who holds the route's CA desk today, or None on a route without one."""
+    ca = next((s for s, r in _stages(flow) if r == StageRole.CA), None)
+    return stage_user_id(flow.request, ca) if ca else None
+
+
+def _past_approved(flow, following):
+    """Past the approval stages it need not wait at (2026-10-20). Returns the next
+    stage it does wait at, or None after the last.
+
+    * One that already approved it in this round: a request that passed its
+      approvals before Payment, on a route then re-seeded to start at Payment,
+      goes on to CA. A new round (resubmitted, sent back) is asked again.
+    * One held by the CA desk's own person (Navdeep picked as Department
+      Head): they approve once, at CA.
+    """
+    ca_user = _ca_user_id(flow)
+    while following is not None and following[1] == StageRole.APPROVAL and (
+            _approved_this_round(flow, following[0])
+            or (ca_user is not None and stage_user_id(flow.request, following[0]) == ca_user)):
+        _point_at(flow, *following)
+        following = _next(flow)
+    return following
+
+
 def approve(advance, *, user, remarks='', version=None):
     """Approve the current stage. Returns `(advance, error)`.
 
@@ -590,6 +655,7 @@ def approve(advance, *, user, remarks='', version=None):
         following = _next(flow)
         if approved_as_head and following is not None:
             following = _approve_once(flow, following, user=user)
+        following = _past_approved(flow, following)
         if posts or following is None:
             flow.status = FlowStatus.COMPLETED
             _point_at(flow, None, '')
@@ -627,10 +693,11 @@ def reject(advance, *, user, remarks, version=None):
 def return_to_creator(advance, *, user, remarks, version=None):
     """An approval stage or Payment: back to the creator, to edit and resubmit.
 
-    Resubmitting routes it afresh from the first stage (a new round) — or,
-    returned by Payment and its approved terms unchanged, straight back to
-    Payment (`keeps_approvals`: the row keeps them as they are now). The
-    payment details Payment had filled stay, to be checked again there.
+    Resubmitting routes it afresh from the first stage (a new round): on a
+    route that starts at Payment (2026-10-20), Payment, then the approvals
+    again. On a route of the earlier shape, returned by Payment with its
+    approved terms unchanged, straight back to Payment (`keeps_approvals`).
+    The payment details Payment had filled stay, to be checked again there.
     """
     _remarks_required(remarks, 'returning it')
     flow = _acting(advance, user, version)
@@ -714,11 +781,12 @@ SEND_BACK_ROLES = (StageRole.FINAL, StageRole.AUDIT, StageRole.CA)
 
 @transaction.atomic
 def send_back(advance, *, user, remarks, version=None):
-    """Audit or Final: back to Payment, which rejects or corrects it.
+    """CA, Audit or Final: back to Payment, which rejects or corrects it.
 
-    The request then climbs the same stages again (Payment -> Audit -> Final),
-    with `cycle` incremented so the creator's edit rule and the "approved in
-    this round?" checks treat it as a fresh round.
+    The request then climbs the same stages again — Payment, its approvals
+    again (user, 2026-10-20), CA, Audit, Final — with `cycle` incremented so
+    the creator's edit rule and the "approved in this round?" checks treat it
+    as a fresh round.
     """
     _remarks_required(remarks, 'sending it back')
     flow = _acting(advance, user, version)
@@ -1171,6 +1239,17 @@ def mark_with_head(plan):
     return plan
 
 
+def mark_with_ca(plan):
+    """An approval stage held by the CA desk's own person, still to come: they
+    approve once, at CA (`_past_approved`), so the timeline says so. In place."""
+    ca = next((e for e in plan if e['role'] == StageRole.CA), None)
+    for entry in plan:
+        if (ca is not None and ca['user_id'] and entry['role'] == StageRole.APPROVAL
+                and entry['user_id'] == ca['user_id'] and entry['state'] == 'UPCOMING'):
+            entry['state'] = 'WITH_CA'
+    return plan
+
+
 def stage_plan(advance):
     """Every stage of the route with where the request stands on it, for the timeline."""
     flow = getattr(advance, 'flow', None)
@@ -1203,9 +1282,12 @@ def stage_plan(advance):
             users[user_id] = (user.name or user.username) if user else ''
         return users[user_id]
 
+    # Approvals stand across cycles only where they come before Payment (the
+    # earlier shape); after Payment, a new round asks them again.
+    payment_at = next((s.sequence for s, r in named if r == StageRole.PAYMENT), None)
     for stage, role in named:
         row = decided.get(stage.id)
-        if row is None and role == StageRole.APPROVAL:
+        if row is None and role == StageRole.APPROVAL and payment_at is not None and stage.sequence < payment_at:
             row = standing.get(stage.id)
         if flow.current_stage_id == stage.id and flow.status == FlowStatus.PENDING:
             state = 'CURRENT'
@@ -1233,4 +1315,4 @@ def stage_plan(advance):
             'acted_by_id': row.actor_id if row else None,
             'acted_on': row.created_on.isoformat() if row else None,
         })
-    return mark_with_head(out)
+    return mark_with_ca(mark_with_head(out))

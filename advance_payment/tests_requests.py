@@ -60,7 +60,7 @@ class TheRoute(SimpleTestCase):
 
     def test_refuses_an_approval_after_payment(self):
         route = FULL_ROUTE[:4] + [stage(9, 'Director Approval', 5)] + FULL_ROUTE[4:]
-        with self.assertRaisesRegex(flow_service.FlowError, 'must end with stages named exactly'):
+        with self.assertRaisesRegex(flow_service.FlowError, 'starts with the stage named exactly Payment Approval'):
             flow_service.roles(route)
 
     def test_refuses_the_fixed_stages_out_of_order(self):

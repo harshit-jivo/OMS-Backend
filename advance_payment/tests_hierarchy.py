@@ -119,8 +119,10 @@ class WhoApproves(SimpleTestCase):
             with self.subTest(code):
                 self.assertEqual(BY_CODE[code]['stages'],
                                  [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.SECOND_STAGE, 'navdeep')])
-                self.assertEqual([name for name, _r in hierarchy.full_stages(BY_CODE[code])][-4:],
-                                 ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+                # Navdeep approves once, at CA (2026-10-20).
+                self.assertEqual([name for name, _r in hierarchy.full_stages(BY_CODE[code])],
+                                 ['Payment Approval', 'Department Head Approval', 'CA Approval',
+                                  'Audit Approval', 'Final Approval'])
 
     def test_the_director_follows_where_the_hierarchy_says(self):
         with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages'])
@@ -150,15 +152,18 @@ class WhoApproves(SimpleTestCase):
     def test_ghee_and_other_raw_material_go_to_bhupinder(self):
         self.assertEqual(self.first('RAW_MATERIAL'), [(hierarchy.OWNER_STAGE, 'bhupinder')])
 
-    def test_every_route_ends_payment_ca_audit_final(self):
+    def test_every_route_starts_at_payment_and_ends_ca_audit_final(self):
         for route in ROUTES:
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
-                self.assertEqual([r for _n, r in stages[-4:]], ['payment', 'ca', 'audit', 'final'])
+                self.assertEqual(stages[0], ('Payment Approval', 'payment'))
+                self.assertEqual([r for _n, r in stages[-3:]], ['ca', 'audit', 'final'])
                 named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
                                             enumerate(stages, start=1)])
-                self.assertEqual([r for _s, r in named][-4:],
-                                 [StageRole.PAYMENT, StageRole.CA, StageRole.AUDIT, StageRole.FINAL])
+                roles = [r for _s, r in named]
+                self.assertEqual(roles[0], StageRole.PAYMENT)
+                self.assertEqual(roles[-3:], [StageRole.CA, StageRole.AUDIT, StageRole.FINAL])
+                self.assertTrue(all(r == StageRole.APPROVAL for r in roles[1:-3]))
 
 
 def _po_request(**overrides):
@@ -335,8 +340,8 @@ class ExpenseRoutes(SimpleTestCase):
         for route in EXPENSE_ROUTES:
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
-                self.assertEqual(stages[-3:], [('Payment Approval', 'payment'), (hierarchy.CA_STAGE, 'ca'),
-                                               (EXPENSE_AUDIT_STAGE, 'expense_audit')])
+                self.assertEqual(stages[0], ('Payment Approval', 'payment'))
+                self.assertEqual(stages[-2:], [(hierarchy.CA_STAGE, 'ca'), (EXPENSE_AUDIT_STAGE, 'expense_audit')])
                 named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
                                             enumerate(stages, start=1)])
                 self.assertEqual(named[-1][1], StageRole.AUDIT)
