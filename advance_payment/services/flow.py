@@ -83,6 +83,7 @@ from advance_payment.services import requests as request_service
 from advance_payment.services import sap as sap_service
 from advance_payment.services import voucher as voucher_service
 from advance_payment.services import ap_invoice
+from advance_payment.hierarchy import NO_CA_PURPOSES
 
 logger = logging.getLogger(__name__)
 
@@ -619,9 +620,15 @@ def _past_approved(flow, following):
       Head): they approve once, at CA.
     """
     ca_user = _ca_user_id(flow)
-    while following is not None and following[1] == StageRole.APPROVAL and (
-            _approved_this_round(flow, following[0])
-            or (ca_user is not None and stage_user_id(flow.request, following[0]) == ca_user)):
+    while following is not None and (
+            (following[1] == StageRole.APPROVAL and (
+                _approved_this_round(flow, following[0])
+                or (ca_user is not None and stage_user_id(flow.request, following[0]) == ca_user)))
+            # A route re-seeded to put its approvals first (2026-10-21): a request
+            # whose Payment already approved it this round does not meet Payment twice.
+            or (following[1] == StageRole.PAYMENT and _approved_this_round(flow, following[0]))
+            # An Oil Purchase never meets CA (2026-10-21), on whatever route it is.
+            or (following[1] == StageRole.CA and getattr(flow.request, 'purpose_code', '') in NO_CA_PURPOSES)):
         _point_at(flow, *following)
         following = _next(flow)
     return following

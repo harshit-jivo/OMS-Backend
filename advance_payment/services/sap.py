@@ -554,8 +554,34 @@ def open_invoices(company, party_type='vendor', card_code=None, search=None,
         'tds': _money(r.get('tds')),
         'created_on': _date(r.get('created_on')),
     } for r in _run(company, sql, params, f'open {party_type} invoices')]
+    if table == 'OPCH':
+        # A freight bill's litres (2026-10-21): what each of its lines carried.
+        litres = bill_litres(company, [r['doc_entry'] for r in rows])
+        for r in rows:
+            r['litres'] = litres.get(r['doc_entry'])
     rows = _with_attachments(company, table, rows)
     return _with_debits(company, 'bill', rows) if table == 'OPCH' else rows
+
+
+#: The litres an A/P invoice's lines carry (`U_UNE_LTS`, per line: the header's
+#: `U_UNE_TOTL` stays 0 on bills) — a freight bill's goods moved (2026-10-21).
+_BILL_LITRES_SQL = '''
+    SELECT "DocEntry" AS "doc_entry", SUM(IFNULL("U_UNE_LTS", 0)) AS "litres"
+    FROM "{schema}"."PCH1" WHERE "DocEntry" IN ({marks}) GROUP BY "DocEntry"
+'''
+
+
+def bill_litres(company, doc_entries):
+    """`{doc_entry: litres}` (as strings) for the bills with any; `{}` if SAP cannot say."""
+    entries = sorted({int(e) for e in doc_entries})
+    if not entries:
+        return {}
+    sql = _BILL_LITRES_SQL.format(schema=_schema(company), marks=', '.join('?' * len(entries)))
+    try:
+        rows = _run(company, sql, entries, 'bill litres')
+    except SapUnavailable:
+        return {}
+    return {int(r['doc_entry']): _money(r.get('litres')) for r in rows if Decimal(str(r.get('litres') or 0))}
 
 
 # ---------------------------------------------------------------------------

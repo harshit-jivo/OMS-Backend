@@ -55,7 +55,9 @@ class TheCaDesk(SimpleTestCase):
         for route in BY_CODE.values():
             with self.subTest(route['code']):
                 names = [n for n, _r in hierarchy.full_stages(route)]
-                if route.get('expense'):  # approvals first, then Accounts, CA, its Audit
+                if route.get('no_ca'):  # Oil Purchase (2026-10-21): no CA at all
+                    self.assertNotIn('CA Approval', names)
+                elif route.get('expense'):  # approvals first, then Accounts, CA, its Audit
                     self.assertEqual(names[-3:-1], ['Accounts Approval', 'CA Approval'])
                 elif route.get('approvals_first'):  # moved: its approvals, then Payment
                     self.assertEqual(names[-4:-2], ['Payment Approval', 'CA Approval'])
@@ -73,7 +75,9 @@ class BillsGoStraightToPayment(SimpleTestCase):
         self.assertIn(f'NOT {hierarchy.FREIGHT_ROUTED}', route['query'])
         for code, other in BY_CODE.items():
             if code in ('AP_AGAINST_BILL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR', 'AP_IMPREST_JOURNAL') or other.get('expense')                     or other.get('never_chosen') \
-                    or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY')):
+                    or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY')) \
+                    or code in ('AP_RAW_MATERIAL', 'AP_PACKING_MATERIAL',  # Bhupinder, bills too (2026-10-21)
+                                'AP_OIL_PURCHASE_AGAINST_BILL'):  # an Oil Purchase's bills: no CA either
                 continue
             with self.subTest(code):
                 self.assertIn(hierarchy.NOT_BILL, other['query'])

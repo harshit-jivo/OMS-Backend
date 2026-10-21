@@ -128,6 +128,10 @@ DUE_SOON_DAYS = 2
 #: the Department Head the requester picks (`needs_department_head`).
 VENDOR_ON_ACCOUNT_PURPOSES = DUE_SOON_PURPOSES
 
+#: Raw and Packing Material: Bhupinder first, then Payment, in every company and
+#: however it is paid (user, 2026-10-21) — no Department Head is asked.
+RM_PM_PURPOSES = frozenset({'RAW_MATERIAL', 'PACKING_MATERIAL'})
+
 #: Request types that always go to the requester's Department Head, then the
 #: Director (Staff Advance / Imprest), whatever the purpose.
 HEAD_REQUEST_TYPES = frozenset({'EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST'})
@@ -167,6 +171,8 @@ def needs_department_head(company, request_type, purpose_code, budget_code='', p
         return False  # Navdeep, then the Payment desk
     if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
         return False  # the plant's fixed approver, by amount
+    if purpose_code in RM_PM_PURPOSES and request_type not in HEAD_REQUEST_TYPES:
+        return False  # Bhupinder, however it is paid, in every company (user, 2026-10-21)
     if request_type == 'VENDOR' and payment_against == 'ON_ACCOUNT':
         return True  # any purpose, through the head picked (user, 2026-10-21)
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES

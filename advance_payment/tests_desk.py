@@ -14,6 +14,7 @@ holders record the UTR after paying, sometimes on a request a stand-in approved.
 """
 from datetime import date
 from decimal import Decimal
+from unittest import mock
 
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -37,6 +38,10 @@ DESK_KEY = views.APPROVAL_KEY
 
 class DeskFixture(TestCase):
     def setUp(self):
+        # The day's cut-off (`tests_cutoff`) is not these tests' subject: open, whenever they run.
+        patcher = mock.patch.object(views.clock, 'closed_for', return_value='')
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.me = make_user('ap-approver', extra_pages=[DESK_KEY])
         self.other = make_user('ap-other', extra_pages=[DESK_KEY])
         self.creator = make_user('ap-creator', extra_pages=['Advance_Payment'])

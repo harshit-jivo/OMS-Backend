@@ -36,7 +36,9 @@ BY_CODE = {r['code']: r for r in ALL_ROUTES}
 
 
 def _routes_for(purpose):
-    return [r for r in ROUTES if f"purpose_code = '{purpose}'" in r['query']]
+    """A purpose's routes, its approvals-first twins (2026-10-21) aside: same approvers, other order."""
+    return [r for r in ROUTES if f"purpose_code = '{purpose}'" in r['query']
+            and not r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)]
 
 
 class EveryRequestHasOneRoute(SimpleTestCase):
@@ -49,7 +51,13 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         # Utilities' and Insurance's bills due within 2 days; every bill (AP_AGAINST_BILL); Mart's small imprests;
         # Mart's Raw & Packing Material (central, Bhupinder); a Vendor On Account by the head, with and
         # without the Director; Mart's bills due within 2 days; an Account Payment ticked for the Director
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1)
+        # (2026-10-21) Mart's own RM/PM route gone; and each route with approvers has its approvals-first twin
+        whole = [r for r in ROUTES if not r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)]
+        # ...and Oil Purchase's own bill and on-account routes, without CA
+        self.assertEqual(len(whole), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1 - 1
+                         + 2)
+        for twin in (r for r in ROUTES if r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)):
+            self.assertIn(twin['code'][:-len(hierarchy.APPROVALS_FIRST_SUFFIX)], BY_CODE)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -64,7 +72,7 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON',
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_DUE_SOON', 'AP_MART_APPROVALS_FIRST',
                                  'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR') or \
                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
@@ -83,7 +91,7 @@ class EveryRequestHasOneRoute(SimpleTestCase):
             self.assertFalse(needs_department_head(company, 'EMPLOYEE_IMPREST', 'TA_DA',
                                                    payment_against='AGAINST_JOURNAL'))
         # Mart's own routes leave journal entries alone; its other imprests still go by amount.
-        for code in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON'):
+        for code in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_DUE_SOON', 'AP_MART_APPROVALS_FIRST'):
             self.assertIn(f'NOT {hierarchy.IMPREST_JOURNAL}', BY_CODE[code]['query'])
         self.assertIn(hierarchy.MART_SMALL_IMPREST, BY_CODE['AP_MART_IMPREST_SMALL']['query'])
         self.assertIn(f'NOT {hierarchy.MART_SMALL_IMPREST}', BY_CODE['AP_MART']['query'])
@@ -139,7 +147,8 @@ class WhoApproves(SimpleTestCase):
                                   'Audit Approval', 'Final Approval'])
 
     def test_the_director_follows_where_the_hierarchy_says(self):
-        with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages'])
+        with_director = sorted(r['code'] for r in ROUTES if (hierarchy.DIRECTOR_STAGE, 'director') in r['stages']
+                               and not r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX))
         self.assertEqual(with_director, sorted([
             'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FA_CIVIL',
             'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
@@ -162,15 +171,16 @@ class WhoApproves(SimpleTestCase):
         self.assertEqual(self.first('FA_CIVIL'), [(hierarchy.OWNER_STAGE, 'bhupinder'),
                                                   (hierarchy.DIRECTOR_STAGE, 'director')])
         self.assertFalse(needs_department_head('OIL', 'VENDOR', 'FA_OTHERS'))
-        self.assertEqual(set(hierarchy.RETIRED_ROUTES), {'AP_FA_PM', 'AP_FA_CONSUMABLES', 'AP_FA_OTHERS'})
+        self.assertEqual(set(hierarchy.RETIRED_ROUTES), {'AP_FA_PM', 'AP_FA_CONSUMABLES', 'AP_FA_OTHERS',
+                                                         'AP_MART_RM_PM'})
 
     def test_ghee_and_other_raw_material_go_to_bhupinder(self):
         self.assertEqual(self.first('RAW_MATERIAL'), [(hierarchy.OWNER_STAGE, 'bhupinder')])
 
     def test_every_route_starts_at_payment_and_ends_ca_audit_final(self):
         for route in ROUTES:
-            if route.get('approvals_first'):
-                continue  # a moved route (TheFixedAssetsMovedToTheDirector)
+            if route.get('approvals_first') or route.get('no_ca'):
+                continue  # approvals first (PaidAgainstAnAdvanceOrAPo), or no CA (OilPurchaseHasNoCa)
             with self.subTest(route['code']):
                 stages = hierarchy.full_stages(route)
                 self.assertEqual(stages[0], ('Payment Approval', 'payment'))
@@ -389,7 +399,7 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON',
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_APPROVALS_FIRST', 'AP_MART_DUE_SOON',
                                  'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR', 'AP_AGAINST_BILL') or \
                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
@@ -522,6 +532,10 @@ class BillsDueSoon(SimpleTestCase):
         for code in ('UTILITIES', 'INSURANCE'):
             with self.subTest(code):
                 usual, soon = BY_CODE[f'AP_{code}']['query'], BY_CODE[f'AP_{code}_DUE_SOON']['query']
+                # The usual one is split again by APPROVALS_FIRST (2026-10-21): both halves are "not due soon".
+                first = BY_CODE[f'AP_{code}{hierarchy.APPROVALS_FIRST_SUFFIX}']['query']
+                self.assertEqual(first, usual.replace(f'AND NOT {hierarchy.APPROVALS_FIRST}', f'AND {hierarchy.APPROVALS_FIRST}'))
+                usual = usual.removesuffix(f' AND NOT {hierarchy.APPROVALS_FIRST}')
                 self.assertTrue(usual.endswith(f'AND NOT {hierarchy.BILL_DUE_SOON}'))
                 self.assertTrue(soon.endswith(f'AND {hierarchy.BILL_DUE_SOON}'))
                 self.assertEqual(usual.replace(f'NOT {hierarchy.BILL_DUE_SOON}', ''),
@@ -535,8 +549,9 @@ class BillsDueSoon(SimpleTestCase):
 
     def test_only_these_routes_look_at_the_due_date(self):
         with_rule = sorted(r['code'] for r in ALL_ROUTES if 'due_date' in r['query'])
-        self.assertEqual(with_rule, ['AP_INSURANCE', 'AP_INSURANCE_DUE_SOON', 'AP_MART', 'AP_MART_DUE_SOON',
-                                     'AP_UTILITIES', 'AP_UTILITIES_DUE_SOON'])
+        self.assertEqual(with_rule, ['AP_INSURANCE', 'AP_INSURANCE_APPROVALS_FIRST', 'AP_INSURANCE_DUE_SOON', 'AP_MART',
+                                     'AP_MART_APPROVALS_FIRST', 'AP_MART_DUE_SOON', 'AP_UTILITIES',
+                                     'AP_UTILITIES_APPROVALS_FIRST', 'AP_UTILITIES_DUE_SOON'])
 
     def test_mart_due_soon_goes_straight_to_payment_else_prabhjot(self):
         # 2026-10-21: Mart asks the Bill Due Date too.
@@ -627,8 +642,10 @@ class TheBillDueDate(SimpleTestCase):
     def test_on_account_takes_any_purpose_through_the_head_picked(self):
         # Since 2026-10-21: any purpose, with the Department Head asked.
         self.assertEqual(_problems(_due_request('RENT', bill_due_date='')), [])
-        self.assertTrue(needs_department_head('OIL', 'VENDOR', 'RAW_MATERIAL', payment_against='ON_ACCOUNT'))
-        self.assertFalse(needs_department_head('OIL', 'VENDOR', 'RAW_MATERIAL', payment_against='AGAINST_PO'))
+        self.assertTrue(needs_department_head('OIL', 'VENDOR', 'SEMI_FINISHED', payment_against='ON_ACCOUNT'))
+        self.assertFalse(needs_department_head('OIL', 'VENDOR', 'SEMI_FINISHED', payment_against='AGAINST_PO'))
+        # Raw / Packing Material: Bhupinder, however it is paid (2026-10-21).
+        self.assertFalse(needs_department_head('OIL', 'VENDOR', 'RAW_MATERIAL', payment_against='ON_ACCOUNT'))
         self.assertFalse(needs_department_head('MART', 'VENDOR', 'RAW_MATERIAL', payment_against='ON_ACCOUNT'))
         # Freight keeps its own route: Navdeep.
         self.assertFalse(needs_department_head('OIL', 'VENDOR', 'FREIGHT_IN', payment_against='ON_ACCOUNT'))
@@ -743,15 +760,113 @@ class TheBackOfficeFunctions(SimpleTestCase):
         self.assertEqual(StageRole.of(hierarchy.BACK_OFFICE_STAGE), StageRole.APPROVAL)
 
 
-class MartsRawAndPackingMaterial(SimpleTestCase):
-    """2026-10-20: bought centrally through Jivo Wellness, under Bhupinder — not Prabhjot."""
+class OilPurchaseHasNoCa(SimpleTestCase):
+    """2026-10-21: an Oil Purchase never meets the CA desk — its route, its bills, on account."""
 
-    def test_mart_rm_and_pm_go_to_bhupinder_the_rest_of_mart_to_prabhjot(self):
-        central = BY_CODE['AP_MART_RM_PM']
-        self.assertEqual(central['stages'], [(hierarchy.OWNER_STAGE, 'bhupinder')])
-        self.assertIn(hierarchy.MART_CENTRAL, central['query'])
-        self.assertIn(f'NOT {hierarchy.MART_CENTRAL}', BY_CODE['AP_MART']['query'])
-        self.assertEqual(BY_CODE['AP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
+    def test_no_ca_however_it_is_paid(self):
+        expected = {
+            'AP_OIL_PURCHASE': ['Payment Approval', 'Budget Owner Approval', 'Second Approval', 'Audit Approval',
+                                'Final Approval'],
+            'AP_OIL_PURCHASE_APPROVALS_FIRST': ['Budget Owner Approval', 'Second Approval', 'Payment Approval',
+                                                'Audit Approval', 'Final Approval'],
+            'AP_OIL_PURCHASE_AGAINST_BILL': ['Payment Approval', 'Audit Approval', 'Final Approval'],
+            'AP_OIL_PURCHASE_ON_ACCOUNT': ['Payment Approval', 'Department Head Approval', 'Audit Approval',
+                                           'Final Approval'],
+        }
+        for code, names in expected.items():
+            with self.subTest(code):
+                stages = hierarchy.full_stages(BY_CODE[code])
+                self.assertEqual([n for n, _r in stages], names)
+                named = flow_service.roles([SimpleNamespace(name=n, sequence=i) for i, (n, _r) in
+                                            enumerate(stages, 1)])
+                self.assertNotIn(StageRole.CA, [r for _s, r in named])
+        # The other routes leave it to these.
+        self.assertIn(f'NOT {hierarchy.OIL_PURCHASE_ROUTED}', BY_CODE['AP_AGAINST_BILL']['query'])
+        self.assertNotIn("'OIL_PURCHASE'", BY_CODE['AP_VENDOR_ON_ACCOUNT']['query'])
+        self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_OIL_PURCHASE']['query'])
+        # Everyone else still has CA.
+        self.assertIn('CA Approval', [n for n, _r in hierarchy.full_stages(BY_CODE['AP_RENT'])])
+
+    def test_one_on_any_other_route_skips_its_ca_stage_too(self):
+        # AP-2026-0102: an Oil Purchase bill on the route moved to Navdeep — Payment, then Audit.
+        ca = SimpleNamespace(id=3, name='CA Approval', sequence=3)
+        audit = SimpleNamespace(id=4, name='Audit Approval', sequence=4)
+        for purpose, expected in (('OIL_PURCHASE', (audit, StageRole.AUDIT)), ('RENT', (ca, StageRole.CA))):
+            with self.subTest(purpose):
+                flow = SimpleNamespace(request=SimpleNamespace(purpose_code=purpose), cycle=1)
+                with mock.patch.object(flow_service, '_ca_user_id', return_value=99),                         mock.patch.object(flow_service, '_approved_this_round', return_value=False),                         mock.patch.object(flow_service, '_point_at'),                         mock.patch.object(flow_service, '_next', return_value=(audit, StageRole.AUDIT)):
+                    self.assertEqual(flow_service._past_approved(flow, (ca, StageRole.CA)), expected)
+
+
+class RawAndPackingMaterial(SimpleTestCase):
+    """2026-10-21: any company, however it is paid — Bhupinder, then Payment, CA, Audit, Final."""
+
+    def test_bhupinder_first_in_every_company_bills_and_on_account_too(self):
+        for code in ('AP_RAW_MATERIAL', 'AP_PACKING_MATERIAL'):
+            with self.subTest(code):
+                route = BY_CODE[code]
+                self.assertEqual(route['company'], 'ALL')
+                self.assertNotIn('company', route['query'])
+                self.assertNotIn('AGAINST_BILL', route['query'])
+                self.assertEqual([n for n, _r in hierarchy.full_stages(route)],
+                                 ['Budget Owner Approval', 'Payment Approval', 'CA Approval', 'Audit Approval',
+                                  'Final Approval'])
+                self.assertEqual(route['stages'], [(hierarchy.OWNER_STAGE, 'bhupinder')])
+        # Every other route leaves them alone: bills, Mart, a vendor on account.
+        self.assertIn(f'NOT {hierarchy.RM_PM_ROUTED}', BY_CODE['AP_AGAINST_BILL']['query'])
+        self.assertIn(f'NOT {hierarchy.RM_PM_ROUTED}', BY_CODE['AP_MART']['query'])
+        self.assertNotIn("'RAW_MATERIAL'", BY_CODE['AP_VENDOR_ON_ACCOUNT']['query'])
+        self.assertNotIn('AP_MART_RM_PM', BY_CODE)
+        for company in ('OIL', 'MART'):
+            self.assertFalse(needs_department_head(company, 'VENDOR', 'PACKING_MATERIAL',
+                                                   payment_against='ON_ACCOUNT'))
+
+
+class PaidAgainstAnAdvanceOrAPo(SimpleTestCase):
+    """2026-10-21: against an Advance, or a vendor against a PO — the approvers first, then Payment."""
+
+    def test_each_route_with_approvers_splits_on_it(self):
+        for code in ('AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_OIL', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_MART',
+                     'AP_RENT', 'AP_FA_PM_OIL', 'AP_BO_HR', 'AP_SALARY'):
+            with self.subTest(code):
+                before, first = BY_CODE[code], BY_CODE[code + hierarchy.APPROVALS_FIRST_SUFFIX]
+                self.assertTrue(before['query'].endswith(f'AND NOT {hierarchy.APPROVALS_FIRST}'))
+                self.assertTrue(first['query'].endswith(f'AND {hierarchy.APPROVALS_FIRST}'))
+                self.assertEqual(first['stages'], before['stages'])
+                names = [n for n, _r in hierarchy.full_stages(first)]
+                self.assertEqual(names[-4:], ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+                self.assertNotEqual(names[0], 'Payment Approval')
+                self.assertEqual([n for n, _r in hierarchy.full_stages(before)][0], 'Payment Approval')
+        self.assertEqual([n for n, _r in hierarchy.full_stages(BY_CODE['AP_STAFF_ADVANCE_APPROVALS_FIRST'])],
+                         ['Department Head Approval', 'Director Approval', 'Payment Approval', 'CA Approval',
+                          'Audit Approval', 'Final Approval'])
+        # A vendor against a PO: e.g. Fixed Assets of the Oil plant — Gagan, the Director, then Payment.
+        self.assertEqual([n for n, _r in hierarchy.full_stages(BY_CODE['AP_FA_PM_OIL_APPROVALS_FIRST'])][:3],
+                         ['Budget Owner Approval', 'Director Approval', 'Payment Approval'])
+        self.assertIn(hierarchy.VENDOR_AGAINST_PO, hierarchy.APPROVALS_FIRST)
+        # No approver of its own, or nothing such reaches it: kept whole.
+        for code in ('AP_AGAINST_BILL', 'AP_FREIGHT_IN', 'AP_ACCOUNT', 'AP_IMPREST_JOURNAL', 'AP_VENDOR_ON_ACCOUNT',
+                     'AP_MART_IMPREST_SMALL', 'AP_RAW_MATERIAL', 'AP_UTILITIES_DUE_SOON'):
+            self.assertNotIn(code + hierarchy.APPROVALS_FIRST_SUFFIX, BY_CODE)
+
+    def test_a_request_payment_already_approved_does_not_meet_payment_twice(self):
+        # On a route re-seeded to put Bhupinder first: approved at Payment, then at Bhupinder.
+        owner = SimpleNamespace(id=1, name='Budget Owner Approval', sequence=1)
+        payment = SimpleNamespace(id=2, name='Payment Approval', sequence=2)
+        ca = SimpleNamespace(id=3, name='CA Approval', sequence=3)
+        flow = SimpleNamespace(request=SimpleNamespace(), cycle=1)
+        with mock.patch.object(flow_service, '_ca_user_id', return_value=99), \
+                mock.patch.object(flow_service, 'stage_user_id', return_value=5), \
+                mock.patch.object(flow_service, '_approved_this_round', side_effect=lambda f, s: s is payment), \
+                mock.patch.object(flow_service, '_point_at'), \
+                mock.patch.object(flow_service, '_next', return_value=(ca, StageRole.CA)):
+            self.assertEqual(flow_service._past_approved(flow, (payment, StageRole.PAYMENT)), (ca, StageRole.CA))
+        with mock.patch.object(flow_service, '_ca_user_id', return_value=99), \
+                mock.patch.object(flow_service, 'stage_user_id', return_value=5), \
+                mock.patch.object(flow_service, '_approved_this_round', return_value=False):
+            self.assertEqual(flow_service._past_approved(flow, (payment, StageRole.PAYMENT)),
+                             (payment, StageRole.PAYMENT))
+        del owner
 
 
 class AVendorPaidOnAccount(SimpleTestCase):
@@ -762,12 +877,12 @@ class AVendorPaidOnAccount(SimpleTestCase):
         self.assertEqual(plain['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD)])
         self.assertEqual(director['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD),
                                               (hierarchy.DIRECTOR_STAGE, 'director')])
-        for code in ('RAW_MATERIAL', 'OIL_PURCHASE', 'SALARY', 'TDS'):
+        for code in ('SEMI_FINISHED', 'SALARY', 'TDS'):
             self.assertIn(f"'{code}'", plain['query'])
         for code in ('FA_PM', 'FA_CIVIL', 'FA_OTHERS', 'FA_CONSUMABLES', 'CAPITAL'):
             self.assertIn(f"'{code}'", director['query'])
         # Their own routes no longer take a vendor paid on account...
-        self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_RAW_MATERIAL']['query'])
+        self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_SEMI_FINISHED']['query'])
         self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_FA_PM_OIL']['query'])
         # ...while a Department Head purpose keeps its own (Utilities: the head, then the Director).
         self.assertNotIn('ON_ACCOUNT', BY_CODE['AP_UTILITIES']['query'])

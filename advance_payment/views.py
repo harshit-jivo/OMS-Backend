@@ -37,6 +37,7 @@ from django.core.cache import cache
 from django.db.models import Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse
 from rest_framework import status as http_status
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
@@ -51,7 +52,7 @@ from advance_payment.models import (
 from advance_payment.purposes import PURPOSE_GROUPS, purposes
 from advance_payment.serializers import EmployeeSerializer, assignment_data, request_data
 from advance_payment.services import (
-    attachment_files, invoice_fields, payment_proof, proof_reader, sap_attachments)
+    attachment_files, clock, invoice_fields, payment_proof, proof_reader, sap_attachments)
 from advance_payment.services import flow as flow_service
 from advance_payment.services import requests as request_service
 from advance_payment.services import assignments as assignment_service
@@ -1451,11 +1452,42 @@ def _payload(request):
     return raw if isinstance(raw, dict) else request.data
 
 
+class PaymentsClosed(APIException):
+    """A change after the day's cut-off (`clock.closed_for`): 423 Locked, with why."""
+
+    status_code = http_status.HTTP_423_LOCKED
+    default_code = 'payments_closed'
+
+
 class _RequestView(APIView):
-    """Either key opens the view; which requests you may see is per object."""
+    """Either key opens the view; which requests you may see is per object.
+
+    Every change — raising, editing, deciding, payment details, files — is
+    refused after the day's cut-off (user, 2026-10-21): 4:30 pm IST for
+    everyone, except on a request waiting at an Audit stage, which Audit may
+    act on until 6:30 pm. Reading is never refused.
+    """
 
     def get_permissions(self):
         return [IsAuthenticated()]
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return
+        reason = clock.closed_for(self._at_audit(kwargs.get('pk')))
+        if reason:
+            raise PaymentsClosed(reason)
+
+    @staticmethod
+    def _at_audit(pk):
+        """Whether the request `pk` waits at an Audit stage (Audit, Expense Audit)."""
+        if pk is None:
+            return False
+        from advance_payment.models import FlowStatus, RequestFlow, StageRole
+
+        return RequestFlow.objects.filter(request_id=pk, status=FlowStatus.PENDING,
+                                          current_role=StageRole.AUDIT).exists()
 
     def _may_read(self, user, advance):
         """Your own; or, with the desk key, what is or was yours to act on.
@@ -1475,7 +1507,7 @@ class _RequestView(APIView):
 
     def _answer(self, request, advance, message='', status=http_status.HTTP_200_OK):
         fresh = _requests().get(pk=advance.pk)
-        (data,) = _with_credit_terms([request_data(fresh, user=request.user, detail=True)])
+        (data,) = _with_litres(_with_credit_terms([request_data(fresh, user=request.user, detail=True)]))
         return ok(data, message, status=status)
 
 
@@ -1508,6 +1540,27 @@ def _credit_due(terms, bills):
             continue
         dues.append((due, posted))
     return min(dues) if dues else (None, None)
+
+
+def _with_litres(rows):
+    """A freight request's bills each gain `litres` (2026-10-21), from SAP: what
+    the bill's lines carried. One query per company; off with the credit terms
+    (`ADVANCE_PAYMENT_CREDIT_TERMS`, the test settings); SAP unreachable: none."""
+    from advance_payment.purposes import FREIGHT_PURPOSES
+
+    if not getattr(settings, 'ADVANCE_PAYMENT_CREDIT_TERMS', True):
+        return rows
+    wanted = {}
+    for row in rows:
+        if row.get('purpose_code') in FREIGHT_PURPOSES:
+            wanted.setdefault(row.get('company'), set()).update(_bill_entries(row))
+    found = {company: sap_service.bill_litres(company, entries) for company, entries in wanted.items() if entries}
+    for row in rows:
+        litres = found.get(row.get('company'), {})
+        for doc in row.get('documents') or ():
+            if doc.get('kind') == 'BILL':
+                doc['litres'] = litres.get(doc.get('sap_doc_entry'))
+    return rows
 
 
 def _with_credit_terms(rows):
@@ -1828,7 +1881,8 @@ class RequestListView(_RequestView):
 
 class RequestDetailView(_RequestView):
     def get(self, request, pk):
-        (data,) = _with_credit_terms([request_data(self._get(request, pk), user=request.user, detail=True)])
+        (data,) = _with_litres(_with_credit_terms([request_data(self._get(request, pk), user=request.user,
+                                                                detail=True)]))
         return ok(data)
 
 
