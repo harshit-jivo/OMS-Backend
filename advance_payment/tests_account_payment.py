@@ -92,9 +92,22 @@ class TheAccountsItMayPay(SimpleTestCase):
         self.assertEqual(run.call_args.args[2], ['2120000', '1110400', '2120014'])
 
     def test_a_company_without_any_has_none(self):
-        rows, run = self.run_sql('OIL')
+        with mock.patch.dict(sap_service.PAYMENT_ACCOUNT_PARENTS, clear=True):
+            rows, run = self.run_sql('OIL')
         self.assertEqual(rows, [])
         run.assert_not_called()
+
+    def test_oil_and_beverages_pay_group_loans_statutory_and_import_accounts(self):
+        # 2026-10-21: the groups their own account-type payments go to.
+        for company in ('OIL', 'BEVERAGES'):
+            with self.subTest(company):
+                parents = sap_service.PAYMENT_ACCOUNT_PARENTS[company]
+                for group in ('1110100', '2202200', '2201100', '2201200', '2161000', '2133000', '2137000',
+                              '5500000', '1107000'):
+                    self.assertIn(group, parents)
+                # Not bank, cash, suspense or employee advances.
+                for group in ('1104100', '1105000', '2191000', '1113000'):
+                    self.assertNotIn(group, parents)
 
 
 class ItsSapPayment(TheSapPayment):

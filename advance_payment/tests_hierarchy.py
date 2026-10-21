@@ -47,8 +47,9 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         # +Mart, Staff x4 (non-plant/imprest, Oil plant, Beverages plant, plant above 20,000); Salary x3, Refund x2;
         # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company;
         # Utilities' and Insurance's bills due within 2 days; every bill (AP_AGAINST_BILL); Mart's small imprests;
-        # Mart's Raw & Packing Material (central, Bhupinder)
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1)
+        # Mart's Raw & Packing Material (central, Bhupinder); a Vendor On Account by the head, with and
+        # without the Director; Mart's bills due within 2 days
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -63,8 +64,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         self.assertIn("request_type IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')",
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_IMPREST_JOURNAL',
-                                 'AP_ACCOUNT') or \
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON',
+                                 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or \
                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
@@ -132,7 +133,7 @@ class WhoApproves(SimpleTestCase):
             'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FA_CIVIL',
             'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
             'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES', 'AP_INSURANCE',
-            'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM']))
+            'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM', 'AP_VENDOR_ON_ACCOUNT_DIRECTOR']))
 
     def test_the_plants_fixed_assets_go_to_its_approver_civil_to_bhupinder(self):
         # Plant & machinery, spares, others: Oil -> Gagan, Beverages -> Arvinder, then the Director.
@@ -376,10 +377,11 @@ class ExpenseRoutes(SimpleTestCase):
         self.assertNotIn('is_electricity', q)  # electricity no longer changes the route
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
-            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_IMPREST_JOURNAL',
-                                 'AP_ACCOUNT', 'AP_AGAINST_BILL') or route['code'].startswith('AP_STAFF_ADVANCE'):
+            if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON',
+                                 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_AGAINST_BILL') or \
+                    route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
-            self.assertIn('purpose_code = ', route['query'])
+            self.assertRegex(route['query'], r'purpose_code (=|IN) ')
 
     def test_the_expense_auditors_stage_is_an_audit_stage_by_its_own_name(self):
         self.assertEqual(StageRole.of('Expense Audit Approval'), StageRole.AUDIT)
@@ -521,8 +523,16 @@ class BillsDueSoon(SimpleTestCase):
 
     def test_only_these_routes_look_at_the_due_date(self):
         with_rule = sorted(r['code'] for r in ALL_ROUTES if 'due_date' in r['query'])
-        self.assertEqual(with_rule, ['AP_INSURANCE', 'AP_INSURANCE_DUE_SOON',
+        self.assertEqual(with_rule, ['AP_INSURANCE', 'AP_INSURANCE_DUE_SOON', 'AP_MART', 'AP_MART_DUE_SOON',
                                      'AP_UTILITIES', 'AP_UTILITIES_DUE_SOON'])
+
+    def test_mart_due_soon_goes_straight_to_payment_else_prabhjot(self):
+        # 2026-10-21: Mart asks the Bill Due Date too.
+        due = BY_CODE['AP_MART_DUE_SOON']
+        self.assertEqual(due['stages'], [])
+        self.assertIn(hierarchy.BILL_DUE_SOON, due['query'])
+        self.assertIn(f'NOT {hierarchy.BILL_DUE_SOON}', BY_CODE['AP_MART']['query'])
+        self.assertEqual(BY_CODE['AP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
 
     def test_every_due_soon_purpose_is_a_department_head_one(self):
         self.assertTrue(purposes.DUE_SOON_PURPOSES <= HEAD_PURPOSES)
@@ -595,14 +605,21 @@ class TheBillDueDate(SimpleTestCase):
         ask = purposes.needs_bill_due_date
         self.assertTrue(ask('OIL', 'VENDOR', 'INSURANCE'))
         self.assertTrue(ask('BEVERAGES', 'VENDOR', 'UTILITIES'))
-        self.assertFalse(ask('MART', 'VENDOR', 'UTILITIES'))          # Prabhjot, whatever it is for
+        self.assertTrue(ask('MART', 'VENDOR', 'UTILITIES'))           # since 2026-10-21
         self.assertFalse(ask('OIL', 'EMPLOYEE_IMPREST', 'UTILITIES'))  # the Employee / Imprest route
         self.assertFalse(ask('OIL', 'VENDOR', 'RENT'))
+        for company in ('MART', 'BEVERAGES'):  # any other purpose: never asked, in any company
+            self.assertFalse(ask(company, 'VENDOR', 'RENT'))
+            self.assertFalse(ask(company, 'VENDOR', 'RAW_MATERIAL', payment_against='ON_ACCOUNT'))
 
-    def test_on_account_is_only_for_utilities_and_insurance(self):
-        problems = _problems(_due_request('RENT', bill_due_date=''))
-        self.assertIn('A vendor is paid On Account only for Electricity, Water & Utilities or an '
-                      'Insurance Premium. Pay against its bill or its PO.', problems)
+    def test_on_account_takes_any_purpose_through_the_head_picked(self):
+        # Since 2026-10-21: any purpose, with the Department Head asked.
+        self.assertEqual(_problems(_due_request('RENT', bill_due_date='')), [])
+        self.assertTrue(needs_department_head('OIL', 'VENDOR', 'RAW_MATERIAL', payment_against='ON_ACCOUNT'))
+        self.assertFalse(needs_department_head('OIL', 'VENDOR', 'RAW_MATERIAL', payment_against='AGAINST_PO'))
+        self.assertFalse(needs_department_head('MART', 'VENDOR', 'RAW_MATERIAL', payment_against='ON_ACCOUNT'))
+        # Freight keeps its own route: Navdeep.
+        self.assertFalse(needs_department_head('OIL', 'VENDOR', 'FREIGHT_IN', payment_against='ON_ACCOUNT'))
 
     def test_raising_one_needs_the_bill_or_policy_attached(self):
         cleaned = _clean(_due_request())
@@ -724,3 +741,23 @@ class MartsRawAndPackingMaterial(SimpleTestCase):
         self.assertIn(f'NOT {hierarchy.MART_CENTRAL}', BY_CODE['AP_MART']['query'])
         self.assertEqual(BY_CODE['AP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
 
+
+class AVendorPaidOnAccount(SimpleTestCase):
+    """2026-10-21: any purpose; the Department Head picked, then the Director where the purpose has him."""
+
+    def test_a_fixed_owners_purpose_goes_by_the_head_and_the_director_only_where_its_route_has_him(self):
+        plain, director = BY_CODE['AP_VENDOR_ON_ACCOUNT'], BY_CODE['AP_VENDOR_ON_ACCOUNT_DIRECTOR']
+        self.assertEqual(plain['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD)])
+        self.assertEqual(director['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD),
+                                              (hierarchy.DIRECTOR_STAGE, 'director')])
+        for code in ('RAW_MATERIAL', 'OIL_PURCHASE', 'SALARY', 'TDS'):
+            self.assertIn(f"'{code}'", plain['query'])
+        for code in ('FA_PM', 'FA_CIVIL', 'FA_OTHERS', 'FA_CONSUMABLES', 'CAPITAL'):
+            self.assertIn(f"'{code}'", director['query'])
+        # Their own routes no longer take a vendor paid on account...
+        self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_RAW_MATERIAL']['query'])
+        self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_FA_PM_OIL']['query'])
+        # ...while a Department Head purpose keeps its own (Utilities: the head, then the Director).
+        self.assertNotIn('ON_ACCOUNT', BY_CODE['AP_UTILITIES']['query'])
+        for code in ('UTILITIES', 'RENT', 'BO_HR', 'FREIGHT_IN'):
+            self.assertNotIn(f"'{code}'", plain['query'] + director['query'])

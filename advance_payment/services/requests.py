@@ -53,7 +53,7 @@ from advance_payment.models import (
     ReturnMethod,
 )
 from advance_payment.purposes import (
-    VENDOR_ON_ACCOUNT_PURPOSES, is_due_soon, needs_bill_due_date, needs_department_head, purpose_label,
+    is_due_soon, needs_bill_due_date, needs_department_head, purpose_label,
 )
 from advance_payment.services import clock, daily_limit
 from core.companies import COMPANY_CODES
@@ -72,9 +72,10 @@ CASES = {
     # The Expected Bill Date is asked, but optional (since 2026-10-07).
     (RequestType.VENDOR, PaymentAgainst.AGAINST_PO): {'documents': DocumentKind.PO, 'expected_date': True},
     (RequestType.VENDOR, PaymentAgainst.AGAINST_BILL): {'documents': DocumentKind.BILL},
-    # Utilities and insurance only (`VENDOR_ON_ACCOUNT_PURPOSES`): a typed
-    # amount on account, matched to the bill when accounts book it.
-    (RequestType.VENDOR, PaymentAgainst.ON_ACCOUNT): {'documents': None, 'on_account_purposes': True},
+    # Any purpose (since 2026-10-21; utilities and insurance before): a typed
+    # amount on account, matched to the bill when accounts book it, approved
+    # by the Department Head picked (`purposes.needs_department_head`).
+    (RequestType.VENDOR, PaymentAgainst.ON_ACCOUNT): {'documents': None},
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.ADVANCE): {'documents': None, 'repayment': True},
     (RequestType.EMPLOYEE_ADVANCE, PaymentAgainst.OTHER): {'documents': None},
     (RequestType.EMPLOYEE_IMPREST, PaymentAgainst.ADVANCE): {'documents': None, 'expected_bill_date': True},
@@ -316,9 +317,6 @@ def clean(data, *, desk=False, user=None):
     if against == PaymentAgainst.OTHER and not against_other:
         problems.append('Say what the payment is against.')
 
-    if case.get('on_account_purposes') and purpose and purpose not in VENDOR_ON_ACCOUNT_PURPOSES:
-        problems.append('A vendor is paid On Account only for Electricity, Water & Utilities or an '
-                        'Insurance Premium. Pay against its bill or its PO.')
 
     if problems:
         raise RequestInvalid(problems)

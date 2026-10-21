@@ -122,10 +122,10 @@ AGAINST_BILL = 'AGAINST_BILL'
 DUE_SOON_PURPOSES = frozenset({'UTILITIES', 'INSURANCE'})
 DUE_SOON_DAYS = 2
 
-#: The purposes a Vendor may be paid ON ACCOUNT for — before, or without
-#: naming, its bill — as SAP pays electricity boards and insurers (2026-10-17:
-#: 134 of 143 of their payments since April 2025). They have no POs. Every
-#: other vendor payment is against a bill or a PO.
+#: The purposes paid by a due date ON ACCOUNT, as SAP pays electricity boards
+#: and insurers (2026-10-17: 134 of 143 of their payments since April 2025).
+#: Since 2026-10-21 a Vendor may be paid On Account for ANY purpose, through
+#: the Department Head the requester picks (`needs_department_head`).
 VENDOR_ON_ACCOUNT_PURPOSES = DUE_SOON_PURPOSES
 
 #: Request types that always go to the requester's Department Head, then the
@@ -165,6 +165,8 @@ def needs_department_head(company, request_type, purpose_code, budget_code='', p
         return False  # Navdeep, then the Payment desk
     if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
         return False  # the plant's fixed approver, by amount
+    if request_type == 'VENDOR' and payment_against == 'ON_ACCOUNT':
+        return True  # any purpose, through the head picked (user, 2026-10-21)
     return request_type in HEAD_REQUEST_TYPES or purpose_code in HEAD_PURPOSES
 
 
@@ -180,9 +182,10 @@ def is_due_soon(bill_due_date, today):
 def needs_bill_due_date(company, request_type, purpose_code, payment_against=''):
     """Whether the request names its Bill Due Date: a `DUE_SOON_PURPOSES`
     purpose on a route that reads it — the purpose routes of Oil and
-    Beverages. Mart's one approver, the Employee / Imprest route, Account
-    Payments and Expenses are not routed by purpose, so they are not asked."""
-    if company in NO_HEAD_COMPANIES or request_type in HEAD_REQUEST_TYPES:
+    Beverages, and Mart's (since 2026-10-21: due soon, straight to Payment;
+    else Prabhjot). The Employee / Imprest route, Account Payments and
+    Expenses are not routed by purpose, so they are not asked."""
+    if request_type in HEAD_REQUEST_TYPES:
         return False
     if request_type in ('ACCOUNT', 'EXPENSE'):
         return False

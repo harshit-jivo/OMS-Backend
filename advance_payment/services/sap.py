@@ -2623,8 +2623,25 @@ _EXPENSE_ACCOUNTS_SQL = '''
 #: two units' accounts, 1110401 / 1110403) — the accounts Mart's own
 #: account-type payments go to (OVPM DocType A, read 2026-10-15). A company
 #: not listed has no Account Payment.
+#:
+#: Oil and Beverages (user, 2026-10-21): the groups their own account-type
+#: payments of the last six months went to, less bank, cash, suspense and
+#: employee advances (their own request type) — inter-company and group
+#: (1110100 JIVO, 2202200 Subsidiary, 1110200 ARY), loans (2201100 bank CC,
+#: 2201200 term, 2201400 vehicle, 2202300 NBFC), statutory and payables
+#: (2161000 salary, 2163000 expense, 2133000 TDS, 2137000 GST RCM, 2136000
+#: GST), import and deposits (5500000 landed cost, 5200000 import expense,
+#: 1107000 deposits & current assets).
+_OIL_BEV_ACCOUNT_PARENTS = (
+    '1110100', '2202200', '1110200',
+    '2201100', '2201200', '2201400', '2202300',
+    '2161000', '2163000', '2133000', '2137000', '2136000',
+    '5500000', '5200000', '1107000',
+)
 PAYMENT_ACCOUNT_PARENTS = {
     'MART': ('2120000', '1110400'),
+    'OIL': _OIL_BEV_ACCOUNT_PARENTS,
+    'BEVERAGES': _OIL_BEV_ACCOUNT_PARENTS,
     **(getattr(settings, 'ADVANCE_PAYMENT_ACCOUNT_PARENTS', None) or {}),
 }
 

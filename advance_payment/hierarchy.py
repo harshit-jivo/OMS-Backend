@@ -149,6 +149,21 @@ BACK_OFFICE_STAGE = 'Back Office Approval'
 MART_CENTRAL_PURPOSES = ('RAW_MATERIAL', 'PACKING_MATERIAL')
 MART_CENTRAL = "purpose_code IN ('RAW_MATERIAL', 'PACKING_MATERIAL')"
 
+#: A Vendor paid On Account, for any purpose (user, 2026-10-21): the picked
+#: Department Head, then the Director where the purpose's own route has him.
+#: Only the purposes routed to a fixed owner need a route of their own for it;
+#: a Department Head purpose (Utilities, Insurance, Back Office…) already goes
+#: through the head, and freight stays with Navdeep.
+VENDOR_ON_ACCOUNT = "(request_type = 'VENDOR' AND payment_against = 'ON_ACCOUNT')"
+
+
+def _on_account_by_head():
+    """`(purposes routed by the head when paid On Account, those of them the Director then approves)`."""
+    fixed = [c for c, _l, _g in PAYMENT_PURPOSES if c not in HEAD_PURPOSES and c not in FREIGHT_PURPOSES]
+    director = [c for c in fixed if c in PLANT_PURPOSES or (c in FIXED_OWNER and FIXED_OWNER[c][1])]
+    return tuple(fixed), tuple(director)
+
+
 #: Purposes a second fixed owner approves after the first, instead of the Director.
 SECOND_OWNER = {'OIL_PURCHASE': 'ziyaul'}
 
@@ -285,8 +300,17 @@ def routes():
     out = [
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
          'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
-                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {MART_CENTRAL}'),
+                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {MART_CENTRAL}',
+                         f'NOT {BILL_DUE_SOON}'),
          'stages': [(OWNER_STAGE, 'mart')]},
+        # Mart's utilities and insurance due within DUE_SOON_DAYS days, or overdue
+        # (2026-10-21): straight to Payment, as Oil's and Beverages' are.
+        {'code': f'AP_MART{DUE_SOON_SUFFIX}',
+         'name': f'Payments · Mart · bill due in {DUE_SOON_DAYS} days or less', 'company': 'MART',
+         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
+                         f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {MART_CENTRAL}',
+                         BILL_DUE_SOON),
+         'stages': []},
         {'code': 'AP_MART_RM_PM', 'name': 'Payments · Mart · Raw & Packing Material (central, Bhupinder)',
          'company': 'MART',
          'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
@@ -324,8 +348,11 @@ def routes():
                          f'amount > {STAFF_ADVANCE_LIMIT}'),
          'stages': [(DIRECTOR_STAGE, 'director')]},
     ]
+    by_head, with_director = _on_account_by_head()
     for code, label, _group in PAYMENT_PURPOSES:
-        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code))
+        # A fixed owner's purpose paid On Account by a vendor goes by the head instead (below).
+        on_account = (f'NOT {VENDOR_ON_ACCOUNT}',) if code in by_head else ()
+        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code), *on_account)
         if code in FREIGHT_PURPOSES:
             # Every company and Payment Against, bills included: Navdeep first.
             out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
@@ -339,18 +366,19 @@ def routes():
                  'stages': _chain('ziyaul', False)},
                 {'code': 'AP_SALARY_FACTORY_OIL', 'name': f'Payments · {label} · Oil factory', 'company': 'OIL',
                  'query': _where("company = 'OIL'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
-                                 f'budget_code IN {FACTORY_BUDGETS}'),
+                                 f'budget_code IN {FACTORY_BUDGETS}', *on_account),
                  'stages': _chain('factory_oil', False)},
                 {'code': 'AP_SALARY_FACTORY_BEV', 'name': f'Payments · {label} · Beverages factory',
                  'company': 'BEVERAGES',
                  'query': _where("company = 'BEVERAGES'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
-                                 f'budget_code IN {FACTORY_BUDGETS}'),
+                                 f'budget_code IN {FACTORY_BUDGETS}', *on_account),
                  'stages': _chain('factory_bev', False)},
             ]
         elif code == 'CUSTOMER_REFUND':
             out += [
                 {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
-                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code)),
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
+                                 *on_account),
                  'stages': _chain(owner, False)}
                 for company, tag, title, owner in (('OIL', 'OIL', 'Oil', 'sales_oil'),
                                                    ('BEVERAGES', 'BEV', 'Beverages', 'sales_bev'))
@@ -358,7 +386,8 @@ def routes():
         elif code in PLANT_PURPOSES:
             out += [
                 {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
-                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code)),
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
+                                 *on_account),
                  'stages': _chain(owner, True)}
                 for company, tag, title, owner in PLANT_APPROVERS
             ]
@@ -393,6 +422,19 @@ def routes():
                         'query': _where(*base), 'stages': stages})
         else:
             raise ValueError(f'Purpose {code} has no route in the hierarchy.')
+    # A vendor paid On Account for a fixed owner's purpose: the picked head (2026-10-21),
+    # then the Director where that purpose's own route has him.
+    def _in(codes):
+        return 'purpose_code IN ({})'.format(', '.join(f"'{c}'" for c in codes))
+    plain = [c for c in by_head if c not in with_director]
+    out += [
+        {'code': 'AP_VENDOR_ON_ACCOUNT', 'name': 'Payments · Vendor On Account · Department Head',
+         'company': 'ALL', 'query': _where(OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, VENDOR_ON_ACCOUNT, _in(plain)),
+         'stages': [(DEPARTMENT_HEAD_STAGE, HEAD)]},
+        {'code': 'AP_VENDOR_ON_ACCOUNT_DIRECTOR', 'name': 'Payments · Vendor On Account · Department Head, Director',
+         'company': 'ALL', 'query': _where(OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, VENDOR_ON_ACCOUNT, _in(with_director)),
+         'stages': _chain(HEAD, True)},
+    ]
     # Every bill, whatever it is for (freight aside): straight to the Payment desk.
     out.append({'code': 'AP_AGAINST_BILL', 'name': 'Payments · Against Bill', 'company': 'ALL',
                 'query': _where(AGAINST_BILL, f'NOT {FREIGHT_ROUTED}'), 'stages': []})
