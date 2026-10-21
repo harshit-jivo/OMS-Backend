@@ -72,7 +72,7 @@ class BillsGoStraightToPayment(SimpleTestCase):
         self.assertIn(hierarchy.AGAINST_BILL, route['query'])
         self.assertIn(f'NOT {hierarchy.FREIGHT_ROUTED}', route['query'])
         for code, other in BY_CODE.items():
-            if code in ('AP_AGAINST_BILL', 'AP_ACCOUNT', 'AP_IMPREST_JOURNAL') or other.get('expense')                     or other.get('never_chosen') \
+            if code in ('AP_AGAINST_BILL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR', 'AP_IMPREST_JOURNAL') or other.get('expense')                     or other.get('never_chosen') \
                     or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY')):
                 continue
             with self.subTest(code):

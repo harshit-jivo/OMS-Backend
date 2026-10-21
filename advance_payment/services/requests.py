@@ -314,6 +314,8 @@ def clean(data, *, desk=False, user=None):
         problems.append('Choose the Ownership HOD or Sub-HOD.')  # not asked on an Expense
 
     against_other = _text(data.get('payment_against_other'), 120) if against == PaymentAgainst.OTHER else ''
+    # An Account Payment may go to the Director instead of Avtar (2026-10-21).
+    director_approval = bool(data.get('director_approval')) and request_type == RequestType.ACCOUNT
     if against == PaymentAgainst.OTHER and not against_other:
         problems.append('Say what the payment is against.')
 
@@ -334,6 +336,7 @@ def clean(data, *, desk=False, user=None):
             'expected_date': expected_date,
             'expected_bill_date': expected_bill_date,
             'bill_due_date': bill_due_date,
+            'director_approval': director_approval,
             **expense_bill,
             'return_method': repayment.get('return_method', ''),
             'return_method_other': repayment.get('return_method_other', ''),
@@ -1021,6 +1024,7 @@ _COMPARED = {
     'expected_date': lambda a: a.expected_date,
     'expected_bill_date': lambda a: a.expected_bill_date,
     'bill_due_date': lambda a: a.bill_due_date,
+    'director_approval': lambda a: 'Yes' if a.director_approval else None,
     'expense_category': lambda a: a.expense_category or None,
     'expense_bill_number': lambda a: a.expense_bill_number or None,
     'expense_bill_date': lambda a: a.expense_bill_date,

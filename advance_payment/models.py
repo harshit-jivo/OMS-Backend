@@ -358,6 +358,10 @@ class AdvanceRequest(models.Model):
     #: 2 days, the request skips its approval stages (`hierarchy.BILL_DUE_SOON`).
     bill_due_date = models.DateField(null=True, blank=True,
                                      help_text='Utilities / insurance: the due date on the bill.')
+    #: An Account Payment the requester sends to the Director instead of Avtar
+    #: (user, 2026-10-21). Always False on any other type.
+    director_approval = models.BooleanField(default=False,
+                                            help_text='Account Payment: approved by the Director, not Avtar.')
     #: An Expense paid to a vendor (2026-10-20): the bill it pays — its
     #: category as SAP books the vendor's bills (ITEM / SERVICE), the vendor's
     #: bill number and its date. Required then, with the bill attached.

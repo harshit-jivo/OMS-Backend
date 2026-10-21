@@ -91,6 +91,8 @@ IMPREST_JOURNAL = "(request_type = 'EMPLOYEE_IMPREST' AND payment_against = 'AGA
 #: An Account Payment (one G/L account, no partner — Katebaa, TPT, BSU): Avtar,
 #: then Payment, in every company (user, 2026-10-15). Kept out of every other route.
 ACCOUNT = "request_type = 'ACCOUNT'"
+#: ...ticked for the Director by the requester: the Director instead of Avtar (2026-10-21).
+DIRECTOR_TICKED = 'director_approval'
 NOT_ACCOUNT = "request_type <> 'ACCOUNT'"
 
 #: Paid against bills (user, 2026-10-19): straight to the Payment desk, in
@@ -320,7 +322,9 @@ def routes():
          'company': 'MART', 'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', NOT_BILL, MART_SMALL_IMPREST),
          'stages': [(IMPREST_STAGE, 'navdeep')]},
         {'code': 'AP_ACCOUNT', 'name': 'Payments · Account Payment', 'company': 'ALL',
-         'query': _where(ACCOUNT), 'stages': [(OWNER_STAGE, 'avtar')]},
+         'query': _where(ACCOUNT, f'NOT {DIRECTOR_TICKED}'), 'stages': [(OWNER_STAGE, 'avtar')]},
+        {'code': 'AP_ACCOUNT_DIRECTOR', 'name': 'Payments · Account Payment · Director', 'company': 'ALL',
+         'query': _where(ACCOUNT, DIRECTOR_TICKED), 'stages': [(DIRECTOR_STAGE, 'director')]},
         # Imprest, and a salary advance outside the plant: the picked Department Head, then the Director.
         {'code': 'AP_STAFF_ADVANCE', 'name': 'Payments · Staff Advance / Imprest', 'company': 'ALL',
          'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN'), NOT_BILL,

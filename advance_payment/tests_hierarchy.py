@@ -48,8 +48,8 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         # Imprest against Journal Entry; Account Payment; the plant's three fixed-asset purposes, one per company;
         # Utilities' and Insurance's bills due within 2 days; every bill (AP_AGAINST_BILL); Mart's small imprests;
         # Mart's Raw & Packing Material (central, Bhupinder); a Vendor On Account by the head, with and
-        # without the Director; Mart's bills due within 2 days
-        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1)
+        # without the Director; Mart's bills due within 2 days; an Account Payment ticked for the Director
+        self.assertEqual(len(ROUTES), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1)
 
     def test_codes_are_unique_and_fit_the_engine(self):
         codes = [r['code'] for r in ROUTES]
@@ -65,7 +65,7 @@ class EveryRequestHasOneRoute(SimpleTestCase):
                       BY_CODE['AP_STAFF_ADVANCE']['query'])
         for route in ROUTES:
             if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON',
-                                 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT') or \
+                                 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR') or \
                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             with self.subTest(route['code']):
@@ -144,7 +144,8 @@ class WhoApproves(SimpleTestCase):
             'AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_FA_CIVIL',
             'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
             'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES', 'AP_INSURANCE',
-            'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM', 'AP_VENDOR_ON_ACCOUNT_DIRECTOR']))
+            'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM', 'AP_VENDOR_ON_ACCOUNT_DIRECTOR',
+            'AP_ACCOUNT_DIRECTOR']))
 
     def test_the_plants_fixed_assets_go_to_its_approver_civil_to_bhupinder(self):
         # Plant & machinery, spares, others: Oil -> Gagan, Beverages -> Arvinder, then the Director.
@@ -389,7 +390,7 @@ class ExpenseRoutes(SimpleTestCase):
         # Payment routes need a purpose an Expense never has, and Mart's excludes it.
         for route in ROUTES:
             if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON',
-                                 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_AGAINST_BILL') or \
+                                 'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR', 'AP_AGAINST_BILL') or \
                     route['code'].startswith('AP_STAFF_ADVANCE'):
                 continue
             self.assertRegex(route['query'], r'purpose_code (=|IN) ')

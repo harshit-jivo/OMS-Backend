@@ -71,6 +71,22 @@ class RaisingOne(SimpleTestCase):
                 self.assertFalse(needs_department_head(company, 'ACCOUNT', 'EMP_ADVANCE'))
 
 
+class TheDirectorsTick(SimpleTestCase):
+    """2026-10-21: an Account Payment ticked for the Director goes to him instead of Avtar."""
+
+    def test_ticked_the_director_else_avtar(self):
+        from advance_payment import hierarchy
+
+        routes = {r['code']: r for r in hierarchy.routes()}
+        avtar, director = routes['AP_ACCOUNT'], routes['AP_ACCOUNT_DIRECTOR']
+        self.assertEqual(avtar['stages'], [(hierarchy.OWNER_STAGE, 'avtar')])
+        self.assertEqual(director['stages'], [(hierarchy.DIRECTOR_STAGE, 'director')])
+        self.assertIn('NOT director_approval', avtar['query'])
+        self.assertTrue(director['query'].endswith('AND director_approval'))
+        self.assertEqual([n for n, _r in hierarchy.full_stages(director)],
+                         ['Payment Approval', 'Director Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+
+
 class TheAccountsItMayPay(SimpleTestCase):
     def run_sql(self, company, **kwargs):
         with mock.patch.object(sap_service, '_schema', return_value='JIVO_MART_HANADB'), \
@@ -124,17 +140,18 @@ class ItsSapPayment(TheSapPayment):
 
 
 class ItsRoute(SimpleTestCase):
-    def test_always_goes_to_avtar_then_payment_audit_final(self):
+    def test_goes_to_avtar_then_payment_audit_final_unless_ticked_for_the_director(self):
         route = {r['code']: r for r in hierarchy.routes()}['AP_ACCOUNT']
         self.assertEqual(route['company'], 'ALL')
-        self.assertEqual(route['query'], "SELECT id FROM advance_payment_request WHERE request_type = 'ACCOUNT'")
+        self.assertEqual(route['query'], "SELECT id FROM advance_payment_request WHERE request_type = 'ACCOUNT' "
+                                         "AND NOT director_approval")
         self.assertEqual(hierarchy.full_stages(route), [
             ('Payment Approval', 'payment'), (hierarchy.OWNER_STAGE, 'avtar'), (hierarchy.CA_STAGE, 'ca'),
             ('Audit Approval', 'audit'), ('Final Approval', 'final')])
 
     def test_no_other_route_takes_it(self):
         for route in hierarchy.routes():
-            if route['code'] == 'AP_ACCOUNT' or route.get('never_chosen'):
+            if route['code'] in ('AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR') or route.get('never_chosen'):
                 continue
             with self.subTest(route['code']):
                 query = route['query']

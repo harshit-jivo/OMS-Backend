@@ -256,6 +256,8 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'expected_bill_date': _iso(advance.expected_bill_date),
         # Utilities / insurance: typed by the requester; due within 2 days, the approvals were skipped.
         'bill_due_date': _iso(advance.bill_due_date),
+        # An Account Payment sent to the Director instead of Avtar (2026-10-21).
+        'director_approval': advance.director_approval,
         # An Expense paid to a vendor: the bill it pays (2026-10-20).
         'expense_category': advance.expense_category,
         'expense_bill_number': advance.expense_bill_number,
