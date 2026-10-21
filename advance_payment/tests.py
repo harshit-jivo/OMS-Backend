@@ -260,10 +260,24 @@ class TheEmployeeMaster(SimpleTestCase):
         self.assertEqual(set(s.errors), {"employee_code", "employee_name", "role"})
 
     def test_refuses_a_bad_phone_or_email(self):
-        valid, s = self._serializer(employee_code="A1", employee_name="A", role=1,
+        valid, s = self._serializer(employee_code="JWPL0001", employee_name="A", role=1,
                                     phone="abc", email="not-an-email")
         self.assertFalse(valid)
         self.assertEqual(set(s.errors), {"phone", "email"})
+
+    def test_refuses_the_code_and_the_name_swapped(self):
+        # 2026-10-21: "MERAJ SIDDIQUE" typed as the code, "JWPL1409" as the name.
+        valid, s = self._serializer(employee_code="MERAJ SIDDIQUE", employee_name="JWPL1409", role=3)
+        self.assertFalse(valid)
+        self.assertEqual(set(s.errors), {"employee_code", "employee_name"})
+        self.assertIn("Is the name in the code box?", str(s.errors["employee_code"][0]))
+        self.assertIn("is an employee code, not a name", str(s.errors["employee_name"][0]))
+        # A real code and name pass; so does a name with a digit or two in it.
+        for code, name in (("JWPL1409", "MERAJ SIDDIQUE"), ("TEMP0002", "Rahul2"), ("jwpl0115", "A B")):
+            with self.subTest(code):
+                valid, s = self._serializer(employee_code=code, employee_name=name, role=3)
+                self.assertNotIn("employee_code", s.errors)
+                self.assertNotIn("employee_name", s.errors)
 
     def test_refuses_a_code_that_exists(self):
         from advance_payment.serializers import EmployeeSerializer

@@ -7,12 +7,22 @@ employee hierarchy by migration 0002, from `data/jsap_employees.psv`.
 Nothing is ever hard-deleted: `is_deleted` / `deleted_on` / `deleted_by`
 mark a row gone, and `Employee.objects.alive()` leaves those out.
 """
+import re
+
 from django.conf import settings
 from django.db import models
 from django.db.models import F, Q
 from django.utils import timezone
 
 from core.companies import COMPANY_CHOICES
+
+
+#: An employee code: letters and digits, no spaces, with a digit in it —
+#: JWPL1409, TEMP0002. A name typed into the code (user, 2026-10-21:
+#: "MERAJ SIDDIQUE" as the code, "JWPL1409" as the name) is refused.
+EMPLOYEE_CODE = re.compile(r'^(?=[A-Z0-9]*[0-9])[A-Z0-9]{3,20}$')
+#: A NAME that is an employee code — a few letters, then three digits or more.
+NAME_LIKE_CODE = re.compile(r'^[A-Za-z]{2,6}[0-9]{3,}$')
 
 
 class EmployeeRole(models.IntegerChoices):

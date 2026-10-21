@@ -3,7 +3,7 @@ import re
 
 from rest_framework import serializers
 
-from advance_payment.models import Employee
+from advance_payment.models import EMPLOYEE_CODE, NAME_LIKE_CODE, Employee
 from advance_payment.services import ap_invoice
 
 _PHONE = re.compile(r'^\+?[0-9][0-9\s-]{6,18}$')
@@ -41,6 +41,11 @@ class EmployeeSerializer(serializers.ModelSerializer):
         code = (value or '').strip().upper()
         if not code:
             raise serializers.ValidationError('Employee code is required.')
+        # The code and the name swapped (2026-10-21) is caught here, not at Payment.
+        if not EMPLOYEE_CODE.match(code):
+            raise serializers.ValidationError(
+                'An employee code is letters and digits only, no spaces, e.g. JWPL1409. '
+                'Is the name in the code box?')
         clash = Employee.objects.filter(employee_code=code)
         if self.instance is not None:
             clash = clash.exclude(pk=self.instance.pk)
@@ -52,6 +57,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
         name = ' '.join((value or '').split())
         if not name:
             raise serializers.ValidationError('Employee name is required.')
+        if NAME_LIKE_CODE.match(name):
+            raise serializers.ValidationError(
+                f'"{name}" is an employee code, not a name. Is the code in the name box?')
         return name
 
     def validate_phone(self, value):

@@ -230,6 +230,10 @@ def clean(data, *, desk=False, user=None):
     not_in_sap = partner_code.startswith(NOT_IN_SAP_PREFIX)
     if not_in_sap and request_type != RequestType.EMPLOYEE_ADVANCE:
         problems.append('Only an Employee advance may be raised for someone not yet in SAP.')
+    elif not_in_sap:
+        # Who it is, from the employee master by code — never as sent: a code
+        # and name swapped (2026-10-21) would find no SAP account at Payment.
+        partner_code, partner_name = _clean_not_in_sap(partner_code, problems)
 
     documents = []
     expense_lines = []
@@ -375,6 +379,18 @@ def _clean_payment_account(company, code, name, problems):
 
 #: Who an Expense is paid to (user, 2026-10-20): a SAP vendor, or an employee's
 #: imprest account — both SAP suppliers, told apart by their code series.
+def _clean_not_in_sap(partner_code, problems):
+    """`(partner_code, partner_name)` of an employee not yet in SAP: the
+    master's own code and name, found by the code after `NOT_IN_SAP_PREFIX`."""
+    code = partner_code[len(NOT_IN_SAP_PREFIX):].strip().upper()
+    employee = Employee.objects.alive().filter(employee_code=code).first() if code else None
+    if employee is None:
+        problems.append(f'{code or "That employee"} is not an employee code in the employee master: '
+                        f'choose the employee again.')
+        return partner_code, ''
+    return f'{NOT_IN_SAP_PREFIX}{employee.employee_code}', employee.employee_name[:200]
+
+
 EXPENSE_PAYEES = {'VENDOR': 'a vendor', 'IMPREST': "an employee's imprest account"}
 IMPREST_PREFIX = 'ORGV'
 

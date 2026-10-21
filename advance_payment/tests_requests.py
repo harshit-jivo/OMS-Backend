@@ -232,7 +232,29 @@ class WhatTheServerAccepts(SimpleTestCase):
             _clean(vendor_bill_request(partner_code='NOSAP:JWPL0999'))
 
     def test_an_employee_advance_by_emi(self):
-        cleaned = _clean({
+        master = mock.Mock(employee_code='JWPL0999', employee_name='New Joiner')
+        with mock.patch.object(request_service.Employee.objects, 'alive') as alive:
+            alive.return_value.filter.return_value.first.return_value = master
+            cleaned = self._emi_advance()
+        self.assertTrue(cleaned.fields['partner_not_in_sap'])
+        self.assertEqual(cleaned.fields['installments'], 6)
+        self.assertEqual(cleaned.documents, [])
+        # Who it is comes from the master by code (2026-10-21), never as sent.
+        self.assertEqual((cleaned.fields['partner_code'], cleaned.fields['partner_name']),
+                         ('NOSAP:JWPL0999', 'New Joiner'))
+        alive.return_value.filter.assert_called_with(employee_code='JWPL0999')
+
+    def test_a_not_in_sap_employee_unknown_to_the_master_is_refused(self):
+        # The code and name swapped: "NOSAP:MERAJ SIDDIQUE" is no employee code.
+        with mock.patch.object(request_service.Employee.objects, 'alive') as alive:
+            alive.return_value.filter.return_value.first.return_value = None
+            with self.assertRaises(request_service.RequestInvalid) as caught:
+                self._emi_advance(partner_code='NOSAP:MERAJ SIDDIQUE', partner_name='JWPL1409')
+        self.assertIn('MERAJ SIDDIQUE is not an employee code in the employee master: choose the employee again.',
+                      caught.exception.problems)
+
+    def _emi_advance(self, **overrides):
+        return _clean({**{
             'company': 'OIL', 'request_type': 'EMPLOYEE_ADVANCE', 'payment_against': 'ADVANCE',
             'partner_code': 'NOSAP:JWPL0999', 'partner_name': 'NEW JOINER', 'amount': '60000',
             'payment_date': '2026-10-01',
@@ -240,10 +262,7 @@ class WhatTheServerAccepts(SimpleTestCase):
             'expected_from_date': '2026-11-01', 'expected_to_date': '2027-04-01',
             'owner_label': 'HR', 'remarks': 'Relocation advance',
             'budget_code': 'BackOff', 'purpose_code': 'EMP_ADVANCE',
-        })
-        self.assertTrue(cleaned.fields['partner_not_in_sap'])
-        self.assertEqual(cleaned.fields['installments'], 6)
-        self.assertEqual(cleaned.documents, [])
+        }, **overrides})
 
 
 def line(pk, method, amount, account='1104107', **extra):
