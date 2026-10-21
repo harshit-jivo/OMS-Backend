@@ -53,6 +53,20 @@ class EveryAttachmentOfABill(SimpleTestCase):
         found = sap.related_attachments('OIL', 'po', 12556)
         self.assertEqual([(a['kind'], a['line']) for a in found], [('po', 1)])
 
+    def test_a_journal_entrys_files_are_read_by_its_trans_id(self, _run, _schema):
+        # 2026-10-21: an imprest's journal entry (TA/DA, incentives) shows its attachments too.
+        rows = [{'doc_entry': 90910, 'doc_num': 926890238, 'line': 1, 'file_name': 'Recharge Approval',
+                 'file_ext': 'pdf', 'date': datetime(2026, 10, 6), 'note': ''}]
+        _run.side_effect = lambda company, sql, params, what: rows
+        found = sap.related_attachments('MART', 'journal', 90910)
+        sql = _run.call_args.args[1]
+        self.assertIn('FROM "JIVO_OIL_HANADB"."OJDT" D', sql)
+        self.assertIn('D."TransId" AS "doc_entry", D."Number" AS "doc_num"', sql)
+        self.assertIn('WHERE D."TransId" IN (?)', sql)
+        self.assertEqual([(a['kind'], a['kind_label'], a['doc_num'], a['file_name']) for a in found],
+                         [('journal', 'Journal entry', 926890238, 'Recharge Approval.pdf')])
+        self.assertEqual(sap.attachment_line('MART', 'journal', 90910, 1)['file_name'], 'Recharge Approval.pdf')
+
     def test_one_line_is_found_by_document_and_line(self, _run, _schema):
         self.assertEqual(sap.attachment_line('OIL', 'grpo', 27276, '1')['file_name'], 'delivery challan.pdf')
         self.assertIsNone(sap.attachment_line('OIL', 'bill', 52169, 9))

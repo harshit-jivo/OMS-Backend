@@ -695,10 +695,14 @@ def _doc_entry(doc_entry):
 
 #: The documents whose attachments can be listed and opened, by KIND. A GRPO
 #: is only ever reached as the base of a bill (see `related_attachments`).
-LINE_ATTACHMENT_TABLES = {'po': 'OPOR', 'bill': 'OPCH', 'grpo': 'OPDN', 'payment': 'OVPM'}
+LINE_ATTACHMENT_TABLES = {'po': 'OPOR', 'bill': 'OPCH', 'grpo': 'OPDN', 'payment': 'OVPM',
+                          # A journal entry (an imprest's TA/DA or incentive, 2026-10-21): by TransId.
+                          'journal': 'OJDT'}
+#: A kind whose table is not keyed DocEntry / DocNum: `(key, number)`.
+_ATTACHMENT_KEYS = {'journal': ('TransId', 'Number')}
 
 _KIND_LABEL = {'po': 'Purchase order', 'bill': 'A/P invoice', 'grpo': 'Goods receipt PO',
-               'payment': 'Outgoing payment'}
+               'payment': 'Outgoing payment', 'journal': 'Journal entry'}
 
 #: The documents an A/P invoice was copied from. In these books a bill is
 #: always copied from GRPOs (PCH1.BaseType 20; never straight from a PO), and
@@ -717,13 +721,13 @@ _BILL_BASES_SQL = '''
 '''
 
 _DOC_ATTACHMENT_LINES_SQL = '''
-    SELECT D."DocEntry" AS "doc_entry", D."DocNum" AS "doc_num",
+    SELECT D."{key}" AS "doc_entry", D."{number}" AS "doc_num",
            A."Line" AS "line", A."FileName" AS "file_name", A."FileExt" AS "file_ext",
            A."Date" AS "date", A."FreeText" AS "note"
     FROM "{schema}"."{table}" D
     JOIN "{schema}"."ATC1" A ON A."AbsEntry" = D."AtcEntry"
-    WHERE D."DocEntry" IN ({entries})
-    ORDER BY D."DocEntry", A."Line"
+    WHERE D."{key}" IN ({entries})
+    ORDER BY D."{key}", A."Line"
 '''
 
 
@@ -732,8 +736,9 @@ def _attachment_lines(company, kind, entries):
     entries = sorted({int(e) for e in entries})
     if not entries:
         return []
+    key, number = _ATTACHMENT_KEYS.get(kind, ('DocEntry', 'DocNum'))
     sql = _DOC_ATTACHMENT_LINES_SQL.format(
-        schema=_schema(company), table=LINE_ATTACHMENT_TABLES[kind],
+        schema=_schema(company), table=LINE_ATTACHMENT_TABLES[kind], key=key, number=number,
         entries=', '.join('?' for _ in entries))
     return [{
         'kind': kind,

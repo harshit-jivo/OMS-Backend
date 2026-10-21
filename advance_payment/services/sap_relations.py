@@ -40,6 +40,7 @@ looked for by GSTIN, PAN and name instead. Only partners of the same type
 """
 from decimal import Decimal
 
+from advance_payment.services import sap as _sap
 from advance_payment.services.sap import _date, _money, _run, _s, _schema
 
 #: SAP's documents in a purchase trail: table, object type, label.
@@ -207,15 +208,20 @@ def relationship_map(company, kind, doc_entry):
 # ---------------------------------------------------------------------------
 _JE_HEADER_SQL = '''
     SELECT "TransId" AS "trans_id", "Number" AS "number", "RefDate" AS "posting_date",
-           "TaxDate" AS "document_date", "Memo" AS "memo", "TransType" AS "trans_type",
-           "BaseRef" AS "base_ref", "Ref1" AS "ref1", "Ref2" AS "ref2"
+           "TaxDate" AS "document_date", "DueDate" AS "due_date", "Memo" AS "memo", "TransType" AS "trans_type",
+           "BaseRef" AS "base_ref", "Ref1" AS "ref1", "Ref2" AS "ref2", "Ref3" AS "ref3",
+           "BatchNum" AS "voucher", "Project" AS "project", "CreateDate" AS "created_on"
     FROM "{schema}"."OJDT" WHERE "TransId" = ?
 '''
 
 _JE_LINES_SQL = '''
     SELECT J."Line_ID" AS "line", J."Account" AS "account", A."AcctName" AS "account_name",
            J."ShortName" AS "short_name", P."CardName" AS "partner_name",
-           J."Debit" AS "debit", J."Credit" AS "credit", J."LineMemo" AS "memo"
+           J."Debit" AS "debit", J."Credit" AS "credit", J."LineMemo" AS "memo",
+           J."Ref1" AS "ref1", J."Ref2" AS "ref2", J."DueDate" AS "due_date",
+           J."ProfitCode" AS "dim1", J."OcrCode2" AS "dim2", J."OcrCode3" AS "dim3",
+           J."OcrCode4" AS "dim4", J."OcrCode5" AS "dim5",
+           J."BalDueDeb" AS "open_debit", J."BalDueCred" AS "open_credit"
     FROM "{schema}"."JDT1" J
     LEFT JOIN "{schema}"."OACT" A ON A."AcctCode" = J."Account"
     LEFT JOIN "{schema}"."OCRD" P ON P."CardCode" = J."ShortName"
@@ -224,7 +230,13 @@ _JE_LINES_SQL = '''
 
 
 def journal_entry(company, trans_id):
-    """A journal entry's header and G/L lines, or None. Amounts as strings."""
+    """A journal entry's header, G/L lines and SAP attachments, or None. Amounts as strings.
+
+    For an imprest paid against it (TA/DA, incentives, 2026-10-21) the desks
+    see what accounts see in SAP: its voucher number, references, remarks,
+    each line's memo and dimensions (Variety, Month, Budget, Sub Budget,
+    State), what is still open on it, and every file attached to it.
+    """
     try:
         tid = int(trans_id)
     except (TypeError, ValueError):
@@ -248,9 +260,16 @@ def journal_entry(company, trans_id):
             'base_ref': _s(h.get('base_ref')),
             'ref1': _s(h.get('ref1')),
             'ref2': _s(h.get('ref2')),
+            'ref3': _s(h.get('ref3')),
+            'due_date': _date(h.get('due_date')),
+            # The Journal Voucher accounts key it under (OJDT.BatchNum); none when posted directly.
+            'voucher': int(h['voucher']) if h.get('voucher') is not None else None,
+            'project': _s(h.get('project')),
+            'created_on': _date(h.get('created_on')),
             'debit': _money(debit),
             'credit': _money(credit),
         },
+        'attachments': _sap.related_attachments(company, 'journal', tid),
         'lines': [{
             'line': int(r['line']),
             'account': _s(r.get('account')),
@@ -261,6 +280,12 @@ def journal_entry(company, trans_id):
             'debit': _money(r.get('debit')),
             'credit': _money(r.get('credit')),
             'memo': _s(r.get('memo')),
+            'ref1': _s(r.get('ref1')),
+            'ref2': _s(r.get('ref2')),
+            'due_date': _date(r.get('due_date')),
+            'dimensions': [_s(r.get(f'dim{n}')) for n in range(1, 6)],
+            # Still unpaid on the line: what an imprest against it pays.
+            'open': _money(Decimal(str(r.get('open_credit') or 0)) - Decimal(str(r.get('open_debit') or 0))),
         } for r in lines],
     }
 
