@@ -72,11 +72,20 @@ class EveryRequestHasOneRoute(SimpleTestCase):
                 self.assertNotIn('MART', route['query'])
                 self.assertIn("request_type NOT IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')", route['query'])
 
-    def test_an_imprest_against_a_journal_entry_goes_to_the_head_then_navdeep_not_the_director(self):
+    def test_an_imprest_against_a_journal_entry_goes_to_navdeep_alone_in_every_company(self):
+        # 2026-10-21: Navdeep only — no Department Head, no Prabhjot; he approves once, at CA.
         route = BY_CODE['AP_IMPREST_JOURNAL']
-        self.assertEqual(route['stages'], [(DEPARTMENT_HEAD_STAGE, hierarchy.HEAD), (hierarchy.SECOND_STAGE, 'navdeep')])
-        self.assertIn("request_type = 'EMPLOYEE_IMPREST' AND payment_against = 'AGAINST_JOURNAL'", route['query'])
-        self.assertNotIn('MART', route['query'])
+        self.assertEqual(route['company'], 'ALL')
+        self.assertEqual(route['stages'], [(hierarchy.SECOND_STAGE, 'navdeep')])
+        self.assertEqual([n for n, _r in hierarchy.full_stages(route)],
+                         ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+        self.assertEqual(route['query'], hierarchy._where(hierarchy.IMPREST_JOURNAL))
+        for company in ('OIL', 'BEVERAGES', 'MART'):
+            self.assertFalse(needs_department_head(company, 'EMPLOYEE_IMPREST', 'TA_DA',
+                                                   payment_against='AGAINST_JOURNAL'))
+        # Mart's own routes leave it alone.
+        for code in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON'):
+            self.assertIn(f'NOT {hierarchy.IMPREST_JOURNAL}', BY_CODE[code]['query'])
         # …and the Staff Advance / Imprest route (head, then Director) no longer takes it.
         self.assertIn(f"NOT {hierarchy.IMPREST_JOURNAL}", BY_CODE['AP_STAFF_ADVANCE']['query'])
 

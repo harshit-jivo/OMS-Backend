@@ -161,6 +161,8 @@ def needs_department_head(company, request_type, purpose_code, budget_code='', p
         return False  # Mart's one approver; an Account Payment's fixed route
     if payment_against == AGAINST_BILL:
         return False  # straight to the Payment desk (user, 2026-10-19)
+    if request_type == 'EMPLOYEE_IMPREST' and payment_against == 'AGAINST_JOURNAL':
+        return False  # Navdeep alone, every company (user, 2026-10-21)
     if purpose_code in FREIGHT_PURPOSES and request_type not in HEAD_REQUEST_TYPES:
         return False  # Navdeep, then the Payment desk
     if request_type == 'EMPLOYEE_ADVANCE' and budget_code in FACTORY_BUDGETS:
