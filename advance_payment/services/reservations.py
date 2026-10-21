@@ -161,13 +161,15 @@ def subtracts_paid(kind):
 
 
 def usage(company, kind, keys, *, exclude_request=None):
-    """`{(doc_entry, line): {'reserved', 'paid', 'requests'}}` for those keys.
+    """`{(doc_entry, line): {'reserved', 'paid', 'requests', 'holding'}}` for those keys.
 
     `requests` counts every request that has touched the document, whatever
-    its status. `exclude_request` leaves one request out (the one being edited).
+    its status; `holding` is `[(request_id, amount)]` of those holding it now
+    (in approval, or returned to the creator). `exclude_request` leaves one
+    request out (the one being edited).
     """
     keys = {_key(*k) for k in keys}
-    out = defaultdict(lambda: {'reserved': ZERO, 'paid': ZERO, 'unadjusted': ZERO, 'requests': 0})
+    out = defaultdict(lambda: {'reserved': ZERO, 'paid': ZERO, 'unadjusted': ZERO, 'requests': 0, 'holding': []})
     if not keys:
         return {}
     paid_lines = []
@@ -183,6 +185,7 @@ def usage(company, kind, keys, *, exclude_request=None):
         use['requests'] += 1
         if status in RESERVING:
             use['reserved'] += amount
+            use['holding'].append((request_id, amount))
         elif status in PAID:
             use['paid'] += amount
             paid_lines.append((key, request_id, amount))
@@ -247,6 +250,45 @@ def lock(company, kind, keys):
             cursor.execute('SELECT pg_advisory_xact_lock(%s)', [int.from_bytes(digest, 'big', signed=True)])
 
 
+def holders(request_ids):
+    """`{request_id: {request_no, status, stage, user}}`: where each holding
+    request is now, and with whom (user, 2026-10-21) — said wherever a
+    document it holds is picked. A returned one is with its creator."""
+    from advance_payment.models import RequestFlow
+
+    ids = {int(i) for i in request_ids}
+    if not ids:
+        return {}
+    out = {}
+    rows = (AdvanceRequest.objects.filter(pk__in=ids)
+            .select_related('created_by').only('pk', 'request_no', 'status', 'created_by'))
+    flows = {f.request_id: f for f in RequestFlow.objects.filter(request_id__in=ids)
+             .select_related('current_stage', 'current_user')}
+    for advance in rows:
+        flow = flows.get(advance.pk)
+
+        def name(user):
+            return (getattr(user, 'name', '') or getattr(user, 'username', '')) if user else ''
+        if advance.status == RequestStatus.RETURNED or flow is None or not flow.current_stage_id:
+            stage, user = 'Returned to its creator', name(advance.created_by)
+        else:
+            stage, user = flow.current_stage.name, name(flow.current_user)
+        out[advance.pk] = {'request_no': advance.request_no, 'status': advance.status,
+                           'stage': stage, 'user': user}
+    return out
+
+
+def _holding(use, found):
+    """The holders of one document, with what each holds, for the API."""
+    return [{**found[rid], 'amount': str(amount)} for rid, amount in (use or {}).get('holding', []) if rid in found]
+
+
+def held_by(use, found):
+    """`"AP-2026-0100 (returned to its creator, Sushil), AP-2026-0185 (Payment Approval, taran)"`."""
+    return ', '.join(f'{h["request_no"]} ({h["stage"]}{", " + h["user"] if h["user"] else ""})'
+                     for h in _holding(use, found))
+
+
 def problems(company, documents, *, exclude_request=None):
     """Every line that asks for more than is still available. `[]` when all fit.
 
@@ -261,6 +303,7 @@ def problems(company, documents, *, exclude_request=None):
         keys = [(d['sap_doc_entry'], d.get('sap_line', 0)) for d in docs]
         lock(company, kind, keys)
         used = usage(company, kind, keys, exclude_request=exclude_request)
+        found_holders = holders({rid for u in used.values() for rid, _a in u['holding']})
         facts = sap_facts(company, kind, [d['sap_doc_entry'] for d in docs])
         for d in docs:
             use = used.get(_key(d['sap_doc_entry'], d.get('sap_line', 0)))
@@ -275,7 +318,9 @@ def problems(company, documents, *, exclude_request=None):
                                  f'{fact["doc_total"]}'
                                  + (f', debit notes take {debit}' if debit else '')
                                  + f', OMS has paid {(use or {}).get("paid", ZERO)} and other '
-                                 f'requests hold {(use or {}).get("reserved", ZERO)}.')
+                                 f'requests hold {(use or {}).get("reserved", ZERO)}'
+                                 + (f': {held_by(use, found_holders)}' if (use or {}).get('holding') else '')
+                                 + '.')
                 continue
             if not use:
                 continue
@@ -284,7 +329,8 @@ def problems(company, documents, *, exclude_request=None):
                 label = d.get('sap_doc_num') or d['sap_doc_entry']
                 held = use['reserved'] + (use.get('unadjusted', use['paid']) if subtracts_paid(kind) else ZERO)
                 found.append(f'{DocumentKind(kind).label} {label}: only {left} is available — {held} of its '
-                             f'{d["open_amount"]} open is already held by other OMS requests.')
+                             f'{d["open_amount"]} open is already held by other OMS requests'
+                             + (f': {held_by(use, found_holders)}' if use.get('holding') else '') + '.')
     return found
 
 
@@ -297,6 +343,7 @@ def annotate(company, kind, rows, *, key, open_field, total_field=None, paid_fie
     `paid_field` (SAP's received / paid-to-date) = what OMS has paid.
     """
     used = usage(company, kind, [key(r) for r in rows])
+    found = holders({rid for u in used.values() for rid, _a in u['holding']})
     out = []
     for r in rows:
         use = used.get(_key(*key(r)))
@@ -322,8 +369,12 @@ def annotate(company, kind, rows, *, key, open_field, total_field=None, paid_fie
             'unadjusted': str(use['unadjusted']) if use and subtracts_paid(kind) else '0',
             'available': str(left),
             'requests': use['requests'] if use else 0,
+            # The requests holding it now, where each is and with whom (2026-10-21).
+            'holders': _holding(use, found),
         }
-        if drop_exhausted and use and left <= 0:
+        # Used up by payments: not offered again. Held by a request still in
+        # progress: offered, saying which and where (user, 2026-10-21).
+        if drop_exhausted and use and left <= 0 and not use['holding']:
             continue
         out.append(r)
     return out

@@ -111,8 +111,14 @@ def _usage_rows(*rows, unadjusted=None, facts=None):
     fake = unadjusted or (lambda company, lines: [amount for _key, _request, amount in lines])
     with mock.patch.object(reservations.RequestDocument.objects, 'filter', return_value=qs), \
             mock.patch.object(reservations, 'unadjusted', side_effect=fake), \
-            mock.patch.object(reservations, 'sap_facts', return_value=dict(facts or {})):
+            mock.patch.object(reservations, 'sap_facts', return_value=dict(facts or {})),             mock.patch.object(reservations, 'holders', side_effect=_fake_holders):
         yield
+
+
+def _fake_holders(request_ids):
+    """Where each holding request is (2026-10-21): request N is AP-2026-000N, at Payment with taran."""
+    return {i: {'request_no': f'AP-2026-{i:04d}', 'status': 'IN_APPROVAL', 'stage': 'Payment Approval',
+                'user': 'taran'} for i in request_ids}
 
 
 class WhatOmsHolds(SimpleTestCase):
@@ -156,14 +162,35 @@ class WhatOmsHolds(SimpleTestCase):
         with _usage_rows(*self.ROWS):
             self.assertEqual(reservations.problems('OIL', [{**line_, 'amount': Decimal('35')}]), [])
 
-    def test_a_used_up_document_is_not_offered_again(self):
+    def test_a_document_used_up_by_payments_is_not_offered_again(self):
+        paid_only = [(14008, 0, Decimal('65'), 3, RequestStatus.COMPLETED)]
         rows = [{'doc_entry': 14008, 'open_amount': '65'}, {'doc_entry': 14009, 'open_amount': '50'}]
-        with _usage_rows(*self.ROWS):
+        with _usage_rows(*paid_only):
             offered = reservations.annotate('OIL', DocumentKind.PO, rows, key=lambda r: (r['doc_entry'], 0),
                                             open_field='open_amount')
         self.assertEqual([r['doc_entry'] for r in offered], [14009])
         self.assertEqual(offered[0]['oms'], {'tracked': True, 'reserved': '0', 'paid': '0', 'unadjusted': '0',
-                                             'available': '50', 'requests': 0})
+                                             'available': '50', 'requests': 0, 'holders': []})
+
+    def test_one_held_by_requests_in_progress_is_offered_saying_which_and_where(self):
+        # 2026-10-21: nothing left, but held (not paid) — offered, with who holds it.
+        rows = [{'doc_entry': 14008, 'open_amount': '65'}]
+        with _usage_rows(*self.ROWS):
+            offered = reservations.annotate('OIL', DocumentKind.PO, rows, key=lambda r: (r['doc_entry'], 0),
+                                            open_field='open_amount')
+        self.assertEqual(offered[0]['oms']['available'], '0')
+        self.assertEqual(offered[0]['oms']['holders'], [
+            {'request_no': 'AP-2026-0001', 'status': 'IN_APPROVAL', 'stage': 'Payment Approval', 'user': 'taran',
+             'amount': '10'},
+            {'request_no': 'AP-2026-0002', 'status': 'IN_APPROVAL', 'stage': 'Payment Approval', 'user': 'taran',
+             'amount': '15'}])
+
+    def test_asking_for_more_than_is_left_names_the_requests_holding_it(self):
+        line_ = {'kind': DocumentKind.BILL, 'sap_doc_entry': 14008, 'sap_line': 0, 'sap_doc_num': '626094417',
+                 'open_amount': Decimal('30'), 'amount': Decimal('20')}
+        with _usage_rows(*self.ROWS):
+            found = reservations.problems('OIL', [line_])
+        self.assertIn('AP-2026-0001 (Payment Approval, taran), AP-2026-0002 (Payment Approval, taran)', found[0])
 
     def test_any_po_is_its_total_less_what_oms_paid_goods_received_ignored(self):
         # Old or new: SAP's received (400, the GRPOs) is never deducted. Open =
