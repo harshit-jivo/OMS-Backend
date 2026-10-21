@@ -299,7 +299,7 @@ def routes():
     labels = {code: label for code, label, _g in PAYMENT_PURPOSES}
     out = [
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
-         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
+         'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
                          f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {MART_CENTRAL}',
                          f'NOT {BILL_DUE_SOON}'),
          'stages': [(OWNER_STAGE, 'mart')]},
@@ -307,17 +307,17 @@ def routes():
         # (2026-10-21): straight to Payment, as Oil's and Beverages' are.
         {'code': f'AP_MART{DUE_SOON_SUFFIX}',
          'name': f'Payments · Mart · bill due in {DUE_SOON_DAYS} days or less', 'company': 'MART',
-         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
+         'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
                          f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {MART_CENTRAL}',
                          BILL_DUE_SOON),
          'stages': []},
         {'code': 'AP_MART_RM_PM', 'name': 'Payments · Mart · Raw & Packing Material (central, Bhupinder)',
          'company': 'MART',
-         'query': _where("company = 'MART'", "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
+         'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
                          f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', MART_CENTRAL),
          'stages': [(OWNER_STAGE, 'bhupinder')]},
         {'code': 'AP_MART_IMPREST_SMALL', 'name': f'Payments · Mart · Employee Imprest · up to {STAFF_ADVANCE_LIMIT:,}',
-         'company': 'MART', 'query': _where("company = 'MART'", NOT_BILL, MART_SMALL_IMPREST),
+         'company': 'MART', 'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', NOT_BILL, MART_SMALL_IMPREST),
          'stages': [(IMPREST_STAGE, 'navdeep')]},
         {'code': 'AP_ACCOUNT', 'name': 'Payments · Account Payment', 'company': 'ALL',
          'query': _where(ACCOUNT), 'stages': [(OWNER_STAGE, 'avtar')]},
@@ -327,12 +327,12 @@ def routes():
                          f"(request_type = 'EMPLOYEE_IMPREST' OR budget_code NOT IN {FACTORY_BUDGETS})",
                          f'NOT {IMPREST_JOURNAL}'),
          'stages': _chain(HEAD, True)},
-        # Against a journal entry (TA/DA, incentives), Oil and Beverages: Navdeep
-        # alone (user, 2026-10-21) — no Department Head. He holds the CA desk
-        # too, so he approves it once, there. Mart's imprests go by amount
-        # (Navdeep up to the limit, Prabhjot above), journal entries included.
+        # Against a journal entry (TA/DA, incentives), in EVERY company and at any
+        # amount: Navdeep alone (user, 2026-10-21) — no Department Head, and in
+        # Mart no 20,000 split and no Prabhjot. He holds the CA desk too, so he
+        # approves it once, there. Mart's other imprests still go by amount.
         {'code': 'AP_IMPREST_JOURNAL', 'name': 'Payments · Imprest against Journal Entry (TA/DA, incentive)',
-         'company': 'ALL', 'query': _where(OIL_AND_BEV, IMPREST_JOURNAL),
+         'company': 'ALL', 'query': _where(IMPREST_JOURNAL),
          'stages': [(SECOND_STAGE, 'navdeep')]},
         # A plant's staff salary advance (approval matrix, 2026-10-09): up to the
         # limit, the plant's approver; above it, the Director ("Sonu Veerji") alone.

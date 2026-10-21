@@ -72,18 +72,19 @@ class EveryRequestHasOneRoute(SimpleTestCase):
                 self.assertNotIn('MART', route['query'])
                 self.assertIn("request_type NOT IN ('EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST')", route['query'])
 
-    def test_an_imprest_against_a_journal_entry_goes_to_navdeep_alone_in_oil_and_beverages(self):
-        # 2026-10-21: Navdeep only — no Department Head; he approves once, at CA.
+    def test_an_imprest_against_a_journal_entry_goes_to_navdeep_alone_in_every_company(self):
+        # 2026-10-21: Navdeep only, at any amount — no Department Head, no Prabhjot; he approves once, at CA.
         route = BY_CODE['AP_IMPREST_JOURNAL']
         self.assertEqual(route['stages'], [(hierarchy.SECOND_STAGE, 'navdeep')])
         self.assertEqual([n for n, _r in hierarchy.full_stages(route)],
                          ['Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
-        self.assertEqual(route['query'], hierarchy._where(hierarchy.OIL_AND_BEV, hierarchy.IMPREST_JOURNAL))
+        self.assertEqual(route['query'], hierarchy._where(hierarchy.IMPREST_JOURNAL))
         for company in ('OIL', 'BEVERAGES', 'MART'):
             self.assertFalse(needs_department_head(company, 'EMPLOYEE_IMPREST', 'TA_DA',
                                                    payment_against='AGAINST_JOURNAL'))
-        # Mart's imprests, journal entries included, go by amount: Navdeep up to 20,000, Prabhjot above.
-        self.assertNotIn('AGAINST_JOURNAL', BY_CODE['AP_MART']['query'])
+        # Mart's own routes leave journal entries alone; its other imprests still go by amount.
+        for code in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_RM_PM', 'AP_MART_DUE_SOON'):
+            self.assertIn(f'NOT {hierarchy.IMPREST_JOURNAL}', BY_CODE[code]['query'])
         self.assertIn(hierarchy.MART_SMALL_IMPREST, BY_CODE['AP_MART_IMPREST_SMALL']['query'])
         self.assertIn(f'NOT {hierarchy.MART_SMALL_IMPREST}', BY_CODE['AP_MART']['query'])
         self.assertEqual(BY_CODE['AP_MART']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
