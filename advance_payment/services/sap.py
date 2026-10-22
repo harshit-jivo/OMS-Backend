@@ -757,11 +757,62 @@ _DOC_ATTACHMENT_LINES_SQL = '''
 '''
 
 
+#: A journal entry mostly carries its file in a UDF, not as an attachment (ATC1):
+#: the file's full path on the company's attachments share (user, 2026-10-22 —
+#: AP-2026-0297's TA/DA). Oil since April 2025: 1,093 entries linked so, 281
+#: with an attachment. Oil and Mart keep the path in U_ATTACH_LINK, Beverages
+#: (which has no U_ATTACH_LINK) in U_ATTACHEMENT; Oil's and Mart's U_ATTACHEMENT
+#: holds another tool's hashed image names, not a path. Listed as line 0.
+JOURNAL_LINK_COLUMNS = {'OIL': 'U_ATTACH_LINK', 'MART': 'U_ATTACH_LINK', 'BEVERAGES': 'U_ATTACHEMENT'}
+JOURNAL_LINK_LINE = 0
+
+_JOURNAL_LINKS_SQL = '''
+    SELECT "TransId" AS "doc_entry", "Number" AS "doc_num", "RefDate" AS "date",
+           TO_NVARCHAR(SUBSTR("{column}", 1, 1000)) AS "link"
+    FROM "{schema}"."OJDT"
+    WHERE "TransId" IN ({entries}) AND LENGTH("{column}") > 0
+'''
+
+
+def _journal_link_lines(company, entries):
+    """The files journal `entries` link in their UDF, as attachment lines (line 0).
+
+    Only a path (a backslash in it) counts; the file is opened by its NAME from
+    the company's share, as an attachment is. A lookup that fails lists nothing.
+    """
+    column = JOURNAL_LINK_COLUMNS.get(company)
+    if not column or not entries:
+        return []
+    sql = _JOURNAL_LINKS_SQL.format(schema=_schema(company), column=column,
+                                    entries=', '.join('?' for _ in entries))
+    try:
+        rows = _run(company, sql, list(entries), 'journal attachment links')
+    except SapUnavailable:
+        logger.warning('advance_payment: journal attachment links unreadable for %s', company)
+        return []
+    out = []
+    for r in rows:
+        link = _s(r.get('link')).strip()
+        name = re.split(r'[\\/]', link)[-1].strip()
+        if '\\' not in link or not name:
+            continue
+        out.append({
+            'kind': 'journal', 'kind_label': _KIND_LABEL['journal'],
+            'doc_entry': int(r['doc_entry']),
+            'doc_num': int(r['doc_num']) if r.get('doc_num') is not None else None,
+            'line': JOURNAL_LINK_LINE, 'file_name': name, 'date': _date(r.get('date')),
+            'note': 'Linked on the journal entry in SAP',
+        })
+    return out
+
+
 def _attachment_lines(company, kind, entries):
-    """Every ATC1 line of `entries` (documents of one kind), in line order."""
+    """Every ATC1 line of `entries` (documents of one kind), in line order; for
+    a journal entry, the file its UDF links too (`_journal_link_lines`)."""
     entries = sorted({int(e) for e in entries})
     if not entries:
         return []
+    links = _journal_link_lines(company, entries) if kind == 'journal' else []
     key, number = _ATTACHMENT_KEYS.get(kind, ('DocEntry', 'DocNum'))
     sql = _DOC_ATTACHMENT_LINES_SQL.format(
         schema=_schema(company), table=LINE_ATTACHMENT_TABLES[kind], key=key, number=number,
@@ -775,7 +826,7 @@ def _attachment_lines(company, kind, entries):
         'file_name': _file_name(r.get('file_name'), r.get('file_ext')),
         'date': _date(r.get('date')),
         'note': _s(r.get('note')),
-    } for r in _run(company, sql, entries, 'document attachments')]
+    } for r in _run(company, sql, entries, 'document attachments')] + links
 
 
 def related_attachments(company, kind, doc_entry):

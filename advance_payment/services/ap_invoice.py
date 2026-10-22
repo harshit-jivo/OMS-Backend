@@ -115,10 +115,13 @@ def charges_gst(tax_codes, codes):
                for c in codes)
 
 
-def build_payload(advance, *, posting_date, series, bpl_id, memo, grpo=None, default_location=None):
+def build_payload(advance, *, posting_date, series, bpl_id, memo, grpo=None, default_location=None,
+                  user_fields=None):
     """The Service Layer `PurchaseInvoices` body. Pure: no SAP, no database writes.
 
     `grpo`: an Item bill's GRPO (`sap.open_grpos`), whose open lines it copies.
+    `user_fields`: `(header, {line_num: line})` of its user fields — bilty, vehicle,
+    litres… (`grpo_fields.for_invoice`): the GRPO's, with the desk's changes.
     `default_location`: the branch's GST location, for a line without its own.
     """
     day = posting_date.isoformat()
@@ -139,9 +142,11 @@ def build_payload(advance, *, posting_date, series, bpl_id, memo, grpo=None, def
     if grpo is not None:
         payload['DocType'] = 'dDocument_Items' if grpo.get('category') == 'ITEM' else 'dDocument_Service'
         code = advance.expense_tds_code
+        head_fields, line_fields = user_fields or ({}, {})
+        payload.update(head_fields)
         payload['DocumentLines'] = [
             {'BaseType': GRPO_BASE_TYPE, 'BaseEntry': int(grpo['doc_entry']), 'BaseLine': int(ln['line_num']),
-             **({'WTLiable': 'tYES'} if code else {})}
+             **({'WTLiable': 'tYES'} if code else {}), **line_fields.get(int(ln['line_num']), {})}
             for ln in grpo['lines']]
         codes = [code] if code else []
     else:
@@ -201,8 +206,13 @@ def post(advance, *, user):
                               f'in SAP (already invoiced, closed or cancelled). Send it back to Accounts.')
             grpo = found[0]
             tax = [ln['tax_code'] for ln in grpo['lines']]
+            # Its user fields (bilty, vehicle, litres…), with the Accounts desk's changes.
+            from advance_payment.services import grpo_fields
+            read = grpo_fields.read(advance.company, advance.expense_grpo_entry)
+            user_fields = grpo_fields.for_invoice(read, advance.expense_grpo_fields) if read else None
         else:
             tax = [ln.tax_code for ln in advance.expense_lines.all()]
+            user_fields = None
         series = sap_service.ap_invoice_series(
             advance.company, advance.expense_bpl_id, posting_date,
             gst=charges_gst(options['tax_codes'], tax), service=grpo is None or grpo.get('category') != 'ITEM')
@@ -211,7 +221,7 @@ def post(advance, *, user):
                           f'Ask Finance to open it.')
         payload = build_payload(advance, posting_date=posting_date, series=series[0],
                                 bpl_id=advance.expense_bpl_id, memo=memo, grpo=grpo,
-                                default_location=branch['location'])
+                                default_location=branch['location'], user_fields=user_fields)
         company_db = voucher_service._company_db(advance)
         existing = sap_service.purchase_invoice_by_memo(advance.company, memo)
     except sap_service.SapUnavailable as exc:

@@ -75,7 +75,7 @@ class BillsGoStraightToPayment(SimpleTestCase):
         self.assertIn(f'NOT {hierarchy.FREIGHT_ROUTED}', route['query'])
         for code, other in BY_CODE.items():
             if code in ('AP_AGAINST_BILL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR', 'AP_IMPREST_JOURNAL') or other.get('expense')                     or other.get('never_chosen') \
-                    or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY', 'AP_ECOM_')) \
+                    or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY', 'AP_ECOM_', 'AP_FA_')) \
                     or code in ('AP_RAW_MATERIAL', 'AP_PACKING_MATERIAL',  # Bhupinder, bills too (2026-10-21)
                                 'AP_OIL_PURCHASE_AGAINST_BILL'):  # an Oil Purchase's bills: no CA either
                 continue
@@ -317,4 +317,5 @@ class TheFixedAssetsMovedToTheDirector(SimpleTestCase):
         for code in ('AP_FA_CIVIL', 'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_OTHERS_OIL', 'AP_FA_CONSUMABLES_BEV'):
             with self.subTest(code):
                 names = [n for n, _r in hierarchy.full_stages(BY_CODE[code])]
-                self.assertEqual(names[:3], ['Payment Approval', 'Budget Owner Approval', 'Director Approval'])
+                # Approvals first since 2026-10-22, whatever it is paid against.
+                self.assertEqual(names[:3], ['Budget Owner Approval', 'Director Approval', 'Payment Approval'])

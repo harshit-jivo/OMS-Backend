@@ -56,9 +56,10 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         # (2026-10-21) Mart's own RM/PM route gone; and each route with approvers has its approvals-first twin
         whole = [r for r in ROUTES if not r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)]
         # ...and Oil Purchase's own bill and on-account routes, without CA; ASSPL's two
-        # routes, Prabhjot and the head picked, for its one purpose (2026-10-22)
+        # routes, Prabhjot and the head picked, for its one purpose; Fixed Assets on
+        # account, approvals first (2026-10-22)
         self.assertEqual(len(whole), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1 - 1
-                         + 2 + 1)
+                         + 2 + 1 + 1)
         for twin in (r for r in ROUTES if r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)):
             self.assertIn(twin['code'][:-len(hierarchy.APPROVALS_FIRST_SUFFIX)], BY_CODE)
 
@@ -157,7 +158,7 @@ class WhoApproves(SimpleTestCase):
             'AP_FA_PM_OIL', 'AP_FA_PM_BEV', 'AP_FA_CONSUMABLES_OIL', 'AP_FA_CONSUMABLES_BEV',
             'AP_FA_OTHERS_OIL', 'AP_FA_OTHERS_BEV', 'AP_CAPITAL', 'AP_UTILITIES', 'AP_INSURANCE',
             'AP_EMP_ADVANCE', 'AP_EMP_IMPREST', 'AP_EXPENSE_CLAIM', 'AP_VENDOR_ON_ACCOUNT_DIRECTOR',
-            'AP_ACCOUNT_DIRECTOR']))
+            'AP_VENDOR_ON_ACCOUNT_FIXED_ASSETS', 'AP_ACCOUNT_DIRECTOR']))
 
     def test_the_plants_fixed_assets_go_to_its_approver_civil_to_bhupinder(self):
         # Plant & machinery, spares, others: Oil -> Gagan, Beverages -> Arvinder, then the Director.
@@ -830,7 +831,7 @@ class PaidAgainstAnAdvanceOrAPo(SimpleTestCase):
 
     def test_each_route_with_approvers_splits_on_it(self):
         for code in ('AP_STAFF_ADVANCE', 'AP_STAFF_ADVANCE_FACTORY_OIL', 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'AP_MART',
-                     'AP_RENT', 'AP_FA_PM_OIL', 'AP_BO_HR', 'AP_SALARY'):
+                     'AP_RENT', 'AP_BO_HR', 'AP_SALARY'):
             with self.subTest(code):
                 before, first = BY_CODE[code], BY_CODE[code + hierarchy.APPROVALS_FIRST_SUFFIX]
                 self.assertTrue(before['query'].endswith(f'AND NOT {hierarchy.APPROVALS_FIRST}'))
@@ -882,8 +883,14 @@ class AVendorPaidOnAccount(SimpleTestCase):
                                               (hierarchy.DIRECTOR_STAGE, 'director')])
         for code in ('SEMI_FINISHED', 'SALARY', 'TDS'):
             self.assertIn(f"'{code}'", plain['query'])
-        for code in ('FA_PM', 'FA_CIVIL', 'FA_OTHERS', 'FA_CONSUMABLES', 'CAPITAL'):
-            self.assertIn(f"'{code}'", director['query'])
+        self.assertIn("'CAPITAL'", director['query'])
+        # Fixed Assets on account (2026-10-22): the head, the Director, THEN Payment.
+        assets = BY_CODE['AP_VENDOR_ON_ACCOUNT_FIXED_ASSETS']
+        for code in hierarchy.FA_PURPOSES:
+            self.assertIn(f"'{code}'", assets['query'])
+            self.assertNotIn(f"'{code}'", director['query'])
+        self.assertEqual([n for n, _r in hierarchy.full_stages(assets)][:3],
+                         [DEPARTMENT_HEAD_STAGE, hierarchy.DIRECTOR_STAGE, 'Payment Approval'])
         # Their own routes no longer take a vendor paid on account...
         self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_SEMI_FINISHED']['query'])
         self.assertIn(f'NOT {hierarchy.VENDOR_ON_ACCOUNT}', BY_CODE['AP_FA_PM_OIL']['query'])
@@ -920,3 +927,20 @@ class EcommercePurposes(SimpleTestCase):
         for code in ('AP_MART', 'AP_STAFF_ADVANCE', 'AP_AGAINST_BILL'):
             with self.subTest(code):
                 self.assertIn(f'NOT {hierarchy.ECOM_ROUTED}', BY_CODE[code]['query'])
+
+
+class FixedAssetsGoToTheirApproversFirst(SimpleTestCase):
+    """Every Fixed Assets purpose (user, 2026-10-22): its owner, the Director, THEN
+    Payment, CA, Audit, Final — whatever it is paid against, bills included."""
+
+    def test_every_fixed_assets_route_runs_its_approvals_first_bills_included(self):
+        codes = [r['code'] for r in ROUTES if r['code'].startswith('AP_FA_')]
+        self.assertEqual(len(codes), 14)  # civil, and three plant purposes per company; each with its twin
+        for code in codes:
+            with self.subTest(code):
+                route = BY_CODE[code]
+                self.assertEqual([n for n, _r in hierarchy.full_stages(route)],
+                                 [hierarchy.OWNER_STAGE, hierarchy.DIRECTOR_STAGE, 'Payment Approval',
+                                  'CA Approval', 'Audit Approval', 'Final Approval'])
+                self.assertNotIn(hierarchy.NOT_BILL, route['query'])
+        self.assertIn(f'NOT {hierarchy.FA_ROUTED}', BY_CODE['AP_AGAINST_BILL']['query'])

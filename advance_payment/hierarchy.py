@@ -134,6 +134,12 @@ FIXED_OWNER = {
 PLANT_PURPOSES = ('FA_PM', 'FA_CONSUMABLES', 'FA_OTHERS')
 PLANT_APPROVERS = (('OIL', 'OIL', 'Oil', 'factory_oil'), ('BEVERAGES', 'BEV', 'Beverages', 'factory_bev'))
 
+#: Every Fixed Assets purpose (user, 2026-10-22): its owner (or, paid On
+#: Account, the Department Head), then the Director, THEN Payment, CA, Audit,
+#: Final — whatever it is paid against, bills included. Oil and Beverages; Mart
+#: keeps its one approver. "Land / Property / Capital" is not one of them.
+FA_PURPOSES = ('FA_PM', 'FA_CIVIL', 'FA_OTHERS', 'FA_CONSUMABLES')
+
 #: Workflows the hierarchy no longer has, deactivated when it is seeded:
 #: the plant's fixed assets had one workflow for both companies until 2026-10-16.
 RETIRED_ROUTES = ('AP_FA_PM', 'AP_FA_CONSUMABLES', 'AP_FA_OTHERS',
@@ -169,6 +175,10 @@ ECOM_BY_HEAD = f"({OIL_AND_BEV} AND budget_code <> '{ECOM_BUDGET}')"
 #: ...the approver FIRST, then Payment: paid On Account, against a PO or an
 #: Advance, or an Employee Imprest (user, 2026-10-22). Else Payment first.
 ECOM_FIRST = "(payment_against IN ('ON_ACCOUNT', 'AGAINST_PO', 'ADVANCE') OR request_type = 'EMPLOYEE_IMPREST')"
+
+#: A Fixed Assets request on its own routes (bills included), not on the bills' route.
+FA_ROUTED = "(purpose_code IN ({}) AND {} AND {} AND {})".format(
+    ', '.join(f"'{p}'" for p in FA_PURPOSES), OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT)
 
 #: Purposes the CA desk does not see (user, 2026-10-21): Oil Purchase — its own
 #: route, a bill for it and a vendor paid on account for it all skip CA.
@@ -413,7 +423,10 @@ def routes():
     for code, label, _group in PAYMENT_PURPOSES:
         # A fixed owner's purpose paid On Account by a vendor goes by the head instead (below).
         on_account = (f'NOT {VENDOR_ON_ACCOUNT}',) if code in by_head else ()
-        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code), *on_account)
+        # A Fixed Assets purpose takes its bills too (2026-10-22).
+        bills = () if code in FA_PURPOSES else (NOT_BILL,)
+        first = {'always_first': True} if code in FA_PURPOSES else {}
+        base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, *bills, _purpose(code), *on_account)
         if code in ECOM_PURPOSES:
             continue  # their own routes, above
         if code in FREIGHT_PURPOSES:
@@ -456,9 +469,9 @@ def routes():
         elif code in PLANT_PURPOSES:
             out += [
                 {'code': f'AP_{code}_{tag}', 'name': f'Payments · {label} · {title}', 'company': company,
-                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code),
+                 'query': _where(f"company = '{company}'", NOT_STAFF, NOT_ACCOUNT, *bills, _purpose(code),
                                  *on_account),
-                 'stages': _chain(owner, True)}
+                 'stages': _chain(owner, True), **first}
                 for company, tag, title, owner in PLANT_APPROVERS
             ]
         elif code in BACK_OFFICE_PURPOSES:
@@ -486,7 +499,7 @@ def routes():
                 ]
                 continue
             out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
-                        'query': _where(*base), 'stages': stages})
+                        'query': _where(*base), 'stages': stages, **first})
         elif code in DUE_SOON_PURPOSES:
             # Two routes, kept apart by the Bill Due Date: the usual one, and
             # straight to Payment for a bill due in DUE_SOON_DAYS days or fewer.
@@ -512,6 +525,8 @@ def routes():
     def _in(codes):
         return 'purpose_code IN ({})'.format(', '.join(f"'{c}'" for c in codes))
     plain = [c for c in by_head if c not in with_director]
+    fixed_assets = [c for c in with_director if c in FA_PURPOSES]
+    with_director = [c for c in with_director if c not in FA_PURPOSES]
     out += [
         {'code': 'AP_VENDOR_ON_ACCOUNT', 'name': 'Payments · Vendor On Account · Department Head',
          'company': 'ALL', 'query': _where(OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, VENDOR_ON_ACCOUNT, _in(plain)),
@@ -519,11 +534,17 @@ def routes():
         {'code': 'AP_VENDOR_ON_ACCOUNT_DIRECTOR', 'name': 'Payments · Vendor On Account · Department Head, Director',
          'company': 'ALL', 'query': _where(OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, VENDOR_ON_ACCOUNT, _in(with_director)),
          'stages': _chain(HEAD, True)},
+        # Fixed Assets paid On Account (2026-10-22): the head, the Director, then Payment.
+        {'code': 'AP_VENDOR_ON_ACCOUNT_FIXED_ASSETS',
+         'name': 'Payments · Vendor On Account · Fixed Assets · Department Head, Director', 'company': 'ALL',
+         'query': _where(OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, VENDOR_ON_ACCOUNT, _in(fixed_assets)),
+         'stages': _chain(HEAD, True), 'approvals_first': True},
     ]
-    # Every bill, whatever it is for (freight aside): straight to the Payment desk.
+    # Every bill, whatever it is for (freight, RM/PM, oil, Fixed Assets aside): straight to the Payment desk.
     out.append({'code': 'AP_AGAINST_BILL', 'name': 'Payments · Against Bill', 'company': 'ALL',
                 'query': _where(AGAINST_BILL, f'NOT {FREIGHT_ROUTED}', f'NOT {RM_PM_ROUTED}',
-                                f'NOT {OIL_PURCHASE_ROUTED}', f'NOT {ECOM_ROUTED}'), 'stages': []})
+                                f'NOT {OIL_PURCHASE_ROUTED}', f'NOT {ECOM_ROUTED}', f'NOT {FA_ROUTED}'),
+                'stages': []})
     return _approvals_first(out) + expense_routes() + moved_routes()
 
 
@@ -539,7 +560,10 @@ def _approvals_first(routes):
         if not approvers or route.get('approvals_first') or route.get('no_split') or route['code'] in NOT_SPLIT:
             out.append(route)
             continue
-        out.append({**route, 'query': f"{route['query']} AND NOT {APPROVALS_FIRST}"})
+        # Fixed Assets (2026-10-22): both halves approvals-first; the split stays
+        # only so the workflows (and the requests on them) keep their codes.
+        always = {'approvals_first': True} if route.get('always_first') else {}
+        out.append({**route, 'query': f"{route['query']} AND NOT {APPROVALS_FIRST}", **always})
         out.append({**route, 'code': route['code'] + APPROVALS_FIRST_SUFFIX,
                     'name': f"{route['name']} · Advance / against PO (approvals, then Payment)",
                     'query': f"{route['query']} AND {APPROVALS_FIRST}", 'approvals_first': True})

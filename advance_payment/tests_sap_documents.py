@@ -529,3 +529,31 @@ class WhatSapTookOffTheRequestsDocuments(SimpleTestCase):
         with mock.patch.object(sap, '_run') as run:
             self.assertEqual(sap.document_deductions('OIL', 'bill', []), [])
         run.assert_not_called()
+
+
+@mock.patch.object(sap, '_schema', return_value='S')
+class AJournalEntrysLinkedFile(SimpleTestCase):
+    """A journal entry's file in its UDF, not ATC1 (AP-2026-0297's TA/DA, 2026-10-22)."""
+
+    def test_the_linked_file_is_line_zero_by_its_name(self, _schema):
+        def run(_company, sql, _params, _what):
+            if '"ATC1"' in sql:
+                return []
+            self.assertIn('"U_ATTACH_LINK"', sql)
+            return [{'doc_entry': 241383, 'doc_num': 1026900028, 'date': datetime(2026, 10, 1),
+                     'link': '\\10.10.101.52\Attachments_Oil\JIVO_OIL\Attachments\TA DA-2708511.pdf'}]
+        with mock.patch.object(sap, '_run', side_effect=run):
+            line = sap.attachment_line('OIL', 'journal', 241383, 0)
+        self.assertEqual(line['file_name'], 'TA DA-2708511.pdf')
+        self.assertEqual(line['doc_num'], 1026900028)
+
+    def test_beverages_reads_its_own_udf_and_a_name_without_a_path_is_not_a_file(self, _schema):
+        with mock.patch.object(sap, '_run', return_value=[{'doc_entry': 1, 'doc_num': 2, 'date': None,
+                                                          'link': 'abc123.png'}]) as run:
+            self.assertEqual(sap._journal_link_lines('BEVERAGES', [1]), [])
+        self.assertIn('"U_ATTACHEMENT"', run.call_args.args[1])
+
+    def test_other_documents_do_not_look_for_a_link(self, _schema):
+        with mock.patch.object(sap, '_run', return_value=[]) as run:
+            sap._attachment_lines('OIL', 'bill', [5])
+        self.assertEqual(run.call_count, 1)

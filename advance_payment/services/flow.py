@@ -67,6 +67,7 @@ from advance_payment.models import (
     FlowStatus,
     LogAction,
     FIXED_ROLES,
+    LedgerDirection,
     Payout,
     PayoutLine,
     RETURN_TO_CREATOR_ROLES,
@@ -948,12 +949,13 @@ def save_payout(advance, data, *, user, version=None):
 
 
 def payment_users(flow):
-    """Today's users of the route's Payment stage and the stage that posted (UTRs, after completion)."""
+    """Today's users of the route's Payment and Audit stages and the stage that
+    posted: they record the UTRs after completion (Audit too since 2026-10-22)."""
     named = _stages(flow)
     posting = posting_role(named)
     ids = set()
     for stage, role in named:
-        if role in (StageRole.PAYMENT, posting):
+        if role in (StageRole.PAYMENT, StageRole.AUDIT, posting):
             ids.add(effective_user_id(stage.id))
     return ids
 
@@ -1034,13 +1036,83 @@ def edit_expense(advance, data, *, user, version=None):
     return advance
 
 
+#: The desks that may pay only some of a request's documents (user, 2026-10-22).
+KEEP_DOCUMENT_ROLES = (StageRole.PAYMENT, StageRole.AUDIT)
+
+
+def _signed(doc):
+    """A document line's part of the request: a ledger item owed BY the partner counts against it."""
+    amount = Decimal(str(doc.amount))
+    return -amount if doc.direction == LedgerDirection.DEBIT else amount
+
+
+@transaction.atomic
+def keep_documents(advance, keep_ids, *, user, remarks, version=None):
+    """Payment or Audit stage: pay only the documents in `keep_ids` (user, 2026-10-22).
+
+    The others (bills, POs, journal entries, ledger items) are taken off the
+    request, so they are free to be paid by another; the request's amount
+    becomes what the kept ones pay. The creator is told which were not paid,
+    and why (`remarks`, required). The payment details follow the new amount:
+    TDS at its rate, and a single (non-cash) payment method. Methods that no
+    longer add up are corrected at Payment; Audit cannot, so it is refused there.
+    The route is not re-chosen. Logged as EDITED with what was taken off.
+    """
+    flow = _acting(advance, user, version)
+    role = StageRole(flow.current_role)
+    if role not in KEEP_DOCUMENT_ROLES:
+        raise FlowError('Bills are taken off a request at the Payment or Audit stage.', status=409)
+    advance = flow.request
+    if advance.request_type == RequestType.EXPENSE:
+        raise FlowError('An Expense request has lines, not bills: correct it at Payment.', status=409)
+    _remarks_required(remarks, 'taking bills off a request')
+    docs = list(advance.documents.all())
+    keep = {int(k) for k in (keep_ids or [])}
+    if keep - {d.pk for d in docs}:
+        raise FlowError("Those are not this request's documents.")
+    kept = [d for d in docs if d.pk in keep]
+    dropped = [d for d in docs if d.pk not in keep]
+    if not dropped:
+        raise FlowError('Untick the bills that are not to be paid.')
+    if not kept:
+        raise FlowError('Keep at least one bill, or reject the request instead.')
+    old = Decimal(str(advance.amount))
+    new = sum((_signed(d) for d in kept), Decimal('0'))
+    if new <= 0:
+        raise FlowError('What is kept must still pay something.')
+    payout = Payout.objects.filter(request=advance).first()
+    if payout is not None:
+        if payout.tds_code and payout.tds_rate is not None:
+            payout.tds_amount = payout_service.tds_amount(new, payout.tds_rate)
+            payout.save(update_fields=['tds_amount', 'updated_on'])
+        net = new - (payout.tds_amount or 0)
+        lines = list(payout.lines.all())
+        if len(lines) == 1 and lines[0].method != 'CASH':
+            lines[0].amount = net
+            lines[0].save(update_fields=['amount'])
+        elif sum((ln.amount for ln in lines), Decimal('0')) != net and role == StageRole.AUDIT:
+            raise FlowError(f'The payment methods would no longer add up to {net}: send it back to '
+                            f'Payment to take these bills off there.', status=409)
+    taken = [{'kind': d.kind, 'number': d.sap_doc_num or d.sap_doc_entry, 'vendor_ref': d.vendor_ref,
+              'amount': f'{Decimal(str(d.amount)):.2f}'} for d in dropped]
+    advance.documents.filter(pk__in=[d.pk for d in dropped]).delete()
+    advance.amount = new
+    advance.save(update_fields=['amount', 'updated_on'])
+    log(advance, LogAction.EDITED, user=user, flow=flow, remarks=remarks.strip(),
+        data={'documents_taken_off': taken, 'amount': {'old': f'{old:.2f}', 'new': f'{new:.2f}'}})
+    _save(flow)
+    notify.documents_taken_off(advance, taken, actor=user, stage=flow.current_stage.name,
+                               remarks=remarks.strip())
+    return advance
+
+
 @transaction.atomic
 def record_utr(advance, line_id, *, user, utr, proof=None):
     flow = _locked(advance)
     if flow.status != FlowStatus.COMPLETED:
         raise FlowError('A UTR is recorded once the request is completed and paid.', status=409)
     if user.pk not in payment_users(flow):
-        raise FlowError('Only the Payment or Final approver records the UTR.', status=403)
+        raise FlowError('Only the Payment, Audit or Final approver records the UTR.', status=403)
     line = PayoutLine.objects.filter(pk=line_id, payout__request=advance).first()
     if line is None:
         raise FlowError('No such payment line.', status=404)
@@ -1115,6 +1187,9 @@ def abilities(advance, user):
         'return_to_creator': actor and role in RETURN_TO_CREATOR_ROLES,
         'send_back': actor and role in SEND_BACK_ROLES,
         'edit_payout': actor and role == StageRole.PAYMENT,
+        # Pay only some of its bills / POs / journal entries; the rest are freed (2026-10-22).
+        'keep_documents': bool(actor and role in KEEP_DOCUMENT_ROLES
+                               and getattr(advance, 'request_type', '') != RequestType.EXPENSE),
         # Take back an approval while the very next stage has not decided.
         # (Not while it waits on you: then you simply decide.)
         'change_decision': bool(not actor and flow is not None and flow.status == FlowStatus.PENDING
@@ -1200,26 +1275,26 @@ def desk_request_ids(user):
 
 
 def _payer_completed_ids(user):
-    """Completed requests on a route where `user` holds Payment or Final today."""
+    """Completed requests on a route where `user` holds Payment, Audit or Final today."""
     from workflow.models import WorkflowStage
     from workflow.services import replacements
 
     owners = replacements.configured_users_acting_for(user.pk, replacements.today())
     payers = WorkflowStage.objects.filter(
         user_id__in=owners, is_active=True, workflow__module__code=MODULE_CODE,
-        name__iregex=r'^\s*(payment|final)\s+approval\s*$').values_list('workflow_id', flat=True)
+        name__iregex=r'^\s*(payment|audit|final)\s+approval\s*$').values_list('workflow_id', flat=True)
     return set(RequestFlow.objects.filter(status=FlowStatus.COMPLETED, workflow_id__in=list(payers))
                .values_list('request_id', flat=True))
 
 
-def holds_final(user):
-    """Whether `user` is a Final desk today (a Final Approval stage of theirs, or
-    one they stand in for): the payment slot sheet is theirs (2026-10-22)."""
+def holds_slot_desk(user):
+    """Whether `user` is a Payment, Audit or Final desk today (such a stage of
+    theirs, or one they stand in for): the payment slot sheet is theirs (2026-10-22)."""
     from workflow.models import WorkflowStage
 
     owners = replacements.configured_users_acting_for(user.pk, replacements.today())
     return WorkflowStage.objects.filter(user_id__in=owners, is_active=True, workflow__module__code=MODULE_CODE,
-                                        name__iregex=r'^\s*final\s+approval\s*$').exists()
+                                        name__iregex=r'^\s*(payment|audit|final)\s+approval\s*$').exists()
 
 
 def readable_request_ids(user):

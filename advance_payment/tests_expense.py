@@ -338,7 +338,7 @@ class ThePaymentStage(SimpleTestCase):
                     'is_electricity': False, 'expense_tds_code': 'C194-2', 'company': 'MART',
                     'expense_category': 'SERVICE', 'expense_bill_number': 'INV-9', 'expense_bill_date': None,
                     'expense_bpl_id': 2, 'expense_bpl_name': 'FACTORY', 'expense_due_date': None,
-                    'expense_grpo_entry': None, 'expense_grpo_num': None},
+                    'expense_grpo_entry': None, 'expense_grpo_num': None, 'expense_grpo_fields': None},
             expense_lines=[{'line_no': 1, 'amount': Decimal('20')}])
         with mock.patch.object(request_service, '_snapshot', side_effect=[{'budget': 'Factory'}, {'budget': 'BackOff'}]), \
                 mock.patch.object(request_service, '_expense_lines',

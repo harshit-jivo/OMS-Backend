@@ -30,6 +30,8 @@ COMPLETED = 'ADVANCE_PAYMENT_COMPLETED'
 REJECTED = 'ADVANCE_PAYMENT_REJECTED'
 RETURNED = 'ADVANCE_PAYMENT_RETURNED'
 ASSIGNED = 'ADVANCE_PAYMENT_ASSIGNED'
+#: Bills taken off a request at Payment or Audit: not paid this time (2026-10-22).
+NOT_PAID = 'ADVANCE_PAYMENT_DOCUMENTS_NOT_PAID'
 
 
 def _amount(value):
@@ -106,6 +108,19 @@ def rejected(advance, *, actor, remarks):
 def returned(advance, *, actor, remarks):
     _later(event_type=RETURNED, title='Payment request returned to you',
            message=f'{_describe(advance)}. Edit and resubmit: {remarks or "no reason given"}.',
+           recipients=[advance.created_by], entity=advance, actor=actor)
+
+
+@_never_fails
+def documents_taken_off(advance, taken, *, actor, stage, remarks):
+    """Tell the creator which of their bills this request will not pay, and why."""
+    names = ', '.join(f"{t['number']}" + (f" ({t['vendor_ref']})" if t.get('vendor_ref') else '') for t in taken)
+    title = ('A bill on your payment request was not paid' if len(taken) == 1
+             else f'{len(taken)} bills on your payment request were not paid')
+    _later(event_type=NOT_PAID, title=title,
+           message=(f'{advance.request_no} · {advance.partner_name}: {names} taken off at {stage} and not paid. '
+                    f'Reason: {remarks}. They are free to be raised again. The request now pays '
+                    f'{_amount(advance.amount)}.'),
            recipients=[advance.created_by], entity=advance, actor=actor)
 
 

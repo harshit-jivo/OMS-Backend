@@ -276,6 +276,7 @@ def request_data(advance, *, user, detail=False, my_decision=_UNSET):
         'expense_due_date': _iso(advance.expense_due_date),
         'expense_grpo_entry': advance.expense_grpo_entry,
         'expense_grpo_num': advance.expense_grpo_num,
+        'expense_grpo_fields': advance.expense_grpo_fields,
         'books_ap_invoice': ap_invoice.applies(advance),
         'return_method': advance.return_method,
         'return_method_other': advance.return_method_other,

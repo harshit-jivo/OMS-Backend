@@ -459,15 +459,19 @@ def _clean_expense_bill(data, partner_code, problems, *, desk=False):
         problems.append('The Due Date cannot be before the Doc Date.')
     bpl_id = _int(data.get('expense_bpl_id'))
     grpo = _int(data.get('expense_grpo_entry')) if category == 'ITEM' else None
+    # The desk's changes to the GRPO's user fields: the Accounts desk's alone (2026-10-22).
+    from advance_payment.services import grpo_fields
+    changes = grpo_fields.clean(data.get('expense_grpo_fields'), problems) if grpo and desk else None
     return {'expense_category': category, 'expense_bill_number': number, 'expense_bill_date': bill_date,
             'expense_bpl_id': bpl_id, 'expense_bpl_name': _text(data.get('expense_bpl_name'), 100) if bpl_id else '',
             'expense_due_date': due_date, 'expense_grpo_entry': grpo,
-            'expense_grpo_num': _int(data.get('expense_grpo_num')) if grpo else None}
+            'expense_grpo_num': _int(data.get('expense_grpo_num')) if grpo else None,
+            'expense_grpo_fields': changes}
 
 
 #: Not booked as an A/P invoice: none of its fields.
 _NO_AP_INVOICE = {'expense_bpl_id': None, 'expense_bpl_name': '', 'expense_due_date': None,
-                  'expense_grpo_entry': None, 'expense_grpo_num': None}
+                  'expense_grpo_entry': None, 'expense_grpo_num': None, 'expense_grpo_fields': None}
 
 
 def _clean_expense_vendor(company, partner_code, partner_name, problems):
@@ -500,6 +504,7 @@ def form_of(advance):
         'expense_bpl_id': advance.expense_bpl_id, 'expense_bpl_name': advance.expense_bpl_name,
         'expense_due_date': advance.expense_due_date.isoformat() if advance.expense_due_date else '',
         'expense_grpo_entry': advance.expense_grpo_entry, 'expense_grpo_num': advance.expense_grpo_num,
+        'expense_grpo_fields': advance.expense_grpo_fields,
         'payment_date': advance.payment_date.isoformat() if advance.payment_date else '',
         'remarks': advance.remarks, 'owner_label': advance.owner_label,
         'budget_code': advance.budget_code, 'sub_budget_code': advance.sub_budget_code,
@@ -523,13 +528,13 @@ EXPENSE_EDITABLE = ('sub_budget_code', 'effect_month', 'is_electricity', 'expens
                     # and what its A/P invoice needs: branch, due date, GRPO.
                     'budget_code', 'expense_category', 'expense_bill_number', 'expense_bill_date',
                     'expense_bpl_id', 'expense_bpl_name', 'expense_due_date', 'expense_grpo_entry',
-                    'expense_grpo_num')
+                    'expense_grpo_num', 'expense_grpo_fields')
 #: ...and the request's fields that follow from them (direct or indirect, by the G/Ls).
 _EXPENSE_FIELDS = ('payment_against', 'sub_budget_code', 'sub_budget_name', 'effect_month', 'is_electricity',
                    'expense_tds_code', 'budget_code', 'budget_name',
                    'expense_category', 'expense_bill_number', 'expense_bill_date',
                    'expense_bpl_id', 'expense_bpl_name', 'expense_due_date', 'expense_grpo_entry',
-                   'expense_grpo_num')
+                   'expense_grpo_num', 'expense_grpo_fields')
 
 
 def edit_expense(advance, cleaned):
@@ -1047,6 +1052,7 @@ _COMPARED = {
     'branch': lambda a: a.expense_bpl_name or a.expense_bpl_id,
     'expense_due_date': lambda a: a.expense_due_date,
     'grpo': lambda a: a.expense_grpo_num or a.expense_grpo_entry,
+    'grpo_fields': lambda a: _grpo_fields_text(a.expense_grpo_fields),
     'return_method': lambda a: a.return_method,
     'return_method_other': lambda a: a.return_method_other,
     'installments': lambda a: a.installments,
@@ -1066,6 +1072,16 @@ _COMPARED = {
                                   f'({a.department_head_employee.employee_code})')
     if a.department_head_employee_id else None,
 }
+
+
+def _grpo_fields_text(changes):
+    """The desk's GRPO field changes as one line for the history, or None."""
+    if not changes:
+        return None
+    parts = [f'{k[2:]} {v or "(blank)"}' for k, v in sorted((changes.get('header') or {}).items())]
+    for line, values in sorted((changes.get('lines') or {}).items(), key=lambda kv: int(kv[0])):
+        parts += [f'line {line} {k[2:]} {v or "(blank)"}' for k, v in sorted(values.items())]
+    return '; '.join(parts) or None
 
 
 def _shown(value):

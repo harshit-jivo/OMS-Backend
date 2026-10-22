@@ -825,7 +825,7 @@ class SlotSheetView(APIView):
 
     The payment slot sheet (user, 2026-10-22): an Excel of the requests whose
     voucher SAP holds — today's, or all — in the accounts team's layout
-    (`services.slot_sheet`). For the Final desk and administrators. `check=1`
+    (`services.slot_sheet`). For the Payment, Audit and Final desks and administrators. `check=1`
     only says whether this login may download it: `{allowed}`.
     """
 
@@ -835,11 +835,12 @@ class SlotSheetView(APIView):
     def get(self, request):
         from advance_payment.services import slot_sheet
 
-        allowed = is_admin(request.user) or flow_service.holds_final(request.user)
+        allowed = is_admin(request.user) or flow_service.holds_slot_desk(request.user)
         if request.query_params.get('check'):
             return ok({'allowed': allowed})
         if not allowed:
-            return fail('The payment slot sheet is for the Final desk.', status=http_status.HTTP_403_FORBIDDEN)
+            return fail('The payment slot sheet is for the Payment, Audit and Final desks.',
+                        status=http_status.HTTP_403_FORBIDDEN)
         scope = (request.query_params.get('scope') or 'today').strip().lower()
         if scope not in ('today', 'all'):
             return fail('scope must be today or all.')
@@ -849,6 +850,32 @@ class SlotSheetView(APIView):
             content, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         response['Content-Disposition'] = f'attachment; filename="{name}"'
         return response
+
+
+class GrpoFieldsView(_Lookup):
+    """GET /api/advance-payments/grpo-fields/?company=&doc_entry=
+
+    An Item bill's GRPO user fields (bilty, transporter, vehicle, litres…), header
+    and open lines, each marked editable or read only (`services.grpo_fields`).
+    """
+
+    resource = 'GRPO fields'
+
+    def get(self, request):
+        from advance_payment.services import grpo_fields
+
+        company, error = self._company(request)
+        if error:
+            return error
+        try:
+            found = grpo_fields.read(company, int(request.query_params.get('doc_entry')))
+        except (TypeError, ValueError):
+            return fail('doc_entry must be a number.', status=http_status.HTTP_400_BAD_REQUEST)
+        except sap_service.SapUnavailable as exc:
+            return fail(str(exc), status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
+        if found is None:
+            return fail('SAP has no such GRPO.', status=http_status.HTTP_404_NOT_FOUND)
+        return ok({'company': company, **found})
 
 
 class DocumentHistoryView(_Lookup):
@@ -1493,10 +1520,9 @@ class PaymentsClosed(APIException):
 class _RequestView(APIView):
     """Either key opens the view; which requests you may see is per object.
 
-    Every change — raising, editing, deciding, payment details, files — is
-    refused after the day's cut-off (user, 2026-10-21): 4:30 pm IST for
-    everyone, except on a request waiting at an Audit stage, which Audit may
-    act on until 6:30 pm. Reading is never refused.
+    After the day's cut-off (user, 2026-10-22): from 4:30 pm IST no new request
+    is raised; from 6:30 pm every change — editing, deciding, payment details,
+    files — is refused too. Reading is never refused.
     """
 
     def get_permissions(self):
@@ -1506,19 +1532,10 @@ class _RequestView(APIView):
         super().initial(request, *args, **kwargs)
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return
-        reason = clock.closed_for(self._at_audit(kwargs.get('pk')))
+        # Raising: a POST to the request list, the one change made to no request.
+        reason = clock.closed_for(raising=kwargs.get('pk') is None)
         if reason:
             raise PaymentsClosed(reason)
-
-    @staticmethod
-    def _at_audit(pk):
-        """Whether the request `pk` waits at an Audit stage (Audit, Expense Audit)."""
-        if pk is None:
-            return False
-        from advance_payment.models import FlowStatus, RequestFlow, StageRole
-
-        return RequestFlow.objects.filter(request_id=pk, status=FlowStatus.PENDING,
-                                          current_role=StageRole.AUDIT).exists()
 
     def _may_read(self, user, advance):
         """Your own; or, with the desk key, what is or was yours to act on.
@@ -2034,6 +2051,32 @@ class RequestExpenseView(_RequestView):
         except flow_service.FlowError as exc:
             return _flow_error(exc)
         return self._answer(request, advance, 'Expense request saved.')
+
+
+class RequestKeepDocumentsView(_RequestView):
+    """POST /requests/<id>/keep-documents/ {keep: [document id, ...], remarks, version}
+
+    The Payment or Audit desk pays only the documents it keeps; the rest are
+    taken off the request, freed, and the creator is told (2026-10-22).
+    """
+
+    def post(self, request, pk):
+        advance = self._get(request, pk)
+        if not _is_desk(request.user):
+            return fail('You do not have the Payments Approval permission.',
+                        status=http_status.HTTP_403_FORBIDDEN)
+        keep = request.data.get('keep')
+        if not isinstance(keep, list):
+            return fail('keep must be a list of document ids.')
+        try:
+            flow_service.keep_documents(advance, keep, user=request.user,
+                                        remarks=request.data.get('remarks') or '',
+                                        version=request.data.get('version'))
+        except (TypeError, ValueError):
+            return fail('keep must be a list of document ids.')
+        except flow_service.FlowError as exc:
+            return _flow_error(exc)
+        return self._answer(request, advance, 'The bills not kept were taken off, and the creator told.')
 
 
 class RequestConfirmPasswordView(_RequestView):

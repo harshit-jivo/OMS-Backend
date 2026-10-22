@@ -395,6 +395,10 @@ class AdvanceRequest(models.Model):
                                                      help_text='Item bill: the GRPO DocEntry it is copied from.')
     expense_grpo_num = models.PositiveIntegerField(null=True, blank=True,
                                                    help_text="Item bill: that GRPO's DocNum.")
+    #: `{header: {field: value}, lines: {"<line>": {field: value}}}`: only what
+    #: the desk changed (`services.grpo_fields`); null for none (2026-10-22).
+    expense_grpo_fields = models.JSONField(null=True, blank=True, default=None,
+                                           help_text="Item bill: the Accounts desk's changes to its GRPO's user fields (bilty, vehicle, litres...).")
     return_method = models.CharField(max_length=20, choices=ReturnMethod.choices, blank=True, default='')
     return_method_other = models.CharField(max_length=120, blank=True, default='')
     installments = models.PositiveSmallIntegerField(null=True, blank=True)
