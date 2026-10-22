@@ -1212,6 +1212,16 @@ def _payer_completed_ids(user):
                .values_list('request_id', flat=True))
 
 
+def holds_final(user):
+    """Whether `user` is a Final desk today (a Final Approval stage of theirs, or
+    one they stand in for): the payment slot sheet is theirs (2026-10-22)."""
+    from workflow.models import WorkflowStage
+
+    owners = replacements.configured_users_acting_for(user.pk, replacements.today())
+    return WorkflowStage.objects.filter(user_id__in=owners, is_active=True, workflow__module__code=MODULE_CODE,
+                                        name__iregex=r'^\s*final\s+approval\s*$').exists()
+
+
 def readable_request_ids(user):
     """What `user` may OPEN from the desk — wider than what it lists.
 

@@ -472,7 +472,7 @@ class ThePaymentPurposes(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.data["data"]
         self.assertEqual(data["groups"], ["Goods", "Services", "Back Office", "People", "Statutory", "Finance"])
-        self.assertEqual(data["count"], 49)  # Insurance Premium added 2026-10-17; 5 Back Office 2026-10-20
+        self.assertEqual(data["count"], 50)  # Insurance 2026-10-17; 5 Back Office 2026-10-20; ASSPL 2026-10-22
         self.assertEqual(data["results"][0],
                          {"code": "OIL_PURCHASE", "label": "Oil Purchase – Imported or Domestic",
                           "group": "Goods", "needs_head": False, "due_date": False})

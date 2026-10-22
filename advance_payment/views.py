@@ -820,6 +820,37 @@ class DocumentDeductionsView(_Lookup):
         return sap_service.document_deductions(company, kind, entries)
 
 
+class SlotSheetView(APIView):
+    """GET /api/advance-payments/slot-sheet/?scope=today|all[&check=1]
+
+    The payment slot sheet (user, 2026-10-22): an Excel of the requests whose
+    voucher SAP holds — today's, or all — in the accounts team's layout
+    (`services.slot_sheet`). For the Final desk and administrators. `check=1`
+    only says whether this login may download it: `{allowed}`.
+    """
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def get(self, request):
+        from advance_payment.services import slot_sheet
+
+        allowed = is_admin(request.user) or flow_service.holds_final(request.user)
+        if request.query_params.get('check'):
+            return ok({'allowed': allowed})
+        if not allowed:
+            return fail('The payment slot sheet is for the Final desk.', status=http_status.HTTP_403_FORBIDDEN)
+        scope = (request.query_params.get('scope') or 'today').strip().lower()
+        if scope not in ('today', 'all'):
+            return fail('scope must be today or all.')
+        content = slot_sheet.workbook(slot_sheet.build_rows(slot_sheet.vouchers(scope)))
+        name = f"Payment_Slot_{'all' if scope == 'all' else clock.today().isoformat()}.xlsx"
+        response = HttpResponse(
+            content, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = f'attachment; filename="{name}"'
+        return response
+
+
 class DocumentHistoryView(_Lookup):
     """GET /api/advance-payments/document-history/?company=&kind=po|bill|ledger&doc_entry=[&line=]
 

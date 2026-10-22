@@ -54,6 +54,8 @@ PAYMENT_PURPOSES = (
     ('SECURITY', 'Security & Housekeeping', 'Services'),
     ('IT_SOFTWARE', 'IT, Software & Subscriptions', 'Services'),
     ('OTHER_EXPENSE', 'Other Expense', 'Services'),
+    # Mainly the E-commerce department's (user, 2026-10-22): Prabhjot, or the head picked.
+    ('ASSPL', 'ASSPL', 'Services'),
     # The Back Office functions (user, 2026-10-20): the head picked, then Nirmal Didi Ji.
     ('BO_HR', 'Back Office – Human Resources (HR)', 'Back Office'),
     ('BO_IT', 'Back Office – Information Technology (IT)', 'Back Office'),
@@ -132,6 +134,14 @@ VENDOR_ON_ACCOUNT_PURPOSES = DUE_SOON_PURPOSES
 #: however it is paid (user, 2026-10-21) — no Department Head is asked.
 RM_PM_PURPOSES = frozenset({'RAW_MATERIAL', 'PACKING_MATERIAL'})
 
+#: The E-commerce department's purposes (user, 2026-10-22): under the ECOM
+#: budget head, Prabhjot approves — no Department Head is asked; under any
+#: other head, the Department Head the requester picks. Mart: Prabhjot, as
+#: everything there. Paid On Account, against a PO or an Advance, or an
+#: Employee Imprest: the approver first, then Payment; otherwise Payment first.
+ECOM_PURPOSES = frozenset({'ASSPL'})
+ECOM_BUDGET = 'ECOM'
+
 #: Request types that always go to the requester's Department Head, then the
 #: Director (Staff Advance / Imprest), whatever the purpose.
 HEAD_REQUEST_TYPES = frozenset({'EMPLOYEE_ADVANCE', 'EMPLOYEE_IMPREST'})
@@ -163,6 +173,11 @@ def needs_department_head(company, request_type, purpose_code, budget_code='', p
     """Whether this request is approved by the Department Head picked on the form."""
     if company in NO_HEAD_COMPANIES or request_type == 'ACCOUNT':
         return False  # Mart's one approver; an Account Payment's fixed route
+    if (purpose_code in ECOM_PURPOSES and request_type != 'EXPENSE'
+            and not (request_type == 'EMPLOYEE_IMPREST' and payment_against == 'AGAINST_JOURNAL')):
+        # E-commerce's purposes, bills included (user, 2026-10-22): Prabhjot
+        # under the ECOM head, else the head picked.
+        return budget_code != ECOM_BUDGET
     if payment_against == AGAINST_BILL:
         return False  # straight to the Payment desk (user, 2026-10-19)
     if request_type == 'EMPLOYEE_IMPREST' and payment_against == 'AGAINST_JOURNAL':
@@ -210,6 +225,7 @@ def purposes():
     requester types (`DUE_SOON_PURPOSES`), and a Vendor may be paid on account
     for it (`VENDOR_ON_ACCOUNT_PURPOSES`).
     """
-    return [{'code': code, 'label': label, 'group': group, 'needs_head': code in HEAD_PURPOSES,
+    return [{'code': code, 'label': label, 'group': group,
+             'needs_head': code in HEAD_PURPOSES or code in ECOM_PURPOSES,
              'due_date': code in DUE_SOON_PURPOSES}
             for code, label, group in PAYMENT_PURPOSES]

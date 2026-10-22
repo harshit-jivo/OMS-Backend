@@ -75,7 +75,7 @@ class BillsGoStraightToPayment(SimpleTestCase):
         self.assertIn(f'NOT {hierarchy.FREIGHT_ROUTED}', route['query'])
         for code, other in BY_CODE.items():
             if code in ('AP_AGAINST_BILL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR', 'AP_IMPREST_JOURNAL') or other.get('expense')                     or other.get('never_chosen') \
-                    or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY')) \
+                    or code.startswith(('AP_FREIGHT_', 'AP_STAFF_ADVANCE_FACTORY', 'AP_ECOM_')) \
                     or code in ('AP_RAW_MATERIAL', 'AP_PACKING_MATERIAL',  # Bhupinder, bills too (2026-10-21)
                                 'AP_OIL_PURCHASE_AGAINST_BILL'):  # an Oil Purchase's bills: no CA either
                 continue

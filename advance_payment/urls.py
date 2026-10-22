@@ -105,6 +105,8 @@ urlpatterns = [
          name='advance-payment-bill-ledger'),
     path('document-history/', views.DocumentHistoryView.as_view(),
          name='advance-payment-document-history'),
+    path('slot-sheet/', views.SlotSheetView.as_view(),
+         name='advance-payment-slot-sheet'),
     path('document-deductions/', views.DocumentDeductionsView.as_view(),
          name='advance-payment-document-deductions'),
     path('tds-options/', views.TdsOptionsView.as_view(),

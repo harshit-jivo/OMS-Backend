@@ -26,7 +26,8 @@ import re
 
 from advance_payment.models import ACCOUNTS_STAGE, DEPARTMENT_HEAD_STAGE, EXPENSE_AUDIT_STAGE
 from advance_payment.purposes import (
-    DUE_SOON_DAYS, DUE_SOON_PURPOSES, FACTORY_BUDGETS as FACTORY_BUDGET_CODES, FREIGHT_PURPOSES, HEAD_PURPOSES,
+    DUE_SOON_DAYS, DUE_SOON_PURPOSES, ECOM_BUDGET, ECOM_PURPOSES, FACTORY_BUDGETS as FACTORY_BUDGET_CODES,
+    FREIGHT_PURPOSES, HEAD_PURPOSES,
     HEAD_REQUEST_TYPES, PAYMENT_PURPOSES, STAFF_ADVANCE_LIMIT,
 )
 
@@ -157,6 +158,18 @@ MART_CENTRAL = "purpose_code IN ('RAW_MATERIAL', 'PACKING_MATERIAL')"
 #: Imprest request (its own route) or an Account Payment.
 RM_PM_ROUTED = f'({MART_CENTRAL} AND {NOT_STAFF} AND {NOT_ACCOUNT})'
 
+#: The E-commerce department's purposes (user, 2026-10-22), in every company,
+#: whatever the type (an Account Payment, an Expense and an imprest against a
+#: journal entry aside), bills included: Prabhjot under the ECOM budget head and
+#: in Mart, else the Department Head picked. Kept out of every other route.
+ECOM_ROUTED = ("(purpose_code IN ({}) AND {} AND request_type <> 'EXPENSE' AND NOT {})"
+               .format(', '.join(f"'{p}'" for p in sorted(ECOM_PURPOSES)), NOT_ACCOUNT, IMPREST_JOURNAL))
+ECOM_BY_PRABHJOT = f"(company = 'MART' OR budget_code = '{ECOM_BUDGET}')"
+ECOM_BY_HEAD = f"({OIL_AND_BEV} AND budget_code <> '{ECOM_BUDGET}')"
+#: ...the approver FIRST, then Payment: paid On Account, against a PO or an
+#: Advance, or an Employee Imprest (user, 2026-10-22). Else Payment first.
+ECOM_FIRST = "(payment_against IN ('ON_ACCOUNT', 'AGAINST_PO', 'ADVANCE') OR request_type = 'EMPLOYEE_IMPREST')"
+
 #: Purposes the CA desk does not see (user, 2026-10-21): Oil Purchase — its own
 #: route, a bill for it and a vendor paid on account for it all skip CA.
 NO_CA_PURPOSES = ('OIL_PURCHASE',)
@@ -189,7 +202,8 @@ def _on_account_by_head():
     """`(purposes routed by the head when paid On Account, those of them the Director then approves)`."""
     fixed = [c for c, _l, _g in PAYMENT_PURPOSES if c not in HEAD_PURPOSES and c not in FREIGHT_PURPOSES
              and c not in MART_CENTRAL_PURPOSES  # RM / PM: Bhupinder, however it is paid
-             and c not in NO_CA_PURPOSES]  # Oil Purchase on account: its own route, without CA
+             and c not in NO_CA_PURPOSES  # Oil Purchase on account: its own route, without CA
+             and c not in ECOM_PURPOSES]  # E-commerce's: Prabhjot or the head, on their own routes
     director = [c for c in fixed if c in PLANT_PURPOSES or (c in FIXED_OWNER and FIXED_OWNER[c][1])]
     return tuple(fixed), tuple(director)
 
@@ -331,7 +345,7 @@ def routes():
         {'code': 'AP_MART', 'name': 'Payments · Mart', 'company': 'MART',
          'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
                          f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {RM_PM_ROUTED}',
-                         f'NOT {BILL_DUE_SOON}'),
+                         f'NOT {BILL_DUE_SOON}', f'NOT {ECOM_ROUTED}'),
          'stages': [(OWNER_STAGE, 'mart')]},
         # Mart's utilities and insurance due within DUE_SOON_DAYS days, or overdue
         # (2026-10-21): straight to Payment, as Oil's and Beverages' are.
@@ -339,10 +353,11 @@ def routes():
          'name': f'Payments · Mart · bill due in {DUE_SOON_DAYS} days or less', 'company': 'MART',
          'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', "request_type NOT IN ('EXPENSE', 'ACCOUNT')", NOT_BILL,
                          f'NOT {FREIGHT_ROUTED}', f'NOT {MART_SMALL_IMPREST}', f'NOT {RM_PM_ROUTED}',
-                         BILL_DUE_SOON),
+                         BILL_DUE_SOON, f'NOT {ECOM_ROUTED}'),
          'stages': []},
         {'code': 'AP_MART_IMPREST_SMALL', 'name': f'Payments · Mart · Employee Imprest · up to {STAFF_ADVANCE_LIMIT:,}',
-         'company': 'MART', 'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', NOT_BILL, MART_SMALL_IMPREST),
+         'company': 'MART', 'query': _where("company = 'MART'", f'NOT {IMPREST_JOURNAL}', NOT_BILL, MART_SMALL_IMPREST,
+                                          f'NOT {ECOM_ROUTED}'),
          'stages': [(IMPREST_STAGE, 'navdeep')]},
         {'code': 'AP_ACCOUNT', 'name': 'Payments · Account Payment', 'company': 'ALL',
          'query': _where(ACCOUNT, f'NOT {DIRECTOR_TICKED}'), 'stages': [(OWNER_STAGE, 'avtar')]},
@@ -352,7 +367,7 @@ def routes():
         {'code': 'AP_STAFF_ADVANCE', 'name': 'Payments · Staff Advance / Imprest', 'company': 'ALL',
          'query': _where(OIL_AND_BEV, NOT_STAFF.replace('NOT IN', 'IN'), NOT_BILL,
                          f"(request_type = 'EMPLOYEE_IMPREST' OR budget_code NOT IN {FACTORY_BUDGETS})",
-                         f'NOT {IMPREST_JOURNAL}'),
+                         f'NOT {IMPREST_JOURNAL}', f'NOT {ECOM_ROUTED}'),
          'stages': _chain(HEAD, True)},
         # Against a journal entry (TA/DA, incentives), in EVERY company and at any
         # amount: Navdeep alone (user, 2026-10-21) — no Department Head, and in
@@ -366,24 +381,41 @@ def routes():
         {'code': 'AP_STAFF_ADVANCE_FACTORY_OIL', 'name': 'Payments · Staff Advance · Oil plant · up to 20,000',
          'company': 'OIL',
          'query': _where("company = 'OIL'", ADVANCE, f'budget_code IN {FACTORY_BUDGETS}',
-                         f'amount <= {STAFF_ADVANCE_LIMIT}'),
+                         f'amount <= {STAFF_ADVANCE_LIMIT}', f'NOT {ECOM_ROUTED}'),
          'stages': [(OWNER_STAGE, 'shunty')]},
         {'code': 'AP_STAFF_ADVANCE_FACTORY_BEV', 'name': 'Payments · Staff Advance · Beverages plant · up to 20,000',
          'company': 'BEVERAGES',
          'query': _where("company = 'BEVERAGES'", ADVANCE, f'budget_code IN {FACTORY_BUDGETS}',
-                         f'amount <= {STAFF_ADVANCE_LIMIT}'),
+                         f'amount <= {STAFF_ADVANCE_LIMIT}', f'NOT {ECOM_ROUTED}'),
          'stages': [(OWNER_STAGE, 'factory_bev')]},
         {'code': 'AP_STAFF_ADVANCE_FACTORY_HIGH', 'name': 'Payments · Staff Advance · plant · above 20,000',
          'company': 'ALL',
          'query': _where(OIL_AND_BEV, ADVANCE, f'budget_code IN {FACTORY_BUDGETS}',
-                         f'amount > {STAFF_ADVANCE_LIMIT}'),
+                         f'amount > {STAFF_ADVANCE_LIMIT}', f'NOT {ECOM_ROUTED}'),
          'stages': [(DIRECTOR_STAGE, 'director')]},
     ]
+    # E-commerce's purposes (user, 2026-10-22): Prabhjot (ECOM head, Mart) or the
+    # head picked; the approver first when paid On Account, against a PO or an
+    # Advance, or for an Employee Imprest — else Payment first. Split here, not
+    # by `_approvals_first`, whose rule differs.
+    for tag, scope, stages, who in (
+            ('PRABHJOT', ECOM_BY_PRABHJOT, [(OWNER_STAGE, 'mart')], 'Prabhjot'),
+            ('HEAD', ECOM_BY_HEAD, [(DEPARTMENT_HEAD_STAGE, HEAD)], 'Department Head')):
+        name = f'Payments · E-commerce (ASSPL) · {who}'
+        out += [
+            {'code': f'AP_ECOM_{tag}', 'name': name, 'company': 'ALL',
+             'query': _where(ECOM_ROUTED, scope, f'NOT {ECOM_FIRST}'), 'stages': stages, 'no_split': True},
+            {'code': f'AP_ECOM_{tag}{APPROVALS_FIRST_SUFFIX}',
+             'name': f'{name} · On Account / PO / Advance / Imprest (approvals, then Payment)', 'company': 'ALL',
+             'query': _where(ECOM_ROUTED, scope, ECOM_FIRST), 'stages': stages, 'approvals_first': True},
+        ]
     by_head, with_director = _on_account_by_head()
     for code, label, _group in PAYMENT_PURPOSES:
         # A fixed owner's purpose paid On Account by a vendor goes by the head instead (below).
         on_account = (f'NOT {VENDOR_ON_ACCOUNT}',) if code in by_head else ()
         base = (OIL_AND_BEV, NOT_STAFF, NOT_ACCOUNT, NOT_BILL, _purpose(code), *on_account)
+        if code in ECOM_PURPOSES:
+            continue  # their own routes, above
         if code in FREIGHT_PURPOSES:
             # Every company and Payment Against, bills included: Navdeep first.
             out.append({'code': f'AP_{code}', 'name': f'Payments · {label}', 'company': 'ALL',
@@ -491,7 +523,7 @@ def routes():
     # Every bill, whatever it is for (freight aside): straight to the Payment desk.
     out.append({'code': 'AP_AGAINST_BILL', 'name': 'Payments · Against Bill', 'company': 'ALL',
                 'query': _where(AGAINST_BILL, f'NOT {FREIGHT_ROUTED}', f'NOT {RM_PM_ROUTED}',
-                                f'NOT {OIL_PURCHASE_ROUTED}'), 'stages': []})
+                                f'NOT {OIL_PURCHASE_ROUTED}', f'NOT {ECOM_ROUTED}'), 'stages': []})
     return _approvals_first(out) + expense_routes() + moved_routes()
 
 
@@ -504,7 +536,7 @@ def _approvals_first(routes):
     out = []
     for route in routes:
         approvers = [s for s in route['stages'] if not _held_by_ca(s[1])]
-        if not approvers or route.get('approvals_first') or route['code'] in NOT_SPLIT:
+        if not approvers or route.get('approvals_first') or route.get('no_split') or route['code'] in NOT_SPLIT:
             out.append(route)
             continue
         out.append({**route, 'query': f"{route['query']} AND NOT {APPROVALS_FIRST}"})

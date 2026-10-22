@@ -37,6 +37,8 @@ BY_CODE = {r['code']: r for r in ALL_ROUTES}
 
 def _routes_for(purpose):
     """A purpose's routes, its approvals-first twins (2026-10-21) aside: same approvers, other order."""
+    if purpose in hierarchy.ECOM_PURPOSES:  # one pair of routes for both (2026-10-22)
+        return [r for r in ROUTES if r['code'] in ('AP_ECOM_PRABHJOT', 'AP_ECOM_HEAD')]
     return [r for r in ROUTES if f"purpose_code = '{purpose}'" in r['query']
             and not r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)]
 
@@ -53,9 +55,10 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         # without the Director; Mart's bills due within 2 days; an Account Payment ticked for the Director
         # (2026-10-21) Mart's own RM/PM route gone; and each route with approvers has its approvals-first twin
         whole = [r for r in ROUTES if not r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)]
-        # ...and Oil Purchase's own bill and on-account routes, without CA
+        # ...and Oil Purchase's own bill and on-account routes, without CA; ASSPL's two
+        # routes, Prabhjot and the head picked, for its one purpose (2026-10-22)
         self.assertEqual(len(whole), len(PAYMENT_PURPOSES) + 5 + 2 + 1 + 1 + 1 + 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1 - 1
-                         + 2)
+                         + 2 + 1)
         for twin in (r for r in ROUTES if r['code'].endswith(hierarchy.APPROVALS_FIRST_SUFFIX)):
             self.assertIn(twin['code'][:-len(hierarchy.APPROVALS_FIRST_SUFFIX)], BY_CODE)
 
@@ -74,7 +77,7 @@ class EveryRequestHasOneRoute(SimpleTestCase):
         for route in ROUTES:
             if route['code'] in ('AP_MART', 'AP_MART_IMPREST_SMALL', 'AP_MART_DUE_SOON', 'AP_MART_APPROVALS_FIRST',
                                  'AP_IMPREST_JOURNAL', 'AP_ACCOUNT', 'AP_ACCOUNT_DIRECTOR') or \
-                    route['code'].startswith('AP_STAFF_ADVANCE'):
+                    route['code'].startswith(('AP_STAFF_ADVANCE', 'AP_ECOM_')):  # E-commerce: every company, any type
                 continue
             with self.subTest(route['code']):
                 self.assertNotIn('MART', route['query'])
@@ -888,3 +891,32 @@ class AVendorPaidOnAccount(SimpleTestCase):
         self.assertNotIn('ON_ACCOUNT', BY_CODE['AP_UTILITIES']['query'])
         for code in ('UTILITIES', 'RENT', 'BO_HR', 'FREIGHT_IN'):
             self.assertNotIn(f"'{code}'", plain['query'] + director['query'])
+
+
+class EcommercePurposes(SimpleTestCase):
+    """ASSPL (user, 2026-10-22; RO Agreement dropped the same day): Prabhjot under the ECOM head and
+    in Mart, else the head picked; approver first On Account / against a PO or an
+    Advance / for an Employee Imprest, else Payment first."""
+
+    def test_the_head_is_asked_except_under_ecom_and_in_mart(self):
+        for purpose in ('ASSPL',):
+            with self.subTest(purpose):
+                self.assertFalse(needs_department_head('OIL', 'VENDOR', purpose, 'ECOM', 'AGAINST_BILL'))
+                self.assertTrue(needs_department_head('OIL', 'VENDOR', purpose, 'Sales', 'AGAINST_BILL'))
+                self.assertTrue(needs_department_head('BEVERAGES', 'EMPLOYEE_IMPREST', purpose, 'Sales', 'ADVANCE'))
+                self.assertFalse(needs_department_head('MART', 'VENDOR', purpose, 'Sales', 'AGAINST_PO'))
+                self.assertFalse(needs_department_head('OIL', 'ACCOUNT', purpose, 'Sales', 'ON_ACCOUNT'))
+
+    def test_prabhjot_or_the_head_first_or_after_payment(self):
+        stages = lambda code: [n for n, _r in hierarchy.full_stages(BY_CODE[code])]  # noqa: E731
+        self.assertEqual(stages('AP_ECOM_PRABHJOT'),
+                         ['Payment Approval', 'Budget Owner Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+        self.assertEqual(stages('AP_ECOM_PRABHJOT_APPROVALS_FIRST'),
+                         ['Budget Owner Approval', 'Payment Approval', 'CA Approval', 'Audit Approval', 'Final Approval'])
+        self.assertEqual(BY_CODE['AP_ECOM_PRABHJOT']['stages'], [(hierarchy.OWNER_STAGE, 'mart')])
+        self.assertEqual(stages('AP_ECOM_HEAD_APPROVALS_FIRST')[:2], [DEPARTMENT_HEAD_STAGE, 'Payment Approval'])
+        self.assertIn(hierarchy.ECOM_FIRST, BY_CODE['AP_ECOM_HEAD_APPROVALS_FIRST']['query'])
+        self.assertIn(f'NOT {hierarchy.ECOM_FIRST}', BY_CODE['AP_ECOM_HEAD']['query'])
+        for code in ('AP_MART', 'AP_STAFF_ADVANCE', 'AP_AGAINST_BILL'):
+            with self.subTest(code):
+                self.assertIn(f'NOT {hierarchy.ECOM_ROUTED}', BY_CODE[code]['query'])
